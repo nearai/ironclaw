@@ -5,6 +5,8 @@ pub(super) enum ProductCommandHandler {
     ProductLifecycleCommand,
     ProductModelCommand,
     ProductStatusCommand,
+    ProductCommandList,
+    ProductCommandExecute,
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -37,6 +39,8 @@ impl ProductCommandHandler {
             PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
             PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
             PRODUCT_STATUS_COMMAND_OPERATION_ID => Some(Self::ProductStatusCommand),
+            PRODUCT_COMMAND_LIST_COMMAND_ID => Some(Self::ProductCommandList),
+            PRODUCT_COMMAND_EXECUTE_COMMAND_ID => Some(Self::ProductCommandExecute),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
             SUBMIT_TURN_COMMAND_ID => Some(Self::SubmitTurn),
             CANCEL_RUN_COMMAND_ID => Some(Self::CancelRun),
@@ -115,6 +119,14 @@ impl ProductCommandHandler {
                         .execute_product_status_command(caller, request)
                         .await?,
                 )
+            }
+            Self::ProductCommandList => {
+                let _: EmptyProductCommandInput = product_command_input(input)?;
+                command_output(services.list_product_commands(caller).await?)
+            }
+            Self::ProductCommandExecute => {
+                let request: RebornExecuteProductCommandRequest = product_command_input(input)?;
+                command_output(services.execute_product_command(caller, request).await?)
             }
             Self::CreateThread => command_output(
                 services
@@ -557,6 +569,47 @@ mod tests {
             let capability = CapabilityId::new(id).expect("valid capability id");
             assert!(
                 ProductCapabilityHandler::parse(&capability).is_some(),
+                "{id} must be registry-backed"
+            );
+        }
+    }
+
+    #[test]
+    fn product_command_handler_parse_covers_every_registered_id() {
+        for id in [
+            PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+            PRODUCT_MODEL_COMMAND_OPERATION_ID,
+            PRODUCT_STATUS_COMMAND_OPERATION_ID,
+            PRODUCT_COMMAND_LIST_COMMAND_ID,
+            PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
+            CREATE_THREAD_COMMAND_ID,
+            SUBMIT_TURN_COMMAND_ID,
+            CANCEL_RUN_COMMAND_ID,
+            RESOLVE_GATE_COMMAND_ID,
+            RETRY_RUN_COMMAND_ID,
+            PROJECT_CREATE_COMMAND_ID,
+            PROJECT_FS_READ_COMMAND_ID,
+            FS_READ_COMMAND_ID,
+            ATTACHMENT_READ_COMMAND_ID,
+            TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID,
+            TRACE_HOLD_AUTHORIZE_COMMAND_ID,
+            OPERATOR_CONFIG_SET_KEY_COMMAND_ID,
+            OPERATOR_SERVICE_LIFECYCLE_COMMAND_ID,
+            LLM_TEST_CONNECTION_COMMAND_ID,
+            LLM_LIST_MODELS_COMMAND_ID,
+            LLM_NEARAI_LOGIN_COMMAND_ID,
+            LLM_NEARAI_WALLET_LOGIN_COMMAND_ID,
+            LLM_CODEX_LOGIN_COMMAND_ID,
+            ADMIN_USER_CREATE_COMMAND_ID,
+            ADMIN_USER_DELETE_SECRET_COMMAND_ID,
+            AUTOMATION_PAUSE_COMMAND_ID,
+            AUTOMATION_RESUME_COMMAND_ID,
+            AUTOMATION_RENAME_COMMAND_ID,
+            AUTOMATION_DELETE_COMMAND_ID,
+        ] {
+            let capability = CapabilityId::new(id).expect("valid capability id");
+            assert!(
+                ProductCommandHandler::parse(&capability).is_some(),
                 "{id} must be registry-backed"
             );
         }

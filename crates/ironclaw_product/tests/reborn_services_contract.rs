@@ -52,7 +52,7 @@ use ironclaw_product::{
     ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
     ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    EmptyProductCommandInput, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
     FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander,
     InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
@@ -73,29 +73,31 @@ use ironclaw_product::{
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductService, PRODUCT_STATUS_COMMAND_OPERATION_ID,
+    OperatorStatusService, OutboundPreferencesProductService, PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
+    PRODUCT_COMMAND_LIST_COMMAND_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
     PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductCancelRunRequest, ProductCapabilityInvoker, ProductCreateThreadRequest,
-    ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
-    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
-    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductRejectionKind,
+    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
+    ProductSetupExtensionRequest, ProductStatusCommandInput, ProductSubmitTurnRequest,
+    ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
+    ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
+    RebornExtensionListResponse, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
@@ -106,25 +108,26 @@ use ironclaw_product::{
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
-    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
-    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornOutboundPreferencesResponse, RebornProductCommandListResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
+    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
+    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -15207,5 +15210,307 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
     assert_eq!(
         remaining, 1,
         "the tenant must never be stranded without an admin"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Command palette: audience-aware `product.commands.list` / `product.commands.execute`.
+//
+// The WebUI door must enforce the same `required_audience`/`CommandAudience`
+// policy the channel command door enforces: a non-admin caller sees and can
+// execute only User-audience commands, an env-bearer operator or an active
+// admin directory record is treated as admin, and the lifecycle family stays
+// listing-only (non-executable) in this PR even for admins. Drives the new
+// facade methods through the generic `ProductSurface::invoke` conduit — the
+// same idiom `status_command_reports_idle_for_a_bound_conversation_without_messages`
+// uses for `PRODUCT_STATUS_COMMAND_OPERATION_ID` — reusing the
+// `FakeAdminUsers`/`admin_record` harness from the admin-authorization cluster
+// above and the `SetupRecordingLlmConfigService` recording fake from the LLM
+// config cluster, rather than standing up new test-only wiring.
+// ---------------------------------------------------------------------------
+
+fn command_palette_services(
+    admin_users: FakeAdminUsers,
+    llm_config: Arc<SetupRecordingLlmConfigService>,
+) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(admin_users))
+    .with_llm_config_service(llm_config)
+}
+
+async fn list_product_commands_via_invoke(
+    services: &RebornServices,
+    caller: ProductSurfaceCaller,
+) -> Result<RebornProductCommandListResponse, ProductSurfaceError> {
+    let response = ProductSurface::invoke(
+        services,
+        caller,
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(PRODUCT_COMMAND_LIST_COMMAND_ID)
+                .expect("list operation id"),
+            input: serde_json::to_value(EmptyProductCommandInput::default()).expect("empty input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await?;
+    Ok(serde_json::from_value(response.output).expect("command list response"))
+}
+
+async fn execute_product_command_via_invoke(
+    services: &RebornServices,
+    caller: ProductSurfaceCaller,
+    thread_id: &str,
+    text: &str,
+) -> Result<RebornExecuteProductCommandResponse, ProductSurfaceError> {
+    let response = ProductSurface::invoke(
+        services,
+        caller,
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(PRODUCT_COMMAND_EXECUTE_COMMAND_ID)
+                .expect("execute operation id"),
+            input: serde_json::to_value(RebornExecuteProductCommandRequest {
+                thread_id: thread_id.to_string(),
+                text: text.to_string(),
+            })
+            .expect("execute input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await?;
+    Ok(serde_json::from_value(response.output).expect("execute response"))
+}
+
+#[tokio::test]
+async fn member_command_list_excludes_admin_audience() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    let response = list_product_commands_via_invoke(&services, caller())
+        .await
+        .expect("member may list commands");
+
+    assert_eq!(response.commands.len(), 2, "{:?}", response.commands);
+    let model = response
+        .commands
+        .iter()
+        .find(|command| command.name == "model")
+        .expect("model command listed");
+    assert_eq!(model.title, "Model");
+    assert_eq!(
+        model.description,
+        "Show or switch the active LLM provider and model"
+    );
+    assert_eq!(
+        model.usage,
+        "/model [<model> | set-provider <provider> [--model <model>]]"
+    );
+    let status = response
+        .commands
+        .iter()
+        .find(|command| command.name == "status")
+        .expect("status command listed");
+    assert_eq!(status.title, "Status");
+    assert_eq!(
+        status.description,
+        "Show what the assistant is doing in this conversation"
+    );
+    assert_eq!(status.usage, "/status");
+    assert!(
+        response
+            .commands
+            .iter()
+            .all(|command| command.name == "model" || command.name == "status"),
+        "member list must not include lifecycle commands: {:?}",
+        response.commands
+    );
+}
+
+#[tokio::test]
+async fn admin_command_list_includes_lifecycle_family() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Admin,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    let response = list_product_commands_via_invoke(&services, caller())
+        .await
+        .expect("admin may list commands");
+
+    assert_eq!(response.commands.len(), 12, "{:?}", response.commands);
+}
+
+#[tokio::test]
+async fn operator_config_caller_lists_admin_commands() {
+    let services = command_palette_services(
+        FakeAdminUsers::default(),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    let response = list_product_commands_via_invoke(&services, caller().with_operator_config(true))
+        .await
+        .expect("operator-config caller may list commands");
+
+    assert_eq!(response.commands.len(), 12, "{:?}", response.commands);
+}
+
+#[tokio::test]
+async fn member_execute_model_set_is_access_denied_without_llm_invoke() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        llm_config.clone(),
+    );
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model set fake",
+    )
+    .await
+    .expect("access-denied is a rejection, not a transport error");
+
+    assert!(response.result.is_none());
+    let rejection = response
+        .rejection
+        .expect("member model-set must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::AccessDenied);
+    assert_eq!(rejection.message, "This command requires an admin account.");
+    assert_eq!(
+        llm_config.set_active_count(),
+        0,
+        "the admin gate must reject before the LLM-config seam is ever invoked"
+    );
+    assert_eq!(
+        llm_config.snapshot_count(),
+        0,
+        "the admin gate must reject before the LLM-config seam is ever invoked"
+    );
+}
+
+#[tokio::test]
+async fn member_execute_model_read_returns_view() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        llm_config,
+    );
+
+    let response =
+        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/model")
+            .await
+            .expect("member may read model status");
+
+    assert!(response.rejection.is_none());
+    let result = response.result.expect("model read must return a view");
+    assert_eq!(result.title, "Model");
+}
+
+#[tokio::test]
+async fn member_execute_unknown_command_help_excludes_admin_names() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    let response =
+        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/nope")
+            .await
+            .expect("unknown command is a rejection, not a transport error");
+
+    assert!(response.result.is_none());
+    let rejection = response
+        .rejection
+        .expect("unknown command must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    assert!(
+        rejection.message.contains("/model"),
+        "{}",
+        rejection.message
+    );
+    assert!(
+        rejection.message.contains("/status"),
+        "{}",
+        rejection.message
+    );
+    assert!(
+        !rejection.message.contains("extension_configure"),
+        "member help must not name admin-only lifecycle commands: {}",
+        rejection.message
+    );
+    assert!(
+        !rejection.message.contains("skill_remove"),
+        "member help must not name admin-only lifecycle commands: {}",
+        rejection.message
+    );
+}
+
+// Mirrors the cross-user-access idiom used throughout this file (e.g.
+// `get_run_state_rejects_cross_user_access`: "404 rather than 403 so the
+// existence of Alice's thread is not leaked"). `execute_product_status_command`
+// resolves thread history through `resolve_thread_history_for_caller`, which
+// maps BOTH an unbound thread_id and a thread bound to a different owner to
+// the identical `ProductSurfaceErrorCode::NotFound`, coalesced into the idle
+// view — so a caller probing another user's thread_id via `/status` gets
+// exactly the same answer as probing a thread_id that was never created:
+// Alice's thread is never distinguishable from "nothing here" through this
+// entry point.
+#[tokio::test]
+async fn execute_status_on_foreign_thread_is_not_found() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+    create_thread_for(&services, caller(), "thread-alice").await;
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller_for_user("user-beta"),
+        "thread-alice",
+        "/status",
+    )
+    .await
+    .expect("cross-user status read settles rather than transport-erroring");
+
+    assert!(response.rejection.is_none());
+    let result = response.result.expect("status must return the idle view");
+    assert_eq!(result.title, "Status");
+    assert_eq!(
+        result
+            .fields
+            .iter()
+            .find(|field| field.label == "State")
+            .map(|field| field.value.as_str()),
+        Some("idle"),
+        "a foreign thread must be indistinguishable from a nonexistent one: {result:?}"
     );
 }
