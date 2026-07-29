@@ -179,14 +179,16 @@ async fn recovery_event_append_failure_stops_before_model_retry() {
         .await
         .expect_err("recovery cannot proceed without its durable numerator event");
 
-    assert!(matches!(
-        error,
+    match error {
         AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Checkpoint,
             kind: AgentLoopHostErrorKind::Unavailable,
-            ..
-        }
-    ));
+            safe_summary,
+            reason_kind: None,
+            detail: None,
+        } => assert_eq!(safe_summary.as_str(), "progress sink unavailable"),
+        other => panic!("expected checkpoint diagnostics, got {other:?}"),
+    }
     assert_eq!(
         host.model_requests().len(),
         1,
