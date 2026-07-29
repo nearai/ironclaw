@@ -263,6 +263,28 @@ impl ModelProviderCallProbe {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_text_contents_for_test(&self, messages: &[&str]) {
+        lock(&self.0).requests.push(ModelProviderCallRecord::Text(
+            messages
+                .iter()
+                .map(|message| (*message).to_string())
+                .collect(),
+        ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_interactive_contents_for_test(&self, messages: &[&str]) {
+        lock(&self.0)
+            .requests
+            .push(ModelProviderCallRecord::Interactive(
+                messages
+                    .iter()
+                    .map(|message| (*message).to_string())
+                    .collect(),
+            ));
+    }
+
     pub fn interactive_calls(&self) -> usize {
         lock(&self.0)
             .requests
@@ -534,58 +556,5 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), gate.park())
             .await
             .expect("second park() call must return immediately, not block");
-    }
-
-    #[test]
-    fn call_probe_distinguishes_missing_and_leaking_boundary_traffic() {
-        let probe = ModelProviderCallProbe::default();
-        assert_eq!(probe.text_message_content_contains("secret"), None);
-        assert_eq!(
-            probe.post_text_interactive_message_content_contains("secret"),
-            None
-        );
-
-        lock(&probe.0)
-            .requests
-            .push(ModelProviderCallRecord::Text(vec![
-                "safe input".to_string(),
-            ]));
-        assert_eq!(probe.text_message_content_contains("secret"), Some(false));
-        assert_eq!(
-            probe.post_text_interactive_message_content_contains("secret"),
-            None
-        );
-
-        lock(&probe.0)
-            .requests
-            .push(ModelProviderCallRecord::Interactive(vec![
-                "leaked secret".to_string(),
-            ]));
-        lock(&probe.0)
-            .requests
-            .push(ModelProviderCallRecord::Interactive(vec![
-                "later clean request".to_string(),
-            ]));
-        assert_eq!(
-            probe.post_text_interactive_message_content_contains("secret"),
-            Some(true),
-            "a later clean retry must not hide an earlier post-compaction leak"
-        );
-
-        let clean_probe = ModelProviderCallProbe::default();
-        lock(&clean_probe.0)
-            .requests
-            .push(ModelProviderCallRecord::Text(vec![
-                "safe input".to_string(),
-            ]));
-        lock(&clean_probe.0)
-            .requests
-            .push(ModelProviderCallRecord::Interactive(vec![
-                "safe request".to_string(),
-            ]));
-        assert_eq!(
-            clean_probe.post_text_interactive_message_content_contains("secret"),
-            Some(false)
-        );
     }
 }

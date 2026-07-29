@@ -12,7 +12,40 @@ mod support;
 
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
+use reborn_support::scripted_provider::{CONTEXT_OVERFLOW_USED_TOKENS, ModelProviderCallProbe};
+
+#[test]
+fn call_probe_distinguishes_missing_and_leaking_boundary_traffic() {
+    let probe = ModelProviderCallProbe::default();
+    assert_eq!(probe.text_message_content_contains("secret"), None);
+    assert_eq!(
+        probe.post_text_interactive_message_content_contains("secret"),
+        None
+    );
+
+    probe.record_text_contents_for_test(&["safe input"]);
+    assert_eq!(probe.text_message_content_contains("secret"), Some(false));
+    assert_eq!(
+        probe.post_text_interactive_message_content_contains("secret"),
+        None
+    );
+
+    probe.record_interactive_contents_for_test(&["leaked secret"]);
+    probe.record_interactive_contents_for_test(&["later clean request"]);
+    assert_eq!(
+        probe.post_text_interactive_message_content_contains("secret"),
+        Some(true),
+        "a later clean retry must not hide an earlier post-compaction leak"
+    );
+
+    let clean_probe = ModelProviderCallProbe::default();
+    clean_probe.record_text_contents_for_test(&["safe input"]);
+    clean_probe.record_interactive_contents_for_test(&["safe request"]);
+    assert_eq!(
+        clean_probe.post_text_interactive_message_content_contains("secret"),
+        Some(false)
+    );
+}
 
 #[tokio::test]
 async fn content_filtered_completion_recovers_with_model_visible_observation() {
