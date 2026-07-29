@@ -4,9 +4,9 @@ use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_processes::{
-    ClaimedProcess, JournalProcessExecutor, ProcessExecutorFailure, ProcessKind,
-    ProcessRuntimePort, ProcessSupervisor, ProcessSupervisorConfig, ProcessSupervisorHandle,
-    ProcessWakeChannel, ProcessWakeNotifier,
+    ClaimedProcess, JournalProcessExecutor, ProcessExecutorFailure, ProcessFailureRecovery,
+    ProcessKind, ProcessRuntimePort, ProcessSupervisor, ProcessSupervisorConfig,
+    ProcessSupervisorHandle, ProcessWakeChannel, ProcessWakeNotifier,
 };
 use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
@@ -161,7 +161,18 @@ impl JournalProcessExecutor for TurnProcessExecutor {
         self.executor
             .execute_claimed_run(claimed, Arc::clone(&self.transitions))
             .await
-            .map_err(|error| ProcessExecutorFailure::from_failure(error.failure().clone()))
+            .map_err(|error| {
+                let recovery = match error.failure_category() {
+                    crate::failure_categories::HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY
+                    | crate::failure_categories::HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY
+                    | crate::failure_categories::HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY => {
+                        ProcessFailureRecovery::RedriveIfCheckpointless
+                    }
+                    _ => ProcessFailureRecovery::Terminal,
+                };
+                ProcessExecutorFailure::from_failure(error.failure().clone())
+                    .with_recovery(recovery)
+            })
     }
 
     fn panic_failure(&self) -> ProcessExecutorFailure {

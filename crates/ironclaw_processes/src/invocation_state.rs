@@ -443,6 +443,7 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
                 worker_id: lease.worker_id,
                 lease_token: lease.lease_token,
                 failure,
+                recovery: crate::ProcessFailureRecovery::Terminal,
                 checkpoint_ref: snapshot.checkpoint_ref.clone(),
                 metadata: Some(Self::encode_metadata(&metadata)?),
             })

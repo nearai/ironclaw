@@ -33,6 +33,14 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 - A duplicate/new submit for the same canonical thread remains `ThreadBusy` while recovery is required.
 - Explicit cancellation of `RecoveryRequired` is terminal `Cancelled` and releases the active lock so a new turn can be submitted.
 
+### 3.1 Checkpointless pre-model failure re-drive
+
+- A trusted scheduler may request `RedriveIfCheckpointless` only for a verified transient failure raised while draining accepted input or constructing the capability surface, context, or prompt before the first `BeforeModel` checkpoint. Other runner failures remain terminal.
+- The store is authoritative for eligibility. Cancellation takes precedence; any durable loop checkpoint prevents scratch re-drive; and `claim_count` must remain below `max_crash_recovery_reclaims`.
+- An eligible failure atomically retires the current runner lease, returns the same run to `Queued`, preserves the canonical turn/run IDs and `accepted_message_ref`, retains the active-thread lock, clears the transient failure from live state, and emits the queued lifecycle classification. The next claim reconstructs work from the already accepted message rather than accepting or persisting a duplicate input.
+- `claim_count` is durable across requeue and process restart. When the bound is reached, or when a checkpoint exists, the run becomes terminal `Failed` with the original sanitized failure category and safe detail. The scheduler must retain the exact active lease identity for a same-run re-drive so shutdown relinquishes only the currently claimed attempt.
+- `runner_failure_recovery_covers_terminal_checkpoint_cancel_and_bounded_redrive_states`, `checkpointless_failure_redrive_is_bounded_and_durable_on_libsql`, and `send_user_message_uses_caller_supplied_skill_context_source` enforce the full transition table, durable bounds/reopen semantics, backend behavior, and scheduler-to-composition wiring.
+
 ---
 
 ## 4. Existing checkpoint and terminal rules

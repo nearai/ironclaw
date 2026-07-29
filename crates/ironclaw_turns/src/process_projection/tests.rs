@@ -186,6 +186,7 @@ async fn fail_agent_process<F>(
             worker_id: claim.worker_id,
             lease_token: claim.lease_token,
             failure: SanitizedFailure::new("runtime_test_failure").expect("failure"),
+            recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
             checkpoint_ref,
             metadata: None,
         })
@@ -851,6 +852,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             worker_id: claim.worker_id,
             lease_token: claim.lease_token,
             failure: SanitizedFailure::new("retryable_failure").expect("failure"),
+            recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
             checkpoint_ref: None,
             metadata: None,
         })

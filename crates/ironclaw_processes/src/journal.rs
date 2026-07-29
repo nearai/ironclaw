@@ -1026,12 +1026,25 @@ pub struct ProcessControlResult {
     pub already_terminal: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessFailureRecovery {
+    /// Preserve the normal failure behavior and terminalize the process.
+    #[default]
+    Terminal,
+    /// Re-queue only when the process has no checkpoint and remains below the
+    /// durable crash-recovery claim limit.
+    RedriveIfCheckpointless,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailProcessRequest {
     pub process_id: ProcessId,
     pub worker_id: ProcessWorkerId,
     pub lease_token: ProcessLeaseToken,
     pub failure: SanitizedFailure,
+    #[serde(default)]
+    pub recovery: ProcessFailureRecovery,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<ProcessCheckpointRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

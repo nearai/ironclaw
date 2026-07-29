@@ -43,6 +43,8 @@ mod migration;
 mod observer;
 mod rows;
 mod state;
+
+pub use state::MAX_CRASH_RECOVERY_RECLAIMS;
 mod validation;
 use command::StoredProcessCommand;
 use migration::{
@@ -858,6 +860,7 @@ where
                 suspension: Some(request.suspension),
                 checkpoint_ref: Some(request.checkpoint_ref),
                 failure: None,
+                failure_recovery: crate::ProcessFailureRecovery::Terminal,
                 metadata: request.metadata,
             },
         )
@@ -910,6 +913,7 @@ where
             },
             ProcessTransitionMutation {
                 failure: Some(request.failure),
+                failure_recovery: request.recovery,
                 checkpoint_ref: request.checkpoint_ref,
                 metadata: request.metadata,
                 ..ProcessTransitionMutation::new(
@@ -1295,6 +1299,8 @@ struct ProcessTransitionMutation {
     suspension: Option<ProcessSuspension>,
     checkpoint_ref: Option<crate::ProcessCheckpointRef>,
     failure: Option<ironclaw_host_api::SanitizedFailure>,
+    #[serde(default)]
+    failure_recovery: crate::ProcessFailureRecovery,
     metadata: Option<serde_json::Value>,
 }
 
@@ -1338,6 +1344,7 @@ impl ProcessTransitionMutation {
             suspension: None,
             checkpoint_ref: None,
             failure: None,
+            failure_recovery: crate::ProcessFailureRecovery::Terminal,
             metadata: None,
         }
     }

@@ -14,11 +14,12 @@ use ironclaw_host_api::{
 use ironclaw_processes::{
     CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest, FailProcessRequest,
     GetProcessCheckpointRequest, GetProcessInputRequest, GetProcessSnapshotRequest,
-    JournaledProcessSnapshot, KillProcessRequest, MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES,
-    MAX_PROCESS_INPUT_PAYLOAD_BYTES, OpenProcessDependencyRequest, ProcessCheckpointId,
-    ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass,
-    ProcessConcurrencyLimits, ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery,
-    ProcessDependencyState, ProcessDependencySubmission, ProcessGateOwnerMatch, ProcessGateQuery,
+    JournaledProcessSnapshot, KillProcessRequest, MAX_CRASH_RECOVERY_RECLAIMS,
+    MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES, MAX_PROCESS_INPUT_PAYLOAD_BYTES,
+    OpenProcessDependencyRequest, ProcessCheckpointId, ProcessCheckpointPayload,
+    ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
+    ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
+    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateOwnerMatch, ProcessGateQuery,
     ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
     ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
@@ -332,6 +333,145 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
         .expect("count row exists");
     let count: i64 = row.get(0).expect("read count");
     assert_eq!(count, 32);
+}
+
+#[tokio::test]
+async fn checkpointless_failure_redrive_is_bounded_and_durable_on_libsql() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("failure-redrive.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libsql filesystem");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    let request_scope = scope();
+    let process_id = ProcessId::new();
+    let failure = SanitizedFailure::new("host_stage_unavailable_prompt")
+        .expect("failure")
+        .with_detail("safe prompt construction detail");
+    let mut store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    submit_internal_process(&store, &request_scope, process_id).await;
+
+    for claim_count in 1..=MAX_CRASH_RECOVERY_RECLAIMS {
+        let worker_id = ProcessWorkerId::from_trusted(format!("redrive-worker-{claim_count}"));
+        let claim = store
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id,
+                scope_filter: Some(request_scope.clone()),
+                process_id_filter: Some(process_id),
+                process_kind_filter: Some(ProcessKind::Internal),
+                max_processes: 1,
+            })
+            .await
+            .expect("claim checkpointless process")
+            .pop()
+            .expect("checkpointless process remains claimable until exhausted");
+        assert_eq!(
+            claim
+                .state
+                .lease
+                .as_ref()
+                .expect("claimed process has lease")
+                .claim_count,
+            claim_count
+        );
+        let state = store
+            .fail_process(FailProcessRequest {
+                process_id,
+                worker_id: claim.worker_id,
+                lease_token: claim.lease_token,
+                failure: failure.clone(),
+                recovery: ProcessFailureRecovery::RedriveIfCheckpointless,
+                checkpoint_ref: None,
+                metadata: None,
+            })
+            .await
+            .expect("record checkpointless runner failure");
+
+        if claim_count < MAX_CRASH_RECOVERY_RECLAIMS {
+            assert_eq!(state.status, ProcessLifecycleStatus::Queued);
+            assert_eq!(state.crash_reclaim_count, claim_count);
+            assert_eq!(state.failure, None);
+            drop(store);
+            store = ProcessJournalStore::new(Arc::clone(&filesystem));
+            let reopened = store
+                .get_process_snapshot(GetProcessSnapshotRequest {
+                    scope: request_scope.clone(),
+                    process_id,
+                })
+                .await
+                .expect("load reopened process");
+            assert_eq!(reopened.status, ProcessLifecycleStatus::Queued);
+            assert_eq!(reopened.crash_reclaim_count, claim_count);
+        } else {
+            assert_eq!(state.status, ProcessLifecycleStatus::Failed);
+            assert_eq!(state.failure, Some(failure.clone()));
+            assert!(state.lease.is_none());
+        }
+    }
+
+    let checkpointed_id = ProcessId::new();
+    let checkpoint_ref = ProcessCheckpointRef::from_trusted("before-model-checkpoint");
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: checkpointed_id,
+            process_kind: ProcessKind::Internal,
+            scope: request_scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(request_scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: Some(checkpoint_ref.clone()),
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit checkpointed process");
+    let checkpointed_claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("checkpointed-worker"),
+            scope_filter: Some(request_scope),
+            process_id_filter: Some(checkpointed_id),
+            process_kind_filter: Some(ProcessKind::Internal),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim checkpointed process")
+        .pop()
+        .expect("checkpointed process claimed");
+    let checkpointed = store
+        .fail_process(FailProcessRequest {
+            process_id: checkpointed_id,
+            worker_id: checkpointed_claim.worker_id,
+            lease_token: checkpointed_claim.lease_token,
+            failure: failure.clone(),
+            recovery: ProcessFailureRecovery::RedriveIfCheckpointless,
+            checkpoint_ref: Some(checkpoint_ref),
+            metadata: None,
+        })
+        .await
+        .expect("checkpointed failure is terminal");
+    assert_eq!(checkpointed.status, ProcessLifecycleStatus::Failed);
+    assert_eq!(checkpointed.failure, Some(failure));
 }
 
 #[tokio::test]
@@ -2693,6 +2833,7 @@ async fn process_control_is_scoped_atomic_and_process_kind_neutral() {
             lease_token: failed_during_cancel_claim.lease_token,
             failure: SanitizedFailure::new("runner_failed_during_cancel")
                 .expect("sanitized failure"),
+            recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
             checkpoint_ref: None,
             metadata: None,
         })

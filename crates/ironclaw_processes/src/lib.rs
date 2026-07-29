@@ -52,11 +52,11 @@ pub use journal::{
     ProcessCheckpointPort, ProcessCheckpointRecord, ProcessCheckpointRef, ProcessConcurrencyClass,
     ProcessConcurrencyLimits, ProcessControlPort, ProcessControlResult, ProcessDependencyPort,
     ProcessDependencyQuery, ProcessDependencyRecord, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource,
-    ProcessGateRecord, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
-    ProcessInputRecord, ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit,
-    ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError,
-    ProcessJournalKind, ProcessJournalObserverRegistry, ProcessJournalPage,
+    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateOwnerMatch, ProcessGateQuery,
+    ProcessGateQuerySource, ProcessGateRecord, ProcessGateScopeMatch, ProcessInputPayload,
+    ProcessInputPort, ProcessInputRecord, ProcessInputRef, ProcessInputSubmission,
+    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry,
+    ProcessJournalError, ProcessJournalKind, ProcessJournalObserverRegistry, ProcessJournalPage,
     ProcessJournalProjectionCursor, ProcessJournalProjectionRequest,
     ProcessJournalProjectionSnapshot, ProcessJournalSource, ProcessKind, ProcessLeaseRequest,
     ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleLookupBatchRequest,
@@ -71,7 +71,8 @@ pub use journal::{
     SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 pub use journal_store::{
-    DEFAULT_PROCESS_LEASE_DURATION, ProcessJournalStore, ProcessJournalStoreError,
+    DEFAULT_PROCESS_LEASE_DURATION, MAX_CRASH_RECOVERY_RECLAIMS, ProcessJournalStore,
+    ProcessJournalStoreError,
 };
 pub use result_store::ProcessResultStore;
 pub use services::{

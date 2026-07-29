@@ -12,14 +12,16 @@ use super::{
 };
 use crate::{
     ClaimedProcess, JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointRecord,
-    ProcessCheckpointRef, ProcessControlResult, ProcessInputRecord, ProcessJournalCursor,
-    ProcessJournalEntry, ProcessJournalKind, ProcessKind, ProcessLeaseSnapshot, ProcessLeaseToken,
-    ProcessLifecycleStatus, ProcessTreeReservation, RecoverExpiredProcessLeasesResponse,
-    types::same_scope_owner,
+    ProcessCheckpointRef, ProcessControlResult, ProcessFailureRecovery, ProcessInputRecord,
+    ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessKind,
+    ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessTreeReservation,
+    RecoverExpiredProcessLeasesResponse, types::same_scope_owner,
 };
 
 const MAX_IDEMPOTENCY_RECORDS: usize = 4096;
-const MAX_CRASH_RECOVERY_RECLAIMS: u64 = 3;
+/// Maximum number of crash-recovery claims allowed before a checkpointless
+/// process is failed terminally.
+pub const MAX_CRASH_RECOVERY_RECLAIMS: u64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ProcessJournalMaterializedState {
@@ -559,6 +561,24 @@ impl ProcessJournalMaterializedState {
             mutation.status = ProcessLifecycleStatus::Cancelled;
             mutation.kind = ProcessJournalKind::Cancelled;
             mutation.failure = None;
+        }
+        if snapshot.status == ProcessLifecycleStatus::Running
+            && mutation.status == ProcessLifecycleStatus::Failed
+            && mutation.failure_recovery == ProcessFailureRecovery::RedriveIfCheckpointless
+            && snapshot.checkpoint_ref.is_none()
+            && mutation.checkpoint_ref.is_none()
+            && snapshot
+                .lease
+                .as_ref()
+                .is_some_and(|lease| lease.claim_count < MAX_CRASH_RECOVERY_RECLAIMS)
+        {
+            mutation.status = ProcessLifecycleStatus::Queued;
+            mutation.kind = ProcessJournalKind::Resumed;
+            mutation.failure = None;
+            snapshot.crash_reclaim_count = snapshot
+                .lease
+                .as_ref()
+                .map_or(snapshot.crash_reclaim_count, |lease| lease.claim_count);
         }
         ensure_transition(snapshot, mutation.status)?;
         snapshot.status = mutation.status;

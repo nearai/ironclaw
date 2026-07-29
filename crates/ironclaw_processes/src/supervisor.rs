@@ -14,9 +14,9 @@ use tokio::{
 use tracing::{Instrument, debug};
 
 use crate::{
-    ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, ProcessJournalStoreError,
-    ProcessKind, ProcessLeaseRequest, ProcessLeaseToken, ProcessTransitionPort, ProcessWorkerId,
-    RecoverExpiredProcessLeasesRequest,
+    ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, ProcessFailureRecovery,
+    ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
+    ProcessTransitionPort, ProcessWorkerId, RecoverExpiredProcessLeasesRequest,
 };
 
 const MAX_CLAIMS_PER_DRAIN_BATCH: usize = 128;
@@ -145,6 +145,7 @@ fn non_zero_duration(value: Duration) -> Duration {
 pub struct ProcessExecutorFailure {
     failure: Option<SanitizedFailure>,
     fallback_category: String,
+    recovery: ProcessFailureRecovery,
 }
 
 impl ProcessExecutorFailure {
@@ -154,6 +155,7 @@ impl ProcessExecutorFailure {
         Self {
             failure,
             fallback_category,
+            recovery: ProcessFailureRecovery::Terminal,
         }
     }
 
@@ -162,7 +164,13 @@ impl ProcessExecutorFailure {
         Self {
             failure: Some(failure),
             fallback_category,
+            recovery: ProcessFailureRecovery::Terminal,
         }
+    }
+
+    pub fn with_recovery(mut self, recovery: ProcessFailureRecovery) -> Self {
+        self.recovery = recovery;
+        self
     }
 
     pub fn failure(&self) -> Option<&SanitizedFailure> {
@@ -173,6 +181,10 @@ impl ProcessExecutorFailure {
         self.failure
             .as_ref()
             .map_or(self.fallback_category.as_str(), SanitizedFailure::category)
+    }
+
+    pub fn recovery(&self) -> ProcessFailureRecovery {
+        self.recovery
     }
 }
 
@@ -539,15 +551,8 @@ fn spawn_executor(
                     result = &mut execution => {
                         break match result {
                             Ok(Ok(())) => None,
-                            Ok(Err(error)) => error
-                                .failure()
-                                .cloned()
-                                .or_else(|| static_failure("unknown_failure")),
-                            Err(_) => executor
-                                .panic_failure()
-                                .failure()
-                                .cloned()
-                                .or_else(|| static_failure("unknown_failure")),
+                            Ok(Err(error)) => Some(error),
+                            Err(_) => Some(executor.panic_failure()),
                         };
                     }
                     _ = heartbeat_tick.tick(), if heartbeats.is_idle() => {
@@ -567,18 +572,14 @@ fn spawn_executor(
                             }
                         }
                         if consecutive_failures >= config.max_consecutive_heartbeat_failures() {
-                            break executor
-                                .heartbeat_failure()
-                                .failure()
-                                .cloned()
-                                .or_else(|| static_failure("unknown_failure"));
+                            break Some(executor.heartbeat_failure());
                         }
                     }
                 }
             };
             heartbeats.abort();
             if let Some(failure) = failure
-                && let Err(error) = record_failure(&runtime, &identity, failure, &config).await
+                && let Err(error) = record_failure(&runtime, &identity, &failure, &config).await
             {
                 debug!(%error, %process_id, "process terminal failure recording exhausted");
                 relinquish(&runtime, &identity).await;
@@ -654,9 +655,18 @@ fn heartbeat_outcome(result: Result<HeartbeatOutcome, tokio::task::JoinError>) -
 async fn record_failure(
     runtime: &Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
     identity: &ClaimedIdentity,
-    failure: SanitizedFailure,
+    executor_failure: &ProcessExecutorFailure,
     config: &ProcessSupervisorConfig,
 ) -> Result<(), ProcessJournalStoreError> {
+    let failure = executor_failure
+        .failure()
+        .cloned()
+        .or_else(|| static_failure("unknown_failure"))
+        .ok_or_else(|| {
+            ProcessJournalStoreError::InvalidRequest(
+                "static unknown process failure category is invalid".to_string(),
+            )
+        })?;
     for attempt in 1..=config.terminal_failure_record_attempts() {
         match runtime
             .fail_process(FailProcessRequest {
@@ -664,6 +674,7 @@ async fn record_failure(
                 worker_id: identity.worker_id.clone(),
                 lease_token: identity.lease_token.clone(),
                 failure: failure.clone(),
+                recovery: executor_failure.recovery(),
                 checkpoint_ref: None,
                 metadata: None,
             })

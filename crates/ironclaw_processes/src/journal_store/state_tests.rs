@@ -908,6 +908,7 @@ fn command_dispatch_covers_submit_claim_heartbeat_transition_and_control_replay(
                 suspension: None,
                 checkpoint_ref: None,
                 failure: None,
+                failure_recovery: crate::ProcessFailureRecovery::Terminal,
                 metadata: Some(json!({"suspended": true})),
             },
         })
@@ -1205,6 +1206,128 @@ fn expired_lease_recovery_covers_cancel_requeue_and_bounded_failure_states() {
             failure
         );
         assert!(recovered.lease.is_none());
+    }
+}
+
+#[test]
+fn runner_failure_recovery_covers_terminal_checkpoint_cancel_and_bounded_redrive_states() {
+    let request_scope = scope("runner-failure-recovery");
+    let worker_id = ProcessWorkerId::from_trusted("runner-failure-worker");
+    let cases = [
+        (
+            "terminal",
+            ProcessLifecycleStatus::Running,
+            None,
+            1,
+            crate::ProcessFailureRecovery::Terminal,
+            ProcessLifecycleStatus::Failed,
+            Some("runner_failure"),
+            0,
+        ),
+        (
+            "checkpointless-redrive",
+            ProcessLifecycleStatus::Running,
+            None,
+            1,
+            crate::ProcessFailureRecovery::RedriveIfCheckpointless,
+            ProcessLifecycleStatus::Queued,
+            None,
+            1,
+        ),
+        (
+            "checkpointed",
+            ProcessLifecycleStatus::Running,
+            Some(ProcessCheckpointRef::from_trusted("checkpoint")),
+            1,
+            crate::ProcessFailureRecovery::RedriveIfCheckpointless,
+            ProcessLifecycleStatus::Failed,
+            Some("runner_failure"),
+            0,
+        ),
+        (
+            "bounded",
+            ProcessLifecycleStatus::Running,
+            None,
+            MAX_CRASH_RECOVERY_RECLAIMS,
+            crate::ProcessFailureRecovery::RedriveIfCheckpointless,
+            ProcessLifecycleStatus::Failed,
+            Some("runner_failure"),
+            0,
+        ),
+        (
+            "cancel-requested",
+            ProcessLifecycleStatus::CancelRequested,
+            None,
+            1,
+            crate::ProcessFailureRecovery::RedriveIfCheckpointless,
+            ProcessLifecycleStatus::Cancelled,
+            None,
+            0,
+        ),
+    ];
+
+    for (
+        label,
+        status,
+        checkpoint_ref,
+        claim_count,
+        recovery,
+        expected_status,
+        expected_failure,
+        expected_reclaim_count,
+    ) in cases
+    {
+        let process_id = ProcessId::new();
+        let lease_token = ProcessLeaseToken::from_trusted(format!("{label}-lease"));
+        let mut process = snapshot(process_id, status, request_scope.clone());
+        process.checkpoint_ref = checkpoint_ref;
+        process.lease = Some(ProcessLeaseSnapshot {
+            worker_id: worker_id.clone(),
+            lease_token: lease_token.clone(),
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count,
+        });
+        let mut state = ProcessJournalMaterializedState::default();
+        state.processes.insert(process_id, process);
+
+        state
+            .apply_command(StoredProcessCommand::LeasedTransition {
+                request: ProcessLeaseRequest {
+                    process_id,
+                    worker_id: worker_id.clone(),
+                    lease_token,
+                },
+                mutation: ProcessTransitionMutation {
+                    status: ProcessLifecycleStatus::Failed,
+                    kind: ProcessJournalKind::Failed,
+                    suspension: None,
+                    checkpoint_ref: None,
+                    failure: Some(
+                        ironclaw_host_api::SanitizedFailure::new("runner_failure")
+                            .expect("failure"),
+                    ),
+                    failure_recovery: recovery,
+                    metadata: None,
+                },
+            })
+            .unwrap_or_else(|error| panic!("{label}: transition failed: {error}"));
+
+        let result = state.processes.get(&process_id).expect("process retained");
+        assert_eq!(result.status, expected_status, "{label}");
+        assert_eq!(
+            result
+                .failure
+                .as_ref()
+                .map(ironclaw_host_api::SanitizedFailure::category),
+            expected_failure,
+            "{label}"
+        );
+        assert_eq!(
+            result.crash_reclaim_count, expected_reclaim_count,
+            "{label}"
+        );
+        assert!(result.lease.is_none(), "{label}");
     }
 }
 

@@ -155,6 +155,7 @@ impl LoopExitApplier {
                 worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
                 lease_token: process_lease_token_from_turn(claimed.lease_token),
                 failure,
+                recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
                 checkpoint_ref: claimed.state.checkpoint_id.map(|checkpoint_id| {
                     ProcessCheckpointRef::from_trusted(checkpoint_id.as_uuid().to_string())
                 }),
@@ -341,6 +342,7 @@ async fn apply_validated_process_loop_exit(
                     worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
                     lease_token: process_lease_token_from_turn(claimed.lease_token),
                     failure,
+                    recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
                     // The failed exit's Final checkpoint is terminal evidence,
                     // not a resumable continuation point. It was verified
                     // before this transition; retain the checkpoint from the
