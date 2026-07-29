@@ -1,0 +1,55 @@
+[package]
+name = "ironclaw_attestation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Canonical signing-bytes + ApprovedTxHash core for the IronClaw attested-signing substrate (chain-SDK-free, no secrets/webauthn)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+# Internal workspace crate, never published to crates.io. Setting this lets the
+# cargo-deny `bans` wildcard check pass without an allow-list entry (matches the
+# `ironclaw_turns` convention — this is the PR where the crate is born).
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[features]
+default = []
+# Test-only: re-exports the low-level component hasher so the binding test
+# suite can drive per-component tampering. Never enable from production
+# dependents — production callers must use `approved_tx_hash_for`.
+test-support = []
+# Exposes the canonical contract suites (`sealed_grant_store_contract_cases!`,
+# `signing_ledger_contract_cases!`) and their `pub` helper functions so the
+# stacked durable PG / libSQL backend crates can run the same behavioural
+# contract against their impls. Mirrors `ironclaw_hooks`'s `contract-tests`
+# feature. Production builds MUST NOT enable this.
+contract-tests = ["dep:tokio"]
+
+[package.metadata.ironclaw]
+# Crypto-free attestation core: canonical bytes, the sealed one-shot grant
+# store, and the signing ledger. Depends only on the contracts crate, and is
+# forbidden from depending on ironclaw_secrets — key material has no path in
+# here, which is why the signer implementations live at kernel.
+layer = "substrates"
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+# Optional: only pulled in by the `contract-tests` feature so the contract
+# suites (which use `#[tokio::test]`) compile for out-of-crate consumers.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"], optional = true }
+
+[dev-dependencies]
+# Self dev-dependency enabling `test-support` so the integration test suite
+# can reach the low-level component hasher (production callers use
+# `approved_tx_hash_for`).
+ironclaw_attestation = { path = ".", features = ["test-support"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
