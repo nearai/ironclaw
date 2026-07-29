@@ -85,6 +85,11 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
         };
         match self.admin_users.get_user(&self.tenant, &user_id).await {
             Ok(Some(record)) if record.status == AdminUserStatus::Active => Ok(Some(record.role)),
+            // The env-bearer operator has no directory record but is the
+            // deployment's implicit owner — mirror
+            // `RebornServices::authorize_admin`'s contract. A persisted
+            // record (any status) still governs when present.
+            Ok(None) if user_id == self.operator_user_id => Ok(Some(AdminUserRole::Owner)),
             Ok(_) => Ok(None),
             Err(AdminUserError::Unavailable) => Err(Self::unavailable()),
             Err(error) => {
@@ -238,9 +243,13 @@ mod tests {
         }
     }
 
+    /// `fail`, when set, is the exact error `get_user` returns — distinct
+    /// from a plain bool so tests can pin behavior for a specific
+    /// `AdminUserError` variant (e.g. `Internal` vs `Unavailable`) rather than
+    /// only "some failure occurred".
     struct FakeAdminUsers {
         roles: Mutex<std::collections::HashMap<String, (AdminUserRole, AdminUserStatus)>>,
-        fail: bool,
+        fail: Option<AdminUserError>,
     }
 
     #[async_trait]
@@ -260,8 +269,8 @@ mod tests {
             _tenant: &TenantId,
             user_id: &UserId,
         ) -> Result<Option<AdminUserRecord>, AdminUserError> {
-            if self.fail {
-                return Err(AdminUserError::Unavailable);
+            if let Some(error) = self.fail {
+                return Err(error);
             }
             let roles = self.roles.lock().expect("lock");
             Ok(roles
@@ -362,7 +371,7 @@ mod tests {
         let lookup = Arc::new(FakeLookup::new(std::collections::HashMap::new(), false));
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(std::collections::HashMap::new()),
-            fail: false,
+            fail: None,
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
@@ -401,7 +410,7 @@ mod tests {
         );
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(roles),
-            fail: false,
+            fail: None,
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
@@ -436,7 +445,7 @@ mod tests {
         );
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(roles),
-            fail: false,
+            fail: None,
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
@@ -476,7 +485,7 @@ mod tests {
         );
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(roles),
-            fail: false,
+            fail: None,
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
@@ -499,7 +508,7 @@ mod tests {
         let lookup = Arc::new(FakeLookup::new(std::collections::HashMap::new(), true));
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(std::collections::HashMap::new()),
-            fail: false,
+            fail: None,
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
@@ -530,7 +539,7 @@ mod tests {
         let lookup = Arc::new(FakeLookup::new(bindings, false));
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(std::collections::HashMap::new()),
-            fail: true,
+            fail: Some(AdminUserError::Unavailable),
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
@@ -546,5 +555,179 @@ mod tests {
             .expect_err("admin-users unavailability must be retryable, not a silent role");
 
         assert!(error.retryable);
+    }
+
+    /// The env-bearer operator has no admin-directory record — `get_user`
+    /// legitimately returns `Ok(None)` for it — but it is still the
+    /// deployment's implicit owner, mirroring `RebornServices::authorize_admin`'s
+    /// `caller.operator_config` bypass. Without this rule the operator is
+    /// permanently denied channel admin commands (PR-1 final review finding).
+    #[tokio::test]
+    async fn operator_bound_actor_without_directory_record_is_implicit_owner() {
+        let operator = user("operator-a");
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "operator-actor"),
+            operator.clone(),
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
+        let admin_users = Arc::new(FakeAdminUsers {
+            roles: Mutex::new(std::collections::HashMap::new()),
+            fail: None,
+        });
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            Some(lookup),
+            admin_users,
+            tenant("tenant-a"),
+            operator,
+        );
+
+        let role = resolver
+            .actor_role(&sample_context("operator-actor"))
+            .await
+            .expect("resolves");
+
+        assert_eq!(role, Some(AdminUserRole::Owner));
+    }
+
+    /// A persisted record for the operator's bound user still governs even
+    /// though the implicit-owner rule would otherwise apply: the record is
+    /// `Some` (not `None`), so the operator match arm never fires and the
+    /// Suspended status denies exactly like any other suspended admin.
+    #[tokio::test]
+    async fn operator_bound_actor_with_suspended_record_is_not_admin() {
+        let operator = user("operator-a");
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "operator-actor"),
+            operator.clone(),
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
+        let mut roles = std::collections::HashMap::new();
+        roles.insert(
+            operator.as_str().to_string(),
+            (AdminUserRole::Owner, AdminUserStatus::Suspended),
+        );
+        let admin_users = Arc::new(FakeAdminUsers {
+            roles: Mutex::new(roles),
+            fail: None,
+        });
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            Some(lookup),
+            admin_users,
+            tenant("tenant-a"),
+            operator,
+        );
+
+        let role = resolver
+            .actor_role(&sample_context("operator-actor"))
+            .await
+            .expect("resolves");
+
+        assert_eq!(role, None);
+    }
+
+    /// The implicit-owner rule is keyed on identity (bound user ==
+    /// `operator_user_id`), not merely "no record exists". A distinct,
+    /// non-operator user with no directory record must still resolve to no
+    /// role.
+    #[tokio::test]
+    async fn non_operator_bound_actor_without_record_stays_none() {
+        let bound_user = user("user-4");
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "plain-actor"),
+            bound_user,
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
+        let admin_users = Arc::new(FakeAdminUsers {
+            roles: Mutex::new(std::collections::HashMap::new()),
+            fail: None,
+        });
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            Some(lookup),
+            admin_users,
+            tenant("tenant-a"),
+            user("operator-a"),
+        );
+
+        let role = resolver
+            .actor_role(&sample_context("plain-actor"))
+            .await
+            .expect("resolves");
+
+        assert_eq!(role, None);
+    }
+
+    /// PR-1-deferred branch: an `Internal` (non-`Unavailable`) admin-users
+    /// failure must still map to a non-retryable error, not be silently
+    /// treated as "no role".
+    #[tokio::test]
+    async fn admin_users_internal_error_is_not_retryable() {
+        let bound_user = user("user-5");
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "actor"),
+            bound_user,
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
+        let admin_users = Arc::new(FakeAdminUsers {
+            roles: Mutex::new(std::collections::HashMap::new()),
+            fail: Some(AdminUserError::Internal),
+        });
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            Some(lookup),
+            admin_users,
+            tenant("tenant-a"),
+            user("operator-a"),
+        );
+
+        let error = resolver
+            .actor_role(&sample_context("actor"))
+            .await
+            .expect_err("internal admin-users failure must not be silently treated as a role");
+
+        assert!(!error.retryable);
+    }
+
+    /// PR-1-deferred branch: an Active `Member` record resolves to
+    /// `Some(Member)`, not just the `Owner`/`Admin` cases the other tests
+    /// exercise.
+    #[tokio::test]
+    async fn bound_actor_with_member_record_resolves_member_role() {
+        let bound_user = user("user-6");
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "member-actor"),
+            bound_user.clone(),
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
+        let mut roles = std::collections::HashMap::new();
+        roles.insert(
+            bound_user.as_str().to_string(),
+            (AdminUserRole::Member, AdminUserStatus::Active),
+        );
+        let admin_users = Arc::new(FakeAdminUsers {
+            roles: Mutex::new(roles),
+            fail: None,
+        });
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            Some(lookup),
+            admin_users,
+            tenant("tenant-a"),
+            user("operator-a"),
+        );
+
+        let role = resolver
+            .actor_role(&sample_context("member-actor"))
+            .await
+            .expect("resolves");
+
+        assert_eq!(role, Some(AdminUserRole::Member));
     }
 }
