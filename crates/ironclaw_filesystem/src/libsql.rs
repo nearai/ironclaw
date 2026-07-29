@@ -919,7 +919,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
         #[cfg(test)]
-        tests::pause_delete_if_version_after_transaction_begin().await;
+        tests::pause_delete_if_version_after_transaction_begin(
+            Arc::as_ptr(&self.runtime) as usize,
+            path,
+        )
+        .await;
         delete_if_version_libsql_inner(&transaction, path, expected_version, expected_raw).await?;
         transaction
             .commit()
@@ -2151,19 +2155,47 @@ mod tests {
     use crate::{CasExpectation, Entry, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
+    struct DeleteIfVersionCancellationGate {
+        runtime_id: usize,
+        path: VirtualPath,
+        begun: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
     static DELETE_IF_VERSION_CANCELLATION_GATE: std::sync::Mutex<
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
+        Option<DeleteIfVersionCancellationGate>,
     > = std::sync::Mutex::new(None);
 
-    pub(super) async fn pause_delete_if_version_after_transaction_begin() {
-        let gate = DELETE_IF_VERSION_CANCELLATION_GATE
+    fn install_delete_if_version_cancellation_gate(
+        filesystem: &LibSqlRootFilesystem,
+        path: &VirtualPath,
+        begun: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        *DELETE_IF_VERSION_CANCELLATION_GATE
             .lock()
-            .expect("delete cancellation gate")
-            .take();
-        if let Some((begun, release)) = gate {
+            .expect("install delete cancellation gate") = Some(DeleteIfVersionCancellationGate {
+            runtime_id: Arc::as_ptr(&filesystem.runtime) as usize,
+            path: path.clone(),
+            begun,
+            release,
+        });
+    }
+
+    pub(super) async fn pause_delete_if_version_after_transaction_begin(
+        runtime_id: usize,
+        path: &VirtualPath,
+    ) {
+        let gate = {
+            let mut gate = DELETE_IF_VERSION_CANCELLATION_GATE
+                .lock()
+                .expect("delete cancellation gate");
+            let matches_target = gate
+                .as_ref()
+                .is_some_and(|gate| gate.runtime_id == runtime_id && gate.path == *path);
+            if matches_target { gate.take() } else { None }
+        };
+        if let Some(DeleteIfVersionCancellationGate { begun, release, .. }) = gate {
             let _ = begun.send(());
             let _ = release.await;
         }
@@ -2709,12 +2741,32 @@ mod tests {
             .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
             .await
             .unwrap();
+        let unrelated_path = VirtualPath::new("/resources/unrelated-delete").unwrap();
+        let unrelated_version = fs
+            .put(
+                &unrelated_path,
+                Entry::bytes(vec![2]),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        let (other_fs, _other_dir) = fresh_backend().await;
+        let other_version = other_fs
+            .put(&path, Entry::bytes(vec![3]), CasExpectation::Absent)
+            .await
+            .unwrap();
 
         let (begun_tx, begun_rx) = tokio::sync::oneshot::channel();
         let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
-        *DELETE_IF_VERSION_CANCELLATION_GATE
-            .lock()
-            .expect("install delete cancellation gate") = Some((begun_tx, release_rx));
+        install_delete_if_version_cancellation_gate(&fs, &path, begun_tx, release_rx);
+
+        fs.delete_if_version(&unrelated_path, unrelated_version)
+            .await
+            .expect("a different path must not consume the target cancellation gate");
+        other_fs
+            .delete_if_version(&path, other_version)
+            .await
+            .expect("the same path on a different runtime must not consume the target gate");
 
         let delete_fs = Arc::clone(&fs);
         let delete_path = path.clone();
