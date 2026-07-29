@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 use ironclaw_libsql_runtime::{
-    LibSqlCheckoutFailureReason, LibSqlConnectionLease, LibSqlLane, LibSqlRuntime,
-    LibSqlRuntimeError,
+    LibSqlCheckoutFailureReason, LibSqlLane, LibSqlReadConnectionLease, LibSqlRuntime,
+    LibSqlRuntimeError, LibSqlWriteConnectionLease,
 };
 
 use crate::backend::EventRecord;
@@ -103,14 +103,16 @@ impl LibSqlRootFilesystem {
             .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))
     }
 
-    async fn read_connection(&self) -> Result<LibSqlConnectionLease, FilesystemError> {
+    async fn read_connection(&self) -> Result<LibSqlReadConnectionLease, FilesystemError> {
         self.runtime
             .read()
             .await
             .map_err(map_runtime_connection_error)
     }
 
-    async fn migration_write_connection(&self) -> Result<LibSqlConnectionLease, FilesystemError> {
+    async fn migration_write_connection(
+        &self,
+    ) -> Result<LibSqlWriteConnectionLease, FilesystemError> {
         self.runtime
             .write()
             .await
@@ -121,7 +123,7 @@ impl LibSqlRootFilesystem {
         &self,
         path: &VirtualPath,
         operation: FilesystemOperation,
-    ) -> Result<LibSqlConnectionLease, FilesystemError> {
+    ) -> Result<LibSqlWriteConnectionLease, FilesystemError> {
         self.runtime
             .write()
             .await
@@ -305,6 +307,12 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let conn = self
             .write_connection(path, FilesystemOperation::EnsureIndex)
             .await?;
+        let transaction = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+            })?;
         // PR #3661 reviewer fix: the prior SELECT-then-INSERT was racey.
         // Two processes declaring the same spec concurrently could both
         // miss the row and then one would hit a unique-constraint backend
@@ -314,22 +322,25 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // then read back the canonical row and compare. If the stored
         // spec matches ours we're idempotent; if it differs we surface
         // IndexConflict.
-        conn.execute(
-            "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
+        transaction
+            .execute(
+                "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
              VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (prefix, name) DO NOTHING",
-            libsql::params![
-                path.as_str(),
-                spec.name.as_str(),
-                keys_json.clone(),
-                kind_str.clone(),
-            ],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+                libsql::params![
+                    path.as_str(),
+                    spec.name.as_str(),
+                    keys_json.clone(),
+                    kind_str.clone(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+            })?;
 
         // Read back what's there and validate it matches.
-        let mut rows = conn
+        let mut rows = transaction
             .query(
                 "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = ?1 AND name = ?2",
                 libsql::params![path.as_str(), spec.name.as_str()],
@@ -375,7 +386,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
                     expressions.join(", ")
                 );
-                conn.execute(&ddl, ()).await.map_err(|error| {
+                transaction.execute(&ddl, ()).await.map_err(|error| {
                     libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
                 })?;
             }
@@ -432,9 +443,12 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     "CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table} \
                      USING fts5(path UNINDEXED, content)"
                 );
-                conn.execute(&create_vtab, ()).await.map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                transaction
+                    .execute(&create_vtab, ())
+                    .await
+                    .map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                    })?;
                 // Triggers keep the FTS table in sync with entries whose
                 // path is within this prefix. They extract the indexed
                 // text via json_extract; non-text values fall through as
@@ -449,9 +463,12 @@ impl RootFilesystem for LibSqlRootFilesystem {
                        VALUES (new.path, COALESCE(json_extract(new.indexed, '$.{fts_key}'), '')); \
                      END"
                 );
-                conn.execute(&trigger_insert, ()).await.map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                transaction
+                    .execute(&trigger_insert, ())
+                    .await
+                    .map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                    })?;
                 let trigger_update = format!(
                     "CREATE TRIGGER IF NOT EXISTS {index_name}_au \
                      AFTER UPDATE ON root_filesystem_entries \
@@ -463,9 +480,12 @@ impl RootFilesystem for LibSqlRootFilesystem {
                        VALUES (new.path, COALESCE(json_extract(new.indexed, '$.{fts_key}'), '')); \
                      END"
                 );
-                conn.execute(&trigger_update, ()).await.map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                transaction
+                    .execute(&trigger_update, ())
+                    .await
+                    .map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                    })?;
                 let trigger_delete = format!(
                     "CREATE TRIGGER IF NOT EXISTS {index_name}_ad \
                      AFTER DELETE ON root_filesystem_entries \
@@ -475,9 +495,12 @@ impl RootFilesystem for LibSqlRootFilesystem {
                        DELETE FROM {fts_table} WHERE path = old.path; \
                      END"
                 );
-                conn.execute(&trigger_delete, ()).await.map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                transaction
+                    .execute(&trigger_delete, ())
+                    .await
+                    .map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                    })?;
                 // Backfill any rows present before the index was declared.
                 let backfill = format!(
                     "INSERT INTO {fts_table}(path, content) \
@@ -489,14 +512,15 @@ impl RootFilesystem for LibSqlRootFilesystem {
                            (SELECT 1 FROM {fts_table} WHERE {fts_table}.path = root_filesystem_entries.path)"
                 );
                 let (backfill_lower, backfill_upper) = descendant_path_range(path);
-                conn.execute(
-                    &backfill,
-                    libsql::params![path_prefix, backfill_lower, backfill_upper],
-                )
-                .await
-                .map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                transaction
+                    .execute(
+                        &backfill,
+                        libsql::params![path_prefix, backfill_lower, backfill_upper],
+                    )
+                    .await
+                    .map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                    })?;
             }
             IndexKind::Vector { dim } => {
                 // Storage shape: IndexValue::Bytes under the indexed key.
@@ -514,7 +538,10 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 }
             }
         }
-        Ok(())
+        transaction
+            .commit()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
     }
 
     async fn query(
@@ -935,21 +962,28 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let conn = self
             .write_connection(path, FilesystemOperation::Append)
             .await?;
+        let transaction = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
         // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
         // insert. We capture the assigned id via last_insert_rowid() under
         // the same connection so concurrent writers don't observe each
         // other's rowids — libsql's per-connection model gives us that
         // for free.
-        conn.execute(
-            r#"
+        transaction
+            .execute(
+                r#"
             INSERT INTO root_filesystem_events (path, payload, created_at)
             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             "#,
-            libsql::params![path.as_str(), libsql::Value::Blob(payload)],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
-        let mut rows = conn
+                libsql::params![path.as_str(), libsql::Value::Blob(payload)],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        #[cfg(test)]
+        tests::pause_append_after_insert(Arc::as_ptr(&self.runtime) as usize, path).await;
+        let mut rows = transaction
             .query("SELECT last_insert_rowid()", ())
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
@@ -964,6 +998,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
             })?;
         let seq_raw: i64 = row
             .get(0)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        drop(rows);
+        transaction
+            .commit()
+            .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
         seq_no_from_i64(path, seq_raw, FilesystemOperation::Append)
     }
@@ -1598,7 +1637,18 @@ impl LibSqlRootFilesystem {
 
     async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
         let conn = self.read_connection().await?;
-        has_child_entry_libsql(&conn, parent).await
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
+        let mut rows = conn
+            .query(
+                LIBSQL_HAS_CHILD_ENTRY_SQL,
+                libsql::params![prefix_lower, prefix_upper],
+            )
+            .await
+            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+        rows.next()
+            .await
+            .map(|row| row.is_some())
+            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))
     }
 
     /// Resolve every FTS index name covering `path` whose first key is
@@ -2152,7 +2202,7 @@ mod tests {
     //! reach.
 
     use super::*;
-    use crate::{CasExpectation, Entry, RecordKind};
+    use crate::{CasExpectation, Entry, IndexName, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
     struct DeleteIfVersionCancellationGate {
@@ -2165,6 +2215,16 @@ mod tests {
     static DELETE_IF_VERSION_CANCELLATION_GATE: std::sync::Mutex<
         Option<DeleteIfVersionCancellationGate>,
     > = std::sync::Mutex::new(None);
+
+    struct AppendCancellationGate {
+        runtime_id: usize,
+        path: VirtualPath,
+        inserted: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    static APPEND_CANCELLATION_GATE: std::sync::Mutex<Option<AppendCancellationGate>> =
+        std::sync::Mutex::new(None);
 
     fn install_delete_if_version_cancellation_gate(
         filesystem: &LibSqlRootFilesystem,
@@ -2197,6 +2257,41 @@ mod tests {
         };
         if let Some(DeleteIfVersionCancellationGate { begun, release, .. }) = gate {
             let _ = begun.send(());
+            let _ = release.await;
+        }
+    }
+
+    fn install_append_cancellation_gate(
+        filesystem: &LibSqlRootFilesystem,
+        path: &VirtualPath,
+        inserted: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        *APPEND_CANCELLATION_GATE
+            .lock()
+            .expect("install append cancellation gate") = Some(AppendCancellationGate {
+            runtime_id: Arc::as_ptr(&filesystem.runtime) as usize,
+            path: path.clone(),
+            inserted,
+            release,
+        });
+    }
+
+    pub(super) async fn pause_append_after_insert(runtime_id: usize, path: &VirtualPath) {
+        let gate = {
+            let mut gate = APPEND_CANCELLATION_GATE
+                .lock()
+                .expect("append cancellation gate");
+            let matches_target = gate
+                .as_ref()
+                .is_some_and(|gate| gate.runtime_id == runtime_id && gate.path == *path);
+            if matches_target { gate.take() } else { None }
+        };
+        if let Some(AppendCancellationGate {
+            inserted, release, ..
+        }) = gate
+        {
+            let _ = inserted.send(());
             let _ = release.await;
         }
     }
@@ -2308,7 +2403,7 @@ mod tests {
     #[tokio::test]
     async fn range_bounds_select_exactly_what_the_like_predicate_did() {
         let (fs, _dir) = fresh_backend().await;
-        let conn = fs.read_connection().await.unwrap();
+        let conn = fs.migration_write_connection().await.unwrap();
         let corpus = [
             "/memory/a",
             "/memory/a/b",
@@ -2517,6 +2612,87 @@ mod tests {
                 operation: FilesystemOperation::Append,
             } if error_path == path
         ));
+    }
+
+    #[tokio::test]
+    async fn ensure_index_rolls_back_the_catalog_when_ddl_fails() {
+        let (fs, _dir) = fresh_backend().await;
+        let path = VirtualPath::new("/resources/index-atomicity").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_status").unwrap(),
+            vec![IndexKey::new("status").unwrap()],
+            IndexKind::Exact,
+        );
+        let conflicting_name = sql_index_name(path.as_str(), spec.name.as_str());
+        let writer = fs.migration_write_connection().await.unwrap();
+        writer
+            .execute(
+                &format!("CREATE TABLE {conflicting_name} (value TEXT NOT NULL)"),
+                (),
+            )
+            .await
+            .unwrap();
+        drop(writer);
+
+        let error = fs
+            .ensure_index(&path, &spec)
+            .await
+            .expect_err("the conflicting table must make index DDL fail");
+        assert!(matches!(error, FilesystemError::Backend { .. }));
+
+        let reader = fs.read_connection().await.unwrap();
+        let mut rows = reader
+            .query(
+                "SELECT COUNT(*) FROM root_filesystem_index_specs \
+                 WHERE prefix = ?1 AND name = ?2",
+                libsql::params![path.as_str(), spec.name.as_str()],
+            )
+            .await
+            .unwrap();
+        let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(
+            count, 0,
+            "failed index DDL must roll back the preceding catalog upsert"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_append_after_insert_rolls_back_the_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("append-cancellation-test.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = Arc::new(LibSqlRootFilesystem::new(db));
+        fs.run_migrations().await.unwrap();
+
+        let path = VirtualPath::new("/resources/cancelled-append").unwrap();
+        let (inserted_tx, inserted_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+        install_append_cancellation_gate(&fs, &path, inserted_tx, release_rx);
+
+        let append_fs = Arc::clone(&fs);
+        let append_path = path.clone();
+        let append =
+            tokio::spawn(
+                async move { append_fs.append(&append_path, b"cancelled".to_vec()).await },
+            );
+        inserted_rx
+            .await
+            .expect("append reaches the point after its insert");
+        append.abort();
+        assert!(
+            append
+                .await
+                .expect_err("cancelled append task")
+                .is_cancelled(),
+            "append task must be cancelled while its transaction is open"
+        );
+
+        assert!(
+            fs.tail(&path, SeqNo::ZERO).await.unwrap().is_empty(),
+            "cancelling append after INSERT must roll the event back"
+        );
+        let seq = fs.append(&path, b"accepted".to_vec()).await.unwrap();
+        assert_eq!(seq, SeqNo::from_backend(1));
     }
 
     #[test]

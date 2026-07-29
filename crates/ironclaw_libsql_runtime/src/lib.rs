@@ -7,7 +7,7 @@
 use std::{
     fmt,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -20,13 +20,21 @@ const LIBSQL_WRITER_POOL_MAX_CONNECTIONS: usize = 1;
 const LIBSQL_POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
 const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
-const LIBSQL_CONNECTION_PRAGMAS: &str = "\
+const LIBSQL_WRITE_CONNECTION_PRAGMAS: &str = "\
     PRAGMA busy_timeout = 5000;\
     PRAGMA synchronous = NORMAL;\
     PRAGMA temp_store = MEMORY;\
     PRAGMA cache_size = -16000;\
     PRAGMA mmap_size = 268435456;\
     PRAGMA wal_autocheckpoint = 1000;";
+const LIBSQL_READ_CONNECTION_PRAGMAS: &str = "\
+    PRAGMA busy_timeout = 5000;\
+    PRAGMA synchronous = NORMAL;\
+    PRAGMA temp_store = MEMORY;\
+    PRAGMA cache_size = -16000;\
+    PRAGMA mmap_size = 268435456;\
+    PRAGMA wal_autocheckpoint = 1000;\
+    PRAGMA query_only = ON;";
 
 type LibSqlPool = Pool<LibSqlConnectionManager>;
 
@@ -55,7 +63,6 @@ pub enum LibSqlCheckoutFailureReason {
     Closed,
     RuntimeUnavailable,
     PostCreateHook,
-    ConnectionAttemptsExhausted,
 }
 
 impl fmt::Display for LibSqlCheckoutFailureReason {
@@ -65,9 +72,6 @@ impl fmt::Display for LibSqlCheckoutFailureReason {
             Self::Closed => formatter.write_str("closed"),
             Self::RuntimeUnavailable => formatter.write_str("runtime unavailable"),
             Self::PostCreateHook => formatter.write_str("post-create hook"),
-            Self::ConnectionAttemptsExhausted => {
-                formatter.write_str("connection attempts exhausted")
-            }
         }
     }
 }
@@ -86,16 +90,51 @@ pub enum LibSqlRuntimeError {
         lane: LibSqlLane,
         reason: LibSqlCheckoutFailureReason,
     },
+    #[error("libSQL writer acquisition is not reentrant")]
+    ReentrantWriter,
 }
 
-/// Exclusive checkout from either the reader or writer pool.
-pub struct LibSqlConnectionLease(Object<LibSqlConnectionManager>);
+/// Checkout from a connection pool configured with `PRAGMA query_only = ON`.
+///
+/// The lease deliberately exposes only the row-returning query API. The
+/// connection itself stays private, and libSQL rejects write SQL even if it is
+/// submitted through `query`.
+pub struct LibSqlReadConnectionLease(Object<LibSqlConnectionManager>);
 
-impl Deref for LibSqlConnectionLease {
+impl LibSqlReadConnectionLease {
+    pub async fn query(
+        &self,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+    ) -> libsql::Result<libsql::Rows> {
+        self.0.query(sql, params).await
+    }
+}
+
+/// Exclusive checkout from the single-slot writer pool.
+pub struct LibSqlWriteConnectionLease {
+    connection: Object<LibSqlConnectionManager>,
+    writer_holder: Arc<Mutex<Option<tokio::task::Id>>>,
+    holder_task_id: Option<tokio::task::Id>,
+}
+
+impl Deref for LibSqlWriteConnectionLease {
     type Target = libsql::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.connection
+    }
+}
+
+impl Drop for LibSqlWriteConnectionLease {
+    fn drop(&mut self) {
+        let Some(holder_task_id) = self.holder_task_id else {
+            return;
+        };
+        let mut holder = recover_writer_holder_lock(&self.writer_holder);
+        if holder.as_ref() == Some(&holder_task_id) {
+            *holder = None;
+        }
     }
 }
 
@@ -103,6 +142,7 @@ impl Deref for LibSqlConnectionLease {
 pub struct LibSqlRuntime {
     read_pool: LibSqlPool,
     write_pool: LibSqlPool,
+    writer_holder: Arc<Mutex<Option<tokio::task::Id>>>,
 }
 
 impl fmt::Debug for LibSqlRuntime {
@@ -111,6 +151,10 @@ impl fmt::Debug for LibSqlRuntime {
             .debug_struct("LibSqlRuntime")
             .field("read_pool", &self.read_pool.status())
             .field("write_pool", &self.write_pool.status())
+            .field(
+                "writer_holder_present",
+                &recover_writer_holder_lock(&self.writer_holder).is_some(),
+            )
             .finish()
     }
 }
@@ -118,22 +162,53 @@ impl fmt::Debug for LibSqlRuntime {
 impl LibSqlRuntime {
     pub fn new(db: Arc<libsql::Database>) -> Self {
         Self {
-            read_pool: build_pool(Arc::clone(&db), LIBSQL_READ_POOL_MAX_CONNECTIONS),
-            write_pool: build_pool(db, LIBSQL_WRITER_POOL_MAX_CONNECTIONS),
+            read_pool: build_pool(
+                Arc::clone(&db),
+                LIBSQL_READ_POOL_MAX_CONNECTIONS,
+                LibSqlLane::Read,
+            ),
+            write_pool: build_pool(db, LIBSQL_WRITER_POOL_MAX_CONNECTIONS, LibSqlLane::Write),
+            writer_holder: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub async fn read(&self) -> Result<LibSqlConnectionLease, LibSqlRuntimeError> {
-        checkout(&self.read_pool, LibSqlLane::Read).await
+    pub async fn read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError> {
+        checkout(&self.read_pool, LibSqlLane::Read)
+            .await
+            .map(LibSqlReadConnectionLease)
     }
 
-    pub async fn write(&self) -> Result<LibSqlConnectionLease, LibSqlRuntimeError> {
-        checkout(&self.write_pool, LibSqlLane::Write).await
+    pub async fn write(&self) -> Result<LibSqlWriteConnectionLease, LibSqlRuntimeError> {
+        let holder_task_id = tokio::task::try_id();
+        if holder_task_id.is_some()
+            && *recover_writer_holder_lock(&self.writer_holder) == holder_task_id
+        {
+            return Err(LibSqlRuntimeError::ReentrantWriter);
+        }
+        let connection = checkout(&self.write_pool, LibSqlLane::Write).await?;
+        if let Some(holder_task_id) = holder_task_id {
+            *recover_writer_holder_lock(&self.writer_holder) = Some(holder_task_id);
+        }
+        Ok(LibSqlWriteConnectionLease {
+            connection,
+            writer_holder: Arc::clone(&self.writer_holder),
+            holder_task_id,
+        })
+    }
+}
+
+fn recover_writer_holder_lock(
+    holder: &Mutex<Option<tokio::task::Id>>,
+) -> MutexGuard<'_, Option<tokio::task::Id>> {
+    match holder.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
 struct LibSqlConnectionManager {
     db: Arc<libsql::Database>,
+    lane: LibSqlLane,
 }
 
 impl Manager for LibSqlConnectionManager {
@@ -141,7 +216,7 @@ impl Manager for LibSqlConnectionManager {
     type Error = LibSqlRuntimeError;
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
-        connect_with_retry(|| self.db.connect()).await
+        connect_with_retry(|| self.db.connect(), connection_pragmas(self.lane)).await
     }
 
     async fn recycle(
@@ -159,16 +234,24 @@ impl Manager for LibSqlConnectionManager {
     }
 }
 
-fn build_pool(db: Arc<libsql::Database>, max_size: usize) -> LibSqlPool {
-    build_pool_with_config(db, max_size, LIBSQL_POOL_CHECKOUT_TIMEOUT)
+fn connection_pragmas(lane: LibSqlLane) -> &'static str {
+    match lane {
+        LibSqlLane::Read => LIBSQL_READ_CONNECTION_PRAGMAS,
+        LibSqlLane::Write => LIBSQL_WRITE_CONNECTION_PRAGMAS,
+    }
+}
+
+fn build_pool(db: Arc<libsql::Database>, max_size: usize, lane: LibSqlLane) -> LibSqlPool {
+    build_pool_with_config(db, max_size, lane, LIBSQL_POOL_CHECKOUT_TIMEOUT)
 }
 
 fn build_pool_with_config(
     db: Arc<libsql::Database>,
     max_size: usize,
+    lane: LibSqlLane,
     wait_timeout: Duration,
 ) -> LibSqlPool {
-    match Pool::builder(LibSqlConnectionManager { db })
+    match Pool::builder(LibSqlConnectionManager { db, lane })
         .max_size(max_size)
         .wait_timeout(Some(wait_timeout))
         .runtime(deadpool::Runtime::Tokio1)
@@ -184,7 +267,7 @@ fn build_pool_with_config(
 async fn checkout(
     pool: &LibSqlPool,
     lane: LibSqlLane,
-) -> Result<LibSqlConnectionLease, LibSqlRuntimeError> {
+) -> Result<Object<LibSqlConnectionManager>, LibSqlRuntimeError> {
     let queued = pool.status().waiting;
     let started = Instant::now();
     let result = pool.get().await;
@@ -195,9 +278,7 @@ async fn checkout(
         queued,
         "libSQL connection checkout completed"
     );
-    result
-        .map(LibSqlConnectionLease)
-        .map_err(|error| map_pool_error(error, lane))
+    result.map_err(|error| map_pool_error(error, lane))
 }
 
 fn map_pool_error(error: PoolError<LibSqlRuntimeError>, lane: LibSqlLane) -> LibSqlRuntimeError {
@@ -222,11 +303,14 @@ fn map_pool_error(error: PoolError<LibSqlRuntimeError>, lane: LibSqlLane) -> Lib
     }
 }
 
-async fn connect_with_retry<F>(mut open: F) -> Result<libsql::Connection, LibSqlRuntimeError>
+async fn connect_with_retry<F>(
+    mut open: F,
+    pragmas: &'static str,
+) -> Result<libsql::Connection, LibSqlRuntimeError>
 where
     F: FnMut() -> Result<libsql::Connection, libsql::Error>,
 {
-    connect_with_retry_and_pragmas(&mut open, |_| LIBSQL_CONNECTION_PRAGMAS).await
+    connect_with_retry_and_pragmas(&mut open, |_| pragmas).await
 }
 
 async fn connect_with_retry_and_pragmas<F, P>(
@@ -237,29 +321,23 @@ where
     F: FnMut() -> Result<libsql::Connection, libsql::Error>,
     P: FnMut(u32) -> &'static str,
 {
-    let mut last_error = None;
-    for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
-        match open() {
+    let mut attempt = 0;
+    loop {
+        let error = match open() {
             Ok(connection) => match connection.execute_batch(pragmas_for_attempt(attempt)).await {
                 Ok(_) => return Ok(connection),
-                Err(error) => last_error = Some(error),
+                Err(error) => error,
             },
-            Err(error) => last_error = Some(error),
+            Err(error) => error,
+        };
+        attempt += 1;
+        if attempt >= LIBSQL_CONNECT_ATTEMPTS {
+            return Err(LibSqlRuntimeError::Connection {
+                operation: "open or initialize",
+                source: error,
+            });
         }
-        if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-            tokio::time::sleep(LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)).await;
-        }
-    }
-
-    match last_error {
-        Some(source) => Err(LibSqlRuntimeError::Connection {
-            operation: "open or initialize",
-            source,
-        }),
-        None => Err(LibSqlRuntimeError::Checkout {
-            lane: LibSqlLane::Read,
-            reason: LibSqlCheckoutFailureReason::ConnectionAttemptsExhausted,
-        }),
+        tokio::time::sleep(LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt - 1)).await;
     }
 }
 
@@ -307,6 +385,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reader_lane_rejects_write_sql() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("reader-is-read-only.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let runtime = LibSqlRuntime::new(database);
+        let writer = runtime.write().await.expect("writer");
+        writer
+            .execute("CREATE TABLE guarded_writes (value TEXT NOT NULL)", ())
+            .await
+            .expect("create guarded table");
+        drop(writer);
+
+        let reader = runtime.read().await.expect("reader");
+        let mut pragma_rows = reader
+            .query("PRAGMA query_only", ())
+            .await
+            .expect("query reader enforcement pragma");
+        let query_only: i64 = pragma_rows
+            .next()
+            .await
+            .expect("read query_only")
+            .expect("query_only row")
+            .get(0)
+            .expect("query_only value");
+        assert_eq!(query_only, 1, "reader connection must enable query_only");
+        let result = reader
+            .query(
+                "INSERT INTO guarded_writes (value) VALUES ('bypass') RETURNING value",
+                (),
+            )
+            .await;
+        let rejected = match result {
+            Ok(mut rows) => rows.next().await.is_err(),
+            Err(_) => true,
+        };
+
+        assert!(
+            rejected,
+            "the reader lane must reject SQL that attempts a write"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_writer_acquisition_fails_without_waiting_for_pool_timeout() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("nested-writer.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let runtime = Arc::new(LibSqlRuntime::new(database));
+        let nested = tokio::spawn(async move {
+            let _held_writer = runtime.write().await.expect("first writer");
+            tokio::time::timeout(Duration::from_millis(25), runtime.write())
+                .await
+                .expect("nested writer acquisition must fail before the pool timeout")
+        })
+        .await
+        .expect("nested writer test task");
+
+        assert!(
+            nested.is_err(),
+            "nested writer acquisition must return a typed runtime error"
+        );
+        assert!(matches!(nested, Err(LibSqlRuntimeError::ReentrantWriter)));
+    }
+
+    #[tokio::test]
     async fn recycle_rejects_connection_returned_inside_transaction() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("recycle.db");
@@ -316,7 +469,7 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let pool = build_pool(database, 1);
+        let pool = build_pool(database, 1, LibSqlLane::Write);
 
         {
             let connection = pool.get().await.expect("first checkout");
@@ -344,7 +497,8 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let pool = build_pool_with_config(database, 1, Duration::from_millis(25));
+        let pool =
+            build_pool_with_config(database, 1, LibSqlLane::Write, Duration::from_millis(25));
         let _held = pool.get().await.expect("held checkout");
 
         let error = match checkout(&pool, LibSqlLane::Write).await {
@@ -412,12 +566,15 @@ mod tests {
     #[tokio::test]
     async fn connection_retry_stops_after_the_fixed_budget() {
         let mut attempts = 0;
-        let result = connect_with_retry(|| {
-            attempts += 1;
-            Err(libsql::Error::ConnectionFailed(format!(
-                "synthetic permanent failure {attempts}"
-            )))
-        })
+        let result = connect_with_retry(
+            || {
+                attempts += 1;
+                Err(libsql::Error::ConnectionFailed(format!(
+                    "synthetic permanent failure {attempts}"
+                )))
+            },
+            LIBSQL_WRITE_CONNECTION_PRAGMAS,
+        )
         .await;
 
         assert_eq!(attempts, LIBSQL_CONNECT_ATTEMPTS);
@@ -451,7 +608,7 @@ mod tests {
                 if initializers == 1 {
                     "THIS IS NOT SQL"
                 } else {
-                    LIBSQL_CONNECTION_PRAGMAS
+                    LIBSQL_WRITE_CONNECTION_PRAGMAS
                 }
             },
         )

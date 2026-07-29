@@ -187,7 +187,7 @@ async fn run_delta_journal_flusher<F>(
                 Ok(seqs) => {
                     if contention_attempt > 0 {
                         health.store(DeltaJournalHealth::Healthy as u8, Ordering::SeqCst);
-                        tracing::warn!(
+                        tracing::debug!(
                             attempts = contention_attempt,
                             recovery_ms = recovery_started.elapsed().as_millis(),
                             batch_size = requests.len(),
@@ -210,7 +210,7 @@ async fn run_delta_journal_flusher<F>(
                             DeltaJournalHealth::RecoveringContention as u8,
                             Ordering::SeqCst,
                         );
-                        tracing::warn!(
+                        tracing::debug!(
                             batch_size = requests.len(),
                             "turn-state delta journal entered filesystem contention recovery"
                         );

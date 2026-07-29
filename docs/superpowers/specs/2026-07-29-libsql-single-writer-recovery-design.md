@@ -61,11 +61,13 @@ Create a small `ironclaw_libsql_runtime` substrate crate. It owns:
 - a one-connection writer pool;
 - connection initialization and bounded checkout policy.
 
-Its public API exposes typed read and writer leases. A writer lease is the sole
-write-admission token for that runtime: holding it for the full database
-operation prevents any other in-process filesystem or trigger write from
-starting. Readers use the separate read pool and remain concurrent with each
-other and with the current writer when WAL permits it.
+Its public API exposes distinct read and writer lease types. Read leases expose
+only the query API and their pooled connections enforce
+`PRAGMA query_only = ON`; writer leases expose the full libSQL connection API
+and are the sole write-admission tokens for that runtime. Holding a writer
+lease for the full database operation prevents any other in-process filesystem
+or trigger write from starting. Readers use the separate read pool and remain
+concurrent with each other and with the current writer when WAL permits it.
 
 The runtime contains only libSQL connection mechanics. It does not know about
 filesystem paths, triggers, events, turns, or product policy.
@@ -91,9 +93,10 @@ already-migrated `Arc<LibSqlRootFilesystem>` to the event store instead of
 reopening `path_or_url`.
 
 The standalone `RebornEventStoreConfig::Libsql { ... }` path remains available
-for callers that intentionally configure an independent event database. A
-prebuilt state-database handle has unknown provenance, so composition preserves
-that explicit target unless the caller selected shared-database composition.
+to the event-store crate's standalone callers. Production libSQL composition
+does not accept a second event target: its input binds the primary runtime to
+the target used for production policy validation, and it always constructs the
+event store from the primary filesystem.
 
 This removes the second production filesystem pool and guarantees event-log
 writes use the same writer lane as all other `RootFilesystem` consumers.
@@ -217,9 +220,8 @@ failing test that is observed before production code changes.
 
 - Filesystem and trigger writes constructed from one runtime serialize against
   each other while reads remain available.
-- Production libSQL composition passes one runtime to filesystem, triggers, and
-  event logs when they share a configured database; it does not reopen that
-  target. An explicitly separate event database owns its own runtime.
+- Production libSQL composition passes one runtime to filesystem, triggers,
+  and event logs and never accepts or reopens a second event target.
 - Standalone constructors remain compatible.
 
 ### `ironclaw_turns`

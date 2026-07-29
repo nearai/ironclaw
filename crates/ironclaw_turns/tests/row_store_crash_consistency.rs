@@ -3741,6 +3741,94 @@ async fn write_behind_put_loop_checkpoint_takes_async_path() {
     check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
 }
 
+/// A cancelled checkpoint write must restore the cached engine before another
+/// caller can observe it. The checkpoint mutates the engine before it waits for
+/// write-behind capacity, so cancellation at that await used to leave a
+/// checkpoint that had never been enqueued or durably accepted.
+#[tokio::test]
+async fn write_behind_aborted_loop_checkpoint_does_not_leak_speculative_state() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+    let store = Arc::new(
+        TurnStateRowStore::new(Arc::clone(&scoped))
+            .with_limits(limits().set_max_pending_write_behind_deltas(1))
+            .with_apply_timeout(std::time::Duration::from_secs(5)),
+    );
+
+    let run_id = submit_one(store.as_ref(), &scope, "idem-aborted-checkpoint").await;
+    let turn_id = store
+        .persistence_snapshot()
+        .await
+        .expect("load submitted run")
+        .runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .expect("submitted run present")
+        .turn_id;
+
+    let stall = backend.append_gate().lock_owned().await;
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .expect("claim query")
+        .expect("claim fills the cap-one write-behind window");
+
+    let checkpoint_store = Arc::clone(&store);
+    let checkpoint_scope = scope.clone();
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: checkpoint_scope,
+                turn_id,
+                run_id,
+                state_ref: LoopCheckpointStateRef::new("checkpoint:must-not-leak")
+                    .expect("state ref"),
+                schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").expect("schema id"),
+                schema_version: RunProfileVersion::new(1),
+                kind: LoopCheckpointKind::BeforeModel,
+                gate_ref: None,
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    checkpoint.abort();
+    assert!(
+        checkpoint
+            .await
+            .expect_err("aborted checkpoint task")
+            .is_cancelled(),
+        "checkpoint write must be cancelled while waiting for write-behind capacity"
+    );
+
+    let live = store
+        .persistence_snapshot()
+        .await
+        .expect("read repaired hot snapshot");
+    assert!(
+        live.loop_checkpoints.is_empty(),
+        "an externally cancelled checkpoint must not remain in the cached engine"
+    );
+
+    drop(stall);
+    store.drain().await.expect("drain accepted claim");
+    drop(store);
+    let reopened = open_row_store(scoped);
+    assert!(
+        reopened
+            .persistence_snapshot()
+            .await
+            .expect("reopen durable snapshot")
+            .loop_checkpoints
+            .is_empty(),
+        "an externally cancelled checkpoint must not become durable"
+    );
+}
+
 /// #6298 IronLoop f5 — `BeforeSideEffect` loop checkpoints are recoverability-
 /// critical: they gate side-effect replay (expired-lease recovery treats the
 /// absence of a durable checkpoint as "no side effect ran" and requeues). Under

@@ -5,6 +5,7 @@
 //! unchanged.
 
 use ironclaw_filesystem::RootFilesystem;
+use tokio::sync::MutexGuard;
 
 use crate::TurnError;
 
@@ -23,7 +24,7 @@ where
     /// exits.
     ///
     /// Awaits the oldest-first backpressure window populated by
-    /// [`track_write_behind_ack_if_async`](Self::track_write_behind_ack_if_async),
+    /// the reserve-enqueue-track critical sections in the mutation paths,
     /// giving a planned/graceful restart a clean durable tail. A hard crash
     /// (SIGKILL/OOM) still loses only the un-acked non-critical (non-critical =
     /// not gate-park/terminal/brand-new-run) tail; gate-park, terminal, and
@@ -111,8 +112,12 @@ where
     /// ack here is backpressure, not deadlock. At the cap, await (and drop) the
     /// OLDEST pending ack first, bounding both memory and the crash-loss window.
     /// A fatal append acknowledgement propagates; retryable contention keeps
-    /// the acknowledgement pending until the retained batch succeeds.
-    pub(super) async fn reserve_write_behind_slot(&self) -> Result<(), TurnError> {
+    /// the acknowledgement pending until the retained batch succeeds. The
+    /// returned guard reserves the slot through enqueue and synchronous ack
+    /// tracking, so cancellation cannot lose an accepted acknowledgement.
+    pub(super) async fn reserve_write_behind_slot(
+        &self,
+    ) -> Result<MutexGuard<'_, std::collections::VecDeque<DeltaAck>>, TurnError> {
         let cap = self.limits.max_pending_write_behind_deltas.max(1);
         let mut window = self.pending_write_behind.lock().await;
         while window.len() >= cap {
@@ -130,29 +135,7 @@ where
             window.pop_front();
             result?;
         }
-        Ok(())
-    }
-
-    /// For a non-critical write-behind commit, move the durable ack into the
-    /// bounded pending window (its slot was reserved by
-    /// [`reserve_write_behind_slot`](Self::reserve_write_behind_slot) before the
-    /// enqueue) and return `None` so [`commit_pending`](Self::commit_pending)
-    /// returns without awaiting. Otherwise return the ack unchanged for the
-    /// caller to await (a critical barrier). Runs under
-    /// `snapshot_state`, so the reserve→enqueue→track sequence is serialized and
-    /// the window can never exceed the cap.
-    pub(super) async fn track_write_behind_ack_if_async(
-        &self,
-        critical: bool,
-        ack: Option<DeltaAck>,
-    ) -> Option<DeltaAck> {
-        if !critical {
-            if let Some(ack) = ack {
-                self.pending_write_behind.lock().await.push_back(ack);
-            }
-            return None;
-        }
-        ack
+        Ok(window)
     }
 
     /// Read-side write-behind barrier (#6298).

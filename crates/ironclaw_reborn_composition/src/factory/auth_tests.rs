@@ -333,7 +333,7 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             RebornCompositionProfile::Production,
             "production-google-oauth-owner",
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
@@ -386,7 +386,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             RebornCompositionProfile::Production,
             "production-auth-fanout-owner",
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )

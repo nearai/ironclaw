@@ -96,7 +96,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             RebornCompositionProfile::Production,
             OWNER,
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )

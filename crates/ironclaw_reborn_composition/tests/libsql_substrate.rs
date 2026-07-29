@@ -15,7 +15,6 @@ use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
     build_libsql_production_host_runtime_services,
 };
-use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use secrecy::SecretString;
 use support::production_readiness::{
@@ -62,8 +61,8 @@ async fn libsql_substrate_builder_wires_production_components_without_local_only
     let fixture = build_libsql_test_services().await;
 
     assert!(
-        fixture.events_db_path.exists(),
-        "the substrate builder must preserve an explicitly separate event-store target"
+        !fixture.unexpected_events_db_path.exists(),
+        "the libSQL substrate builder must not open a second event-store database"
     );
     let production_config = ProductionWiringConfig::new([])
         .require_runtime_http_egress()
@@ -90,7 +89,6 @@ async fn libsql_substrate_readiness_diagnostics_cover_required_backend_gaps() {
 async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
@@ -99,11 +97,8 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        database,
-        event_store: RebornEventStoreConfig::Libsql {
-            path_or_url: events_db_path.display().to_string(),
-            auth_token: None,
-        },
+        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("too-short")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
@@ -135,7 +130,6 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
     );
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
@@ -144,11 +138,8 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        database,
-        event_store: RebornEventStoreConfig::Libsql {
-            path_or_url: events_db_path.display().to_string(),
-            auth_token: None,
-        },
+        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: None,
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
@@ -175,7 +166,6 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
 async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_authority() {
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
@@ -184,11 +174,8 @@ async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_au
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        database,
-        event_store: RebornEventStoreConfig::Libsql {
-            path_or_url: events_db_path.display().to_string(),
-            auth_token: None,
-        },
+        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: false,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
@@ -254,14 +241,14 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 
 struct LibSqlTestServices {
     _dir: tempfile::TempDir,
-    events_db_path: std::path::PathBuf,
+    unexpected_events_db_path: std::path::PathBuf,
     services: ironclaw_reborn_composition::LibSqlProductionHostRuntimeServices,
 }
 
 async fn build_libsql_test_services() -> LibSqlTestServices {
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let events_db_path = dir.path().join("events.db");
+    let unexpected_events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
@@ -270,11 +257,8 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
     );
 
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        database,
-        event_store: RebornEventStoreConfig::Libsql {
-            path_or_url: events_db_path.display().to_string(),
-            auth_token: None,
-        },
+        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
@@ -292,7 +276,7 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
 
     LibSqlTestServices {
         _dir: dir,
-        events_db_path,
+        unexpected_events_db_path,
         services,
     }
 }

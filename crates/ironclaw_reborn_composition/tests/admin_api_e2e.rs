@@ -940,12 +940,12 @@ async fn build_admin_harness_production() -> AdminHarness {
             .await
             .expect("libsql db"),
     );
-    let events = root.path().join("events.db").to_string_lossy().to_string();
+    let database_path = root.path().join("reborn.db").to_string_lossy().to_string();
     let build_input = RebornHostBindings::libsql(
         RebornCompositionProfile::Production,
         OPERATOR_USER,
         db,
-        events,
+        database_path,
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )

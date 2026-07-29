@@ -508,13 +508,20 @@ where
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
+///
+/// State, event, and audit persistence all use `runtime`. A second libSQL
+/// connection target is deliberately not configurable here: one physical
+/// database has one composition-owned runtime and one writer admission lane.
 pub struct LibSqlProductionSubstrateConfig<TPolicy, TWake>
 where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
-    pub database: Arc<libsql::Database>,
-    pub event_store: RebornEventStoreConfig,
+    pub runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+    /// The target from which `runtime` was opened. Retained only for
+    /// production durability and transport-policy validation; it is never
+    /// reopened by the event store.
+    pub database_path_or_url: String,
     /// Set this only when deployment guarantees exactly one runtime process, or
     /// one elected runtime owner, is allowed to enforce resource quotas for this
     /// database. The filesystem governor keeps in-process tallies as authority.

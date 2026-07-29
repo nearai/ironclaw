@@ -152,7 +152,7 @@ async fn build_production_runtime_with_poller(
             RebornCompositionProfile::Production,
             USER,
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )

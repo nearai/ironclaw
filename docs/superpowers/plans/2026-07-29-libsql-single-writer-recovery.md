@@ -4,7 +4,7 @@
 
 **Goal:** Route every production libSQL write through one shared writer lane per database and make retryable turn-journal contention recover without a process restart.
 
-**Architecture:** Add a libSQL-only substrate that owns separate pooled reader and single-connection writer lanes. Production composition shares one runtime across the filesystem, trigger repository, and event store when they use the same configured database, while preserving explicitly separate event databases; backend-neutral turn persistence retains and retries an atomic batch only when `FilesystemError::BackendBusy` says replay is safe.
+**Architecture:** Add a libSQL-only substrate that owns separate pooled reader and single-connection writer lanes. Production composition shares one runtime across the filesystem, trigger repository, and event store and does not accept a second libSQL event target; backend-neutral turn persistence retains and retries an atomic batch only when `FilesystemError::BackendBusy` says replay is safe.
 
 **Tech Stack:** Rust 2024, Tokio, libSQL 0.9, deadpool 0.12, async-trait, tracing, Cargo workspace tests.
 
@@ -32,9 +32,11 @@
 
 **Interfaces:**
 - Produces: `LibSqlRuntime::new(Arc<libsql::Database>) -> Self`
-- Produces: `LibSqlRuntime::read(&self) -> Result<LibSqlConnectionLease, LibSqlRuntimeError>`
-- Produces: `LibSqlRuntime::write(&self) -> Result<LibSqlConnectionLease, LibSqlRuntimeError>`
-- Produces: `LibSqlConnectionLease: Deref<Target = libsql::Connection>`
+- Produces: `LibSqlRuntime::read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError>`
+- Produces: `LibSqlRuntime::write(&self) -> Result<LibSqlWriteConnectionLease, LibSqlRuntimeError>`
+- Produces: a query-only read lease whose pooled connections enforce
+  `PRAGMA query_only = ON`
+- Produces: `LibSqlWriteConnectionLease: Deref<Target = libsql::Connection>`
 - Produces: `LIBSQL_READ_POOL_MAX_CONNECTIONS = 8`
 - The writer pool maximum is exactly one and is not configurable in production.
 
@@ -346,12 +348,13 @@ filesystem-backed store.
 
 - [ ] **Step 5: Wire exactly one production runtime**
 
-In `build_libsql_production`, create one `Arc<LibSqlRuntime>` from the supplied
-database. Construct filesystem and trigger repository from that same `Arc`.
-Pass the already-migrated filesystem in `LibsqlFilesystem`; stop passing
-`path_or_url` and `auth_token` to a builder that reopens the database. Remove
-now-unused arguments from this internal production path while keeping config
-validation at the outer boundary.
+Before `build_libsql_production`, create one `Arc<LibSqlRuntime>` from the
+configured or supplied database. Construct filesystem and trigger repository
+from that same `Arc`. Pass the already-migrated filesystem in
+`LibsqlFilesystem`; retain `path_or_url` only for validation and never pass
+credentials to a builder that can reopen the database. The libSQL production
+substrate input likewise accepts the primary runtime and target, not an
+independent event-store configuration.
 
 Add a factory test that constructs the libSQL backend through the production
 builder test seam and proves a held runtime writer blocks both a filesystem
@@ -514,7 +517,9 @@ git commit -m "fix(turns): recover journal after transient backend contention"
 Run:
 
 ```bash
-git diff origin/main...HEAD -- 'crates/**/*.rs' | rg -n '\\.unwrap\\(|\\.expect\\(|/tmp|std::env::temp_dir|\\[[^]]+\\.\\.[^]]+\\]'
+git diff --unified=0 origin/main...HEAD -- 'crates/**/*.rs' \
+  | rg '^\\+[^+]' \
+  | rg -n '\\.unwrap\\(|\\.expect\\(|/tmp|std::env::temp_dir|\\[[^]]+\\.\\.[^]]+\\]'
 ```
 
 Expected: no new production `.unwrap()`/`.expect()`, hardcoded temporary path,
@@ -546,14 +551,9 @@ cargo clippy -p ironclaw_libsql_runtime -p ironclaw_filesystem -p ironclaw_trigg
 cargo test -p ironclaw_filesystem db::tests::postgres_transient_write_conflicts_are_retryable_contention -- --exact
 ```
 
-If PostgreSQL integration tests require Docker, set:
-
-```bash
-DOCKER_HOST=unix:///Users/benjaminkurrek/.colima/default/docker.sock
-```
-
-and run only the package-selected storage contract named by the testing
-playbook.
+If PostgreSQL integration tests require Docker, use the environment's
+configured Docker endpoint and run only the package-selected storage contract
+named by the testing playbook.
 
 - [ ] **Step 4: Review the complete diff**
 

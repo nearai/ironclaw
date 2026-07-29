@@ -35,7 +35,7 @@ use super::{
 /// restores the engine from the last accepted snapshot before releasing the
 /// mutex to a waiter. Accepted branches disarm only after installing their
 /// accepted snapshot/store state.
-struct SnapshotMutationGuard<'a, F>
+pub(super) struct SnapshotMutationGuard<'a, F>
 where
     F: RootFilesystem,
 {
@@ -48,7 +48,7 @@ impl<'a, F> SnapshotMutationGuard<'a, F>
 where
     F: RootFilesystem,
 {
-    fn new(
+    pub(super) fn new(
         owner: &'a TurnStateRowStore<F>,
         guard: tokio::sync::MutexGuard<'a, Option<RowSnapshotState>>,
     ) -> Self {
@@ -59,7 +59,7 @@ where
         }
     }
 
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -287,22 +287,25 @@ where
                 // A failed reservation clears the hot cache only when the
                 // journal generation is fatal; contention recovery retains
                 // accepted hot state.
-                if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
-                    *guard = None;
-                    return Err(error);
-                }
-                let ack = match self.enqueue_delta(persist_delta) {
+                let mut pending_window = if delta_critical {
+                    None
+                } else {
+                    Some(self.reserve_write_behind_slot().await?)
+                };
+                let mut ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
                     Err(error) => {
                         *guard = None;
                         return Err(error);
                     }
                 };
+                if let Some(window) = pending_window.as_mut()
+                    && let Some(pending_ack) = ack.take()
+                {
+                    window.push_back(pending_ack);
+                }
                 *guard = Some(next_state);
                 guard.disarm();
-                let ack = self
-                    .track_write_behind_ack_if_async(delta_critical, ack)
-                    .await;
                 return Ok(RowApplyOutcome::Pending(PendingRowCommit { value, ack }));
             }
         };
@@ -437,17 +440,23 @@ where
                 // twin reservation in the whole-snapshot apply path above. Do
                 // not advance the accepted snapshot before this await: the
                 // outer timeout may cancel us while the cap is full.
-                if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
-                    *guard = None;
-                    return Err(error);
-                }
-                let ack = match self.enqueue_delta(persist_delta) {
+                let mut pending_window = if delta_critical {
+                    None
+                } else {
+                    Some(self.reserve_write_behind_slot().await?)
+                };
+                let mut ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
                     Err(error) => {
                         *guard = None;
                         return Err(error);
                     }
                 };
+                if let Some(window) = pending_window.as_mut()
+                    && let Some(pending_ack) = ack.take()
+                {
+                    window.push_back(pending_ack);
+                }
                 if let Some(state) = guard.as_mut() {
                     if let Err(error) = state.apply_delta(delta, reservation_seq) {
                         *guard = None;
@@ -467,9 +476,6 @@ where
                     *guard = Some(next_state);
                 }
                 guard.disarm();
-                let ack = self
-                    .track_write_behind_ack_if_async(delta_critical, ack)
-                    .await;
                 return Ok(PendingRowCommit { value, ack });
             }
         };

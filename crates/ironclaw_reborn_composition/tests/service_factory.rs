@@ -833,7 +833,7 @@ async fn production_defaults_first_party_trust_policy() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -863,7 +863,7 @@ async fn production_requires_process_binding_for_defaulted_first_party_trust_pol
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -894,7 +894,7 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -931,7 +931,7 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -995,7 +995,7 @@ async fn production_rejects_empty_trust_policy() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1027,7 +1027,7 @@ async fn production_self_mints_turn_wake_wiring() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1055,7 +1055,7 @@ async fn production_requires_runtime_policy() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1086,7 +1086,7 @@ async fn production_rejects_local_only_runtime_policy() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1208,7 +1208,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
         )
         .with_production_trust_policy(production_trust_policy())
@@ -1290,7 +1290,8 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     let dir = tempfile::tempdir().unwrap();
-    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let database_path = dir.path().join("reborn.db");
+    let db = libsql_db_at(database_path.clone()).await;
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
@@ -1298,7 +1299,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            database_path.to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1321,8 +1322,8 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 #[tokio::test]
 async fn production_libsql_services_migrate_trigger_repository_before_runtime_injection() {
     let dir = tempfile::tempdir().unwrap();
-    let db = libsql_db_at(dir.path().join("reborn.db")).await;
-    let legacy_event_db = dir.path().join("events.db");
+    let database_path = dir.path().join("reborn.db");
+    let db = libsql_db_at(database_path.clone()).await;
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
@@ -1330,7 +1331,7 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
             RebornCompositionProfile::Production,
             "test-owner",
             Arc::clone(&db),
-            legacy_event_db.to_string_lossy(),
+            database_path.to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1345,10 +1346,6 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
     handle.shutdown().await;
 
     assert!(services.host_runtime_for_test().is_some());
-    assert!(
-        legacy_event_db.exists(),
-        "a caller-supplied database handle must not silently replace the separately configured event-store target"
-    );
 
     let conn = db.connect().expect("connect libsql state db");
     let mut rows = conn
@@ -1557,7 +1554,7 @@ async fn production_libsql_secure_default_builds_without_process_port() {
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1591,7 +1588,7 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1659,7 +1656,7 @@ async fn migration_dry_run_validates_libsql_shape() {
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1701,7 +1698,7 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )

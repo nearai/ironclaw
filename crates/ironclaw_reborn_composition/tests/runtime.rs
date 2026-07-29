@@ -77,7 +77,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
         ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
         "runtime-migration-dry-run-owner",
         db,
-        dir.path().join("events.db").to_string_lossy(),
+        dir.path().join("reborn.db").to_string_lossy(),
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     ));

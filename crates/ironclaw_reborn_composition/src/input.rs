@@ -274,9 +274,8 @@ pub(crate) enum PostgresPoolSource {
 
 /// Declarative libSQL connection config (Phase B). `path_or_url` is retained
 /// after opening for production durability/transport validation. Production
-/// opens one shared runtime from this config. A caller-supplied prebuilt
-/// database has unknown provenance, so its separately configured event target
-/// remains authoritative instead of being silently replaced by that handle.
+/// opens one shared runtime from this config and routes every adapter for the
+/// database through that runtime.
 #[derive(Clone)]
 pub(crate) struct LibsqlConnectionConfig {
     pub(crate) path_or_url: String,
@@ -300,10 +299,10 @@ pub(crate) enum RebornStorageInput {
     },
     Libsql {
         connection: LibsqlConnectionConfig,
-        /// Test escape hatch: a caller-supplied, already-opened database the
-        /// build prefers over opening from `connection`. When `None` the build
-        /// opens the handle from `connection` at build time.
-        prebuilt_db: Option<Arc<libsql::Database>>,
+        /// Test escape hatch: a caller-supplied runtime that already owns the
+        /// database connection pools. When `None`, composition opens the
+        /// database from `connection` and creates the sole runtime itself.
+        prebuilt_runtime: Option<Arc<ironclaw_libsql_runtime::LibSqlRuntime>>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
@@ -586,12 +585,17 @@ impl RebornHostBindings {
             })
     }
 
+    /// Compatibility constructor for a caller-supplied database handle.
+    ///
+    /// `database_path_or_url` must identify `db`; composition never reopens it.
+    /// `_auth_token` is retained only for source compatibility with the former
+    /// event-store reopen path and is deliberately not consumed.
     pub fn libsql(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
         db: Arc<libsql::Database>,
-        path_or_url: impl Into<String>,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+        database_path_or_url: impl Into<String>,
+        _auth_token: Option<ironclaw_secrets::SecretMaterial>,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
@@ -599,10 +603,38 @@ impl RebornHostBindings {
             owner_id,
             RebornStorageInput::Libsql {
                 connection: LibsqlConnectionConfig {
-                    path_or_url: path_or_url.into(),
-                    auth_token,
+                    path_or_url: database_path_or_url.into(),
+                    auth_token: None,
                 },
-                prebuilt_db: Some(db),
+                prebuilt_runtime: Some(Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db))),
+                secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton: true,
+            },
+        )
+    }
+
+    /// Build libSQL composition from the runtime that owns the database.
+    ///
+    /// `database_path_or_url` must identify the database already opened by
+    /// `runtime`; it is retained only for production durability and transport
+    /// policy validation. Filesystem, trigger, event, and audit adapters all
+    /// receive this exact runtime.
+    pub fn libsql_from_runtime(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+        database_path_or_url: impl Into<String>,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Self {
+        Self::new(
+            DeploymentConfig::for_profile(profile, false),
+            owner_id,
+            RebornStorageInput::Libsql {
+                connection: LibsqlConnectionConfig {
+                    path_or_url: database_path_or_url.into(),
+                    auth_token: None,
+                },
+                prebuilt_runtime: Some(runtime),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton: true,
             },
@@ -613,18 +645,18 @@ impl RebornHostBindings {
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
         db: Arc<libsql::Database>,
-        path_or_url: impl Into<String>,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+        database_path_or_url: impl Into<String>,
+        _auth_token: Option<ironclaw_secrets::SecretMaterial>,
     ) -> Self {
         Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
                 connection: LibsqlConnectionConfig {
-                    path_or_url: path_or_url.into(),
-                    auth_token,
+                    path_or_url: database_path_or_url.into(),
+                    auth_token: None,
                 },
-                prebuilt_db: Some(db),
+                prebuilt_runtime: Some(Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db))),
                 secret_master_key: None,
                 process_local_resource_governor_singleton: true,
             },

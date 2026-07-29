@@ -17,7 +17,7 @@ layer = "substrates"
 deadpool = { version = "0.12", default-features = false, features = ["managed", "rt_tokio_1"] }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]

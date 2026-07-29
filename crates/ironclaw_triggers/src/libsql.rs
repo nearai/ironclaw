@@ -6,11 +6,14 @@ use crate::{
     TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
+// arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-use ironclaw_libsql_runtime::{LibSqlConnectionLease, LibSqlRuntime};
+use ironclaw_libsql_runtime::{
+    LibSqlReadConnectionLease, LibSqlRuntime, LibSqlWriteConnectionLease,
+};
 use ironclaw_turns::TurnRunId;
 use libsql::params;
 use std::{collections::HashMap, sync::Arc};
@@ -347,14 +350,14 @@ impl LibSqlTriggerRepository {
         }
     }
 
-    async fn read_connection(&self) -> Result<LibSqlConnectionLease, TriggerError> {
+    async fn read_connection(&self) -> Result<LibSqlReadConnectionLease, TriggerError> {
         self.runtime
             .read()
             .await
             .map_err(|error| backend_error("checkout trigger reader", error))
     }
 
-    async fn write_connection(&self) -> Result<LibSqlConnectionLease, TriggerError> {
+    async fn write_connection(&self) -> Result<LibSqlWriteConnectionLease, TriggerError> {
         self.runtime
             .write()
             .await
@@ -794,7 +797,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     fire_slot: request.fire_slot,
                 }));
             }
-            Ok(None) => drop(transaction),
+            Ok(None) => rollback(transaction, "roll back missed trigger fire claim").await?,
             Err(error) => return Err(error),
         }
 
@@ -938,7 +941,13 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 commit(transaction, "commit retryable trigger fire failure").await?;
                 return Ok(Some(record));
             }
-            Ok(None) => drop(transaction),
+            Ok(None) => {
+                rollback(
+                    transaction,
+                    "roll back missed retryable trigger fire failure",
+                )
+                .await?
+            }
             Err(error) => return Err(error),
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
@@ -1016,7 +1025,13 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 commit(transaction, "commit permanent trigger fire failure").await?;
                 return Ok(Some(record));
             }
-            Ok(None) => drop(transaction),
+            Ok(None) => {
+                rollback(
+                    transaction,
+                    "roll back missed permanent trigger fire failure",
+                )
+                .await?
+            }
             Err(error) => return Err(error),
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
@@ -1084,7 +1099,13 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 commit(transaction, "commit terminal trigger fire failure").await?;
                 return Ok(Some(record));
             }
-            Ok(None) => drop(transaction),
+            Ok(None) => {
+                rollback(
+                    transaction,
+                    "roll back missed terminal trigger fire failure",
+                )
+                .await?
+            }
             Err(error) => return Err(error),
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
@@ -1163,7 +1184,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 Ok(Some(record))
             }
             Ok(None) => {
-                drop(transaction);
+                rollback(transaction, "roll back missed clear active trigger fire").await?;
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -1416,6 +1437,14 @@ async fn commit(transaction: libsql::Transaction, operation: &str) -> Result<(),
         .await
         .map_err(|error| backend_error(operation, error))
 }
+
+async fn rollback(transaction: libsql::Transaction, operation: &str) -> Result<(), TriggerError> {
+    transaction
+        .rollback()
+        .await
+        .map_err(|error| backend_error(operation, error))
+}
+
 async fn write_record(
     conn: &libsql::Connection,
     record: &TriggerRecord,
@@ -1608,7 +1637,13 @@ async fn mark_successful_fire_result(
             commit(transaction, "commit successful trigger fire result").await?;
             return Ok(Some(record));
         }
-        Ok(None) => drop(transaction),
+        Ok(None) => {
+            rollback(
+                transaction,
+                "roll back missed successful trigger fire result",
+            )
+            .await?
+        }
         Err(error) => return Err(error),
     }
     resolve_missed_fire_result_update(

@@ -1844,6 +1844,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_prebuilt_libsql_filesystem_rejects_in_memory_target() {
+        let database = Arc::new(
+            libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .expect("in-memory database"),
+        );
+        let filesystem = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(database));
+        filesystem
+            .run_migrations()
+            .await
+            .expect("filesystem migrations");
+
+        let result = build_reborn_event_stores(
+            RebornProfile::Production,
+            RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem,
+                path_or_url: ":memory:".to_string(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RebornEventStoreError::ProductionInMemoryDisabled)
+        ));
+    }
+
+    #[tokio::test]
     async fn jsonl_head_cursor_reports_latest_and_rejects_future() {
         // The JSONL production backend's head_cursor is the replay/live
         // boundary probe taken at subscription start. A cursor-arithmetic bug

@@ -91,6 +91,72 @@ async fn local_dev_libsql_trigger_repository_uses_the_filesystem_writer_lane() {
 }
 
 #[tokio::test]
+async fn production_libsql_event_log_uses_the_composition_runtime_writer_lane() {
+    let dir = tempfile::tempdir().expect("production libsql root");
+    let database_path = dir.path().join("reborn.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(database_path.display().to_string())
+            .build()
+            .await
+            .expect("build production libsql database"),
+    );
+    let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database));
+    let services = build_runtime_substrate(
+        RebornHostBindings::libsql_from_runtime(
+            RebornCompositionProfile::Production,
+            "shared-runtime-owner",
+            Arc::clone(&runtime),
+            database_path.display().to_string(),
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::AuditMode::Standard,
+        }),
+    )
+    .await
+    .expect("build production libsql services");
+
+    let held_writer = runtime.write().await.expect("hold composition writer lane");
+    let event_log = Arc::clone(&services.event_log);
+    let mut event_append = tokio::spawn(async move {
+        event_log
+            .append(ironclaw_events::RuntimeEvent::dispatch_requested(
+                ResourceScope::local_default(
+                    UserId::new("shared-runtime-owner").expect("event owner"),
+                    InvocationId::new(),
+                )
+                .expect("event resource scope"),
+                CapabilityId::new("test.shared-runtime").expect("event capability"),
+            ))
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut event_append)
+            .await
+            .is_err(),
+        "production event append must queue behind the composition runtime's writer lane"
+    );
+    drop(held_writer);
+    tokio::time::timeout(std::time::Duration::from_secs(1), event_append)
+        .await
+        .expect("event append resumes after writer release")
+        .expect("event append task")
+        .expect("event append succeeds");
+}
+
+#[tokio::test]
 async fn production_store_bundle_new_validates_runtime_storage_before_store_assembly() {
     let filesystem = empty_composite_filesystem();
     let error = match ProductionStoreBundle::new(
@@ -1493,7 +1559,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
@@ -1606,7 +1672,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
@@ -1722,7 +1788,7 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
             RebornCompositionProfile::Production,
             "",
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
