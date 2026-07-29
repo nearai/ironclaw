@@ -331,7 +331,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | `agents.defaults.contextInjection: "never"` | ✅ | ❌ | Disable workspace bootstrap injection per-agent |
 | `agents.defaults.experimental.localModelLean` | ✅ | ❌ | Drop heavyweight default tools for weaker local models |
 | `agents.files.get/set` workspace tools | ✅ | 🚧 | First-party scoped read/write/list/glob/grep/apply_patch capabilities exist through Reborn HostRuntime; OpenClaw-compatible `agents.files.*` aliases and realpath-via-fd hardening still pending |
-| Trajectory export | ✅ | 🚧 | WebChat v2 can download a caller-owned, deterministically redacted `ironclaw.run_artifact.v1` bundle for one exact run, including replay metadata and bounded scoped logs; default-on local capture and full event/artifact parity remain follow-up |
+| Trajectory export | ✅ | 🚧 | WebChat v2 can download caller-owned, deterministically redacted artifacts for one exact run (`ironclaw.run_artifact.v1`) or a complete multi-run thread (`ironclaw.thread_artifact.v1`), including replay metadata and bounded scoped logs; full-thread exports fail closed with `413` when the documented message/byte budget is exceeded; default-on local capture and full event/artifact parity remain follow-up |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |

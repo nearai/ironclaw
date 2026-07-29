@@ -74,5 +74,40 @@
     "qa_6d_gmail_to_sheet_routine",
     "qa_7b_sheets_connect",
     "qa_9c_slack_digest_names_not_ids"
-  ]
+  ],
+  "promotion_metadata": {
+    "schema_version": 1,
+    "fixture_schema_version": 1,
+    "provenance": {
+      "source_kind": "github_actions_live_canary",
+      "source_url": "https://github.com/nearai/ironclaw/actions/runs/29837220214",
+      "source_run": 29837220214,
+      "source_commit": "c918d91943a84071726924b4e3e9a47d33d8f695"
+    },
+    "scrub": {
+      "status": "verified",
+      "pipeline": "reborn-qa-fixture-scrub-v1",
+      "checker": "scripts/ci/check-reborn-qa-fixtures.sh"
+    },
+    "owning_journey": {
+      "strategy": "case_id",
+      "registry": "tests/e2e/journey_cases.py"
+    },
+    "last_successful_replay": {
+      "date": "2026-07-29",
+      "commit": "bed3f68056160adcae9985fb9e4401b7f45b8da8",
+      "command": "uv run --project tests/e2e --python 3.12 pytest tests/e2e/scenarios/test_reborn_qa_trace_replay.py::test_every_harvested_trace_replays -q"
+    },
+    "max_replay_age_days": 45,
+    "live_retirement": {
+      "review_interval_days": 30,
+      "minimum_representative_drift_cases": 3,
+      "representative_drift_cases": [
+        "qa_3b_endpoint_status_live_chat",
+        "qa_9b_routine_dm_delivery_exactly_once",
+        "qa_10a_slack_self_attribution"
+      ],
+      "retired_cases": []
+    }
+  }
 }

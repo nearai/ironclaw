@@ -528,6 +528,14 @@ pub struct ThreadHistoryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessagesRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub max_messages: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessageRangeRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -574,6 +582,18 @@ pub struct ThreadHistory {
     pub thread: SessionThreadRecord,
     pub messages: Vec<ThreadMessageRecord>,
     pub summary_artifacts: Vec<SummaryArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedThreadMessages {
+    Complete(Box<BoundedThreadMessageSnapshot>),
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessageSnapshot {
+    pub history: ThreadMessageRange,
+    pub context: ContextMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

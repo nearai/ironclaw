@@ -1,7 +1,10 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
 use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError};
-use ironclaw_product::{RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest};
+use ironclaw_product::{
+    RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest, RebornThreadArtifact,
+    RebornThreadArtifactRequest, THREAD_ARTIFACT_VIEW,
+};
 use serde::Deserialize;
 
 use crate::webui_v2::error::WebUiV2HttpError;
@@ -11,6 +14,11 @@ use crate::webui_v2::router::WebUiV2State;
 pub struct RunArtifactPath {
     pub thread_id: String,
     pub run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ThreadArtifactPath {
+    pub thread_id: String,
 }
 
 /// `GET /api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact`
@@ -28,6 +36,34 @@ pub async fn get_run_artifact(
     let page = surface
         .query(ironclaw_host_api::ProductSurfaceQueryRequest {
             view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+            input: params,
+            cursor: None,
+            limit: None,
+        })
+        .await?;
+    let payload = page
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(ProductSurfaceError::internal)?;
+    let artifact = serde_json::from_value(payload).map_err(ProductSurfaceError::internal_from)?;
+    Ok(Json(artifact))
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/artifact`
+pub async fn get_thread_artifact(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(path): Path<ThreadArtifactPath>,
+) -> Result<Json<RebornThreadArtifact>, WebUiV2HttpError> {
+    let params = serde_json::to_value(RebornThreadArtifactRequest {
+        thread_id: path.thread_id,
+    })
+    .map_err(ProductSurfaceError::internal_from)?;
+    let surface = state.bind_services(caller);
+    let page = surface
+        .query(ironclaw_host_api::ProductSurfaceQueryRequest {
+            view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
             input: params,
             cursor: None,
             limit: None,

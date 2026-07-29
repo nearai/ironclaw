@@ -33,6 +33,7 @@
 //! request and performs one exact read.
 
 mod message_lookup_index;
+mod message_read;
 mod thread_index;
 
 use std::{
@@ -65,6 +66,7 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
@@ -78,6 +80,7 @@ use crate::{
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
+use message_read::{MessageReadBudget, MessageReadResult};
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
 /// store budgets — enough to absorb routine cross-process contention,
@@ -2317,6 +2320,51 @@ where
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = match self
+            .read_thread_messages(
+                &request.scope,
+                &request.thread_id,
+                Some(MessageReadBudget::new(
+                    request.max_messages,
+                    request.max_bytes,
+                )),
+            )
+            .await?
+        {
+            MessageReadResult::Complete(messages) => messages,
+            MessageReadResult::LimitExceeded => {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        };
+        let message_ids = messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: self.thread_record_with_index_overlay(thread).await?,
+                    messages: messages.iter().map(history_message).collect(),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(&messages, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(

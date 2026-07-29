@@ -864,6 +864,11 @@ jobs:
       - name: Scrub Reborn QA fixtures
         run: scripts/ci/check-reborn-qa-fixtures.sh
 
+      - name: Test fixture promotion guards
+        run: |
+          bash scripts/ci/test-check-reborn-qa-fixtures.sh
+          python3 -m unittest scripts/ci/test-check-regression-promotions.py
+
       - name: Run Reborn QA fixture contracts and replay
         run: cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior -- --nocapture
 

@@ -15,7 +15,7 @@
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
-pub use run_artifact::get_run_artifact;
+pub use run_artifact::{get_run_artifact, get_thread_artifact};
 
 use std::convert::Infallible;
 use std::time::Duration;

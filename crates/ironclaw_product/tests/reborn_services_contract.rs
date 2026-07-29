@@ -116,14 +116,15 @@ use ironclaw_product::{
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse,
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
     SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    StaticOperatorStatusService, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
     TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
@@ -144,13 +145,14 @@ use ironclaw_product::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessages,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, BoundedThreadMessageSnapshot,
+    BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessage, ContextMessages,
     ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
     ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
@@ -1877,6 +1879,10 @@ impl SessionThreadService for ScopeMismatchThreadStub {
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
+    ThreadArtifact {
+        history: Box<ThreadHistory>,
+        snapshot: Box<BoundedThreadMessageSnapshot>,
+    },
     ListPages,
     SubmittedReplay {
         turn_run_id: Option<String>,
@@ -1928,6 +1934,19 @@ impl ScriptedThreadService {
     fn history(history: ThreadHistory) -> Self {
         Self {
             behavior: ScriptedThreadBehavior::History(Box::new(history)),
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn thread_artifact(history: ThreadHistory, snapshot: BoundedThreadMessageSnapshot) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::ThreadArtifact {
+                history: Box::new(history),
+                snapshot: Box::new(snapshot),
+            },
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
@@ -2029,6 +2048,7 @@ impl SessionThreadService for ScriptedThreadService {
                 "backend detail /host/path secret-token".to_string(),
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
+            ScriptedThreadBehavior::ThreadArtifact { history, .. } => Ok(history.as_ref().clone()),
             ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
             ScriptedThreadBehavior::SubmittedReplay { .. }
             | ScriptedThreadBehavior::RejectedBusyReplay
@@ -2157,6 +2177,7 @@ impl SessionThreadService for ScriptedThreadService {
             }
             ScriptedThreadBehavior::BackendHistory
             | ScriptedThreadBehavior::History(_)
+            | ScriptedThreadBehavior::ThreadArtifact { .. }
             | ScriptedThreadBehavior::ListPages => {
                 scripted_stub_unreachable("replay_accepted_inbound_message")
             }
@@ -2255,6 +2276,18 @@ impl SessionThreadService for ScriptedThreadService {
         _request: LoadContextMessagesRequest,
     ) -> Result<ContextMessages, SessionThreadError> {
         scripted_stub_unreachable("load_context_messages")
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        _request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        match &self.behavior {
+            ScriptedThreadBehavior::ThreadArtifact { snapshot, .. } => Ok(
+                BoundedThreadMessages::Complete(Box::new(snapshot.as_ref().clone())),
+            ),
+            _ => scripted_stub_unreachable("list_thread_messages_bounded"),
+        }
     }
 
     async fn create_summary_artifact(
@@ -8339,6 +8372,224 @@ async fn run_artifact_rejects_another_user_before_querying_logs() {
         )
         .await
         .expect_err("foreign run must not be exported");
+
+    assert_eq!(error.status_code, 404);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::NotFound);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-full-artifact").expect("thread id");
+    let first_run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let second_run_id = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &first_run_id,
+        "first run",
+    )
+    .await;
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &second_run_id,
+        "second run",
+    )
+    .await;
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("owned thread artifact");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.messages.len(), 2);
+    assert_eq!(artifact.messages[0].content, "first run");
+    assert_eq!(
+        artifact.messages[0].run_id.as_deref(),
+        Some(first_run_id.to_string().as_str())
+    );
+    assert_eq!(artifact.messages[1].content, "second run");
+    assert_eq!(
+        artifact.messages[1].run_id.as_deref(),
+        Some(second_run_id.to_string().as_str())
+    );
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].thread_id.as_deref(),
+        Some("thread-full-artifact")
+    );
+    assert_eq!(requests[0].run_id, None);
+    assert_eq!(requests[0].limit, Some(500));
+}
+
+#[tokio::test]
+async fn thread_artifact_projects_messages_from_the_bounded_snapshot() {
+    let owner = caller();
+    let history = fake_thread_history(&owner, "thread-bounded-artifact");
+    let message = history.messages[0].clone();
+    let snapshot = BoundedThreadMessageSnapshot {
+        history: ThreadMessageRange {
+            thread: history.thread.clone(),
+            messages: vec![message.clone()],
+        },
+        context: ContextMessages {
+            thread_id: history.thread.thread_id.clone(),
+            messages: vec![ContextMessage {
+                message_id: Some(message.message_id),
+                summary_id: None,
+                sequence: message.sequence,
+                kind: message.kind,
+                tool_result_provider_call: None,
+                content: "content from bounded snapshot".to_string(),
+                image_attachments: Vec::new(),
+            }],
+        },
+    };
+    let thread_service = Arc::new(ScriptedThreadService::thread_artifact(history, snapshot));
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: "thread-bounded-artifact".to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("thread artifact");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.messages.len(), 1);
+    assert_eq!(
+        artifact.messages[0].content,
+        "content from bounded snapshot"
+    );
+}
+
+#[tokio::test]
+async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact-over-budget").expect("thread id");
+    let run_id = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    for sequence in 0..=1_000 {
+        seed_submitted_message(
+            &thread_service,
+            &thread_scope,
+            &thread_id,
+            &run_id,
+            &format!("message {sequence}"),
+        )
+        .await;
+    }
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("oversized thread artifact must fail closed");
+
+    assert_eq!(error.status_code, 413);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn thread_artifact_rejects_another_user_before_querying_logs() {
+    let owner = caller_for_user("user-bob");
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-bob-full-artifact").expect("thread id");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope,
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("foreign thread must not be exported");
 
     assert_eq!(error.status_code, 404);
     assert_eq!(error.kind, ProductSurfaceErrorKind::NotFound);
