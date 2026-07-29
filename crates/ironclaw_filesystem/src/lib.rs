@@ -25,7 +25,6 @@ mod hsm;
 mod in_memory;
 mod index;
 mod libsql;
-mod libsql_pool;
 mod local;
 mod postgres;
 mod record;

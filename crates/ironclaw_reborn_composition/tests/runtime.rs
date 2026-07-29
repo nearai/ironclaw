@@ -73,14 +73,17 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
             .await
             .unwrap(),
     );
-    let input = RebornRuntimeInput::from_build_input(RebornHostBindings::libsql(
-        ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
-        "runtime-migration-dry-run-owner",
-        db,
-        dir.path().join("events.db").to_string_lossy(),
-        None,
-        ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
-    ));
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
+            ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
+            "runtime-migration-dry-run-owner",
+            db,
+            dir.path().join("reborn.db").to_string_lossy(),
+            None,
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .expect("libSQL bindings"),
+    );
 
     let error = match build_reborn_runtime(input).await {
         Ok(runtime) => {

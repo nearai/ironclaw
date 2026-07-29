@@ -1574,6 +1574,15 @@ impl RebornRuntime {
         });
         let identity_lookup = Some(Arc::clone(&self.channel_identity_store)
             as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>);
+        // Same substrate the WebUI admin routes read (`RebornAdminUserDirectory`
+        // in `product_surface.rs`); token minting is WebUI-only (`create_user`)
+        // and unreachable from channel-command role gating (`get_user` only).
+        let admin_users: Arc<dyn ironclaw_product::AdminUserService> =
+            Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+                self.reborn_user_directory(),
+                self.reborn_admin_secret_provisioner(),
+                Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+            ));
         Some(
             ironclaw_extension_host::channel_host::GenericChannelHostAssembly::start(
                 GenericChannelHostDeps {
@@ -1590,6 +1599,7 @@ impl RebornRuntime {
                     identity_lookup,
                     delivery,
                     channel_pairing: self.channel_pairing.clone(),
+                    admin_users,
                 },
             ),
         )

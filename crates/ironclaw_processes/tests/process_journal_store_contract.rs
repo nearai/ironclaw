@@ -249,7 +249,9 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
             .await
             .expect("build libsql database"),
     );
-    let backend = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&database)));
+    let backend = Arc::new(
+        LibSqlRootFilesystem::new(Arc::clone(&database)).expect("libSQL filesystem runtime"),
+    );
     backend
         .run_migrations()
         .await

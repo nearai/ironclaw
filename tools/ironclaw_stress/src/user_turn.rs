@@ -2086,7 +2086,9 @@ fn provider_latency_failure(error: LlmError) -> OperationFailure {
         | LlmError::SessionExpired { .. }
         | LlmError::SessionRenewalFailed { .. } => "model_provider_auth",
         LlmError::ContextLengthExceeded { .. } => "model_provider_context_length",
+        LlmError::InvalidRequest { .. } => "model_provider_invalid_request",
         LlmError::ModelNotAvailable { .. } => "model_provider_model_unavailable",
+        LlmError::QuotaExceeded { .. } => "model_provider_quota_exceeded",
         LlmError::BadGateway { .. }
         | LlmError::RequestFailed { .. }
         | LlmError::InvalidResponse { .. }

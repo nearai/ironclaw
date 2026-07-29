@@ -488,6 +488,49 @@ impl CodexChatGptProvider {
         items
     }
 
+    async fn map_failed_response(response: reqwest::Response, request_model: &str) -> LlmError {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .map(crate::retry::parse_retry_after_value);
+        let unreadable_body_error = |reason: &'static str| match status.as_u16() {
+            429 => LlmError::RateLimited {
+                provider: "codex_chatgpt".to_string(),
+                retry_after,
+            },
+            500..=599 => LlmError::BadGateway {
+                provider: "codex_chatgpt".to_string(),
+                status: status.as_u16(),
+                retry_after,
+            },
+            _ => LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: reason.to_string(),
+            },
+        };
+        let body = match tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::error::read_bounded_provider_error_body(response),
+        )
+        .await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return unreadable_body_error("failed to read provider error response"),
+            Err(_) => {
+                return unreadable_body_error("timed out while reading provider error response");
+            }
+        };
+        let body = String::from_utf8_lossy(&body);
+        crate::error::map_provider_http_error(crate::error::ProviderHttpError {
+            adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
+            model: request_model,
+            status: status.as_u16(),
+            body: body.as_ref(),
+            retry_after,
+        })
+    }
+
     /// Send a request and parse the SSE response.
     ///
     /// On HTTP 401, if a refresh token is available, attempts to refresh
@@ -500,6 +543,11 @@ impl CodexChatGptProvider {
             model = %body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
             "Codex ChatGPT: sending request"
         );
+        let request_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(self.configured_model.as_str())
+            .to_string();
 
         let api_key = self.api_key.read().await.clone();
         let resp =
@@ -525,22 +573,7 @@ impl CodexChatGptProvider {
                     .await?;
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
-                        let body_text =
-                            tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
-                                .await
-                                .unwrap_or(Ok(String::new()))
-                                .unwrap_or_default();
-                        if let Some(error) =
-                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
-                        {
-                            return Err(error);
-                        }
-                        return Err(LlmError::RequestFailed {
-                            provider: "codex_chatgpt".to_string(),
-                            reason: format!(
-                                "HTTP {retry_status} from {url} (after concurrent token refresh): {body_text}"
-                            ),
-                        });
+                        return Err(Self::map_failed_response(retry_resp, &request_model).await);
                     }
                     return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
                 }
@@ -566,22 +599,7 @@ impl CodexChatGptProvider {
 
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
-                        let body_text =
-                            tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
-                                .await
-                                .unwrap_or(Ok(String::new()))
-                                .unwrap_or_default();
-                        if let Some(error) =
-                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
-                        {
-                            return Err(error);
-                        }
-                        return Err(LlmError::RequestFailed {
-                            provider: "codex_chatgpt".to_string(),
-                            reason: format!(
-                                "HTTP {retry_status} from {url} (after token refresh): {body_text}"
-                            ),
-                        });
+                        return Err(Self::map_failed_response(retry_resp, &request_model).await);
                     }
 
                     return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
@@ -601,21 +619,7 @@ impl CodexChatGptProvider {
         }
 
         if !status.is_success() {
-            // Read the error body with a timeout to avoid hanging
-            let body_text = tokio::time::timeout(Duration::from_secs(5), resp.text())
-                .await
-                .unwrap_or(Ok(String::new()))
-                .unwrap_or_default();
-            // Context-overflow (HTTP 413, or a 400 whose body names a
-            // context-length error) must surface as ContextLengthExceeded so
-            // the loop's context-shrink recovery fires.
-            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
-                return Err(error);
-            }
-            return Err(LlmError::RequestFailed {
-                provider: "codex_chatgpt".to_string(),
-                reason: format!("HTTP {status} from {url}: {body_text}",),
-            });
+            return Err(Self::map_failed_response(resp, &request_model).await);
         }
 
         Self::parse_sse_response_stream(resp, self.request_timeout).await
@@ -1134,6 +1138,10 @@ struct PendingToolCall {
 
 #[async_trait]
 impl LlmProvider for CodexChatGptProvider {
+    fn provider_id(&self) -> String {
+        "codex_chatgpt".to_string()
+    }
+
     fn model_name(&self) -> &str {
         // Return resolved model if available, otherwise the configured name.
         self.resolved_model
@@ -2228,6 +2236,88 @@ data: {"response":{"status":"incomplete","incomplete_details":{"reason":"max_out
             FinishReason::Length,
             "a truncated tool call must not be laundered into ToolUse",
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_http_error_body_preserves_status_through_provider_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn request_truncated_error(
+            status_line: &'static str,
+            headers: &'static str,
+        ) -> LlmError {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let address = listener.local_addr().expect("local address");
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.expect("accept request");
+                    let mut request = [0u8; 4096];
+                    let bytes_read = socket.read(&mut request).await.expect("read request");
+                    let request = String::from_utf8_lossy(&request[..bytes_read]);
+                    if request.starts_with("GET /models") {
+                        let body = r#"{"models":[{"slug":"gpt-4o"}]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("write model response");
+                        continue;
+                    }
+
+                    assert!(request.starts_with("POST /responses"));
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: 128\r\n{headers}connection: close\r\n\r\n{{\"error\":"
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write truncated error response");
+                    break;
+                }
+            });
+
+            let provider =
+                CodexChatGptProvider::new(&format!("http://{address}"), "test-key", "gpt-4o");
+            let error = provider
+                .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+                .await
+                .expect_err("truncated error body must fail the request");
+            server.await.expect("test server");
+            error
+        }
+
+        let error = request_truncated_error("400 Bad Request", "").await;
+        assert!(matches!(
+            error,
+            LlmError::RequestFailed { provider, reason }
+                if provider == "codex_chatgpt"
+                    && reason == "failed to read provider error response"
+        ));
+
+        let error = request_truncated_error("429 Too Many Requests", "retry-after: 17\r\n").await;
+        assert!(matches!(
+            error,
+            LlmError::RateLimited {
+                provider,
+                retry_after: Some(retry_after),
+            } if provider == "codex_chatgpt" && retry_after == Duration::from_secs(17)
+        ));
+
+        let error = request_truncated_error("502 Bad Gateway", "retry-after: 23\r\n").await;
+        assert!(matches!(
+            error,
+            LlmError::BadGateway {
+                provider,
+                status: 502,
+                retry_after: Some(retry_after),
+            } if provider == "codex_chatgpt" && retry_after == Duration::from_secs(23)
+        ));
     }
 
     mod responses_api_test_server {

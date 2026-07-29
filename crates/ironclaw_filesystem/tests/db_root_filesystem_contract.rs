@@ -255,7 +255,7 @@ async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_varian
 
     let locked_db =
         std::sync::Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(locked_db);
+    let filesystem = LibSqlRootFilesystem::new(locked_db).expect("filesystem runtime");
     let err = filesystem.run_migrations().await.unwrap_err();
     assert!(
         matches!(err, FilesystemError::BackendInfrastructure { .. }),
@@ -1681,7 +1681,8 @@ async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem =
+        std::sync::Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
 
     let mut tasks = Vec::new();
@@ -1712,7 +1713,8 @@ async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem =
+        std::sync::Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let parent = VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put").unwrap();
     filesystem.create_dir_all(&parent).await.unwrap();
@@ -1746,7 +1748,7 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     TestLibSqlRootFilesystem {
         filesystem,
@@ -3205,3 +3207,4 @@ mod postgres_tests {
         assert!(fs.capabilities().has(Capability::Events));
     }
 }
+// arch-exempt: large_file, fallible libSQL runtime construction only adjusts existing contract setup, plan #6175

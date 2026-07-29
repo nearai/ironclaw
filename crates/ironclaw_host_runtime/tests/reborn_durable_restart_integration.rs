@@ -594,7 +594,7 @@ async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     scoped_run_state_filesystem(Arc::new(filesystem))
 }
@@ -647,7 +647,7 @@ fn filesystem_process_services(engine_root: &Path) -> DurableProcessServices {
 
 async fn libsql_process_services(db_path: &Path) -> DurableProcessServices {
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("libSQL filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(filesystem),

@@ -481,7 +481,9 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
             .await
             .expect("build libsql database for oauth bundle"),
     );
-    let root = Arc::new(LibSqlRootFilesystem::new(db));
+    let root = Arc::new(
+        LibSqlRootFilesystem::new(db).expect("filesystem runtime"), // safety: this test-support constructor intentionally fails fast
+    );
     root.run_migrations()
         .await
         .expect("libsql filesystem migrations");

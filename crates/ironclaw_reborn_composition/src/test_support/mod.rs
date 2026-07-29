@@ -67,6 +67,7 @@ mod budget_gateway;
 #[cfg(feature = "test-support")]
 mod channel_connection;
 mod durable;
+mod libsql_host_bindings;
 mod local_dev_boot;
 mod local_dev_capability_io;
 mod oauth_product_auth;
@@ -99,6 +100,10 @@ pub use durable::{
     open_local_dev_approval_request_store_for_test,
     open_local_dev_approval_settings_stores_for_test,
     open_local_dev_outbound_preferences_store_for_test, open_local_dev_trigger_repository_for_test,
+};
+pub use libsql_host_bindings::{
+    libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,
+    libsql_host_bindings_with_resolved_secret_master_key_for_test,
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 pub use local_dev_boot::build_secret_store_for_test;

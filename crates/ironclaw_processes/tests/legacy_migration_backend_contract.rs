@@ -21,7 +21,7 @@ async fn deployed_legacy_layouts_import_on_libsql() {
             .await
             .expect("build libsql database"),
     );
-    let backend = Arc::new(LibSqlRootFilesystem::new(database));
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
     backend
         .run_migrations()
         .await

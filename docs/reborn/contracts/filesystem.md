@@ -342,6 +342,14 @@ Memory/test backends as needed
 
 The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are database-backed `RootFilesystem` implementations for generic file-shaped content, not a mandate that every durable service becomes files.
 
+Production libSQL adapters for one database share one
+`ironclaw_libsql_runtime::LibSqlRuntime`. The runtime has a bounded concurrent
+reader pool and exactly one writer connection. Filesystem writes hold that
+writer lease through the complete immediate transaction, including
+precondition reads, commit, or rollback. Standalone constructors may create a
+private runtime, but production composition must pass the same runtime to every
+adapter that targets the database. PostgreSQL retains its concurrent pool.
+
 Catalog metadata distinguishes file-shaped content from structured records and derived indexes:
 
 ```rust
@@ -402,6 +410,7 @@ pub enum FilesystemError {
     PathOutsideMount { path: VirtualPath },
     SymlinkEscape { path: VirtualPath },
     MountConflict { path: VirtualPath },
+    BackendBusy { path: VirtualPath, operation: FilesystemOperation },
     Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
     NotFound { path: VirtualPath, operation: FilesystemOperation },
     VersionMismatch { path: VirtualPath, expected: Option<RecordVersion>, found: Option<RecordVersion> },
@@ -410,6 +419,13 @@ pub enum FilesystemError {
 ```
 
 Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths. `NotFound`/`VersionMismatch`/`Unsupported` back `delete_if_version` (§14.1) — absent path, stale version, and unsupported-backend cases respectively.
+
+`BackendBusy` is the backend-neutral, replay-safe contention outcome. An
+adapter may return it only when the complete operation is atomic and no partial
+side effect committed. Generic consumers may retry the whole operation; they
+must not decode SQLite or PostgreSQL driver errors themselves. libSQL maps
+SQLite `BUSY`/`LOCKED`; PostgreSQL maps serialization failure, deadlock-victim,
+and lock-not-available SQLSTATEs without changing its concurrency policy.
 
 ---
 
