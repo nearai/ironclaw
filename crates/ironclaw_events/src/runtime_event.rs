@@ -56,6 +56,7 @@ pub enum RuntimeEventKind {
     HookDispatched,
     HookDecisionEmitted,
     HookFailed,
+    FailureRecovered,
 }
 
 /// Redacted runtime event payload.
@@ -112,6 +113,12 @@ pub struct RuntimeEvent {
     /// Closed-vocabulary failure disposition (`fail_closed`, `fail_isolated`).
     /// Present on [`RuntimeEventKind::HookFailed`].
     pub hook_failure_disposition: Option<String>,
+    /// Closed-vocabulary loop stage that applied recovery.
+    pub recovery_stage: Option<String>,
+    /// Closed-vocabulary failure class recovered at that stage.
+    pub recovery_class: Option<String>,
+    /// Closed-vocabulary recovery action (`retried` or `model_visible`).
+    pub recovery_disposition: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -147,6 +154,12 @@ struct RuntimeEventWire {
     hook_failure_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_failure_disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_disposition: Option<String>,
 }
 
 impl Serialize for RuntimeEvent {
@@ -183,6 +196,9 @@ impl Serialize for RuntimeEvent {
                 .hook_failure_disposition
                 .clone()
                 .map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.clone().map(sanitize_hook_label),
+            recovery_class: self.recovery_class.clone().map(sanitize_hook_label),
+            recovery_disposition: self.recovery_disposition.clone().map(sanitize_hook_label),
         };
         wire.serialize(serializer)
     }
@@ -234,6 +250,12 @@ struct TrustedRuntimeEventWire {
     hook_failure_category: Option<String>,
     #[serde(default)]
     hook_failure_disposition: Option<String>,
+    #[serde(default)]
+    recovery_stage: Option<String>,
+    #[serde(default)]
+    recovery_class: Option<String>,
+    #[serde(default)]
+    recovery_disposition: Option<String>,
 }
 
 impl RuntimeEventWire {
@@ -261,6 +283,9 @@ impl RuntimeEventWire {
             hook_decision: self.hook_decision.map(sanitize_hook_label),
             hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
             hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.map(sanitize_hook_label),
+            recovery_class: self.recovery_class.map(sanitize_hook_label),
+            recovery_disposition: self.recovery_disposition.map(sanitize_hook_label),
         }
     }
 }
@@ -290,6 +315,9 @@ impl TrustedRuntimeEventWire {
             hook_decision: self.hook_decision.map(sanitize_hook_label),
             hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
             hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.map(sanitize_hook_label),
+            recovery_class: self.recovery_class.map(sanitize_hook_label),
+            recovery_disposition: self.recovery_disposition.map(sanitize_hook_label),
         }
     }
 }
@@ -620,6 +648,9 @@ impl RuntimeEvent {
             hook_decision: payload.hook_decision,
             hook_failure_category: payload.hook_failure_category,
             hook_failure_disposition: payload.hook_failure_disposition,
+            recovery_stage: None,
+            recovery_class: None,
+            recovery_disposition: None,
         }
     }
 
@@ -662,6 +693,23 @@ impl RuntimeEvent {
     pub fn with_error_summary(mut self, summary: impl AsRef<str>) -> Self {
         self.error_summary = sanitize_error_summary(summary);
         self
+    }
+
+    /// Construct a durable recovery numerator event from closed-vocabulary
+    /// labels supplied by the typed loop milestone contract.
+    pub fn failure_recovered(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        stage: impl Into<String>,
+        class: impl Into<String>,
+        disposition: impl Into<String>,
+    ) -> Self {
+        let mut event =
+            Self::new_metadata_only(RuntimeEventKind::FailureRecovered, scope, capability_id);
+        event.recovery_stage = Some(sanitize_hook_label(stage));
+        event.recovery_class = Some(sanitize_hook_label(class));
+        event.recovery_disposition = Some(sanitize_hook_label(disposition));
+        event
     }
 
     /// Construct a [`RuntimeEventKind::HookDispatched`] event.
@@ -1358,6 +1406,42 @@ mod tests {
             decoded.hook_failure_disposition.as_deref(),
             Some("fail_closed")
         );
+    }
+
+    #[test]
+    fn failure_recovered_round_trips_and_old_events_default_recovery_fields() {
+        let recovered = RuntimeEvent::failure_recovered(
+            scope(),
+            capability(),
+            "capability",
+            "backend",
+            "retried",
+        );
+        let wire = serde_json::to_string(&recovered).expect("serialize recovery event");
+        let decoded: RuntimeEvent =
+            serde_json::from_str(&wire).expect("deserialize recovery event");
+        assert_eq!(decoded, recovered);
+        assert_eq!(decoded.kind, RuntimeEventKind::FailureRecovered);
+        assert_eq!(decoded.recovery_stage.as_deref(), Some("capability"));
+        assert_eq!(decoded.recovery_class.as_deref(), Some("backend"));
+        assert_eq!(decoded.recovery_disposition.as_deref(), Some("retried"));
+
+        let old_event = RuntimeEvent::model_completed(scope(), capability());
+        let mut old_wire = serde_json::to_value(old_event).expect("serialize old event shape");
+        old_wire
+            .as_object_mut()
+            .expect("runtime event must serialize as an object")
+            .retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "recovery_stage" | "recovery_class" | "recovery_disposition"
+                )
+            });
+        let decoded_old: RuntimeEvent =
+            serde_json::from_value(old_wire).expect("deserialize old event shape");
+        assert!(decoded_old.recovery_stage.is_none());
+        assert!(decoded_old.recovery_class.is_none());
+        assert!(decoded_old.recovery_disposition.is_none());
     }
 
     /// PR #3640 finding D10: the round-trip tests above pass `None` for the

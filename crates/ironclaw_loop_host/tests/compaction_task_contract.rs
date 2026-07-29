@@ -462,6 +462,41 @@ async fn compaction_task_persists_escaped_summary_with_anti_injection_prefix() {
 }
 
 #[tokio::test]
+async fn production_compaction_scanner_allows_dotted_package_names_and_persists_summary() {
+    let fixture = CompactionFixture::new_with_thread("dotted-package").await;
+    let package_name = "org.springframework.integration.transformer";
+    fixture.append_user(package_name).await;
+    let inference = Arc::new(CapturingInference::new("package summary"));
+    let port = HostManagedLoopCompactionPort::new(
+        inference.clone(),
+        Arc::clone(&fixture.threads),
+        fixture.scope.clone(),
+        "system prompt",
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("a package name must not poison compaction as a false-positive JWT");
+
+    assert!(matches!(outcome, LoopCompactionOutcome::Compacted(_)));
+    assert!(inference.last_input().contains(package_name));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.summary_artifacts.len(),
+        1,
+        "successful caller-path compaction must durably persist one summary"
+    );
+}
+
+#[tokio::test]
 async fn compaction_task_maps_summary_persistence_failure_after_inference() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible").await;

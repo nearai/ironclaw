@@ -209,6 +209,12 @@ pub struct TimelineEntry {
     pub hook_failure_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_failure_disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_disposition: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -232,6 +238,7 @@ pub enum TimelineEntryKind {
     HookDispatched,
     HookDecisionEmitted,
     HookFailed,
+    FailureRecovered,
 }
 
 impl From<RuntimeEventKind> for TimelineEntryKind {
@@ -258,6 +265,7 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::HookDispatched => Self::HookDispatched,
             RuntimeEventKind::HookDecisionEmitted => Self::HookDecisionEmitted,
             RuntimeEventKind::HookFailed => Self::HookFailed,
+            RuntimeEventKind::FailureRecovered => Self::FailureRecovered,
         }
     }
 }
@@ -1702,6 +1710,9 @@ fn project_timeline_entry(entry: &EventLogEntry<RuntimeEvent>) -> TimelineEntry 
         hook_decision: event.hook_decision.clone(),
         hook_failure_category: event.hook_failure_category.clone(),
         hook_failure_disposition: event.hook_failure_disposition.clone(),
+        recovery_stage: event.recovery_stage.clone(),
+        recovery_class: event.recovery_class.clone(),
+        recovery_disposition: event.recovery_disposition.clone(),
     }
 }
 

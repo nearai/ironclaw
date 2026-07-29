@@ -37,6 +37,16 @@ pub struct RuntimeEvent {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
+    pub hook_id: Option<String>,
+    pub hook_point: Option<String>,
+    pub hook_trust_class: Option<String>,
+    pub hook_decision: Option<String>,
+    pub hook_failure_category: Option<String>,
+    pub hook_failure_disposition: Option<String>,
+    pub recovery_stage: Option<String>,
+    pub recovery_class: Option<String>,
+    pub recovery_disposition: Option<String>,
 }
 ```
 
@@ -48,20 +58,37 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    CapabilityActivityRequested,
+    CapabilityActivitySucceeded,
+    CapabilityActivityFailed,
     ModelStarted,
     ModelCompleted,
     ModelFailed,
     AssistantReplyFinalized,
     LoopCompleted,
+    LoopCancelled,
     LoopFailed,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
+    HookDispatched,
+    HookDecisionEmitted,
+    HookFailed,
+    FailureRecovered,
 }
 ```
 
 Model/reply milestone events are metadata-only loop milestones. `ModelFailed` is attempt-level progress and does not by itself mean the loop/run is terminally failed; trusted terminal status comes from validated `LoopCompleted` / `LoopFailed` milestones or a later trusted turn-run transition source. These events carry scope, capability id, and sanitized failure kind when applicable; they do not carry raw prompts, assistant content, provider errors, host paths, secrets, or message payloads.
+
+`FailureRecovered` is a durable, non-terminal numerator event emitted once
+when the canonical loop applies a non-terminal recovery outcome. Its
+closed-vocabulary `recovery_stage`, `recovery_class`, and
+`recovery_disposition` fields distinguish model/capability recovery, the typed
+failure bucket, and whether the failed operation was retried or surfaced as a
+model-visible observation. Recovery events preserve the current run status in
+projections and do not imply success or completion. The three optional fields
+default to absent when older JSONL records are deserialized.
 
 Approval-specific runtime event kinds are deliberately absent. Approval resolution belongs to the audit envelope contract.
 

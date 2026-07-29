@@ -555,11 +555,12 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
-        // Bare JSON Web Tokens. Keep every segment bounded away from ordinary
-        // dotted identifiers while accepting base64url without padding.
+        // Bare JSON Web Tokens. A JWT header is base64url-encoded JSON and
+        // therefore begins with `eyJ`; requiring that prefix avoids treating
+        // long dotted package names as credentials.
         LeakPattern {
             name: "bare_jwt".to_string(),
-            regex: Regex::new(r"\b[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
+            regex: Regex::new(r"\beyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
                 .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
@@ -904,6 +905,26 @@ mod tests {
 
         assert!(changed);
         assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn bare_jwt_detector_allows_long_dotted_package_names() {
+        let detector = LeakDetector::new();
+        for package_name in [
+            "com.fasterxml.jackson",
+            "org.springframework.integration.transformer",
+        ] {
+            let scan = detector.scan(package_name);
+            let (redacted, changed) = detector.redact_all_secrets(package_name);
+
+            assert!(
+                scan.is_clean(),
+                "a dotted package name is not a credential: {:?}",
+                scan.matches
+            );
+            assert!(!changed);
+            assert_eq!(redacted, package_name);
+        }
     }
 
     #[test]

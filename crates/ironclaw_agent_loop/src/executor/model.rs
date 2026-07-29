@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlocked, LoopBlockedKind, LoopExit, LoopFailureKind,
     run_profile::{
         AgentLoopHostErrorKind, LoopDriverNoteKind, LoopModelCapabilityView, LoopModelRequest,
-        LoopProgressEvent, LoopSafeSummary,
+        LoopProgressEvent, LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     },
 };
 use tracing::debug;
@@ -20,7 +20,7 @@ use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     HostStage, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
-    model_error_class, model_error_failure_summary, model_preference_to_host,
+    model_error_class, model_error_failure_summary, model_preference_to_host, model_recovery_class,
     sanitized_strategy_summary_or_fallback,
 };
 
@@ -203,18 +203,31 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         .recovery()
                         .on_model_error(&state, &summary)
                         .await;
-                    let (recovery, scope, alter, observation) = match recovery_outcome {
+                    let (recovery, scope, alter, observation, disposition) = match recovery_outcome
+                    {
                         RecoveryOutcome::Retry {
                             recovery,
                             scope,
                             alter,
-                        } => (recovery, scope, alter, None),
+                        } => (
+                            recovery,
+                            scope,
+                            alter,
+                            None,
+                            LoopRecoveryDisposition::Retried,
+                        ),
                         RecoveryOutcome::ModelErrorObservation {
                             recovery,
                             scope,
                             alter,
                             observation,
-                        } => (recovery, scope, alter, Some(observation)),
+                        } => (
+                            recovery,
+                            scope,
+                            alter,
+                            Some(observation),
+                            LoopRecoveryDisposition::ModelVisible,
+                        ),
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
                                 detail: "ToolErrorResult on model error",
@@ -250,6 +263,16 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             )?));
                         }
                     };
+                    CheckpointStage
+                        .emit_progress(
+                            ctx,
+                            LoopProgressEvent::FailureRecovered {
+                                stage: LoopRecoveryStage::Model,
+                                class: model_recovery_class(class),
+                                disposition,
+                            },
+                        )
+                        .await;
                     state.recovery_state = recovery;
                     state.pending_model_error_observation = observation;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {

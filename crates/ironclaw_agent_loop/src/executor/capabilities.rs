@@ -14,7 +14,8 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
         CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRequestBatch,
+        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRecoveryClass,
+        LoopRecoveryDisposition, LoopRecoveryStage, LoopRequestBatch,
         MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
         ObservationTrust, ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
         VisibleCapabilitySurface,
@@ -978,6 +979,16 @@ impl CapabilityStage {
                         capability_batch,
                     )
                     .await?;
+                    CheckpointStage
+                        .emit_progress(
+                            ctx,
+                            LoopProgressEvent::FailureRecovered {
+                                stage: LoopRecoveryStage::Capability,
+                                class: LoopRecoveryClass::Capability(summary.kind),
+                                disposition: LoopRecoveryDisposition::ModelVisible,
+                            },
+                        )
+                        .await;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -1046,6 +1057,16 @@ impl CapabilityStage {
                             capability_batch,
                         )
                         .await?;
+                        CheckpointStage
+                            .emit_progress(
+                                ctx,
+                                LoopProgressEvent::FailureRecovered {
+                                    stage: LoopRecoveryStage::Capability,
+                                    class: LoopRecoveryClass::Capability(summary.kind),
+                                    disposition: LoopRecoveryDisposition::ModelVisible,
+                                },
+                            )
+                            .await;
                         match CheckpointStage.cancel_if_requested(ctx, state).await? {
                             CancelCheck::Continue(next) => state = *next,
                             CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -1063,6 +1084,16 @@ impl CapabilityStage {
                         });
                     }
                     honor_retry_alteration(alter.as_ref())?;
+                    CheckpointStage
+                        .emit_progress(
+                            ctx,
+                            LoopProgressEvent::FailureRecovered {
+                                stage: LoopRecoveryStage::Capability,
+                                class: LoopRecoveryClass::Capability(summary.kind),
+                                disposition: LoopRecoveryDisposition::Retried,
+                            },
+                        )
+                        .await;
                     CheckpointStage
                         .emit_progress(
                             ctx,

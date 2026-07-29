@@ -19,6 +19,7 @@ const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
 const HOOK_CAPABILITY_ID: &str = "loop.hook";
+const RECOVERY_CAPABILITY_ID: &str = "loop.recovery";
 
 /// Scope authority bound into the sink at construction time.
 ///
@@ -258,6 +259,17 @@ impl DurableLoopHostMilestoneSink {
                     Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
                 event
             }
+            LoopHostMilestoneKind::FailureRecovered {
+                stage,
+                class,
+                disposition,
+            } => RuntimeEvent::failure_recovered(
+                scope,
+                capability_id(RECOVERY_CAPABILITY_ID)?,
+                stage.as_str(),
+                class.as_str(),
+                disposition.as_str(),
+            ),
             LoopHostMilestoneKind::AssistantReplyFinalized { .. } => {
                 RuntimeEvent::assistant_reply_finalized(
                     scope,

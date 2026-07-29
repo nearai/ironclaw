@@ -11,8 +11,8 @@ use crate::{
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
-    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRunContext,
-    LoopSafeSummary, PromptMode,
+    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRecoveryClass,
+    LoopRecoveryDisposition, LoopRecoveryStage, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
@@ -115,6 +115,11 @@ pub enum LoopHostMilestoneKind {
         /// re-sanitize this value before surfacing it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         safe_summary: Option<LoopSafeSummary>,
+    },
+    FailureRecovered {
+        stage: LoopRecoveryStage,
+        class: LoopRecoveryClass,
+        disposition: LoopRecoveryDisposition,
     },
     CapabilityBatchStarted {
         iteration: u32,
@@ -260,6 +265,7 @@ impl LoopHostMilestoneKind {
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CapabilityCompleted { .. } => "capability_completed",
             Self::CapabilityFailed { .. } => "capability_failed",
+            Self::FailureRecovered { .. } => "failure_recovered",
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
@@ -533,6 +539,20 @@ where
             runtime,
             reason_kind,
             safe_summary,
+        })
+        .await
+    }
+
+    pub async fn failure_recovered(
+        &self,
+        stage: LoopRecoveryStage,
+        class: LoopRecoveryClass,
+        disposition: LoopRecoveryDisposition,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::FailureRecovered {
+            stage,
+            class,
+            disposition,
         })
         .await
     }
