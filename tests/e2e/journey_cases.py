@@ -249,6 +249,27 @@ PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = provider_journey_runs()
 
 PRODUCT_JOURNEY_CASES = (
     ProductJourneyCase(
+        case_id="generic_extension_webhook_signed_post_becomes_a_turn",
+        provider_worlds=(ProviderWorld.NONE,),
+        mutable_provider_worlds=(),
+        ingress=JourneyIngress.EXTENSION_WEBHOOK,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        # The cited test ends at durable turn admission: its scripted reply is
+        # never consulted and nothing is delivered, so naming a delivery
+        # target would overstate it.
+        delivery_target=JourneyDeliveryTarget.NONE,
+        # Admission only. The test registers its ingress secret directly, so
+        # the webhook never crosses the runtime credential-injection path --
+        # claiming that assertion would credit this row with coverage that
+        # lives elsewhere.
+        assertions=(ObservableAssertion.DURABLE_STATE,),
+        evidence=CargoEvidence(
+            source="tests/integration/extension_ingress.rs",
+            test="signed_acme_post_flows_through_the_production_mount_into_a_turn",
+            target="reborn_integration_extension_ingress",
+        ),
+    ),
+    ProductJourneyCase(
         case_id="webui_text_turn_persists",
         provider_worlds=(ProviderWorld.NONE,),
         mutable_provider_worlds=(),
@@ -338,10 +359,18 @@ def _production_channel_surfaces(direction: str) -> set[str]:
 
 
 def required_ingresses() -> set[str]:
-    """Built-in ingress plus every production channel declaring inbound."""
+    """Built-in ingress plus every production channel declaring inbound.
+
+    `EXTENSION_WEBHOOK` is the generic mount itself, not a third channel.
+    Slack and Telegram both arrive through it, so covering them exercises it
+    incidentally -- but only for two vendors the host already ships. The
+    surface that matters is the one a *new* extension arrives on, and the only
+    way to prove that is with an extension the host has never heard of.
+    """
     return {
         JourneyIngress.WEBUI,
         JourneyIngress.SCHEDULED_TRIGGER,
+        JourneyIngress.EXTENSION_WEBHOOK,
         *_production_channel_surfaces("inbound"),
     }
 
