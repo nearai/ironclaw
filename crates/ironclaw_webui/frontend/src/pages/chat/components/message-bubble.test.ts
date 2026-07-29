@@ -103,7 +103,11 @@ test("assistant bubbles expose final reply state for live QA", () => {
 
 test("assistant bubbles keep streaming projections off the full markdown path", async () => {
   const { MessageBubble } = await import("./message-bubble");
-  const render = (isFinalReply: boolean, activeRunId: string | null) =>
+  const render = (
+    isFinalReply: boolean,
+    activeRunId: string | null,
+    isStreaming?: boolean,
+  ) =>
     renderToStaticMarkup(
       React.createElement(MessageBubble, {
         message: {
@@ -112,6 +116,7 @@ test("assistant bubbles keep streaming projections off the full markdown path", 
           content: '<img src=x onerror="alert(1)">',
           turnRunId: "run-1",
           isFinalReply,
+          isStreaming,
         },
         activeRunId,
       }),
@@ -123,6 +128,11 @@ test("assistant bubbles keep streaming projections off the full markdown path", 
     render(false, null),
     /data-streaming="false"/,
     "historical assistant drafts must render through the completed Markdown path",
+  );
+  assert.match(
+    render(false, "run-1", false),
+    /data-streaming="false"/,
+    "an earlier model phase must stop using the streaming Markdown path while the run continues",
   );
 });
 

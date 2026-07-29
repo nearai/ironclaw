@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -36,10 +37,15 @@ use ironclaw_turns::{
 // same live broadcast would put low append-log cursors and high synthetic
 // cursors behind the same `last_delivered_cursor` ordering gate.
 const LIVE_PROGRESS_CURSOR_BASE: u64 = 1 << 62;
+// The runtime's concurrent-run limit is substantially lower. Keep this
+// defensive ceiling so a missing terminal milestone cannot turn phase
+// bookkeeping into unbounded process memory.
+const MAX_TRACKED_TEXT_PHASE_RUNS: usize = 1_024;
 
 pub(super) struct LiveProgressMilestoneSink {
     inner: Arc<dyn LoopHostMilestoneSink>,
     publisher: Arc<LiveProjectionPublisher>,
+    text_phase_by_run: Mutex<HashMap<TurnRunId, u64>>,
 }
 
 #[derive(Debug)]
@@ -70,7 +76,50 @@ impl LiveProgressMilestoneSink {
         inner: Arc<dyn LoopHostMilestoneSink>,
         publisher: Arc<LiveProjectionPublisher>,
     ) -> Self {
-        Self { inner, publisher }
+        Self {
+            inner,
+            publisher,
+            text_phase_by_run: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn begin_text_phase(&self, run_id: TurnRunId) {
+        let mut phases = match self.text_phase_by_run.lock() {
+            Ok(phases) => phases,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !phases.contains_key(&run_id) && phases.len() >= MAX_TRACKED_TEXT_PHASE_RUNS {
+            tracing::debug!(
+                %run_id,
+                "live text phase tracker reached its bounded capacity"
+            );
+            return;
+        }
+        let next_phase = phases
+            .get(&run_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        phases.insert(run_id, next_phase);
+    }
+
+    fn text_id(&self, run_id: TurnRunId) -> String {
+        let phases = match self.text_phase_by_run.lock() {
+            Ok(phases) => phases,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match phases.get(&run_id) {
+            Some(phase) => text_phase_id(run_id, *phase),
+            None => legacy_text_id(run_id),
+        }
+    }
+
+    fn finish_run(&self, run_id: TurnRunId) {
+        let mut phases = match self.text_phase_by_run.lock() {
+            Ok(phases) => phases,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        phases.remove(&run_id);
     }
 }
 
@@ -323,7 +372,7 @@ impl LiveProgressMilestoneSink {
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::Text {
-                id: text_id(milestone.run_id),
+                id: self.text_id(milestone.run_id),
                 run_id: milestone.run_id,
                 body,
             },
@@ -463,6 +512,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
     ) -> Result<(), AgentLoopHostError> {
         self.inner.publish_loop_milestone(milestone.clone()).await?;
         match &milestone.kind {
+            LoopHostMilestoneKind::ModelStarted { .. } => {
+                self.begin_text_phase(milestone.run_id);
+            }
             LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
                 self.publish_text_delta(&milestone, safe_text);
             }
@@ -529,6 +581,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
             LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
                 self.publish_work_summary(&milestone, *kind, safe_summary.as_str());
             }
+            LoopHostMilestoneKind::Completed { .. } | LoopHostMilestoneKind::Failed { .. } => {
+                self.finish_run(milestone.run_id);
+            }
             _ => {}
         }
         Ok(())
@@ -569,8 +624,12 @@ fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("thinking:{run_id}:{sequence}")
 }
 
-fn text_id(run_id: TurnRunId) -> String {
+fn legacy_text_id(run_id: TurnRunId) -> String {
     format!("text:{run_id}")
+}
+
+fn text_phase_id(run_id: TurnRunId, phase: u64) -> String {
+    format!("text:{run_id}:{phase}")
 }
 
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {

@@ -106,6 +106,7 @@ function MessageBubbleImpl({
   const isStreamingAssistantReply =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === false &&
+    message.isStreaming !== false &&
     messageBelongsToActiveRun(message, activeRunId);
   const isStreamingThinking =
     role === CHAT_MESSAGE_ROLES.THINKING &&

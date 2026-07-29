@@ -285,6 +285,95 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
 }
 
 #[tokio::test]
+async fn fresh_product_event_stream_preserves_each_model_text_phase() {
+    let fixture = live_projection_fixture("webui-text-phases");
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let milestone = |kind| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind,
+    };
+
+    for kind in [
+        LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        },
+        LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "I’ll research".to_string(),
+        },
+        LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "I’ll research this first.".to_string(),
+        },
+        LoopHostMilestoneKind::ModelCompleted {
+            effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new(
+                "test-model",
+            )
+            .unwrap(),
+        },
+        LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        },
+        LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "Here is the final answer.".to_string(),
+        },
+    ] {
+        fixture
+            .sink
+            .publish_loop_milestone(milestone(kind))
+            .await
+            .unwrap();
+    }
+
+    let events = fixture
+        .services
+        .product_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(fixture.user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let text_items = events
+        .iter()
+        .flat_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => state
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    ProductProjectionItem::Text {
+                        id,
+                        run_id: observed_run_id,
+                        body,
+                    } if *observed_run_id == Some(run_id) => Some((id.clone(), body.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        text_items,
+        vec![
+            (
+                format!("text:{run_id}:1"),
+                "I’ll research this first.".to_string()
+            ),
+            (
+                format!("text:{run_id}:2"),
+                "Here is the final answer.".to_string()
+            ),
+        ],
+        "a later model call must not overwrite an earlier assistant utterance from the same run"
+    );
+}
+
+#[tokio::test]
 async fn provider_rate_live_text_stays_smooth_and_precedes_tool_activity() {
     let fixture = live_projection_fixture("webui-text-burst");
     let scope = fixture.scope.clone();

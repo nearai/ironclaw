@@ -152,6 +152,13 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   frame immediately after admission. Browser connection state uses that frame
   as proof that the projection tail is ready instead of waiting for a model
   delta or the periodic transport keep-alive.
+- Live assistant text is cumulative within one model call and keyed by both
+  turn run and model-call phase. A later model call therefore starts a new
+  assistant item instead of replacing an earlier utterance from the same run.
+  The SPA marks the prior phase as no longer streaming, retains it as
+  intermediate text, and upgrades only the latest phase when the durable final
+  reply arrives. These phase items remain live-projection/session state rather
+  than durable transcript records.
 - `after_cursor` is retained only within one mounted Chat route (including
   native EventSource retries and visibility recovery). A route/thread remount
   starts at the projection origin so the server returns durable state plus the
