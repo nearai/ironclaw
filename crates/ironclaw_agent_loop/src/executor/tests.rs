@@ -158,6 +158,37 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
 }
 
 #[tokio::test]
+async fn recovery_event_append_failure_stops_before_model_retry() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model gateway unavailable",
+        )])
+        .with_failing_progress_port();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("recovery cannot proceed without its durable numerator event");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Checkpoint,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            ..
+        }
+    ));
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "the failed recovery append must gate the retry side effect"
+    );
+}
+
+#[tokio::test]
 async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
     let host = MockHost::new(vec![reply_response(), reply_response()]);
     let run_context = host.run_context().clone();
@@ -1432,6 +1463,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
             .filter(|event| matches!(
                 event,
                 LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
                     stage: LoopRecoveryStage::Model,
                     class: LoopRecoveryClass::ModelContextOverflow,
                     disposition: LoopRecoveryDisposition::Retried,
@@ -4040,6 +4072,22 @@ async fn model_content_filter_gives_model_one_rephrase_attempt() {
             .pending_model_error_observation
             .is_none()
     );
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Model,
+                    class: LoopRecoveryClass::ModelContentFiltered,
+                    disposition: LoopRecoveryDisposition::ModelVisible,
+                }
+            ))
+            .count(),
+        1,
+        "one model-visible recovery must emit one durable numerator event"
+    );
 }
 
 #[tokio::test]
@@ -4691,6 +4739,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
             matches!(
                 event,
                 LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
                     stage: LoopRecoveryStage::Capability,
                     class: LoopRecoveryClass::Capability(FailureKind::PolicyDenied),
                     disposition: LoopRecoveryDisposition::Retried,
@@ -5079,6 +5128,24 @@ async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recove
     );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 3);
+    let recovery_sequences = host
+        .progress_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            LoopProgressEvent::FailureRecovered {
+                sequence,
+                stage: LoopRecoveryStage::Capability,
+                class: LoopRecoveryClass::Capability(FailureKind::OperationFailed),
+                disposition: LoopRecoveryDisposition::ModelVisible,
+            } => Some(sequence),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery_sequences,
+        vec![1, 2, 3],
+        "each directly model-visible tool failure must contribute one ordered numerator event"
+    );
     assert_eq!(
         final_staged_state(&host)
             .stop_state
@@ -8060,6 +8127,7 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
             .filter(|event| matches!(
                 event,
                 LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
                     stage: LoopRecoveryStage::Capability,
                     class: LoopRecoveryClass::Capability(FailureKind::Backend),
                     disposition: LoopRecoveryDisposition::ModelVisible,

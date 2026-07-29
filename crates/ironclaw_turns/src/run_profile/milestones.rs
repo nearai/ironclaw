@@ -117,6 +117,8 @@ pub enum LoopHostMilestoneKind {
         safe_summary: Option<LoopSafeSummary>,
     },
     FailureRecovered {
+        #[serde(default)]
+        sequence: u64,
         stage: LoopRecoveryStage,
         class: LoopRecoveryClass,
         disposition: LoopRecoveryDisposition,
@@ -545,11 +547,13 @@ where
 
     pub async fn failure_recovered(
         &self,
+        sequence: u64,
         stage: LoopRecoveryStage,
         class: LoopRecoveryClass,
         disposition: LoopRecoveryDisposition,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::FailureRecovered {
+            sequence,
             stage,
             class,
             disposition,
@@ -998,6 +1002,37 @@ mod hook_milestone_schema_snapshots {
   }
 }"#;
         assert_eq!(pretty(&value), EXPECTED);
+    }
+}
+
+#[cfg(test)]
+mod recovery_milestone_schema_compatibility {
+    use super::{
+        LoopHostMilestoneKind, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+    };
+
+    #[test]
+    fn legacy_recovery_milestone_without_sequence_defaults_to_zero() {
+        let legacy = r#"{
+            "failure_recovered": {
+                "stage": "model",
+                "class": "model_unavailable",
+                "disposition": "retried"
+            }
+        }"#;
+
+        let decoded: LoopHostMilestoneKind =
+            serde_json::from_str(legacy).expect("legacy recovery milestone must remain readable");
+
+        assert!(matches!(
+            decoded,
+            LoopHostMilestoneKind::FailureRecovered {
+                sequence: 0,
+                stage: LoopRecoveryStage::Model,
+                class: LoopRecoveryClass::ModelUnavailable,
+                disposition: LoopRecoveryDisposition::Retried,
+            }
+        ));
     }
 }
 

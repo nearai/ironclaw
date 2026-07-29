@@ -998,6 +998,7 @@ async fn failure_recovery_milestone_is_durable_and_projected_exactly_once() {
         scope,
         run_id,
         LoopHostMilestoneKind::FailureRecovered {
+            sequence: 1,
             stage: LoopRecoveryStage::Capability,
             class: LoopRecoveryClass::Capability(ironclaw_host_api::FailureKind::Backend),
             disposition: LoopRecoveryDisposition::Retried,

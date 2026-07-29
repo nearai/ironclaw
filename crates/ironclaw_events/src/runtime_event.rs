@@ -16,6 +16,13 @@ impl RuntimeEventId {
         Self(Uuid::new_v4())
     }
 
+    /// Construct a stable event identity from caller-owned, domain-separated
+    /// bytes. Callers are responsible for deriving collision-resistant bytes
+    /// from typed durable identity rather than display strings.
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(bytes))
+    }
+
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -196,9 +203,12 @@ impl Serialize for RuntimeEvent {
                 .hook_failure_disposition
                 .clone()
                 .map(sanitize_hook_label),
-            recovery_stage: self.recovery_stage.clone().map(sanitize_hook_label),
-            recovery_class: self.recovery_class.clone().map(sanitize_hook_label),
-            recovery_disposition: self.recovery_disposition.clone().map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.clone().map(sanitize_telemetry_label),
+            recovery_class: self.recovery_class.clone().map(sanitize_telemetry_label),
+            recovery_disposition: self
+                .recovery_disposition
+                .clone()
+                .map(sanitize_telemetry_label),
         };
         wire.serialize(serializer)
     }
@@ -283,9 +293,9 @@ impl RuntimeEventWire {
             hook_decision: self.hook_decision.map(sanitize_hook_label),
             hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
             hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
-            recovery_stage: self.recovery_stage.map(sanitize_hook_label),
-            recovery_class: self.recovery_class.map(sanitize_hook_label),
-            recovery_disposition: self.recovery_disposition.map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.map(sanitize_telemetry_label),
+            recovery_class: self.recovery_class.map(sanitize_telemetry_label),
+            recovery_disposition: self.recovery_disposition.map(sanitize_telemetry_label),
         }
     }
 }
@@ -315,9 +325,9 @@ impl TrustedRuntimeEventWire {
             hook_decision: self.hook_decision.map(sanitize_hook_label),
             hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
             hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
-            recovery_stage: self.recovery_stage.map(sanitize_hook_label),
-            recovery_class: self.recovery_class.map(sanitize_hook_label),
-            recovery_disposition: self.recovery_disposition.map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.map(sanitize_telemetry_label),
+            recovery_class: self.recovery_class.map(sanitize_telemetry_label),
+            recovery_disposition: self.recovery_disposition.map(sanitize_telemetry_label),
         }
     }
 }
@@ -698,6 +708,7 @@ impl RuntimeEvent {
     /// Construct a durable recovery numerator event from closed-vocabulary
     /// labels supplied by the typed loop milestone contract.
     pub fn failure_recovered(
+        event_id: RuntimeEventId,
         scope: ResourceScope,
         capability_id: CapabilityId,
         stage: impl Into<String>,
@@ -706,9 +717,10 @@ impl RuntimeEvent {
     ) -> Self {
         let mut event =
             Self::new_metadata_only(RuntimeEventKind::FailureRecovered, scope, capability_id);
-        event.recovery_stage = Some(sanitize_hook_label(stage));
-        event.recovery_class = Some(sanitize_hook_label(class));
-        event.recovery_disposition = Some(sanitize_hook_label(disposition));
+        event.event_id = event_id;
+        event.recovery_stage = Some(sanitize_telemetry_label(stage));
+        event.recovery_class = Some(sanitize_telemetry_label(class));
+        event.recovery_disposition = Some(sanitize_telemetry_label(disposition));
         event
     }
 
@@ -1116,7 +1128,7 @@ fn is_error_kind_char(byte: u8) -> bool {
 /// telemetry rather than runtime error classification.
 pub const UNCLASSIFIED_HOOK_LABEL: &str = "unclassified";
 
-const MAX_HOOK_LABEL_LEN: usize = 48;
+const MAX_TELEMETRY_LABEL_LEN: usize = 48;
 const HOOK_ID_LEN: usize = 64;
 
 /// Collapse any hook label (point, trust class, decision kind, failure
@@ -1127,16 +1139,20 @@ const HOOK_ID_LEN: usize = 64;
 /// Accepts only lowercase ASCII letters, digits, and `_`. First character must
 /// be a lowercase ASCII letter. Maximum 48 bytes.
 pub fn sanitize_hook_label(label: impl Into<String>) -> String {
+    sanitize_telemetry_label(label)
+}
+
+fn sanitize_telemetry_label(label: impl Into<String>) -> String {
     let value = label.into();
-    if is_safe_hook_label(&value) {
+    if is_safe_telemetry_label(&value) {
         value
     } else {
         UNCLASSIFIED_HOOK_LABEL.to_string()
     }
 }
 
-fn is_safe_hook_label(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_HOOK_LABEL_LEN {
+fn is_safe_telemetry_label(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_TELEMETRY_LABEL_LEN {
         return false;
     }
     let first = value.as_bytes()[0];
@@ -1411,6 +1427,7 @@ mod tests {
     #[test]
     fn failure_recovered_round_trips_and_old_events_default_recovery_fields() {
         let recovered = RuntimeEvent::failure_recovered(
+            RuntimeEventId::new(),
             scope(),
             capability(),
             "capability",

@@ -263,24 +263,23 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             )?));
                         }
                     };
-                    CheckpointStage
-                        .emit_progress(
-                            ctx,
-                            LoopProgressEvent::FailureRecovered {
-                                stage: LoopRecoveryStage::Model,
-                                class: model_recovery_class(class),
-                                disposition,
-                            },
-                        )
-                        .await;
-                    state.recovery_state = recovery;
-                    state.pending_model_error_observation = observation;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                     }
                     let retry_action =
                         prepare_model_retry_alteration(&mut state, scope, alter.as_ref())?;
+                    state.recovery_state = recovery;
+                    state.pending_model_error_observation = observation;
+                    CheckpointStage
+                        .emit_recovery(
+                            ctx,
+                            &mut state,
+                            LoopRecoveryStage::Model,
+                            model_recovery_class(class),
+                            disposition,
+                        )
+                        .await?;
                     // Persist the consumed retry/observation budget before the
                     // next model attempt. Otherwise a worker restart reloads
                     // the pre-error BeforeModel checkpoint and grants the

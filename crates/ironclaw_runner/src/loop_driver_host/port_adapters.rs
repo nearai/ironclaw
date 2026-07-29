@@ -445,10 +445,15 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
                     .await
             }
             LoopProgressEvent::FailureRecovered {
+                sequence,
                 stage,
                 class,
                 disposition,
-            } => emitter.failure_recovered(stage, class, disposition).await,
+            } => {
+                emitter
+                    .failure_recovered(sequence, stage, class, disposition)
+                    .await
+            }
             LoopProgressEvent::GateBlocked {
                 iteration,
                 gate_kind,

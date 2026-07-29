@@ -67,8 +67,11 @@ pub enum LoopProgressEvent {
     },
     /// A recovery decision was applied to a failed model or capability
     /// operation. This is the durable numerator paired with failure
-    /// milestones: one event per applied non-terminal recovery outcome.
+    /// milestones. `sequence` is stable across checkpoint replay so consumers
+    /// can deduplicate an at-least-once physical append into one logical event.
     FailureRecovered {
+        #[serde(default)]
+        sequence: u64,
         stage: LoopRecoveryStage,
         class: LoopRecoveryClass,
         disposition: LoopRecoveryDisposition,
@@ -261,11 +264,10 @@ pub enum LoopDriverNoteKind {
 pub trait LoopProgressPort: Send + Sync {
     /// Emit observational progress for UI/status consumers.
     ///
-    /// Progress events are best-effort and must not be used as
-    /// recoverability-critical durability markers. A failed progress emission
-    /// must not invalidate already-completed durable work; callers should treat
-    /// this like host model milestone projection, where sink failures are
-    /// logged/observed without changing the provider or checkpoint outcome.
+    /// Progress events are best-effort except
+    /// [`LoopProgressEvent::FailureRecovered`], whose producer must propagate a
+    /// failed append before continuing the recovery transition. Other progress
+    /// failures must not invalidate already-completed durable work.
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError>;
 }
 

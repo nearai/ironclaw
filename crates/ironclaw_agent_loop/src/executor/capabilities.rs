@@ -957,12 +957,18 @@ impl CapabilityStage {
         clear_matching_pending_auth_resume(&mut state, &call);
         clear_matching_pending_external_tool_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
-            match ctx
+            let outcome = ctx
                 .planner
                 .recovery()
                 .on_capability_error(&state, &summary)
-                .await
-            {
+                .await;
+            let outcome = match outcome {
+                RecoveryOutcome::Retry { recovery, .. } if is_resume_origin => {
+                    RecoveryOutcome::ToolErrorResult { recovery }
+                }
+                other => other,
+            };
+            match outcome {
                 RecoveryOutcome::ModelErrorObservation { .. } => {
                     return Err(AgentLoopExecutorError::PlannerContract {
                         detail: "ModelErrorObservation on capability error",
@@ -980,15 +986,14 @@ impl CapabilityStage {
                     )
                     .await?;
                     CheckpointStage
-                        .emit_progress(
+                        .emit_recovery(
                             ctx,
-                            LoopProgressEvent::FailureRecovered {
-                                stage: LoopRecoveryStage::Capability,
-                                class: LoopRecoveryClass::Capability(summary.kind),
-                                disposition: LoopRecoveryDisposition::ModelVisible,
-                            },
+                            &mut state,
+                            LoopRecoveryStage::Capability,
+                            LoopRecoveryClass::Capability(summary.kind),
+                            LoopRecoveryDisposition::ModelVisible,
                         )
-                        .await;
+                        .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -1039,41 +1044,6 @@ impl CapabilityStage {
                 RecoveryOutcome::Retry {
                     recovery, alter, ..
                 } => {
-                    state.recovery_state = recovery;
-
-                    // Part C-sub-A: a resume-origin retryable failure must not be
-                    // silently re-dispatched.  The first dispatch already contacted
-                    // the backend (side-effect risk) and a retry without the
-                    // approval/auth context would cause scope_mismatch.  Surface
-                    // the real error to the model as a clean tool error and
-                    // continue the loop so the user can re-approve / re-auth.
-                    if is_resume_origin {
-                        append_blocked_capability_error_result(
-                            ctx.host,
-                            &mut state,
-                            &call,
-                            &summary,
-                            model_observation,
-                            capability_batch,
-                        )
-                        .await?;
-                        CheckpointStage
-                            .emit_progress(
-                                ctx,
-                                LoopProgressEvent::FailureRecovered {
-                                    stage: LoopRecoveryStage::Capability,
-                                    class: LoopRecoveryClass::Capability(summary.kind),
-                                    disposition: LoopRecoveryDisposition::ModelVisible,
-                                },
-                            )
-                            .await;
-                        match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                            CancelCheck::Continue(next) => state = *next,
-                            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
-                        }
-                        return Ok(BatchStep::Continue(Box::new(state)));
-                    }
-
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -1084,16 +1054,16 @@ impl CapabilityStage {
                         });
                     }
                     honor_retry_alteration(alter.as_ref())?;
+                    state.recovery_state = recovery;
                     CheckpointStage
-                        .emit_progress(
+                        .emit_recovery(
                             ctx,
-                            LoopProgressEvent::FailureRecovered {
-                                stage: LoopRecoveryStage::Capability,
-                                class: LoopRecoveryClass::Capability(summary.kind),
-                                disposition: LoopRecoveryDisposition::Retried,
-                            },
+                            &mut state,
+                            LoopRecoveryStage::Capability,
+                            LoopRecoveryClass::Capability(summary.kind),
+                            LoopRecoveryDisposition::Retried,
                         )
-                        .await;
+                        .await?;
                     CheckpointStage
                         .emit_progress(
                             ctx,

@@ -211,6 +211,9 @@ impl LeakDetector {
             let pattern = &self.patterns[idx];
             for mat in pattern.regex.find_iter(content) {
                 let matched_text = mat.as_str();
+                if pattern.name == "bare_jwt" && !has_json_web_token_header(matched_text) {
+                    continue;
+                }
                 let location = mat.start()..mat.end();
 
                 let leak_match = LeakMatch {
@@ -461,6 +464,56 @@ fn extract_literal_prefix(pattern: &str) -> Option<String> {
     }
 }
 
+fn has_json_web_token_header(candidate: &str) -> bool {
+    let mut segments = candidate.split('.');
+    let (Some(header), Some(_payload), Some(_signature), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    let Some(header) = decode_base64url_no_pad(header) else {
+        return false;
+    };
+    matches!(
+        serde_json::from_slice::<serde_json::Value>(&header),
+        Ok(serde_json::Value::Object(fields))
+            if fields.get("alg").and_then(serde_json::Value::as_str).is_some()
+    )
+}
+
+fn decode_base64url_no_pad(input: &str) -> Option<Vec<u8>> {
+    if input.is_empty() || input.len() % 4 == 1 {
+        return None;
+    }
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut accumulator = 0_u32;
+    let mut bits = 0_u8;
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        };
+        accumulator = (accumulator << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push(((accumulator >> bits) & 0xff) as u8);
+            accumulator &= if bits == 0 { 0 } else { (1_u32 << bits) - 1 };
+        }
+    }
+    if accumulator != 0 {
+        return None;
+    }
+    Some(output)
+}
+
 /// Default leak detection patterns.
 fn default_patterns() -> Vec<LeakPattern> {
     vec![
@@ -555,12 +608,13 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
-        // Bare JSON Web Tokens. A JWT header is base64url-encoded JSON and
-        // therefore begins with `eyJ`; requiring that prefix avoids treating
-        // long dotted package names as credentials.
+        // Bare JSON Web Tokens. The regex finds the three-segment base64url
+        // shape; the scanner then decodes and validates the JSON header. This
+        // avoids package-name false positives without assuming that the header
+        // JSON begins immediately with `{`.
         LeakPattern {
             name: "bare_jwt".to_string(),
-            regex: Regex::new(r"\beyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
+            regex: Regex::new(r"\b[a-zA-Z0-9_-]{4,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
                 .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
@@ -900,6 +954,19 @@ mod tests {
     fn redact_all_secrets_masks_bare_jwt() {
         let detector = LeakDetector::new();
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
+
+        let (redacted, changed) = detector.redact_all_secrets(jwt);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn bare_jwt_detector_accepts_json_header_with_leading_whitespace() {
+        let detector = LeakDetector::new();
+        // Header decodes to ` {"alg":"HS256"}`. JSON permits leading
+        // whitespace, so security classification cannot depend on `eyJ`.
+        let jwt = "IHsiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
 
         let (redacted, changed) = detector.redact_all_secrets(jwt);
 

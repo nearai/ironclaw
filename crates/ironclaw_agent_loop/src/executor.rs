@@ -120,6 +120,8 @@ pub enum AgentLoopExecutorError {
     PlannerContract { detail: &'static str },
     #[error("checkpoint write failed at {stage:?}")]
     CheckpointFailed { stage: CheckpointKind },
+    #[error("durable recovery event sequence exhausted")]
+    RecoverySequenceExhausted,
     /// Constructed when a model or capability call returns a cancelled outcome
     /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `FailureKind::Cancelled`
     /// surfaces from an in-flight external call). Between-call boundary cancellation
