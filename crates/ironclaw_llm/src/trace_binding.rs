@@ -266,3 +266,140 @@ mod tests {
         ));
     }
 }
+
+/// Property tests for the fixture-parsing boundary (#6524 workstream 9).
+///
+/// Recorded traces are walked here before replay. The content originates from
+/// a model and a provider, so the resolver has to stay well-behaved on shapes
+/// nobody wrote by hand: markers in odd positions, values that merely look
+/// like markers, and structures deeper than any fixture an author would type.
+#[cfg(test)]
+mod trace_binding_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// serde_json refuses to parse deeper than this, so no fixture read from
+    /// disk can hand the resolver anything more nested. Verified rather than
+    /// assumed: depth 127 parses, 128 is rejected with "recursion limit
+    /// exceeded". The resolver's own recursion overflows the stack somewhere
+    /// between 100 and 1000, so this ceiling — enforced in a different crate —
+    /// is the only reason that is unreachable. If serde_json's limit ever
+    /// rises, or a caller builds a Value programmatically instead of parsing
+    /// one, this function needs an explicit depth guard.
+    const SERDE_JSON_PARSE_DEPTH_LIMIT: usize = 128;
+
+    /// Arbitrary JSON, shallow enough to mirror what a parsed fixture can hold.
+    fn json_value() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::from),
+            any::<i64>().prop_map(serde_json::Value::from),
+            "\\PC{0,12}".prop_map(serde_json::Value::from),
+        ];
+        leaf.prop_recursive(6, 48, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                proptest::collection::hash_map("[a-z$_]{1,6}", inner, 0..4)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        /// A document with no markers must come back byte-identical.
+        ///
+        /// The resolver rewrites in place, so a bug here would silently alter
+        /// replayed arguments — the trace would still run and would still
+        /// look like it reproduced the recording.
+        #[test]
+        fn documents_without_markers_are_unchanged(value in json_value()) {
+            prop_assume!(!format!("{value}").contains("$trace_result"));
+            let mut resolved = value.clone();
+            let outcome = resolve_trace_result_bindings(&mut resolved, &[]);
+            prop_assert!(outcome.is_ok(), "{outcome:?}");
+            prop_assert_eq!(resolved, value);
+        }
+
+        /// Arbitrary content resolves or errors, never panics.
+        #[test]
+        fn arbitrary_documents_never_panic(
+            value in json_value(),
+            ids in proptest::collection::vec("[a-z_0-9]{1,8}", 0..3),
+        ) {
+            let observed: Vec<_> = ids
+                .into_iter()
+                .map(|id| ObservedToolResult {
+                    tool_call_id: id,
+                    content: serde_json::json!({"ok": true}),
+                })
+                .collect();
+            let mut resolved = value;
+            let _ = resolve_trace_result_bindings(&mut resolved, &observed);
+        }
+
+        /// A well-formed marker is replaced by exactly the pointed-at value.
+        #[test]
+        fn a_valid_marker_resolves_to_the_pointed_value(
+            tool_call_id in "[a-z_0-9]{1,8}",
+            payload in json_value(),
+        ) {
+            let observed = ObservedToolResult {
+                tool_call_id: tool_call_id.clone(),
+                content: serde_json::json!({"nested": {"value": payload.clone()}}),
+            };
+            let mut arguments = serde_json::json!({
+                "arg": {"$trace_result": {"tool_call_id": tool_call_id, "pointer": "/nested/value"}}
+            });
+            resolve_trace_result_bindings(&mut arguments, std::slice::from_ref(&observed))
+                .expect("a well-formed marker resolves");
+            prop_assert_eq!(&arguments["arg"], &payload);
+        }
+
+        /// An unknown tool-call id is a clean error, never a silent pass.
+        ///
+        /// Silently leaving the marker in place would replay a literal
+        /// `{"$trace_result": ...}` object as a tool argument, which a
+        /// provider would reject far from the real cause.
+        #[test]
+        fn an_unknown_tool_call_id_errors(
+            wanted in "[a-z]{4,8}",
+            present in "[A-Z]{4,8}",
+        ) {
+            let observed = ObservedToolResult {
+                tool_call_id: present,
+                content: serde_json::json!({"id": 1}),
+            };
+            let mut arguments = serde_json::json!({
+                "arg": {"$trace_result": {"tool_call_id": wanted, "pointer": "/id"}}
+            });
+            let outcome =
+                resolve_trace_result_bindings(&mut arguments, std::slice::from_ref(&observed));
+            prop_assert!(matches!(outcome, Err(TraceBindingError::MissingToolCall(_))), "{outcome:?}");
+        }
+    }
+
+    /// The depth a parsed fixture can actually reach is handled without panic.
+    #[test]
+    fn nesting_up_to_the_parser_limit_is_handled() {
+        let depth = SERDE_JSON_PARSE_DEPTH_LIMIT - 1;
+        let text = format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&text).expect("one under the limit still parses");
+        resolve_trace_result_bindings(&mut value, &[]).expect("no markers, so nothing to resolve");
+    }
+
+    /// Pins the assumption the comment above rests on: the ceiling is real.
+    #[test]
+    fn the_parser_rejects_deeper_documents_than_the_resolver_can_walk() {
+        let text = format!(
+            "{}1{}",
+            "[".repeat(SERDE_JSON_PARSE_DEPTH_LIMIT),
+            "]".repeat(SERDE_JSON_PARSE_DEPTH_LIMIT)
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&text).is_err(),
+            "serde_json accepted a document at the recursion limit; the \
+             resolver's lack of a depth guard is no longer covered by it"
+        );
+    }
+}

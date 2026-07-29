@@ -2028,20 +2028,18 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
 fn registry_with_slack_user_package() -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
+    let root = VirtualPath::new("/system/extensions/slack").unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/slack").unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
@@ -2127,20 +2125,18 @@ fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
 fn registry_with_github_package() -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
+    let root = VirtualPath::new("/system/extensions/github").unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/github").unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
@@ -2168,20 +2164,18 @@ fn filesystem_with_google_drive_package() -> DiskFilesystem {
 fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
+    let root = VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry

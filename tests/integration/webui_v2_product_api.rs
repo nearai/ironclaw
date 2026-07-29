@@ -731,6 +731,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         &ironclaw_host_api::HostPortCatalog::empty(),
         catalog_manifest.manifest_hash().cloned(),
         &contracts,
+        None,
     )
     .expect("orphan manifest parses");
     store

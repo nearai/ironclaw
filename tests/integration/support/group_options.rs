@@ -1,6 +1,7 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
-//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`, `budget_accounting`,
+//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
+//! `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
@@ -15,6 +16,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ironclaw_host_api::CapabilityId;
+use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
@@ -104,6 +107,26 @@ impl RebornIntegrationGroupBuilder {
     /// env-dependent.
     pub fn with_tool_disclosure_off(mut self) -> Self {
         self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self
+    }
+
+    /// #5647 RED-pin seam: override the Bridged-mode `CapabilityAllowSet`
+    /// (default forces `All`) so a test can reproduce a narrowed profile atop
+    /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
+    /// Mirrors the production resolve-once wiring in
+    /// `crates/ironclaw_runner/src/runtime.rs`:
+    /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
+    /// resolved allow-set between `ToolDisclosureCapabilityDecorator` and the
+    /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
+    /// in `crates/ironclaw_runner/src/loop_driver_host.rs` calls
+    /// `build_text_only_host_with_capabilities`. The explicit
+    /// `build_text_only_host_with_profiled_capabilities` form is for test
+    /// construction.
+    pub fn with_narrowed_capability_allow_set_for_bridged_test(
+        mut self,
+        ids: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        self.narrowed_bridged_allow_set = Some(CapabilityAllowSet::allowlist(ids));
         self
     }
 

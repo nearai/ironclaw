@@ -18,15 +18,16 @@ use ironclaw_hooks::middleware::{
 };
 use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
 use ironclaw_loop_host::{
-    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
-    GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, TurnStateRunCancellationFactory,
-    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
+    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityAllowSet, CapabilityResolveError,
+    CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
+    host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -137,7 +138,28 @@ use tokio::task::JoinHandle;
 
 struct ProfiledCapabilityHostRuntime {
     capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+}
+
+struct SurfaceFilteringCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
     surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for SurfaceFilteringCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let allow_set = Arc::new(
+            self.surface_resolver
+                .resolve(run_context)
+                .await
+                .map_err(capability_resolve_error_to_agent_host_error)?,
+        );
+        let capabilities = self.inner.create_capability_port(run_context).await?;
+        Ok(apply_capability_surface_profile(capabilities, allow_set))
+    }
 }
 
 /// Provider resolver that consults the current visible-capability surface
@@ -1442,9 +1464,21 @@ where
         surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     ) -> Self {
         self.profiled_capabilities = Some(ProfiledCapabilityHostRuntime {
-            capability_factory,
-            surface_resolver,
+            capability_factory: Arc::new(SurfaceFilteringCapabilityPortFactory {
+                inner: capability_factory,
+                surface_resolver,
+            }),
         });
+        self
+    }
+
+    /// Install a runner-private factory that already resolves and applies the
+    /// effective capability profile during port construction.
+    pub(crate) fn with_resolved_profiled_capability_port_factory(
+        mut self,
+        capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+    ) -> Self {
+        self.profiled_capabilities = Some(ProfiledCapabilityHostRuntime { capability_factory });
         self
     }
 
@@ -1487,25 +1521,21 @@ where
             .await
     }
 
+    /// Build a host from a capability port plus an already-resolved profile.
+    /// Production uses the runner-private profiled factory; this explicit form
+    /// remains useful to tests that act as their own construction boundary.
     pub async fn build_text_only_host_with_profiled_capabilities(
         &self,
         request: RebornLoopDriverHostRequest,
         capabilities: Arc<dyn LoopCapabilityPort>,
-        surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+        allow_set: Arc<CapabilityAllowSet>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
         validate_thread_scope(
             &self.effective_thread_scope(&request.loop_run_context),
             &request.loop_run_context,
         )?;
-        let allow_set = Arc::new(
-            surface_resolver
-                .resolve(&request.loop_run_context)
-                .await
-                .map_err(capability_resolve_error_to_host_error)?,
-        );
-        let capabilities: Arc<dyn LoopCapabilityPort> =
-            Arc::new(CapabilitySurfaceProfileFilter::new(capabilities, allow_set));
+        let capabilities = apply_capability_surface_profile(capabilities, allow_set);
         self.build_text_only_host_with_capabilities(request, capabilities)
             .await
     }
@@ -2381,12 +2411,8 @@ where
                 .create_capability_port(&request.loop_run_context)
                 .await
                 .map_err(|error| crate::turn_runner::HostFactoryError::new(error.safe_summary))?;
-            self.build_text_only_host_with_profiled_capabilities(
-                request,
-                capabilities,
-                Arc::clone(&profiled.surface_resolver),
-            )
-            .await
+            self.build_text_only_host_with_capabilities(request, capabilities)
+                .await
         } else {
             self.build_text_only_host(request).await
         };
@@ -2505,6 +2531,25 @@ fn capability_resolve_error_to_host_error(
     RebornLoopDriverHostError::InvalidRequest {
         reason: reason.to_string(),
     }
+}
+
+pub(crate) fn capability_resolve_error_to_agent_host_error(
+    error: CapabilityResolveError,
+) -> AgentLoopHostError {
+    let host_error = capability_resolve_error_to_host_error(error);
+    AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, host_error.to_string())
+}
+
+pub(crate) fn apply_capability_surface_profile(
+    capabilities: Arc<dyn LoopCapabilityPort>,
+    allow_set: Arc<CapabilityAllowSet>,
+) -> Arc<dyn LoopCapabilityPort> {
+    // #5647: bridge meta-tool ids are host-synthesized, not granted
+    // capabilities — exempt them so narrowed profiles keep bridged disclosure.
+    Arc::new(
+        CapabilitySurfaceProfileFilter::new(capabilities, allow_set)
+            .with_host_exempt_capability_ids(crate::tool_disclosure::bridge_capability_ids()),
+    )
 }
 
 fn slot_for_model_profile(

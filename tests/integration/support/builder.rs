@@ -29,7 +29,7 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
     RuntimeHttpEgressRequest, UserId, VirtualPath,
 };
 use ironclaw_llm::Role;
@@ -156,6 +156,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
     /// today's behavior byte-for-byte.
     tool_disclosure: Option<ToolDisclosureMode>,
+    /// #5647 RED-pin seam: pass-through to
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
+    narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -406,6 +409,22 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// #5647 RED-pin seam: pass-through to
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`.
+    /// Only takes effect when paired with `.with_tool_disclosure_bridged()` —
+    /// see that method's docs for the fail-fast guard on misuse.
+    pub fn with_narrowed_capability_allow_set_for_bridged_test(
+        mut self,
+        ids: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.narrowed_bridged_allow_set = Some(
+            ids.into_iter()
+                .map(|id| CapabilityId::new(id).expect("test capability id must be valid"))
+                .collect(),
+        );
+        self
+    }
+
     /// Use the real first-party tool runtime so scripted tool calls execute through
     /// `RuntimeHttpEgress`, captured at the recording egress (no network). Required
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
@@ -629,6 +648,9 @@ impl RebornIntegrationHarnessBuilder {
             }
             None => {}
         }
+        if let Some(ids) = self.narrowed_bridged_allow_set {
+            group_builder = group_builder.with_narrowed_capability_allow_set_for_bridged_test(ids);
+        }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
         }
@@ -757,6 +779,7 @@ impl RebornIntegrationHarness {
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
             tool_disclosure: None,
+            narrowed_bridged_allow_set: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -1251,6 +1274,22 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
     }
 
+    /// How many times `capability_id` was dispatched through the real
+    /// capability path since this thread's baseline.
+    ///
+    /// The assertion below answers "was it exactly N"; a generated sequence
+    /// needs the number itself, because the bound it checks ("at most once,
+    /// and zero unless something approved") depends on the sequence rather
+    /// than being a fixed expectation.
+    pub async fn tool_invocation_count(&self, capability_id: &str) -> HarnessResult<usize> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        Ok(delta
+            .iter()
+            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
+            .count())
+    }
+
     /// Assert the named capability was invoked exactly `expected` times through
     /// the real capability path. Uses the same per-thread delta as
     /// [`Self::assert_tool_invoked`].
@@ -1259,12 +1298,7 @@ impl RebornIntegrationHarness {
         capability_id: &str,
         expected: usize,
     ) -> HarnessResult<()> {
-        let all = self.capability_recorder.invocations();
-        let delta = &all[self.baseline_invocation_count..];
-        let actual = delta
-            .iter()
-            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
-            .count();
+        let actual = self.tool_invocation_count(capability_id).await?;
         if actual == expected {
             return Ok(());
         }
@@ -1317,6 +1351,22 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// How many recorded RESULTS `capability_id` produced.
+    ///
+    /// Distinct from `tool_invocation_count`, and the distinction matters for
+    /// effect counting: a gated attempt is recorded as an invocation but
+    /// produces no result, so a single approve-then-resume shows two
+    /// invocations and one result. "Was the effect performed" is the result
+    /// count; the invocation count would report a duplicate that never
+    /// happened.
+    pub async fn capability_result_count(&self, capability_id: &str) -> HarnessResult<usize> {
+        Ok(self
+            .captured_capability_results()
+            .iter()
+            .filter(|result| result.capability_id.as_str() == capability_id)
+            .count())
+    }
+
     /// S2 seam: assert the named capability produced EXACTLY `expected`
     /// recorded RESULTS (`captured_capability_results`) — the proof that a
     /// gate resume dispatched the gated capability's real execution once,
@@ -1330,11 +1380,7 @@ impl RebornIntegrationHarness {
         capability_id: &str,
         expected: usize,
     ) -> HarnessResult<()> {
-        let results = self.captured_capability_results();
-        let actual = results
-            .iter()
-            .filter(|result| result.capability_id.as_str() == capability_id)
-            .count();
+        let actual = self.capability_result_count(capability_id).await?;
         if actual == expected {
             return Ok(());
         }
@@ -1641,6 +1687,22 @@ impl RebornIntegrationHarness {
             &format!("{expected:?}"),
         )
         .await
+    }
+
+    /// Read the run's current state once, without waiting for a condition.
+    ///
+    /// The waiting variants above answer "did it get here eventually", which
+    /// cannot express "it never passed through there". Generated sequence
+    /// tests assert after every transition, so they need the instantaneous
+    /// value rather than a settled one.
+    pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
+        Ok(self
+            .turn_store
+            .get_run_state(GetRunStateRequest {
+                scope: self.turn_scope.clone(),
+                run_id,
+            })
+            .await?)
     }
 
     /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does

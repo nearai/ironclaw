@@ -203,19 +203,18 @@ fn visibility_probe_package() -> HarnessResult<(
     ironclaw_extensions::ExtensionPackage,
     ironclaw_extensions::ResolvedExtensionManifest,
 )> {
+    let root = ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
+        Some(root.clone()),
     )?;
     let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
     Ok((
-        ironclaw_extensions::ExtensionPackage::from_manifest(
-            manifest,
-            ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
-        )?,
+        ironclaw_extensions::ExtensionPackage::from_manifest(manifest, root)?,
         record.resolved().clone(),
     ))
 }
@@ -778,7 +777,6 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
-        inbound_payload_classifier: None,
     }
 }
 
@@ -787,7 +785,6 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
         extension_id: "telegram".to_string(),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         preference_target_codec: None,
-        inbound_payload_classifier: None,
     }
 }
 

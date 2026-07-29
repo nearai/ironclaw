@@ -221,7 +221,7 @@ fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, Age
             ));
         }
     };
-    Ok(resolution::failed(error_kind, safe_summary, None))
+    Ok(super::diagnostic_failure(error_kind, safe_summary))
 }
 
 /// Resolve the user the run acts on behalf of: the explicit thread owner, else

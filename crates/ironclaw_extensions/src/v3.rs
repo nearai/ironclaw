@@ -591,6 +591,9 @@ pub(crate) fn parse_v3(
         description: manifest.description.clone(),
         requested_trust: manifest.requested_trust,
         runtime: manifest.runtime.clone(),
+        // No package root is in scope at v3 parse time either; the loader
+        // fabricates one when this is `None`.
+        root: None,
         mcp: mcp.map(|mcp| ResolvedMcpDeclaration {
             server: mcp.server.as_str().to_string(),
             namespace: mcp.namespace,

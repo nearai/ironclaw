@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlockedKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopCheckpointKind,
-        LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
+        LoopGateKind, LoopRecoveryClass, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
@@ -127,11 +127,35 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // Deliberately unclassified (terminal with diagnostics): deterministic
         // request-invalid errors must not masquerade as stale/retryable, while
         // policy denial and scope mismatch remain host/config-shaped. The
-        // runner preserves the original kind when categorizing the failure.
+        // runner names each of these with its own failure category
+        // (`model_stage_request_invalid` / `_policy_denied` / `_scope_mismatch`
+        // in `ironclaw_runner::failure_categories`), none of which is
+        // auto-retriable.
+        //
+        // This comment previously claimed the runner "preserves the original
+        // kind" — it did not. All four fell through to
+        // `host_stage_unavailable_model`, which the runner lists as a transient
+        // outage that re-drives cleanly, so a permanently-failing call was
+        // silently retried and reported as a generic host outage.
         AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::PolicyDenied => None,
+    }
+}
+
+pub(super) fn model_recovery_class(class: ModelErrorClass) -> LoopRecoveryClass {
+    match class {
+        ModelErrorClass::Transient => LoopRecoveryClass::ModelTransient,
+        ModelErrorClass::ContextOverflow => LoopRecoveryClass::ModelContextOverflow,
+        ModelErrorClass::ContentFiltered => LoopRecoveryClass::ModelContentFiltered,
+        ModelErrorClass::InvalidOutput => LoopRecoveryClass::ModelInvalidOutput,
+        ModelErrorClass::Unavailable => LoopRecoveryClass::ModelUnavailable,
+        ModelErrorClass::Internal => LoopRecoveryClass::ModelInternal,
+        ModelErrorClass::StaleRequest => LoopRecoveryClass::ModelStaleRequest,
+        ModelErrorClass::Unauthorized => LoopRecoveryClass::ModelUnauthorized,
+        ModelErrorClass::CheckpointRejected => LoopRecoveryClass::ModelCheckpointRejected,
+        ModelErrorClass::TranscriptWriteFailed => LoopRecoveryClass::ModelTranscriptWriteFailed,
     }
 }
 
@@ -193,7 +217,7 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         }
     };
     let detail = error.detail.or(rejected_summary_detail);
-    if detail.is_none() && error.reason_kind.is_none() && error.diagnostic_ref.is_none() {
+    if detail.is_none() && error.reason_kind.is_none() {
         return AgentLoopExecutorError::HostUnavailable {
             stage: HostStage::Capability,
         };
@@ -203,7 +227,6 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         kind: error.kind,
         safe_summary,
         reason_kind: error.reason_kind,
-        diagnostic_ref: error.diagnostic_ref,
         detail,
     }
 }
@@ -211,11 +234,10 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 /// Sanitized failure-category wire strings for a terminal capability failure.
 ///
 /// The seven output strings are a HARD cross-crate contract: the runner's
-/// failure lane (`failure_lane.rs`) and auto-retry disposition
-/// (`retry_disposition.rs`) and the product failure explanations match on them
+/// failure summaries and the product failure explanations match on them
 /// byte-for-byte. This bucketing preserves the retired `CapabilityErrorClass`
-/// membership for the retired kinds and assigns each precise kind to the
-/// bucket its coarse ancestor used:
+/// membership for the retired kinds and assigns each precise kind to the bucket
+/// its coarse ancestor used:
 ///
 /// - `capability_permanent` survives only for `Cancelled` (the retired
 ///   `Permanent` *kind* merged into `OperationFailed`, so its old bucket is no
@@ -366,9 +388,8 @@ mod tests {
 
     /// Classification lock for the seven-string failure-category contract:
     /// every unified `FailureKind` maps to a deliberate wire category, and the
-    /// bucket set never grows — the runner's failure lane and auto-retry
-    /// disposition and the product failure explanations match these strings
-    /// byte-for-byte.
+    /// bucket set never grows — runner and product failure explanations match
+    /// these strings byte-for-byte.
     ///
     /// This complements the compile-time guarantee (the match is exhaustive
     /// with no `_ =>` wildcard) by also catching a silent *re-bucketing* of an

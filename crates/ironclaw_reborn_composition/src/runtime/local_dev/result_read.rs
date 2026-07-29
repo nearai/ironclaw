@@ -251,20 +251,18 @@ fn result_read_observation(
 /// retryable host outage (`Unavailable` would quietly retry a ref that can
 /// never appear). Model-visible and non-retryable.
 fn unavailable_result_reference() -> Resolution {
-    resolution::failed(
+    super::diagnostic_failure(
         FailureKind::OperationFailed,
         "result reference is unavailable in this thread".to_string(),
-        None,
     )
 }
 
 /// The stored result exists but cannot be decoded as text — an output-decode
 /// failure, not an input-encoding fault.
 fn non_text_result_content() -> Resolution {
-    resolution::failed(
+    super::diagnostic_failure(
         FailureKind::OutputDecode,
         "stored tool result cannot be returned as text".to_string(),
-        None,
     )
 }
 
@@ -293,9 +291,9 @@ fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> Box
     Box::new(resolution::failed(
         FailureKind::InputEncode,
         safe_summary.to_string(),
-        Some(CapabilityFailureDetail::InvalidInput {
+        CapabilityFailureDetail::InvalidInput {
             issues: vec![issue],
-        }),
+        },
     ))
 }
 

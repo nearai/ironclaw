@@ -31,11 +31,14 @@ use crate::{
 
 mod broker;
 mod ca;
+mod connect;
 mod container_identity;
 mod credential_firewall;
 mod key_codec;
 mod mounts;
+mod network_allowlist;
 mod scope_key;
+pub(crate) mod shell_limits;
 
 // `attribution`, `registry`, and `user_key` are the persistent per-user
 // sandbox container model's identity/registry primitives: container naming,
@@ -52,16 +55,22 @@ mod user_key;
 use mounts::RebornSandboxMountSources;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
+pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use network_allowlist::{
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES,
+    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,
+    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
+};
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use user_key::RebornSandboxUserKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
 const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

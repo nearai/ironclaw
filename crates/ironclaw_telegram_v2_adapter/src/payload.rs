@@ -277,6 +277,9 @@ fn has_bot_mention(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> bo
 }
 
 fn reply_to_bot(message: &TelegramMessage, bot_user_id: i64) -> bool {
+    if bot_user_id <= 0 {
+        return false;
+    }
     let Some(reply) = message.reply_to_message.as_deref() else {
         return false;
     };
@@ -287,35 +290,7 @@ fn reply_to_bot(message: &TelegramMessage, bot_user_id: i64) -> bool {
 }
 
 fn recognized_bot_command(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> bool {
-    for (text, entities) in text_entity_windows(message) {
-        for entity in entities {
-            if entity.entity_type != "bot_command" {
-                continue;
-            }
-            let Some(slice) = slice_text_by_offset(text, entity.offset, entity.length) else {
-                continue;
-            };
-            let raw = slice.strip_prefix('/').unwrap_or(slice);
-            let cmd = match raw.split_once('@') {
-                Some((cmd, target)) => {
-                    if !target.eq_ignore_ascii_case(&policy.bot_username) {
-                        continue;
-                    }
-                    cmd
-                }
-                None => raw,
-            };
-            let cmd_lower = cmd.to_ascii_lowercase();
-            if policy
-                .recognized_commands
-                .iter()
-                .any(|recognized| recognized.to_ascii_lowercase() == cmd_lower)
-            {
-                return true;
-            }
-        }
-    }
-    false
+    extract_first_bot_command(message, policy).is_some()
 }
 
 /// Slice a UTF-16 offset+length window out of a string.
@@ -382,8 +357,8 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
 
 /// One host-verified Telegram webhook update, normalized for the generic
 /// channel-adapter contract: an ignored (but authenticated) update or one
-/// plain user message. Bot-command reclassification is a host-sink concern;
-/// the message text carries the command verbatim.
+/// plain user message. Recognized bot commands are rewritten into generic
+/// command form so host classification does not need Telegram username syntax.
 #[derive(Debug)]
 pub enum TelegramInboundEvent {
     Ignore,
@@ -424,14 +399,7 @@ pub fn normalize_telegram_update(
     let actor = build_actor_ref(message.from.as_ref())?;
     let conversation = build_conversation_ref(&message)?;
     let attachments = collect_attachments(&message)?;
-    let text = strip_leading_mention(
-        message
-            .text
-            .clone()
-            .or_else(|| message.caption.clone())
-            .unwrap_or_default(),
-        group_trigger_policy,
-    );
+    let text = normalize_forwarded_text(&message, group_trigger_policy);
     let attachments = attachments
         .into_iter()
         .map(|descriptor| AttachmentRef {
@@ -454,6 +422,26 @@ pub fn normalize_telegram_update(
             reply_context: None,
         },
     )))
+}
+
+fn normalize_forwarded_text(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> String {
+    if let Some((command, arguments)) =
+        extract_first_addressed_bot_command(message, &policy.bot_username)
+    {
+        if arguments.is_empty() {
+            return format!("/{command}");
+        }
+        return format!("/{command} {arguments}");
+    }
+
+    strip_leading_mention(
+        message
+            .text
+            .clone()
+            .or_else(|| message.caption.clone())
+            .unwrap_or_default(),
+        policy,
+    )
 }
 
 #[cfg(test)]
@@ -632,14 +620,37 @@ fn extract_first_bot_command(
     message: &TelegramMessage,
     policy: &GroupTriggerPolicy,
 ) -> Option<(String, String)> {
+    extract_first_matching_bot_command(message, &policy.bot_username, |command| {
+        policy
+            .recognized_commands
+            .iter()
+            .any(|recognized| recognized.eq_ignore_ascii_case(command))
+    })
+}
+
+fn extract_first_addressed_bot_command(
+    message: &TelegramMessage,
+    bot_username: &str,
+) -> Option<(String, String)> {
+    extract_first_matching_bot_command(message, bot_username, |_| true)
+}
+
+fn extract_first_matching_bot_command(
+    message: &TelegramMessage,
+    bot_username: &str,
+    mut accepts_command: impl FnMut(&str) -> bool,
+) -> Option<(String, String)> {
     // Consult both `text+entities` and `caption+caption_entities` so a
-    // recognized `/command` in a media-message caption is extracted
-    // correctly. The first matching command in `text` wins; otherwise
-    // the first matching command in `caption` wins. Offsets in each
-    // entities list are bound to their companion string.
+    // matching `/command` in a media-message caption is extracted correctly.
+    // The first matching command in `text` wins; otherwise the first matching
+    // command in `caption` wins. Offsets in each entities list are bound to
+    // their companion string.
     for (text, entities) in text_entity_windows(message) {
         for entity in entities {
             if entity.entity_type != "bot_command" {
+                continue;
+            }
+            if !bot_command_is_leading(text, entities, entity, bot_username) {
                 continue;
             }
             let Some(slice) = slice_text_by_offset(text, entity.offset, entity.length) else {
@@ -648,7 +659,7 @@ fn extract_first_bot_command(
             let trimmed = slice.strip_prefix('/').unwrap_or(slice);
             let cmd_only = match trimmed.split_once('@') {
                 Some((cmd, target)) => {
-                    if !target.eq_ignore_ascii_case(&policy.bot_username) {
+                    if !target.eq_ignore_ascii_case(bot_username) {
                         continue;
                     }
                     cmd
@@ -656,14 +667,12 @@ fn extract_first_bot_command(
                 None => trimmed,
             };
             let cmd_lower = cmd_only.to_ascii_lowercase();
-            if !policy
-                .recognized_commands
-                .iter()
-                .any(|c| c.to_ascii_lowercase() == cmd_lower)
-            {
+            if !accepts_command(&cmd_lower) {
                 continue;
             }
-            let after_offset = entity.offset + entity.length;
+            let Some(after_offset) = entity.offset.checked_add(entity.length) else {
+                continue;
+            };
             let arguments = slice_text_to_end(text, after_offset)
                 .unwrap_or("")
                 .trim_start()
@@ -672,6 +681,40 @@ fn extract_first_bot_command(
         }
     }
     None
+}
+
+fn bot_command_is_leading(
+    text: &str,
+    entities: &[MessageEntity],
+    command: &MessageEntity,
+    bot_username: &str,
+) -> bool {
+    if command.offset == 0 {
+        return true;
+    }
+    let Some(mention) = entities
+        .iter()
+        .find(|entity| entity.entity_type == "mention" && entity.offset == 0)
+    else {
+        return false;
+    };
+    let Some(mention_text) = slice_text_by_offset(text, mention.offset, mention.length) else {
+        return false;
+    };
+    if !mention_text
+        .strip_prefix('@')
+        .is_some_and(|target| target.eq_ignore_ascii_case(bot_username))
+    {
+        return false;
+    }
+    let Some(mention_end) = mention.offset.checked_add(mention.length) else {
+        return false;
+    };
+    let Some(gap_length) = command.offset.checked_sub(mention_end) else {
+        return false;
+    };
+    slice_text_by_offset(text, mention_end, gap_length)
+        .is_some_and(|gap| gap.chars().all(char::is_whitespace))
 }
 
 fn strip_leading_mention(text: String, policy: &GroupTriggerPolicy) -> String {
@@ -940,6 +983,178 @@ mod tests {
             bot_user_id: 9000,
             recognized_commands: vec!["start".into(), "help".into()],
         }
+    }
+
+    #[test]
+    fn normalized_bot_qualified_command_uses_generic_command_text() {
+        let payload = include_bytes!("../tests/fixtures/group_command.json");
+        let event =
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("recognized group command must be forwarded");
+        };
+        assert_eq!(message.text, "/help");
+        assert_eq!(message.trigger, ProductTriggerReason::BotCommand);
+    }
+
+    #[test]
+    fn normalized_bot_command_preserves_arguments() {
+        let payload = br#"{
+            "update_id": 501,
+            "message": {
+                "message_id": 71,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "/help@ironclaw_bot verbose now",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 18}]
+            }
+        }"#;
+        let event =
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("recognized group command must be forwarded");
+        };
+        assert_eq!(message.text, "/help verbose now");
+    }
+
+    #[test]
+    fn private_qualified_product_command_canonicalizes_without_group_whitelist() {
+        let payload = br#"{
+            "update_id": 503,
+            "message": {
+                "message_id": 73,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/model@ironclaw_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 19}]
+            }
+        }"#;
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        let event = normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat command must be forwarded");
+        };
+        assert_eq!(message.text, "/model openai/gpt-5");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn private_command_for_another_bot_keeps_its_target() {
+        let payload = br#"{
+            "update_id": 504,
+            "message": {
+                "message_id": 74,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/model@other_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 16}]
+            }
+        }"#;
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        let event = normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat command must be forwarded");
+        };
+        assert_eq!(message.text, "/model@other_bot openai/gpt-5");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn private_mid_sentence_bot_command_remains_ordinary_text() {
+        let payload = br#"{
+            "update_id": 506,
+            "message": {
+                "message_id": 76,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "please run /help for me",
+                "entities": [{"type": "bot_command", "offset": 11, "length": 5}]
+            }
+        }"#;
+
+        let event =
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat text must be forwarded");
+        };
+        assert_eq!(message.text, "please run /help for me");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn command_after_non_mention_prefix_remains_ordinary_text() {
+        let payload = r#"{
+            "update_id": 505,
+            "message": {
+                "message_id": 75,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "🦀 /model@ironclaw_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 3, "length": 19}]
+            }
+        }"#
+        .as_bytes();
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        let event = normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat command must be forwarded");
+        };
+        assert_eq!(
+            message.text, "🦀 /model@ironclaw_bot openai/gpt-5",
+            "only commands at offset zero or after a leading bot mention are canonicalized"
+        );
+    }
+
+    #[test]
+    fn command_for_another_bot_remains_ignored_in_groups() {
+        let payload = br#"{
+            "update_id": 502,
+            "message": {
+                "message_id": 72,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "/help@other_bot",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 15}]
+            }
+        }"#;
+        assert!(matches!(
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes"),
+            TelegramInboundEvent::Ignore
+        ));
+    }
+
+    #[test]
+    fn addressed_product_command_without_group_whitelist_remains_ignored_in_groups() {
+        let payload = br#"{
+            "update_id": 506,
+            "message": {
+                "message_id": 76,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "/model@ironclaw_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 19}]
+            }
+        }"#;
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        assert!(matches!(
+            normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes"),
+            TelegramInboundEvent::Ignore
+        ));
     }
 
     #[test]
@@ -1340,6 +1555,33 @@ mod tests {
     }
 
     #[test]
+    fn unset_bot_user_id_does_not_match_a_group_reply() {
+        let payload = br#"{
+            "update_id": 206,
+            "message": {
+                "message_id": 17,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "ambient reply",
+                "reply_to_message": {
+                    "message_id": 7,
+                    "date": 1699999999,
+                    "from": {"id": 0, "is_bot": true, "first_name": "Unknown"},
+                    "chat": {"id": -42, "type": "supergroup"},
+                    "text": "hi there"
+                }
+            }
+        }"#;
+        let mut policy = policy();
+        policy.bot_user_id = 0;
+        assert!(matches!(
+            normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes"),
+            TelegramInboundEvent::Ignore
+        ));
+    }
+
+    #[test]
     fn group_recognized_command_creates_command_envelope() {
         let payload = br#"{
             "update_id": 203,
@@ -1595,6 +1837,152 @@ mod tests {
             ),
             "got {:?}",
             parsed.payload
+        );
+    }
+}
+
+/// Property tests for the Telegram ingress boundary (#6524 workstream 9:
+/// "focused fuzzing for untrusted ingress").
+///
+/// The sibling of the Slack ingress properties. Both entry points sit on a
+/// public webhook and see whatever the internet sends before any secret has
+/// been trusted, so covering one and not the other would leave half the
+/// surface unexamined while the box read as closed.
+#[cfg(test)]
+mod ingress_properties {
+    use super::*;
+    use ironclaw_host_api::product_adapter::auth::mark_shared_secret_header_verified;
+    use proptest::prelude::*;
+
+    fn verified_evidence() -> ProtocolAuthEvidence {
+        mark_shared_secret_header_verified(
+            "X-Telegram-Bot-Api-Secret-Token",
+            "telegram_install_property",
+        )
+    }
+
+    fn unverified_evidence() -> ProtocolAuthEvidence {
+        ProtocolAuthEvidence::failed(
+            ironclaw_host_api::product_adapter::ProtocolAuthFailure::Missing,
+        )
+    }
+
+    fn install() -> AdapterInstallationId {
+        AdapterInstallationId::new("install_property").expect("valid")
+    }
+
+    fn trigger_policy() -> GroupTriggerPolicy {
+        GroupTriggerPolicy {
+            bot_username: "ironclaw_bot".into(),
+            bot_user_id: 9000,
+            recognized_commands: vec!["start".into(), "help".into()],
+        }
+    }
+
+    /// Update-shaped payloads plus noise.
+    ///
+    /// Biased for the same reason as the Slack generator: uniform random bytes
+    /// die at the JSON parser and exercise only the outermost guard, never the
+    /// branches that read chat, entities or commands.
+    fn update_bytes() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..256),
+            "\\PC{0,200}".prop_map(|s| s.into_bytes()),
+            (any::<i64>(), "\\PC{0,40}", any::<i64>(), "[a-z_]{0,12}").prop_map(
+                |(update_id, text, chat_id, chat_type)| {
+                    serde_json::json!({
+                        "update_id": update_id,
+                        "message": {
+                            "message_id": 1,
+                            "date": 0,
+                            "text": text,
+                            "chat": {"id": chat_id, "type": chat_type},
+                        }
+                    })
+                    .to_string()
+                    .into_bytes()
+                }
+            ),
+            // Command-shaped text, which drives the entity/command branches.
+            ("[a-z]{1,10}", any::<i64>()).prop_map(|(command, chat_id)| {
+                serde_json::json!({
+                    "update_id": 7,
+                    "message": {
+                        "message_id": 1,
+                        "date": 0,
+                        "text": format!("/{command}@ironclaw_bot payload"),
+                        "entities": [{"type": "bot_command", "offset": 0, "length": command.len() + 1}],
+                        "chat": {"id": chat_id, "type": "group"},
+                    }
+                })
+                .to_string()
+                .into_bytes()
+            }),
+        ]
+    }
+
+    proptest! {
+        /// No update is parsed without verified evidence.
+        ///
+        /// Telegram's webhook secret is the only thing standing between the
+        /// public endpoint and an injected turn, exactly as the Slack
+        /// signature is on that side.
+        #[test]
+        fn unverified_evidence_rejects_every_update(raw in update_bytes()) {
+            let outcome =
+                parse_telegram_update(&raw, &unverified_evidence(), &install(), &trigger_policy());
+            prop_assert!(
+                matches!(outcome, Err(PayloadParseError::UnauthenticatedPayload)),
+                "unverified update was not rejected: {outcome:?}"
+            );
+        }
+
+        /// Verified evidence plus arbitrary bytes parses or errors, never panics.
+        #[test]
+        fn verified_evidence_never_panics(raw in update_bytes()) {
+            let _ =
+                parse_telegram_update(&raw, &verified_evidence(), &install(), &trigger_policy());
+            let _ = normalize_telegram_update(&raw, &install(), &trigger_policy());
+        }
+    }
+
+    /// Telegram accepts an unbounded body where Slack refuses over 1 MiB.
+    ///
+    /// Recorded rather than asserted as a limit, because there is none here to
+    /// assert. Whether that matters depends on a cap in the HTTP layer above,
+    /// which this function cannot see — so the honest thing is to pin the
+    /// current behaviour (a large body is parsed on its merits, not refused on
+    /// length) and leave the question visible instead of implying parity that
+    /// does not exist.
+    #[test]
+    fn large_bodies_are_judged_on_content_not_length() {
+        let padding = "a".repeat(2 * 1024 * 1024);
+        let payload = serde_json::json!({
+            "update_id": 11,
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "text": padding,
+                "chat": {"id": 42, "type": "private"},
+            }
+        })
+        .to_string()
+        .into_bytes();
+        assert!(payload.len() > 1024 * 1024);
+
+        let outcome = parse_telegram_update(
+            &payload,
+            &verified_evidence(),
+            &install(),
+            &trigger_policy(),
+        );
+        // Asserting only "not UnauthenticatedPayload" would be satisfied by
+        // BodyTooLarge, or by any other parse error -- including the size
+        // rejection this test exists to rule out. Pin the success instead.
+        assert!(
+            outcome.is_ok(),
+            "a large body must still be judged on content, not rejected on \
+             size or authentication; got {outcome:?}"
         );
     }
 }
