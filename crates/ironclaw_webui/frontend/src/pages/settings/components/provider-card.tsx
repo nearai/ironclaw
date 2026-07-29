@@ -1,7 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
+import { Badge, Button, Card, Icon } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {

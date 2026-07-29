@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
 import { ActivityRun } from "./activity-run";
 import { MessageBubble } from "./message-bubble";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 import { groupMessages } from "../lib/message-groups";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
@@ -377,7 +377,7 @@ export function MessageList({
               onClick={loadOlder}
               disabled={isLoading}
               data-testid="message-list-load-older"
-              className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-300 hover:border-signal/35 hover:text-white disabled:opacity-50"
+              className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-300 transition-colors hover:border-signal/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isLoading
                 ? t("chat.history.loading")

@@ -32,9 +32,11 @@ vi.mock("./tool-activity", async () => {
   };
 });
 
-vi.mock("../../../design-system/icons", async () => {
+vi.mock("@ironclaw/ui", async (importOriginal) => {
+  const original = await importOriginal<object>();
   const { createElement } = await import("react");
   return {
+    ...original,
     Icon: ({ name, className }) =>
       createElement("span", { className, "data-icon": name }),
   };

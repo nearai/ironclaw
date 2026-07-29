@@ -1,6 +1,5 @@
 import { useNavigate } from "react-router";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import {
   formatRoutineDate,

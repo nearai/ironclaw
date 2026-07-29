@@ -13,5 +13,5 @@
     "target": "ES2022",
     "types": ["node", "react", "react-dom", "vite/client"]
   },
-  "include": ["scripts", "src", "vite.config.ts"]
+  "include": ["e2e", "packages/ui/src", "scripts", "src", "playwright.config.ts", "vite.config.ts"]
 }

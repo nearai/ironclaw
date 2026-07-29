@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Panel, StatusPill } from "@ironclaw/ui";
 import {
   formatMissionCadence,
   formatMissionStatus,
@@ -32,7 +32,8 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
                 key={mission.id}
                 onClick={() => onSelectMission(mission.id)}
                 className={[
-                  "w-full rounded-[20px] border p-4 text-left",
+                  "w-full rounded-[20px] border p-4 text-left transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                   selectedMissionId === mission.id
                     ? "border-signal/35 bg-signal/10"
                     : "border-white/10 bg-white/[0.025] hover:border-signal/25 hover:bg-white/[0.045]",

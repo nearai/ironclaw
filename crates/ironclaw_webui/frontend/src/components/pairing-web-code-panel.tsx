@@ -2,7 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import React from "react";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 import { notifyChannelConnected } from "../lib/channel-connection-events";
 import {
@@ -254,7 +254,7 @@ export function PairingWebCodePanel({
           onClick={disconnect}
           disabled={isDisconnecting}
           data-testid="pairing-disconnect"
-          className="mt-2 text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-2 rounded-[4px] text-xs text-iron-400 underline underline-offset-2 transition-colors hover:text-iron-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {t("pairing.web.disconnect")}
         </button>

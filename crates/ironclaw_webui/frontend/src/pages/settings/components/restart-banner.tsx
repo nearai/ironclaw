@@ -1,7 +1,5 @@
 // @ts-nocheck
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
+import { Button, Icon, Modal, ModalBody, ModalFooter } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useGatewayRestart } from "../hooks/useGatewayRestart";
 

@@ -1,4 +1,4 @@
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { summarizeActivity } from "../lib/activity-summary";
@@ -42,7 +42,8 @@ export function ActivityRun({ activity, activeRunId = null }: ActivityRunProps) 
         aria-expanded={expanded ? "true" : "false"}
         data-testid="activity-run-toggle"
         className={[
-          "v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
+          "v2-button flex w-full min-w-0 items-center gap-2 rounded-md border-0 bg-transparent px-1 py-1.5 text-left text-sm transition-colors",
+          "hover:bg-[var(--v2-surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
           summary.hasError
             ? "text-[var(--v2-danger-text)]"
             : "text-iron-400 hover:text-iron-200",

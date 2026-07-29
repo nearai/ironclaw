@@ -61,6 +61,10 @@ test("router and login defaults no longer add the legacy mount prefix", () => {
   const login = frontendFile("src/pages/login/login-page.tsx");
   assert.ok(login.includes('oauthRedirectAfter = "/"'));
 
+  // The brand mark is the inline NEAR wordmark; the IronClaw logo asset moved
+  // to the agent avatar in the sidebar footer, still on a root-relative path.
   const sidebar = frontendFile("src/components/sidebar.tsx");
-  assert.ok(sidebar.includes('src="/assets/logo.png"'));
+  assert.ok(sidebar.includes("<NearLogo"));
+  const sidebarFooter = frontendFile("src/components/sidebar-footer.tsx");
+  assert.ok(sidebarFooter.includes('src="/assets/logo.png"'));
 });

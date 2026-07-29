@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Panel, StatusPill } from "@ironclaw/ui";
 
 function attentionTone(item) {
   return item?.type === "failure" ? "danger" : "warning";
@@ -26,7 +26,7 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
           <button
             key={`${item.project_id}-${item.thread_id || item.message}`}
             onClick={() => onOpenItem(item)}
-            className="group rounded-2xl border border-white/10 bg-iron-950/55 p-4 text-left hover:border-signal/30 hover:bg-white/[0.05]"
+            className="group rounded-2xl border border-white/10 bg-iron-950/55 p-4 text-left transition-colors hover:border-signal/30 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <div className="flex items-start justify-between gap-3">
               <div>

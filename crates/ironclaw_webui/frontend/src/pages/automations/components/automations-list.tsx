@@ -1,8 +1,5 @@
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, EmptyPanel, Icon, Panel, StatusPill, cn } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
 import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters";
 import { AutomationDetailPanel } from "./automation-detail-panel";
 import { AutomationsEmptyState } from "./automations-empty-state";
@@ -64,7 +61,8 @@ export function AutomationsList({
                   aria-pressed={filter === item.value}
                   onClick={() => onFilterChange(item.value)}
                   className={cn(
-                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight",
+                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]",
                     filter === item.value
                       ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                       : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"

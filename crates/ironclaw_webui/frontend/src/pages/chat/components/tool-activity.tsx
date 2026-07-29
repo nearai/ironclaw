@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 
@@ -152,7 +152,7 @@ function ToolActivityCard({ activity, nested = false }) {
       aria-expanded={expanded ? "true" : "false"}
       aria-controls={controlsId}
       data-testid="tool-activity-toggle"
-      className="v2-button flex w-full min-w-0 items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm"
+      className="v2-button flex w-full min-w-0 items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm transition-colors hover:bg-[var(--v2-surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]"
     >
       <span className={["h-2 w-2 shrink-0 rounded-full", dotClass].join(" ")} />
       <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-iron-300"
@@ -268,7 +268,8 @@ function ToolDetailPanel({
               key={tab.id}
               onClick={() => setActive(tab.id)}
               className={[
-                "v2-button rounded-t-md px-2.5 py-1 font-mono text-[11px]",
+                "v2-button rounded-t-md px-2.5 py-1 font-mono text-[11px] transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]",
                 active === tab.id
                   ? "bg-iron-900 text-iron-100"
                   : "text-iron-400 hover:text-iron-200",

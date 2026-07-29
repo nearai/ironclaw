@@ -1,5 +1,5 @@
 import React from "react";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 
 const toneCss = {
@@ -31,7 +31,7 @@ export function ActionToast({ result, onDismiss }) {
       <button
         onClick={onDismiss}
         aria-label={t("common.dismiss")}
-        className="shrink-0 opacity-70 hover:opacity-100"
+        className="shrink-0 rounded opacity-70 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         <Icon name="close" className="h-3.5 w-3.5" />
       </button>

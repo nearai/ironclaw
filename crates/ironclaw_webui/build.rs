@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=frontend/package.json");
     println!("cargo:rerun-if-changed=frontend/pnpm-lock.yaml");
     println!("cargo:rerun-if-changed=frontend/pnpm-workspace.yaml");
+    println!("cargo:rerun-if-changed=frontend/packages/ui/package.json");
+    println!("cargo:rerun-if-changed=frontend/packages/ui/src");
     println!("cargo:rerun-if-changed=frontend/public");
     println!("cargo:rerun-if-changed=frontend/src");
     println!("cargo:rerun-if-changed=frontend/vite.config.ts");
@@ -100,7 +102,17 @@ fn build_frontend_dist(
     if generated_dist_dir.exists() {
         fs::remove_dir_all(generated_dist_dir)?;
     }
-    run_pnpm(&["install", "--frozen-lockfile"], &frontend_dir)?;
+    // Filter to the SPA package: this links @ironclaw/ui (consumed as
+    // TypeScript source) without installing its Storybook-only toolchain.
+    run_pnpm(
+        &[
+            "install",
+            "--frozen-lockfile",
+            "--filter",
+            "ironclaw-webui-v2-frontend",
+        ],
+        &frontend_dir,
+    )?;
     let generated_arg = generated_dist_dir.to_string_lossy().into_owned();
     run_pnpm(
         &[

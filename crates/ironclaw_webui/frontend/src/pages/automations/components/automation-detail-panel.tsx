@@ -1,11 +1,6 @@
 import React from "react";
-import { Button } from "../../../design-system/button";
-import { ConfirmDialog } from "../../../design-system/confirm-dialog";
-import { Icon } from "../../../design-system/icons";
-import { Input } from "../../../design-system/input";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, ConfirmDialog, EmptyPanel, Icon, Input, Panel, StatusPill, cn } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
 import {
   RecentRunRow,
   recentRunKey,

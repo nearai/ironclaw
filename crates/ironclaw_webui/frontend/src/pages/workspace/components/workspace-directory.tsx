@@ -1,5 +1,5 @@
+import { Card, Skeleton } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
-import { Panel } from "../../../design-system/primitives";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 import { WorkspaceBreadcrumb } from "./workspace-breadcrumb";
 
@@ -21,8 +21,8 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div className="v2-skeleton h-16 rounded-xl" />
-        <div className="v2-skeleton h-[460px] rounded-xl" />
+        <Skeleton className="h-16" />
+        <Skeleton className="h-[460px]" />
       </div>
     );
   }
@@ -37,10 +37,14 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
 
   let body;
   if (!visible.length) {
-    body = (<div className="px-4 py-10 text-center text-sm text-iron-300">{t("workspace.emptyDir")}</div>);
+    body = (<div className="px-4 py-10 text-center text-sm text-[var(--v2-text-muted)]">{t("workspace.emptyDir")}</div>);
   } else if (!rows.length) {
-    body = (<div className="px-4 py-10 text-center text-sm text-iron-300">{t("workspace.noMatches")}</div>);
+    body = (<div className="px-4 py-10 text-center text-sm text-[var(--v2-text-muted)]">{t("workspace.noMatches")}</div>);
   } else {
+    // The row rules keep main's `white/[0.06]` rather than the panel-border
+    // token: on the light card that value is near-invisible, and the token
+    // hairline reads as an extra line the page never had. This extraction is
+    // meant to be visually inert, so parity wins over tidiness here.
     body = (
       <div className="divide-y divide-white/[0.06]">
         {rows.map((entry) => (
@@ -50,9 +54,9 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
             data-testid="workspace-directory-entry"
             data-entry-path={entry.path}
             onClick={() => onOpen(entry.path)}
-            className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-iron-200 hover:bg-white/[0.05] hover:text-white"
+            className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-[var(--v2-text-strong)] transition-colors hover:bg-[var(--v2-surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]"
           >
-            <span className={["w-4 text-center text-xs", entry.is_dir ? "text-signal" : "text-iron-400"].join(" ")}>
+            <span className={["w-4 text-center text-xs", entry.is_dir ? "text-[var(--v2-accent-text)]" : "text-[var(--v2-text-muted)]"].join(" ")}>
               {entry.is_dir ? "□" : "·"}
             </span>
             <span className={["min-w-0 truncate", entry.is_dir ? "font-semibold" : ""].join(" ")}>{displayName(entry)}</span>
@@ -63,11 +67,11 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
   }
 
   return (
-    <Panel className="flex min-h-[520px] flex-col overflow-hidden p-0 xl:min-h-0">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+    <Card className="flex min-h-[520px] flex-col overflow-hidden xl:min-h-0">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
         <WorkspaceBreadcrumb path={path} onNavigate={onNavigate} />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
-    </Panel>
+    </Card>
   );
 }

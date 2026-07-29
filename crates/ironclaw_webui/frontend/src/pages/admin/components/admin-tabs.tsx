@@ -1,7 +1,7 @@
-import { Icon } from "../../../design-system/icons";
+import { Icon, type IconName } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 
-const ADMIN_TABS = [
+const ADMIN_TABS: { id: string; labelKey: string; icon: IconName }[] = [
   { id: "dashboard", labelKey: "admin.tab.dashboard", icon: "pulse" },
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
   { id: "usage", labelKey: "admin.tab.usage", icon: "spark" },
@@ -19,7 +19,8 @@ export function AdminTabs({ activeTab, onTabChange }) {
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
             className={[
-              "group flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm",
+              "group flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               activeTab === tab.id
                 ? "v2-nav-active text-white"
                 : "text-iron-300 hover:bg-white/[0.045] hover:text-white",
@@ -53,7 +54,8 @@ export function AdminTabsMobile({ activeTab, onTabChange }) {
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
             className={[
-              "flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm whitespace-nowrap",
+              "flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm whitespace-nowrap transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               activeTab === tab.id
                 ? "border border-signal/35 bg-signal/10 text-white"
                 : "border border-transparent text-iron-300 hover:text-white",

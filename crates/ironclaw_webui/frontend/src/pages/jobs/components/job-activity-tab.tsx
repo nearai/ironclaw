@@ -1,7 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel } from "../../../design-system/primitives";
+import { Button, EmptyPanel, Panel } from "@ironclaw/ui";
 import { formatJobDate } from "../lib/jobs-presenters";
 
 const FILTERS = [

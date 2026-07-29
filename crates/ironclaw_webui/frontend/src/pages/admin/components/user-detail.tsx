@@ -1,9 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Button, Panel, SelectMenu, StatusPill } from "@ironclaw/ui";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import { UserSecretsPanel } from "./user-secrets-panel";
@@ -157,7 +155,7 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
     <div className="space-y-5">
       <button
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-iron-300 hover:text-white"
+        className="flex items-center gap-1.5 rounded text-xs text-iron-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         <span>←</span>
         <span>{t("admin.users.backToUsers")}</span>

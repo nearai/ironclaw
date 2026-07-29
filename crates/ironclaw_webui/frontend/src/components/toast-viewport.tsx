@@ -5,7 +5,7 @@ import hotToast, {
   type Toast,
   type ToastType,
 } from "react-hot-toast";
-import { Icon } from "../design-system/icons";
+import { Icon, type IconName } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 
 const INFO_TONE = "border-[var(--v2-panel-border)] text-[var(--v2-text)]";
@@ -18,7 +18,7 @@ const TONE: Record<ToastType, string> = {
   error:
     "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] text-[var(--v2-danger-text)]",
 };
-const ICON: Record<ToastType, string> = {
+const ICON: Record<ToastType, IconName> = {
   blank: "bolt",
   custom: "bolt",
   loading: "bolt",
@@ -55,7 +55,7 @@ export function ToastViewport() {
             title={t("common.dismiss")}
             data-testid="toast-dismiss"
             onClick={() => hotToast.dismiss(item.id)}
-            className="-mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-md text-current opacity-70 transition hover:bg-[var(--v2-surface-muted)] hover:opacity-100 focus:opacity-100"
+            className="-mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-md text-current opacity-70 transition hover:bg-[var(--v2-surface-muted)] hover:opacity-100 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <Icon name="close" className="h-3.5 w-3.5" />
           </button>

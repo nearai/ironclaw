@@ -4,7 +4,7 @@ import { useT } from "../lib/i18n";
 import { useAuthSession } from "./auth";
 import { defaultRoute } from "./routes";
 import { LoginPage as LoginView } from "../pages/login/login-page";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/ui";
 import { RouteLoadBoundary } from "./route-load-boundary";
 
 const GatewayLayout = React.lazy(() =>

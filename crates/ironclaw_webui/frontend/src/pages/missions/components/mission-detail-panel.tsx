@@ -1,6 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
 
@@ -137,7 +136,7 @@ export function MissionDetailPanel({
                 key={thread.id}
                 type="button"
                 onClick={() => onOpenThread(thread)}
-                className="w-full rounded-xl border border-white/8 bg-iron-950/60 p-4 text-left hover:border-signal/30 hover:bg-white/[0.05]"
+                className="w-full rounded-xl border border-white/8 bg-iron-950/60 p-4 text-left transition-colors hover:border-signal/30 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0 truncate text-sm font-semibold text-white">{thread.title || thread.goal}</div>

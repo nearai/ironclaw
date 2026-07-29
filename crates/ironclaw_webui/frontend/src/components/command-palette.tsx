@@ -1,7 +1,7 @@
 import React from "react";
 import { useT } from "../lib/i18n";
 import { useNavigate } from "react-router";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 
 /* ⌘K / Ctrl+K launcher: jump to a thread, start a new chat, navigate to a
    section, or toggle the theme. Pure frontend — drives existing routes and
@@ -113,7 +113,8 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
                     onMouseEnter={() => setActive(index)}
                     onClick={() => exec(command)}
                     className={[
-                      "flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm",
+                      "flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm transition-colors",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                       index === active
                         ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                         : "text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)]",

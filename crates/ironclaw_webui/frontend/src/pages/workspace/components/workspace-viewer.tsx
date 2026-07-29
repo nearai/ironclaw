@@ -1,7 +1,6 @@
 import React from "react";
+import { Badge, Button, Card, EmptyPanel, Skeleton } from "@ironclaw/ui";
 import { useI18n, useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
 import { fetchAttachmentBlob } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import { toast } from "../../../lib/toast";
@@ -27,7 +26,7 @@ function FileBody({ path, file }) {
         <img
           src={file.image_data_url}
           alt={fileBaseName(path)}
-          className="max-h-full max-w-full rounded-lg border border-white/10"
+          className="max-h-full max-w-full rounded-lg border border-[var(--v2-panel-border)]"
         />
       </div>
     );
@@ -38,7 +37,7 @@ function FileBody({ path, file }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-6 sm:py-4">
         {isMarkdownPath(path)
           ? (<MarkdownRenderer content={file.content} className="max-w-4xl text-base leading-7" />)
-          : (<pre className="overflow-x-auto whitespace-pre-wrap font-mono text-sm leading-6 text-iron-200">{file.content}</pre>)}
+          : (<pre className="overflow-x-auto whitespace-pre-wrap font-mono text-sm leading-6 text-[var(--v2-text-strong)]">{file.content}</pre>)}
       </div>
     );
   }
@@ -46,7 +45,7 @@ function FileBody({ path, file }) {
   // Binary / unpreviewable: offer a download instead of inlining bytes.
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
-      <p className="max-w-md text-sm text-iron-300">{t("workspace.binaryPreviewUnavailable")}</p>
+      <p className="max-w-md text-sm text-[var(--v2-text-muted)]">{t("workspace.binaryPreviewUnavailable")}</p>
     </div>
   );
 }
@@ -72,8 +71,8 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div className="v2-skeleton h-16 rounded-xl" />
-        <div className="v2-skeleton h-[460px] rounded-xl" />
+        <Skeleton className="h-16" />
+        <Skeleton className="h-[460px]" />
       </div>
     );
   }
@@ -93,11 +92,11 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
   });
 
   return (
-    <Panel className="flex min-h-[520px] flex-col overflow-hidden p-0 xl:min-h-0">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+    <Card className="flex min-h-[520px] flex-col overflow-hidden xl:min-h-0">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
         <WorkspaceBreadcrumb path={path} onNavigate={onNavigate} />
         <div className="flex items-center gap-2">
-          <StatusPill tone="muted" label={meta} />
+          <Badge tone="muted" label={meta} />
           <Button
             data-testid="workspace-download"
             variant="secondary"
@@ -111,10 +110,10 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
       <FileBody path={path} file={file} />
 
       {parentPath(path) && (
-        <div className="border-t border-white/10 px-4 py-3 text-xs text-iron-400">
+        <div className="border-t border-[var(--v2-panel-border)] px-4 py-3 text-xs text-[var(--v2-text-muted)]">
           {t("workspace.parent", { path: parentPath(path) })}
         </div>
       )}
-    </Panel>
+    </Card>
   );
 }

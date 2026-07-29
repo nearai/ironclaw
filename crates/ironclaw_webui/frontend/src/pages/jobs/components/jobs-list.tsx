@@ -1,6 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
 import {
   canShowCancel,
   formatJobDate,
@@ -91,7 +90,7 @@ export function JobsList({
             ].join(" ")}
           >
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <button onClick={() => onSelectJob(job.id)} className="min-w-0 text-left">
+              <button onClick={() => onSelectJob(job.id)} className="min-w-0 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="truncate text-lg font-semibold text-iron-100">{job.title || t("jobs.list.untitled")}</h3>
                   <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />

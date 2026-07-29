@@ -1,4 +1,4 @@
-import { EmptyPanel, Panel } from "../../../design-system/primitives";
+import { EmptyPanel, Panel } from "@ironclaw/ui";
 
 function TreeNodes({ nodes, depth = 0, selectedPath, expandingPath, onToggleDirectory, onSelectPath }) {
   return (
@@ -8,7 +8,8 @@ function TreeNodes({ nodes, depth = 0, selectedPath, expandingPath, onToggleDire
         <button
           onClick={() => (node.isDir ? onToggleDirectory(node.path) : onSelectPath(node.path))}
           className={[
-            "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm",
+            "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
             selectedPath === node.path ? "bg-signal/10 text-white" : "text-iron-200 hover:bg-white/[0.05]",
           ].join(" ")}
           style={{ paddingLeft: `${depth * 18 + 12}px` }}

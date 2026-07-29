@@ -1,10 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Button, Icon, Panel, SelectMenu, StatusPill } from "@ironclaw/ui";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -211,14 +208,14 @@ export function UserRow({
         <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
-            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
+            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 transition-colors hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
+            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 transition-colors hover:border-signal/30 hover:text-signal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
           <button
             data-testid="admin-user-role"
             disabled={isActionPending}
             aria-busy={isUpdating || undefined}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
-            className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-iron-700 hover:text-iron-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 transition-colors hover:border-iron-700 hover:text-iron-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isUpdating
               ? t("common.saving")
@@ -374,7 +371,8 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
                     key={f.value}
                     onClick={() => setFilter(f.value)}
                     className={[
-                      "rounded-md px-2.5 py-1.5 text-[11px] font-medium",
+                      "rounded-md px-2.5 py-1.5 text-[11px] font-medium transition-colors",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                       filter === f.value
                         ? "border border-signal/35 bg-signal/10 text-iron-100"
                         : "border border-transparent text-iron-300 hover:text-iron-100",

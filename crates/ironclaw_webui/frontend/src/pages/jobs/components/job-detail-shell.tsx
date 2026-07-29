@@ -1,5 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, Panel, StatusPill } from "@ironclaw/ui";
 import {
   JOB_DETAIL_TABS,
   canShowCancel,
@@ -26,7 +25,7 @@ export function JobDetailShell({
       <Panel className="p-5 sm:p-6">
         <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0">
-            <button onClick={onBack} className="text-sm text-signal hover:text-white">Back to all jobs</button>
+            <button onClick={onBack} className="rounded text-sm text-signal transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]">Back to all jobs</button>
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <h2 className="text-3xl font-semibold tracking-tight text-white">{job.title || "Untitled job"}</h2>
               <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
@@ -44,7 +43,7 @@ export function JobDetailShell({
                 href={job.browse_url}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="v2-button inline-flex h-10 items-center rounded-md border border-white/12 bg-white/[0.04] px-4 text-sm font-semibold text-iron-100 hover:border-signal/45 hover:bg-signal/10"
+                className="v2-button inline-flex h-10 items-center rounded-md border border-white/12 bg-white/[0.04] px-4 text-sm font-semibold text-iron-100 transition-colors hover:border-signal/45 hover:bg-signal/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
               >
                 Browse files
               </a>
@@ -65,7 +64,8 @@ export function JobDetailShell({
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
             className={[
-              "v2-button rounded-full border px-4 py-2 text-sm",
+              "v2-button rounded-full border px-4 py-2 text-sm transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               activeTab === tab.id
                 ? "border-signal/35 bg-signal/12 text-white"
                 : "border-white/10 bg-white/[0.03] text-iron-300 hover:border-signal/25 hover:text-white",

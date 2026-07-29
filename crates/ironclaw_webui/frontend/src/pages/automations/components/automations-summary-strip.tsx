@@ -1,10 +1,19 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard } from "../../../design-system/primitives";
-import { cn } from "../../../utils/cn";
+import { Panel, StatCard, cn, type BadgeTone } from "@ironclaw/ui";
+
+type SummaryCard = {
+  key: string;
+  label: string;
+  value: string | number;
+  tone: BadgeTone;
+  detail: string;
+  filter?: string | null;
+  valueClassName?: string;
+};
 
 export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter }) {
   const t = useT();
-  const cards = [
+  const cards: SummaryCard[] = [
     {
       key: "scheduled",
       label: t("automations.summary.scheduled"),

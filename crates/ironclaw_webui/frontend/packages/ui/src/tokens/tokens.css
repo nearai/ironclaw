@@ -1,0 +1,172 @@
+/* ════════════════════════════════════════════════════════════════════
+   @ironclaw/ui — design tokens.
+
+   Single source of truth for the WebUI v2 theme: color primitives for
+   light and dark, the semantic type scale, and the two motion keyframes
+   components are allowed to use (spin + breathe) under the app's static
+   motion policy. Imported by the app's app.css and by Storybook.
+   ════════════════════════════════════════════════════════════════════ */
+
+@theme {
+  --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
+    ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
+  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+    monospace;
+  /* Semantic type scale for shared controls. Keep these viewport-independent. */
+  --text-ui-sm: 0.75rem;
+  --text-ui: 0.8125rem;
+  --text-ui-lg: 1rem;
+  --color-iron-950: var(--v2-canvas-strong);
+  --color-iron-900: var(--v2-surface);
+  --color-iron-800: var(--v2-surface-soft);
+  --color-iron-700: var(--v2-panel-border);
+  --color-iron-400: var(--v2-text-faint);
+  --color-iron-300: var(--v2-text-muted);
+  --color-iron-200: var(--v2-text);
+  --color-iron-100: var(--v2-text-strong);
+  --color-signal: var(--v2-accent-text);
+  --color-copper: var(--v2-warning-text);
+  --color-mint: var(--v2-accent-text);
+}
+
+/* ── Light theme ─────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+
+  /* Canvas / surfaces */
+  --v2-canvas:        #f4f7fb;
+  --v2-canvas-strong: #ffffff;
+  --v2-surface:       #ffffff;
+  --v2-surface-soft:  #eef4fa;
+  --v2-surface-muted: #e4edf5;
+
+  /* Card tokens — used by Card component */
+  --v2-card-bg:     rgba(255, 255, 255, 0.92);
+  --v2-card-border: rgba(19, 45, 68, 0.12);
+  --v2-card-shadow: none;
+
+  /* Panel border (nav items, dividers, form borders) */
+  --v2-panel-border: rgba(19, 45, 68, 0.12);
+
+  /* Rail (input bg in dark) */
+  --v2-rail:    #edf3f8;
+  --v2-input-bg: #ffffff;
+
+  /* Typography */
+  --v2-text:        #243244;
+  --v2-text-strong: #0f1720;
+  --v2-text-muted:  #5f7183;
+  --v2-text-faint:  #8a9aab;
+  --v2-inverse:     #ffffff;
+  --v2-ink:         #0f1720;
+
+  /* Controls */
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+
+  /* Accent — signal blue */
+  --v2-accent:       #2e9de2;
+  --v2-accent-strong:#1678bd;
+  --v2-accent-soft:  rgba(76, 167, 230, 0.12);
+  --v2-accent-text:  #10649e;
+
+  /* Semantic colours */
+  --v2-positive-soft: rgba(32, 210, 154, 0.13);
+  --v2-positive-text: #087a5d;
+  --v2-warning-soft:  rgba(245, 193, 91, 0.18);
+  --v2-warning-text:  #8b5b00;
+  --v2-danger-soft:   rgba(255, 100, 128, 0.12);
+  --v2-danger-text:   #b42342;
+  --v2-info-soft:     rgba(76, 167, 230, 0.12);
+  --v2-info-text:     #146fae;
+
+  /* Interaction states — shared by every component so keyboard focus and
+     press feedback look identical across the system. `--v2-focus-ring` is
+     the one sanctioned focus-visible ring color; derived from the accent so
+     it adapts to both themes automatically. */
+  --v2-focus-ring: color-mix(in srgb, var(--v2-accent) 32%, transparent);
+
+  background: var(--v2-canvas);
+}
+
+/* ── Dark theme ─────────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --v2-canvas:        var(--bg-canvas, #111114);
+  --v2-canvas-strong: #0d0d10;
+  --v2-surface:       var(--bg-surface, #1b1b1f);
+  --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.03));
+  --v2-surface-muted: rgba(255, 255, 255, 0.07);
+
+  /* Card tokens in dark: transparent border + drop shadow */
+  --v2-card-bg:     #1b1b1f;
+  --v2-card-border: rgba(255, 255, 255, 0);
+  --v2-card-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+
+  --v2-panel-border: rgba(255, 255, 255, 0.1);
+
+  --v2-rail:     #151519;
+  --v2-input-bg: #151519;
+
+  --v2-text:        rgba(255, 255, 255, 0.82);
+  --v2-text-strong: var(--text-primary, #ffffff);
+  --v2-text-muted:  var(--text-secondary, rgba(255, 255, 255, 0.6));
+  --v2-text-faint:  var(--text-tertiary, rgba(255, 255, 255, 0.45));
+  --v2-inverse:     var(--text-inverse, #111111);
+  --v2-ink:         var(--accent-primary, #4ca7e6);
+
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-opacity%3D%270.55%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+
+  --v2-accent:        var(--accent-primary,        #4ca7e6);
+  --v2-accent-strong: var(--accent-primary-strong, #2882c8);
+  --v2-accent-soft:   rgba(76, 167, 230, 0.14);
+  --v2-accent-text:   var(--text-brand,            #8fc8f2);
+
+  --v2-positive-soft: rgba(32, 210, 154, 0.13);
+  --v2-positive-text: var(--text-positive, #20d29a);
+  --v2-warning-soft:  rgba(245, 193, 91, 0.14);
+  --v2-warning-text:  var(--accent-warning, #f5c15b);
+  --v2-danger-soft:   rgba(255, 100, 128, 0.13);
+  --v2-danger-text:   var(--text-danger, #ff6480);
+  --v2-info-soft:     rgba(76, 167, 230, 0.14);
+  --v2-info-text:     var(--accent-primary-soft, #8fc8f2);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* ── Motion primitives ───────────────────────────────────────────── */
+/* The two sanctioned animations under the app's static-motion policy.  */
+
+@keyframes v2-breathe {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+/* Refresh / in-flight spinner (used by the Spinner primitive). An
+   intentional exception to the app's `animation: none !important` motion
+   policy: the class selector + !important outranks the universal rule so
+   a loading control can spin. Suppressed under prefers-reduced-motion. */
+@keyframes v2-spin {
+  to { transform: rotate(360deg); }
+}
+.v2-spin {
+  animation: v2-spin 0.8s linear infinite !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-spin { animation: none !important; }
+}
+
+/* Interaction transitions (hover/active/focus color shifts) are declared on
+   components via Tailwind's transition utilities (~150ms ease). Inside the
+   app they are neutralized by the static-motion policy in app.css; in other
+   hosts (Storybook) this opt-out keeps them suppressed for users who ask
+   for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+  }
+}

@@ -1,7 +1,7 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Panel, StatusPill, type BadgeTone } from "@ironclaw/ui";
 
-function buildCards(t) {
+function buildCards(t): { key: string; label: string; tone: BadgeTone }[] {
   return [
     { key: "total", label: t("missions.summary.totalMissions"), tone: "muted" },
     { key: "active", label: t("missions.summary.active"), tone: "signal" },

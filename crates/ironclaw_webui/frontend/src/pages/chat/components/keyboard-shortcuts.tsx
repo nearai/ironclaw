@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 
 const SHORTCUTS = [
   { keys: ["Enter"], descKey: "shortcuts.send" },
@@ -39,7 +39,7 @@ export function KeyboardShortcuts({ open, onClose }) {
             type="button"
             onClick={onClose}
             aria-label={t("shortcuts.close")}
-            className="ml-auto grid h-7 w-7 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]"
+            className="ml-auto grid h-7 w-7 place-items-center rounded-md text-[var(--v2-text-faint)] transition-colors hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <Icon name="close" className="h-4 w-4" />
           </button>

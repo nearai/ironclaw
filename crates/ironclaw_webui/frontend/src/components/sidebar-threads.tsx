@@ -1,7 +1,6 @@
 import { NavLink } from "react-router";
 import React from "react";
-import { Icon } from "../design-system/icons";
-import { ConfirmDialog } from "../design-system/confirm-dialog";
+import { ConfirmDialog, Icon, cn } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
 import { deleteThreadErrorMessage } from "../lib/thread-errors";
@@ -21,7 +20,6 @@ import {
   threadActivityIso,
 } from "../lib/thread-meta";
 import { displaySidebarTitle } from "../lib/thread-title";
-import { cn } from "../utils/cn";
 
 /* Single source of truth for how a thread state renders in the sidebar.
  *
@@ -122,7 +120,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
   return (
     <div
       className={cn(
-        "group flex w-full items-stretch rounded-[8px] border-l-2",
+        "group flex w-full items-stretch rounded-[8px] border-l-2 transition-colors duration-150",
         presentation
           ? presentation.borderClass
           : isActive
@@ -130,12 +128,12 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
           : "border-transparent",
         isActive
           ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-          : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+          : "text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)] active:bg-[var(--v2-surface-muted)]"
       )}
     >
       <button
         onClick={() => onSelect(thread.id)}
-        className="min-w-0 flex-1 px-3 py-2 text-left"
+        className="min-w-0 flex-1 rounded-[8px] px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         title={timeTitle || undefined}
       >
         <div className="flex w-full items-center gap-1.5">
@@ -169,7 +167,8 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
           isPinned
             ? "text-[var(--v2-accent-text)]"
             : "opacity-0 text-[var(--v2-text-faint)] group-hover:opacity-100 focus:opacity-100",
-          "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-accent-text)]"
+          "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-accent-text)]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         )}
       >
         <Icon name="pin" className="h-3.5 w-3.5" strokeWidth={2} />
@@ -185,7 +184,8 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         className={cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
           "opacity-70 transition hover:opacity-100 focus:opacity-100",
-          "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
+          "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         )}
       >
         <Icon name="trash" className="h-3.5 w-3.5" strokeWidth={2} />
@@ -207,7 +207,7 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   if (items.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
-      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--v2-text-faint)]">
         {label}
       </span>
       {items.map(
@@ -289,17 +289,17 @@ export function SidebarThreads({
     <div className="flex min-h-0 flex-1 flex-col px-2">
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 hover:bg-[var(--v2-surface-muted)]"
+        className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 transition-colors duration-150 hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         <span
-          className="flex-1 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]"
+          className="flex-1 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--v2-text-faint)]"
         >
           {t("chat.conversations")}
         </span>
         <Icon
           name="chevron"
           className={cn(
-            "h-3.5 w-3.5 text-[var(--v2-text-faint)]",
+            "h-3.5 w-3.5 text-[var(--v2-text-faint)] transition-transform duration-150",
             collapsed ? "-rotate-90" : ""
           )}
           strokeWidth={2.2}
@@ -329,7 +329,8 @@ export function SidebarThreads({
             onClick={onNavigate}
             className={({ isActive }) =>
               cn(
-                "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] font-medium",
+                "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] font-medium transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                 isActive
                   ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                   : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
@@ -384,7 +385,7 @@ export function SidebarThreads({
             disabled={isLoadingMore}
             aria-busy={isLoadingMore || undefined}
             onClick={onLoadMore}
-            className="mx-1 rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-2 text-[12px] font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-wait disabled:opacity-60"
+            className="mx-1 rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-2 text-[12px] font-medium text-[var(--v2-text-muted)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-wait disabled:opacity-60"
           >
             {isLoadingMore ? t("common.loading") : t("common.loadMore")}
           </button>)}

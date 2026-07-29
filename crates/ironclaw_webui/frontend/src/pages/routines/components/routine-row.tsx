@@ -1,5 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { StatusPill } from "../../../design-system/primitives";
+import { Button, StatusPill } from "@ironclaw/ui";
 import {
   formatRoutineDate,
   routineStatusTone,
@@ -26,7 +25,7 @@ export function RoutineRow({
       ].join(" ")}
     >
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-        <button onClick={() => onSelectRoutine(routine.id)} className="min-w-0 text-left">
+        <button onClick={() => onSelectRoutine(routine.id)} className="min-w-0 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="truncate text-lg font-semibold text-iron-100">{routine.name}</h3>
             <StatusPill

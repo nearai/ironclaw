@@ -1,4 +1,5 @@
 import { Link } from "react-router";
+import { NearLogo } from "./near-logo";
 import { SidebarFooter } from "./sidebar-footer";
 import { SidebarNav } from "./sidebar-nav";
 import { SidebarThreads } from "./sidebar-threads";
@@ -27,10 +28,12 @@ export function Sidebar({
         <Link
           to="/chat"
           onClick={onClose}
-          className="flex items-center gap-2.5 opacity-90 hover:opacity-100"
-          aria-label="IronClaw"
+          className="flex items-center gap-2.5 rounded-[8px] opacity-90 transition-colors hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
+          aria-label="NEAR AI"
         >
-          <img src="/assets/logo.png" alt="IronClaw" className="h-7 w-auto" />
+          {/* Brand mark is the NEAR wordmark; the IronClaw logo is the agent's
+              avatar (sidebar footer) instead. */}
+          <NearLogo className="h-[22px] w-auto text-[var(--v2-text-strong)]" />
         </Link>
       </div>
 

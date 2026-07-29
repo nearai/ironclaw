@@ -1,9 +1,8 @@
 import { NavLink, useLocation } from "react-router";
 import React from "react";
 import { primaryRoutes, EXPANDABLE_SUB_ROUTES } from "../app/routes";
-import { Icon } from "../design-system/icons";
+import { Icon, IconButton, cn, iconButtonClasses } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 import { TeeShield } from "./tee-shield";
 import { NotificationCenter } from "./notification-center";
 
@@ -68,7 +67,7 @@ export function PageHeader({
       <button
         type="button"
         onClick={onToggleSidebar}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)]"
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] transition-colors duration-150 hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         aria-label={toggleSidebarLabel}
         aria-controls="gateway-sidebar"
         aria-expanded={sidebarOpen ? "true" : "false"}
@@ -79,7 +78,7 @@ export function PageHeader({
 
       {breadcrumb
         ? (
-            <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold">
+            <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold tracking-[-0.01em]">
               <span className="shrink-0 text-[var(--v2-text-muted)]">
                 {breadcrumb.parent}
               </span>
@@ -94,7 +93,7 @@ export function PageHeader({
           )
         : (
             <span
-              className="truncate text-[14px] font-semibold text-[var(--v2-text-strong)]"
+              className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[var(--v2-text-strong)]"
             >
               {title}
             </span>
@@ -107,27 +106,23 @@ export function PageHeader({
         <NavLink
           to="/logs"
           data-testid="header-logs-link"
-          className={({ isActive }) =>
-            cn(
-              "grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-              isActive && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-            )}
+          className={({ isActive }) => iconButtonClasses({ active: isActive })}
           title={t("nav.logs")}
           aria-label={t("nav.logs")}
         >
           <Icon name="terminal" className="h-4 w-4" />
         </NavLink>
-        <a
+        <IconButton
+          as="a"
           href={DOCS_URL}
           target="_blank"
           rel="noopener noreferrer"
           data-testid="header-docs-link"
-          className="grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           title={t("nav.docs")}
           aria-label={t("nav.docs")}
         >
           <Icon name="bookOpen" className="h-4 w-4" />
-        </a>
+        </IconButton>
       </div>
     </header>
   );

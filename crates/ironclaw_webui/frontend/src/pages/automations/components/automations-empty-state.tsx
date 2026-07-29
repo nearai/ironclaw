@@ -1,10 +1,7 @@
 import { useNavigate } from "react-router";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { Panel } from "../../../design-system/primitives";
+import { Button, Icon, Panel, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
 
 // Example prompts shown in the empty state. This intentionally stays a tiny,
 // static list; rendering maps the i18n keys directly instead of introducing

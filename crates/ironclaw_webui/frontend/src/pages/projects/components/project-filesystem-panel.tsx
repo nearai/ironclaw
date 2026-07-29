@@ -1,8 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button, Icon, Panel, StatusPill } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import {
   fetchAttachmentBlob,
@@ -171,7 +169,7 @@ export function ProjectFilesystemPanel({ threadId }) {
                   data-testid="project-filesystem-entry"
                   data-entry-kind={entry.kind}
                   data-entry-path={entry.path}
-                  className="flex w-full items-center gap-3 rounded-[12px] border border-transparent px-3 py-2 text-left hover:border-white/10 hover:bg-white/[0.04]"
+                  className="flex w-full items-center gap-3 rounded-[12px] border border-transparent px-3 py-2 text-left transition-colors hover:border-white/10 hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
                 >
                   <Icon
                     name={entry.kind === "directory" ? "folder" : "file"}

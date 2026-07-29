@@ -1,8 +1,6 @@
 // @ts-nocheck
 import React from "react";
-import { Button } from "../../../design-system/button";
-import { Input } from "../../../design-system/input";
-import { Panel } from "../../../design-system/primitives";
+import { Button, Input, Panel } from "@ironclaw/ui";
 import { clientActionId } from "../../../lib/api";
 import { useAdminConfiguration } from "../hooks/useAdminConfiguration";
 

@@ -1,5 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, Panel, StatusPill } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
@@ -115,7 +114,7 @@ export function ProjectMissionInspector({
                     <button
                       key={thread.id}
                       onClick={() => onOpenThread(thread.id)}
-                      className="w-full rounded-2xl border border-white/8 bg-iron-950/60 p-4 text-left hover:border-signal/30 hover:bg-white/[0.05]"
+                      className="w-full rounded-2xl border border-white/8 bg-iron-950/60 p-4 text-left transition-colors hover:border-signal/30 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 truncate text-sm font-semibold text-white">{thread.goal}</div>

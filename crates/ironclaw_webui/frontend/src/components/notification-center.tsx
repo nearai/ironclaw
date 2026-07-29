@@ -1,10 +1,8 @@
 import { useNavigate } from "react-router";
 import { createPortal } from "react-dom";
-import { Button } from "../design-system/button";
-import { Icon } from "../design-system/icons";
+import { Button, Icon, IconButton, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 
 function NotificationRow({ message, unread, onOpen }) {
   const t = useT();
@@ -15,7 +13,8 @@ function NotificationRow({ message, unread, onOpen }) {
       onClick={message.href ? () => onOpen(message) : undefined}
       data-testid="notification-row"
       className={cn(
-        "grid w-full grid-cols-[2rem_minmax(0,1fr)] gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3 text-left last:border-0",
+        "grid w-full grid-cols-[2rem_minmax(0,1fr)] gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3 text-left transition-colors last:border-0",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]",
         message.href
           ? "hover:bg-[var(--v2-surface-soft)]"
           : "cursor-default opacity-80"
@@ -176,18 +175,14 @@ export function NotificationCenter({ state }) {
 
   return (
     <div className="relative">
-      <button
-        type="button"
+      <IconButton
         onClick={toggleOpen}
         data-testid="notification-bell"
         ref={triggerRef}
         aria-label={t("notifications.open")}
         aria-expanded={open ? "true" : "false"}
-        className={cn(
-          "relative grid h-8 w-8 place-items-center rounded-[8px]",
-          "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-          open && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-        )}
+        active={open}
+        className="relative"
         title={t("notifications.open")}
       >
         <Icon name="bell" className="h-4 w-4" />
@@ -198,7 +193,7 @@ export function NotificationCenter({ state }) {
             className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--v2-canvas-strong)] bg-[var(--v2-danger-text)]"
           />
         )}
-      </button>
+      </IconButton>
 
       {overlay && typeof document !== "undefined"
         ? createPortal(overlay, document.body)

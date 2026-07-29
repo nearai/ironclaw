@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button, Icon } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -463,7 +462,7 @@ function ModalShell({ onClose, returnFocusTo, title, children }) {
           <button
             onClick={onClose}
             aria-label={t("common.close")}
-            className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"
+            className="grid h-8 w-8 place-items-center rounded-md text-iron-300 transition-colors hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <Icon name="close" className="h-4 w-4" />
           </button>

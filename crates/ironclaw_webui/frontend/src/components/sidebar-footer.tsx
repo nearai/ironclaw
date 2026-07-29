@@ -1,14 +1,9 @@
-import { Icon } from "../design-system/icons";
+import { Icon, IconButton, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 
 function profileName(profile) {
   return profile?.display_name || profile?.email || profile?.id || "IronClaw";
-}
-
-function profileInitial(profile) {
-  return profileName(profile).trim().charAt(0).toUpperCase() || "I";
 }
 
 function useAccountPopover() {
@@ -55,7 +50,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
       <button
         type="button"
         onClick={accountPopover.toggle}
-        className="flex min-w-0 flex-1 items-center gap-2 rounded-[8px] text-left"
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-[8px] p-1 -m-1 text-left transition-colors hover:bg-[var(--v2-surface-soft)] active:bg-[var(--v2-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         title={name}
       >
         <div
@@ -68,7 +63,11 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
               referrerPolicy="no-referrer"
               className="h-full w-full object-cover"
             />)
-          : (<span className="place-self-center">{profileInitial(profile)}</span>)}
+          : (<img
+              src="/assets/logo.png"
+              alt=""
+              className="h-full w-full object-cover"
+            />)}
         </div>
         <span className="min-w-0">
           <span className="block truncate text-[13px] font-medium text-[var(--v2-text-strong)]">
@@ -79,20 +78,18 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
           </span>
         </span>
       </button>
-      <button
+      <IconButton
         onClick={toggleTheme}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
         title={theme === "dark" ? t("theme.light") : t("theme.dark")}
       >
         <Icon name={theme === "dark" ? "sun" : "moon"} className="h-4 w-4" />
-      </button>
-      <button
+      </IconButton>
+      <IconButton
         onClick={onSignOut}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
         title={t("header.signOut")}
       >
         <Icon name="logout" className="h-4 w-4" />
-      </button>
+      </IconButton>
     </div>
   );
 }

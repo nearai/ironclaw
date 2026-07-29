@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { useInterfaceTheme } from "../design-system/theme";
+import { cn, useInterfaceTheme } from "@ironclaw/ui";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
 import { useNotifications } from "../hooks/useNotifications";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
@@ -19,7 +19,6 @@ import { PageHeader } from "../components/page-header";
 import { CommandPalette } from "../components/command-palette";
 import { ToastViewport } from "../components/toast-viewport";
 import React from "react";
-import { cn } from "../utils/cn";
 
 export function GatewayLayout({
   token,
@@ -156,6 +155,8 @@ export function GatewayLayout({
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {statusQuery.error &&
           (
+            // Main's exact banner: rounded-[14px], block layout. Callout uses
+            // rounded-xl and a flex row, so it is not a 1:1 replacement here.
             <div
               className={cn(
                 "m-4 rounded-[14px] border px-4 py-3 text-sm",

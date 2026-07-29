@@ -3,10 +3,7 @@ import { Navigate, useNavigate, useOutletContext } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { Badge } from "../../design-system/badge";
-import { Button } from "../../design-system/button";
-import { Card } from "../../design-system/card";
-import { Icon } from "../../design-system/icons";
+import { Badge, Button, Card, Icon } from "@ironclaw/ui";
 import { ProviderDialog } from "../settings/components/provider-dialog";
 import { ProviderLoginStatus } from "../settings/components/provider-login-status";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions";
@@ -108,7 +105,7 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
                   setOpen(false);
                   item.run();
                 }}
-                className="flex w-full items-center rounded-[7px] px-2.5 py-1.5 text-left text-[13px] text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex w-full items-center rounded-[7px] px-2.5 py-1.5 text-left text-[13px] text-[var(--v2-text)] transition-colors hover:bg-[var(--v2-surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {item.label}
               </button>

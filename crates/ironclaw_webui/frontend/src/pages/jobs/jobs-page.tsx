@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button";
-import { EmptyPanel } from "../../design-system/primitives";
+import { Button, EmptyPanel } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { JobActivityTab } from "./components/job-activity-tab";
@@ -34,7 +33,7 @@ function FeedbackBanner({ result, onDismiss }) {
       <span className="min-w-0 flex-1">{result.message}</span>
       <button
         onClick={onDismiss}
-        className="shrink-0 opacity-70 hover:opacity-100"
+        className="shrink-0 rounded opacity-70 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         {t("jobs.dismiss")}
       </button>

@@ -1,9 +1,6 @@
 import { Link } from "react-router";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { StatusPill } from "../../../design-system/primitives";
+import { Button, Icon, StatusPill, cn } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
 import { runSummaryView } from "../lib/automations-presenters";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data";
 

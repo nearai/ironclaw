@@ -1,6 +1,6 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
-import { ConfirmDialog } from "../../design-system/confirm-dialog";
+import { ConfirmDialog } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
@@ -39,7 +39,7 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
       <p className="mt-1 text-sm">{t(descriptionKey)}</p>
       <button
         type="button"
-        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
         onClick={onRetry}
         disabled={isRefetching}
       >

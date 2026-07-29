@@ -1,6 +1,4 @@
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
-import type { InterfaceTheme } from "../../../design-system/theme";
+import { Card, Icon, type InterfaceTheme } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useInterfacePreferences } from "../../../lib/interface-preferences";
 import { matchesSearch } from "../lib/settings-search";

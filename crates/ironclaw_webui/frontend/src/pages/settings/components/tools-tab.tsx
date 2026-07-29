@@ -1,7 +1,4 @@
-import { Icon } from "../../../design-system/icons";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Badge, Card, Icon, SelectMenu, type SelectMenuOption } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";
@@ -86,7 +83,7 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
 function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
   const t = useT();
   const description = translatedToolDescription(t, tool);
-  const permissionStates = [
+  const permissionStates: SelectMenuOption[] = [
     { value: "default", label: t("tools.followDefault"), tone: "neutral" },
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
     { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" },
@@ -150,7 +147,15 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
 
       <div className="flex shrink-0 items-center gap-3">
         {isLocked
-          ? (<Badge tone={current.tone} label={current.label} size="sm" />)
+          ? (
+              // Badge has no "neutral" tone; it always rendered the muted
+              // fallback for the default state, so map it explicitly.
+              <Badge
+                tone={current.tone === "neutral" || current.tone === undefined ? "muted" : current.tone}
+                label={current.label}
+                size="sm"
+              />
+            )
           : (
               <SelectMenu
                 value={selectedState}

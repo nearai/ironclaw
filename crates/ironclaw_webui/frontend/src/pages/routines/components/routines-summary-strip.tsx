@@ -1,6 +1,6 @@
-import { Panel, StatCard } from "../../../design-system/primitives";
+import { Panel, StatCard, type BadgeTone } from "@ironclaw/ui";
 
-const SUMMARY_CARDS = [
+const SUMMARY_CARDS: { key: string; label: string; tone: BadgeTone; detail: string }[] = [
   {
     key: "total",
     label: "Total routines",
