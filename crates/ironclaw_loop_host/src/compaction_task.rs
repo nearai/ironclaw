@@ -561,7 +561,14 @@ where
             None => escape_xml(redacted_content),
         };
         let escape_transformed_content = escaped != redacted_content;
-        let escaped_redaction = self.redact_leaks(&escaped)?;
+        let escaped_redaction = if escape_transformed_content {
+            self.redact_leaks(&escaped)?
+        } else {
+            LeakRedaction {
+                content: None,
+                count: 0,
+            }
+        };
         let escaped_content = escaped_redaction.content.unwrap_or(escaped);
         if (escape_transformed_content || escaped_redaction.count > 0)
             && !self
