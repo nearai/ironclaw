@@ -6,10 +6,6 @@ function profileName(profile) {
   return profile?.display_name || profile?.email || profile?.id || "IronClaw";
 }
 
-function profileInitial(profile) {
-  return profileName(profile).trim().charAt(0).toUpperCase() || "I";
-}
-
 function useAccountPopover() {
   const [open, setOpen] = React.useState(false);
   const toggle = React.useCallback(() => {
@@ -67,7 +63,11 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
               referrerPolicy="no-referrer"
               className="h-full w-full object-cover"
             />)
-          : (<span className="place-self-center">{profileInitial(profile)}</span>)}
+          : (<img
+              src="/assets/logo.png"
+              alt=""
+              className="h-full w-full object-cover"
+            />)}
         </div>
         <span className="min-w-0">
           <span className="block truncate text-[13px] font-medium text-[var(--v2-text-strong)]">

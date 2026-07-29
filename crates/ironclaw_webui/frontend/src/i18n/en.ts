@@ -61,16 +61,16 @@ registerPack("en", {
   "status.offline": "offline",
   "status.checking": "checking",
 
-  // Login page
-  "login.tagline": "Gateway v2",
-  "login.hero": "Local agent control without losing the operator trail.",
+  // Login page (copy aligned with the ironclaw.com landing page)
+  "login.tagline": "Built by Near Foundation",
+  "login.hero": "Do what you do best, IronClaw will do the rest.",
   "login.heroSub":
-    "Token access keeps the browser console tied to the same gateway runtime, approvals, tools, and thread state.",
+    "An open-source agent for your busywork — in encrypted enclaves, where your secrets never touch the model.",
   "login.bearerAuth": "Bearer auth",
   "login.bearerDesc":
     "Paste the local gateway token to open the operator surface.",
   "login.console": "IronClaw console",
-  "login.secureSub": "Secure access to the local agent gateway.",
+  "login.secureSub": "Your secrets never leave the encrypted vault.",
   "login.tokenLabel": "Gateway token",
   "login.tokenRequired": "Gateway token is required",
   "login.tokenPlaceholder": "Paste your auth token",
@@ -80,23 +80,23 @@ registerPack("en", {
   "login.oauthProvider": "Continue with {provider}",
   "login.localDevHint": "Running IronClaw locally? Get your sign-in link:",
 
-  // Chat — empty state
+  // Chat — empty state (copy aligned with the ironclaw.com landing page)
   "chat.heroTitle": "Hello, what do you need help with?",
   "chat.heroDesc":
-    "Start with a goal, a repo question, a review request, or work you want inspected.",
-  "chat.emptyTitle": "Start with a concrete operator task.",
+    "Hand off your busywork — it sets itself up in chat, then runs on its own.",
+  "chat.emptyTitle": "More you can hand off.",
   "chat.emptyDesc":
-    "Send a message or ask for a gateway check. The workspace keeps approvals and runtime activity visible as the turn progresses.",
-  "chat.suggestion1": "Map the current gateway state",
-  "chat.suggestion1Desc": "Inspect runtime health, channels, tools, and open work.",
-  "chat.suggestion2": "Review recent thread activity",
-  "chat.suggestion2Desc": "Look for correctness risks, blocked approvals, and follow-ups.",
-  "chat.suggestion3": "Draft an extension readiness check",
-  "chat.suggestion3Desc": "Verify setup, auth, pairing, and available capabilities.",
+    "Here's a taste of what IronClaw takes off your plate. Tap any to start it in your agent.",
+  "chat.suggestion1": "Inbox triage",
+  "chat.suggestion1Desc": "Reads, prioritizes, and summarizes email — and drafts replies for the ones that matter.",
+  "chat.suggestion2": "Daily morning briefing",
+  "chat.suggestion2Desc": "A concise daily summary of your calendar, email, tasks, and key signals.",
+  "chat.suggestion3": "Meeting prep assistant",
+  "chat.suggestion3Desc": "10 minutes before each meeting, get a brief on the company, attendees, and recent news.",
 
   // Chat — input
   "chat.placeholder": "Message IronClaw...",
-  "chat.heroPlaceholder": "Ask IronClaw anything.",
+  "chat.heroPlaceholder": "Triage my inbox every morning",
   "chat.followUpPlaceholder": "Ask for follow-up changes",
   "chat.send": "Send message",
   "chat.attachFiles": "Attach files",
