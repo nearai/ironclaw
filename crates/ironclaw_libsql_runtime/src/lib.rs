@@ -134,9 +134,17 @@ impl Manager for LibSqlConnectionManager {
 }
 
 fn build_pool(db: Arc<libsql::Database>, max_size: usize) -> LibSqlPool {
+    build_pool_with_config(db, max_size, LIBSQL_POOL_CHECKOUT_TIMEOUT)
+}
+
+fn build_pool_with_config(
+    db: Arc<libsql::Database>,
+    max_size: usize,
+    wait_timeout: Duration,
+) -> LibSqlPool {
     match Pool::builder(LibSqlConnectionManager { db })
         .max_size(max_size)
-        .wait_timeout(Some(LIBSQL_POOL_CHECKOUT_TIMEOUT))
+        .wait_timeout(Some(wait_timeout))
         .runtime(deadpool::Runtime::Tokio1)
         .build()
     {
@@ -192,10 +200,21 @@ async fn connect_with_retry<F>(mut open: F) -> Result<libsql::Connection, LibSql
 where
     F: FnMut() -> Result<libsql::Connection, libsql::Error>,
 {
+    connect_with_retry_and_pragmas(&mut open, |_| LIBSQL_CONNECTION_PRAGMAS).await
+}
+
+async fn connect_with_retry_and_pragmas<F, P>(
+    mut open: F,
+    mut pragmas_for_attempt: P,
+) -> Result<libsql::Connection, LibSqlRuntimeError>
+where
+    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
+    P: FnMut(u32) -> &'static str,
+{
     let mut last_error = None;
     for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
         match open() {
-            Ok(connection) => match connection.execute_batch(LIBSQL_CONNECTION_PRAGMAS).await {
+            Ok(connection) => match connection.execute_batch(pragmas_for_attempt(attempt)).await {
                 Ok(_) => return Ok(connection),
                 Err(error) => last_error = Some(error),
             },
@@ -222,7 +241,7 @@ where
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use super::LibSqlRuntime;
+    use super::*;
 
     /// Break caught: permitting two concurrent writer leases would recreate
     /// SQLite writer-lock contention inside one IronClaw process.
@@ -259,5 +278,124 @@ mod tests {
             .await
             .expect("second writer admitted")
             .expect("writer task");
+    }
+
+    #[tokio::test]
+    async fn recycle_rejects_connection_returned_inside_transaction() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("recycle.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let pool = build_pool(database, 1);
+
+        {
+            let connection = pool.get().await.expect("first checkout");
+            connection
+                .execute("BEGIN", ())
+                .await
+                .expect("begin transaction");
+            assert!(!connection.is_autocommit());
+        }
+
+        let next = pool.get().await.expect("replacement checkout");
+        assert!(
+            next.is_autocommit(),
+            "a connection returned mid-transaction must be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_timeout_is_redacted_and_typed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("timeout.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let pool = build_pool_with_config(database, 1, Duration::from_millis(25));
+        let _held = pool.get().await.expect("held checkout");
+
+        let error = match checkout(&pool, LibSqlLane::Write).await {
+            Ok(_) => panic!("checkout must time out"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            LibSqlRuntimeError::Checkout {
+                lane: LibSqlLane::Write,
+                reason: "timeout",
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_retry_stops_after_the_fixed_budget() {
+        let mut attempts = 0;
+        let result = connect_with_retry(|| {
+            attempts += 1;
+            Err(libsql::Error::ConnectionFailed(format!(
+                "synthetic permanent failure {attempts}"
+            )))
+        })
+        .await;
+
+        assert_eq!(attempts, LIBSQL_CONNECT_ATTEMPTS);
+        assert!(matches!(
+            result,
+            Err(LibSqlRuntimeError::Connection {
+                operation: "open or initialize",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_retry_reopens_after_transient_initialization_failure() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("pragma-retry.db");
+        let database = libsql::Builder::new_local(path)
+            .build()
+            .await
+            .expect("database");
+        let mut opens = 0;
+        let mut initializers = 0;
+
+        let connection = connect_with_retry_and_pragmas(
+            || {
+                opens += 1;
+                database.connect()
+            },
+            |_| {
+                initializers += 1;
+                if initializers == 1 {
+                    "THIS IS NOT SQL"
+                } else {
+                    LIBSQL_CONNECTION_PRAGMAS
+                }
+            },
+        )
+        .await
+        .expect("second initialization succeeds");
+
+        assert_eq!(opens, 2);
+        assert_eq!(initializers, 2);
+        let mut rows = connection
+            .query("PRAGMA busy_timeout", ())
+            .await
+            .expect("busy timeout query");
+        let timeout: i64 = rows
+            .next()
+            .await
+            .expect("row read")
+            .expect("row")
+            .get(0)
+            .expect("timeout");
+        assert_eq!(timeout, 5000);
     }
 }

@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
+use ironclaw_libsql_runtime::{LibSqlConnectionLease, LibSqlRuntime};
 
 use crate::backend::EventRecord;
 use crate::db::{
@@ -11,7 +12,6 @@ use crate::db::{
     is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
     record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
-use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
@@ -20,7 +20,7 @@ use crate::{
 };
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
-    pool: LibSqlPool,
+    runtime: Arc<LibSqlRuntime>,
 }
 const LIBSQL_CHILD_ENTRIES_SQL: &str = "SELECT path, length(contents), is_dir \
     FROM root_filesystem_entries \
@@ -45,13 +45,15 @@ const INDEXED_QUERY_PREFIX_SQL: &str = "SELECT path, indexed, version \
      WHERE is_dir = 0 AND (path = ?1 OR (path >= ?2 AND path < ?3))";
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self {
-            pool: build_libsql_pool(db),
-        }
+        Self::from_runtime(Arc::new(LibSqlRuntime::new(db)))
+    }
+
+    pub fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {
+        Self { runtime }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         // Switch the database to WAL journaling once, here, before any
         // transaction is opened. WAL is persisted in the database header, so
         // a single successful run sticks for the life of the file and for
@@ -108,24 +110,27 @@ impl LibSqlRootFilesystem {
         }
     }
 
-    /// Check out a pooled connection for exclusive use until the guard
-    /// drops. Callers must drop the guard before `.await`-ing any other
-    /// `self` method that also checks out — see the invariant note in
-    /// [`crate::libsql_pool`].
-    async fn connect(&self) -> Result<PooledLibSqlConnection, FilesystemError> {
-        self.pool.get().await.map_err(|error| match error {
-            deadpool::managed::PoolError::Backend(error) => {
-                let reason = error.to_string();
-                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
-                error
-            }
-            other => {
-                let reason = format!("libSQL connection pool checkout failed: {other}");
-                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
-                crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
-            }
-        })
+    async fn read_connection(&self) -> Result<LibSqlConnectionLease, FilesystemError> {
+        self.runtime
+            .read()
+            .await
+            .map_err(map_runtime_connection_error)
     }
+
+    async fn write_connection(&self) -> Result<LibSqlConnectionLease, FilesystemError> {
+        self.runtime
+            .write()
+            .await
+            .map_err(map_runtime_connection_error)
+    }
+}
+
+fn map_runtime_connection_error(
+    error: ironclaw_libsql_runtime::LibSqlRuntimeError,
+) -> FilesystemError {
+    let reason = error.to_string();
+    tracing::debug!(%reason, "libSQL root filesystem connection checkout failed");
+    crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
 }
 #[async_trait]
 impl RootFilesystem for LibSqlRootFilesystem {
@@ -157,7 +162,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let content_type_str = entry.content_type.as_str().to_string();
         let body = entry.body;
 
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
             libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
         })?;
@@ -187,7 +192,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -271,7 +276,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             operation: FilesystemOperation::EnsureIndex,
         })?;
 
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         // PR #3661 reviewer fix: the prior SELECT-then-INSERT was racey.
         // Two processes declaring the same spec concurrently could both
         // miss the row and then one would hit a unique-constraint backend
@@ -530,7 +535,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             page.offset,
         )?));
 
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(&sql, params)
             .await
@@ -570,7 +575,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT contents, is_dir FROM root_filesystem_entries WHERE path = ?1",
@@ -604,7 +609,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         path: &VirtualPath,
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let max_bytes = max_bytes as i64;
         let mut rows = conn
             .query(
@@ -652,14 +657,10 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        if matches!(
-            self.exact_entry(path).await?,
-            Some((_, FileType::Directory, _))
-        ) || self.has_child_entry(path).await?
-        {
-            return Err(directory_write_error(path.clone()));
-        }
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+        })?;
         // PR #3660 reviewer fix: legacy write_file must also reset the
         // record metadata (content_type / kind / indexed) and bump the
         // version, otherwise a get() after a write_file-overwrite of a
@@ -667,9 +668,17 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // legacy writes as opaque-file entries: kind=NULL, indexed='{}',
         // content_type=application/octet-stream, version bumped from the
         // current row's version (or 1 for new entries).
-        let rows = conn
-            .execute(
-                r#"
+        let result = async {
+            if matches!(
+                exact_entry_libsql(&conn, path).await?,
+                Some((_, FileType::Directory, _))
+            ) || has_child_entry_libsql(&conn, path).await?
+            {
+                return Err(directory_write_error(path.clone()));
+            }
+            let rows = conn
+                .execute(
+                    r#"
                 INSERT INTO root_filesystem_entries
                     (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
                 VALUES (?1, ?2, 0, 'application/octet-stream', NULL, '{}', 1,
@@ -684,27 +693,38 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     updated_at = excluded.updated_at
                 WHERE root_filesystem_entries.is_dir = 0
                 "#,
-                libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
-            )
-            .await
-            .map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
-            })?;
-        if rows == 0 {
-            return Err(directory_write_error(path.clone()));
+                    libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                })?;
+            if rows == 0 {
+                return Err(directory_write_error(path.clone()));
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                }),
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(error)
+            }
+        }
     }
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        if matches!(
-            self.exact_entry(path).await?,
-            Some((_, FileType::Directory, _))
-        ) || self.has_child_entry(path).await?
-        {
-            return Err(directory_append_error(path.clone()));
-        }
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error)
+        })?;
         // PR #3660 reviewer fix: same metadata-reset concern as write_file.
         // Append also resets kind/indexed/content_type to opaque-file
         // defaults — appending bytes onto a previously record-shaped
@@ -716,26 +736,49 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // deprecation note). New callers must use `append`/`tail` for
         // log-shaped mounts or `get`+`put` read-modify-write — both avoid
         // the full-row rewrite.
-        conn.execute(
-            r#"
-            INSERT INTO root_filesystem_entries
-                (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
-            VALUES (?1, ?2, 0, 'application/octet-stream', NULL, '{}', 1,
-                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            ON CONFLICT (path) DO UPDATE SET
-                contents = CAST(root_filesystem_entries.contents || excluded.contents AS BLOB),
-                is_dir = 0,
-                content_type = excluded.content_type,
-                kind = excluded.kind,
-                indexed = excluded.indexed,
-                version = root_filesystem_entries.version + 1,
-                updated_at = excluded.updated_at
-            "#,
-            libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
-        Ok(())
+        let result = async {
+            if matches!(
+                exact_entry_libsql(&conn, path).await?,
+                Some((_, FileType::Directory, _))
+            ) || has_child_entry_libsql(&conn, path).await?
+            {
+                return Err(directory_append_error(path.clone()));
+            }
+            conn.execute(
+                r#"
+                INSERT INTO root_filesystem_entries
+                    (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
+                VALUES (?1, ?2, 0, 'application/octet-stream', NULL, '{}', 1,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT (path) DO UPDATE SET
+                    contents = CAST(root_filesystem_entries.contents || excluded.contents AS BLOB),
+                    is_dir = 0,
+                    content_type = excluded.content_type,
+                    kind = excluded.kind,
+                    indexed = excluded.indexed,
+                    version = root_filesystem_entries.version + 1,
+                    updated_at = excluded.updated_at
+                "#,
+                libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))
+        }
+        .await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error)
+                }),
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(error)
+            }
+        }
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -780,45 +823,59 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
         // Range bounds rather than LIKE for the same reason reads use them:
         // `root_filesystem_entries` and `_sequences` key on path and
         // `_events` carries `idx_root_filesystem_events_path_seq`, so a
         // subtree delete seeks each index instead of scanning every table.
         let (prefix_lower, prefix_upper) = descendant_path_range(path);
-        let deleted = conn
-            .execute(
-                "DELETE FROM root_filesystem_entries \
+        let result = async {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM root_filesystem_entries \
+                 WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+                    libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::Delete, error)
+                })?;
+            if deleted == 0 {
+                return Err(not_found(path.clone(), FilesystemOperation::Delete));
+            }
+            // Sweep the append-event log for this path and its subtree.
+            conn.execute(
+                "DELETE FROM root_filesystem_events \
                  WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
                 libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
             )
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        if deleted == 0 {
-            return Err(not_found(path.clone(), FilesystemOperation::Delete));
+            // Sweep any reserved sequence counter for this path and subtree.
+            conn.execute(
+                "DELETE FROM root_filesystem_sequences \
+                 WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+                libsql::params![path.as_str(), prefix_lower, prefix_upper],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+            Ok(())
         }
-        // Sweep the append-event log for this path and its subtree. Append-only
-        // finalized assistant messages live in `root_filesystem_events`, so a
-        // delete/recreate of the same thread would otherwise replay stale
-        // history from the old log. Mirrors the entries-delete predicate above.
-        conn.execute(
-            "DELETE FROM root_filesystem_events \
-             WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
-            libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        // Sweep any reserved sequence counter for this path and its subtree so
-        // a delete/recreate restarts sequences from 1 rather than resuming
-        // stale state. Mirrors the entries-delete predicate above.
-        conn.execute(
-            "DELETE FROM root_filesystem_sequences \
-             WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
-            libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        Ok(())
+        .await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error)),
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(error)
+            }
+        }
     }
 
     async fn delete_if_version(
@@ -837,18 +894,17 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // outcome. `BEGIN IMMEDIATE` takes the write lock up front (same
         // idiom as `put`) so the DELETE and the follow-up SELECT run as one
         // unit on one connection — this also keeps the call stack to a
-        // single checkout, matching the one-checkout-per-call-stack
-        // invariant the bounded pool (see `libsql_pool`, issue #5466) enforces
-        // (no nested `self.connect()`).
+        // single writer lease, matching the one-lease-per-call-stack invariant
+        // the shared libSQL runtime enforces (no nested writer acquisition).
         //
         // Round-A review: validate `expected_version` before taking the
-        // pool checkout / write lock. An out-of-range version can never
+        // writer checkout / write lock. An out-of-range version can never
         // match a real row, so failing closed here avoids holding a
         // contended connection (and SQLite's write lock) for a call
         // destined to error — relevant under the concurrent CAS storms
         // this pool exists to survive.
         let expected_raw = record_version_to_i64(path, expected_version)?;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
@@ -868,7 +924,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
         // insert. We capture the assigned id via last_insert_rowid() under
         // the same connection so concurrent writers don't observe each
@@ -910,49 +966,63 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if payloads.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         // One multi-row INSERT per chunk collapses N appends into one round-trip.
         // `seq` is INTEGER PRIMARY KEY AUTOINCREMENT, assigned in VALUES order;
         // `RETURNING seq` then sorted ASC recovers payload order
         // deterministically. Chunk the batch so the bound parameter count
         // (2 per row) stays well under SQLite's default 999-parameter limit.
-        // All chunks run inside a single transaction handle that auto-rolls-back
-        // on drop if not committed, making this cancellation-safe.
+        // BEGIN IMMEDIATE acquires SQLite's writer lock before any batch work.
+        // The shared writer lease prevents in-process competition; the
+        // immediate transaction fails at admission if an external writer owns
+        // the database.
         const ROWS_PER_STATEMENT: usize = 256;
-        let tx = conn
-            .transaction()
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
-        let mut seqs: Vec<i64> = Vec::with_capacity(payloads.len());
-        let mut iter = payloads.into_iter().peekable();
-        while iter.peek().is_some() {
-            let mut sql =
-                String::from("INSERT INTO root_filesystem_events (path, payload) VALUES ");
-            let mut params: Vec<libsql::Value> = Vec::new();
-            for (row_idx, payload) in (&mut iter).take(ROWS_PER_STATEMENT).enumerate() {
-                if row_idx > 0 {
-                    sql.push(',');
+        let result = async {
+            let mut seqs: Vec<i64> = Vec::with_capacity(payloads.len());
+            let mut iter = payloads.into_iter().peekable();
+            while iter.peek().is_some() {
+                let mut sql =
+                    String::from("INSERT INTO root_filesystem_events (path, payload) VALUES ");
+                let mut params: Vec<libsql::Value> = Vec::new();
+                for (row_idx, payload) in (&mut iter).take(ROWS_PER_STATEMENT).enumerate() {
+                    if row_idx > 0 {
+                        sql.push(',');
+                    }
+                    sql.push_str("(?, ?)");
+                    params.push(libsql::Value::Text(path.as_str().to_string()));
+                    params.push(libsql::Value::Blob(payload));
                 }
-                sql.push_str("(?, ?)");
-                params.push(libsql::Value::Text(path.as_str().to_string()));
-                params.push(libsql::Value::Blob(payload));
-            }
-            sql.push_str(" RETURNING seq");
-            let mut rows = tx.query(&sql, params).await.map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::Append, error)
-            })?;
-            while let Some(row) = rows.next().await.map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::Append, error)
-            })? {
-                let seq_raw: i64 = row.get(0).map_err(|error| {
+                sql.push_str(" RETURNING seq");
+                let mut rows = conn.query(&sql, params).await.map_err(|error| {
                     libsql_db_error(path.clone(), FilesystemOperation::Append, error)
                 })?;
-                seqs.push(seq_raw);
+                while let Some(row) = rows.next().await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                })? {
+                    let seq_raw: i64 = row.get(0).map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                    })?;
+                    seqs.push(seq_raw);
+                }
             }
+            Ok::<_, FilesystemError>(seqs)
         }
-        tx.commit()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        .await;
+        let mut seqs = match result {
+            Ok(seqs) => {
+                conn.execute("COMMIT", ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                })?;
+                seqs
+            }
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(error);
+            }
+        };
         seqs.sort_unstable();
         seqs.into_iter()
             .map(|seq_raw| seq_no_from_i64(path, seq_raw, FilesystemOperation::Append))
@@ -976,7 +1046,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if max_records == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let from_raw = i64::try_from(from.get()).map_err(|error| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::Tail,
@@ -1023,7 +1093,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         path: &VirtualPath,
         from: SeqNo,
     ) -> Result<Option<SeqNo>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::HeadSeq,
@@ -1062,7 +1132,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -1095,7 +1165,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
             libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
         })?;
@@ -1449,7 +1519,7 @@ impl LibSqlRootFilesystem {
         &self,
         path: &VirtualPath,
     ) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 "SELECT length(contents), is_dir, CAST(strftime('%s', updated_at) AS INTEGER) AS updated_at_epoch FROM root_filesystem_entries WHERE path = ?1",
@@ -1489,7 +1559,7 @@ impl LibSqlRootFilesystem {
         parent: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let (prefix_lower, prefix_upper) = descendant_path_range(parent);
         let mut rows = conn
             .query(
@@ -1529,7 +1599,7 @@ impl LibSqlRootFilesystem {
     }
 
     async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         has_child_entry_libsql(&conn, parent).await
     }
 
@@ -1547,7 +1617,7 @@ impl LibSqlRootFilesystem {
         if keys.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut out = std::collections::HashMap::new();
         // Scan the spec catalog for FTS specs whose prefix is path or any
         // ancestor (so callers may declare the index on a higher prefix
@@ -1623,7 +1693,7 @@ impl LibSqlRootFilesystem {
         embedding: &[f32],
         limit: u32,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let (prefix_lower, prefix_upper) = descendant_path_range(path);
         let mut rows = conn
             .query(
@@ -2084,7 +2154,6 @@ mod tests {
     //! reach.
 
     use super::*;
-    use crate::libsql_pool::{LIBSQL_CONNECT_ATTEMPTS, connect_with_retry};
     use crate::{CasExpectation, Entry, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
@@ -2110,7 +2179,7 @@ mod tests {
             prefix_upper,
             "/tenants/tenant/users/user/secrets/product-auth0"
         );
-        let conn = fs.connect().await.unwrap();
+        let conn = fs.read_connection().await.unwrap();
         for query in [LIBSQL_CHILD_ENTRIES_SQL, LIBSQL_HAS_CHILD_ENTRY_SQL] {
             let explain_sql = format!("EXPLAIN QUERY PLAN {query}");
             let mut rows = conn
@@ -2155,7 +2224,7 @@ mod tests {
         let (fs, _dir) = fresh_backend().await;
         let parent = VirtualPath::new("/memory/extensions/.installations/v2/memberships").unwrap();
         let (prefix_lower, prefix_upper) = descendant_path_range(&parent);
-        let conn = fs.connect().await.unwrap();
+        let conn = fs.read_connection().await.unwrap();
         for sql in [RECORD_QUERY_PREFIX_SQL, INDEXED_QUERY_PREFIX_SQL] {
             let mut rows = conn
                 .query(
@@ -2195,7 +2264,7 @@ mod tests {
     #[tokio::test]
     async fn range_bounds_select_exactly_what_the_like_predicate_did() {
         let (fs, _dir) = fresh_backend().await;
-        let conn = fs.connect().await.unwrap();
+        let conn = fs.read_connection().await.unwrap();
         let corpus = [
             "/memory/a",
             "/memory/a/b",
@@ -2320,7 +2389,7 @@ mod tests {
         for _ in 0..10 {
             let fs = Arc::clone(&fs);
             handles.push(tokio::spawn(async move {
-                let conn = fs.connect().await?;
+                let conn = fs.read_connection().await?;
                 let mut rows = conn
                     .query("PRAGMA busy_timeout", ())
                     .await
@@ -2355,21 +2424,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("append-contention-test.db");
         let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = Arc::new(LibSqlRootFilesystem {
-            pool: crate::libsql_pool::build_libsql_pool_with_config(
-                db,
-                2,
-                std::time::Duration::from_secs(1),
-            ),
-        });
+        let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
         fs.run_migrations().await.unwrap();
 
-        let writer = fs.connect().await.unwrap();
-        writer.execute("BEGIN IMMEDIATE", ()).await.unwrap();
-
-        // Configure the pool's only other connection to fail quickly while
-        // the first connection holds SQLite's single-writer lock.
-        let contender = fs.connect().await.unwrap();
+        // Configure the runtime's writer connection to fail quickly against a
+        // lock owned outside the shared process-local admission lane.
+        let contender = fs.write_connection().await.unwrap();
         let mut configured = contender
             .query("PRAGMA busy_timeout = 1", ())
             .await
@@ -2381,6 +2441,9 @@ mod tests {
         assert_eq!(timeout_ms, 1);
         drop(rows);
         drop(contender);
+
+        let writer = db.connect().unwrap();
+        writer.execute("BEGIN IMMEDIATE", ()).await.unwrap();
 
         let path = VirtualPath::new("/resources/deltas/log").unwrap();
         let append_fs = Arc::clone(&fs);
@@ -2412,30 +2475,89 @@ mod tests {
         ));
     }
 
+    /// Break caught: deleting the entry row before a later event-log cleanup
+    /// fails would expose a partially applied filesystem delete.
     #[tokio::test]
-    async fn connect_retries_transient_open_failures_before_succeeding() {
+    async fn delete_rolls_back_all_tables_when_event_cleanup_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("connect-retry-branch-test.db");
-        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-        let mut attempts = 0;
+        let db_path = dir.path().join("atomic-delete-test.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem::new(Arc::clone(&db));
+        fs.run_migrations().await.unwrap();
 
-        let conn = connect_with_retry(|| {
-            attempts += 1;
-            if attempts < LIBSQL_CONNECT_ATTEMPTS {
-                return Err(libsql::Error::ConnectionFailed(format!(
-                    "synthetic transient failure {attempts}"
-                )));
-            }
-            db.connect()
-        })
-        .await
-        .unwrap();
+        let path = VirtualPath::new("/resources/atomic/delete").unwrap();
+        fs.write_file(&path, b"entry").await.unwrap();
+        fs.append(&path, b"event".to_vec()).await.unwrap();
 
-        assert_eq!(attempts, LIBSQL_CONNECT_ATTEMPTS);
-        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        let timeout: i64 = row.get(0).unwrap();
-        assert_eq!(timeout, 5000);
+        let connection = db.connect().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_event_delete \
+                 BEFORE DELETE ON root_filesystem_events \
+                 WHEN OLD.path = '/resources/atomic/delete' \
+                 BEGIN \
+                   SELECT RAISE(ABORT, 'synthetic event cleanup failure'); \
+                 END;",
+            )
+            .await
+            .unwrap();
+
+        let result = fs.delete(&path).await;
+        assert!(matches!(result, Err(FilesystemError::Backend { .. })));
+        assert!(
+            fs.get(&path).await.unwrap().is_some(),
+            "a failed multi-table delete must restore the entry row"
+        );
+        assert_eq!(
+            fs.tail(&path, SeqNo::ZERO).await.unwrap().len(),
+            1,
+            "a failed multi-table delete must preserve append events"
+        );
+    }
+
+    /// Break caught: checking for descendants before entering the writer lane
+    /// lets a child appear between validation and the parent-file write.
+    #[tokio::test]
+    async fn write_file_rechecks_directory_conflict_inside_writer_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("writer-lane-precondition-test.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let runtime = Arc::new(LibSqlRuntime::new(Arc::clone(&db)));
+        let fs = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
+        fs.run_migrations().await.unwrap();
+
+        let held_writer = runtime.write().await.unwrap();
+        let parent = VirtualPath::new("/resources/parent").unwrap();
+        let write_fs = Arc::clone(&fs);
+        let write_parent = parent.clone();
+        let mut parent_write =
+            tokio::spawn(async move { write_fs.write_file(&write_parent, b"parent").await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let external = db.connect().unwrap();
+        external
+            .execute(
+                "INSERT INTO root_filesystem_entries \
+                 (path, contents, is_dir, content_type, kind, indexed, version) \
+                 VALUES (?1, X'', 0, 'application/octet-stream', NULL, '{}', 1)",
+                libsql::params!["/resources/parent/child"],
+            )
+            .await
+            .unwrap();
+        drop(held_writer);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut parent_write)
+            .await
+            .expect("parent write completes")
+            .expect("parent write task");
+        assert!(
+            matches!(result, Err(FilesystemError::Backend { .. })),
+            "the parent file must be rejected after a child appears: {result:?}"
+        );
+        assert!(
+            fs.get(&parent).await.unwrap().is_none(),
+            "the rejected parent file must not coexist with its child"
+        );
     }
 
     /// `run_migrations` must switch the database into WAL journaling, which
@@ -2448,7 +2570,7 @@ mod tests {
     #[tokio::test]
     async fn migrations_enable_wal_journal_mode() {
         let (fs, _dir) = fresh_backend().await;
-        let conn = fs.connect().await.unwrap();
+        let conn = fs.read_connection().await.unwrap();
         let mut rows = conn.query("PRAGMA journal_mode", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let mode: String = row.get(0).unwrap();
@@ -2467,7 +2589,7 @@ mod tests {
     #[tokio::test]
     async fn connect_applies_performance_pragmas() {
         let (fs, _dir) = fresh_backend().await;
-        let conn = fs.connect().await.unwrap();
+        let conn = fs.read_connection().await.unwrap();
 
         let mut rows = conn.query("PRAGMA synchronous", ()).await.unwrap();
         let synchronous: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
@@ -2482,50 +2604,6 @@ mod tests {
         assert_eq!(busy_timeout, 5000, "busy_timeout must remain 5000");
     }
 
-    /// A pool checkout that times out waiting for a free connection (every
-    /// slot held by another in-flight operation) must surface as a
-    /// `FilesystemOperation::Connect` infrastructure error through
-    /// `connect()`'s `other` match arm — not panic, hang past the
-    /// configured timeout, or lose the fact that this was a pool
-    /// exhaustion rather than some other backend failure. Uses the
-    /// `build_libsql_pool_with_config` test seam to build a deliberately
-    /// tiny (size-1), fast-timing-out pool so the test doesn't wait out
-    /// the real 10s production timeout.
-    #[tokio::test]
-    async fn connect_maps_pool_checkout_timeout_to_connect_infrastructure_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("checkout-timeout-test.db");
-        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = LibSqlRootFilesystem {
-            pool: crate::libsql_pool::build_libsql_pool_with_config(
-                db,
-                1,
-                std::time::Duration::from_millis(50),
-            ),
-        };
-        fs.run_migrations().await.unwrap();
-
-        // Hold the pool's only connection for the rest of the test.
-        let _held = fs.connect().await.unwrap();
-
-        // The pool has no free connection and none will be returned before
-        // the 50ms wait_timeout elapses, so this checkout must time out
-        // rather than hang or succeed.
-        let Err(err) = fs.connect().await else {
-            panic!("checkout must fail while the only connection is held");
-        };
-        match err {
-            FilesystemError::BackendInfrastructure { operation, reason } => {
-                assert_eq!(operation, FilesystemOperation::Connect);
-                assert!(
-                    !reason.is_empty(),
-                    "checkout-timeout reason must not be empty"
-                );
-            }
-            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
-        }
-    }
-
     /// Deterministic, single-task regression pin for the atomicity fix
     /// (commit 1792aebb2 / PR #5749 round 4): `delete_if_version`'s
     /// zero-rows diagnosis must reuse the SAME connection the conditional
@@ -2534,25 +2612,17 @@ mod tests {
     /// doesn't actually discriminate this — every racer shares one
     /// pre-fetched version and nothing recreates the path mid-round, so
     /// it passes with or without the fix. This test does discriminate it,
-    /// with no concurrency required: build a deliberately size-1 pool (via
-    /// `build_libsql_pool_with_config`), let `delete_if_version` check out
-    /// its only connection, and hit the stale-version (0-rows) branch. If
-    /// the diagnosis internally called `self.connect()` again — the
-    /// pre-fix pattern — that second checkout would deadlock against the
-    /// first (nothing else can return the only connection) and time out;
-    /// reusing the passed-in `conn` completes immediately.
+    /// with no concurrency required: the shared runtime's writer lane has
+    /// exactly one connection, so `delete_if_version` checks it out and hits
+    /// the stale-version (0-rows) branch. If diagnosis tried to acquire a
+    /// second writer lease, it would deadlock against the first; reusing the
+    /// passed-in connection completes immediately.
     #[tokio::test]
     async fn delete_if_version_diagnosis_reuses_the_delete_connection_under_a_size_one_pool() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("delete-single-conn-test.db");
         let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = LibSqlRootFilesystem {
-            pool: crate::libsql_pool::build_libsql_pool_with_config(
-                db,
-                1,
-                std::time::Duration::from_millis(200),
-            ),
-        };
+        let fs = LibSqlRootFilesystem::new(db);
         fs.run_migrations().await.unwrap();
 
         let path = VirtualPath::new("/secrets/single-conn").unwrap();

@@ -3826,6 +3826,7 @@ dependencies = [
  "deadpool",
  "deadpool-postgres",
  "ironclaw_host_api",
+ "ironclaw_libsql_runtime",
  "ironclaw_observability",
  "ironclaw_safety",
  "libsql",
