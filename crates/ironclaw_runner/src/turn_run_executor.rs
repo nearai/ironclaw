@@ -144,7 +144,7 @@ pub struct RebornTurnRunExecutor {
     gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
     /// After-turn interaction recorder (mem0 `add` seam). Optional; production
     /// wires `None` pending #5013 — only compositions that resolve a memory
-    /// document-store provider attach it, and a `Completed` run finishes cleanly
+    /// bound memory provider attach it, and a `Completed` run finishes cleanly
     /// without it (the same genuine optionality as `memory_context_service` on
     /// `DefaultPlannedRuntimeParts`).
     // arch-exempt: optional_arc, deferred production wiring, issue #5013

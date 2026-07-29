@@ -41,4 +41,7 @@ tracing = "0.1"
 # Self dev-dependency enables `test-support` for the crate's integration tests
 # in `tests/`, which import the mock transport.
 ironclaw_memory_mem0 = { path = ".", features = ["test-support"] }
+# The provider-level MemoryService contract suite this crate wires in
+# tests/memory_service_contract.rs (over a stateful fake mem0 server).
+ironclaw_memory = { path = "../ironclaw_memory", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -208,6 +208,28 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// A tool with this model-facing wire name (e.g. `ironclaw__memory__search`)
+    /// was offered to the model on at least one captured request.
+    pub fn assert_model_tool_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Ok(());
+        }
+        Err(format!("tool {tool_name:?} was not offered to the model; offered: {names:?}").into())
+    }
+
+    /// No captured request offered a tool with this model-facing wire name.
+    pub fn assert_model_tool_not_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Err(format!(
+                "tool {tool_name:?} must NOT be offered to the model; offered: {names:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
@@ -761,6 +783,52 @@ impl RebornIntegrationHarness {
             format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
                 .into(),
         )
+    }
+
+    /// Assert the most recent persisted denial tells the model what would
+    /// unlock the call.
+    ///
+    /// Reads the recovery hint off the persisted `ToolResultReference`
+    /// envelope — the same bytes the model is handed on the next turn — so it
+    /// pins the whole path: denial -> `DenyReason` -> recovery observation ->
+    /// persistence. Denials carried `model_observation: None` before #6792,
+    /// so this asserted nothing that existed.
+    pub async fn assert_denial_recovery_hint(&self, expected: &str) -> HarnessResult<()> {
+        let hints = self.persisted_tool_recovery_hints().await?;
+        if hints.iter().any(|hint| hint.as_deref() == Some(expected)) {
+            return Ok(());
+        }
+        Err(
+            format!("no persisted tool result carried recovery hint {expected:?}; saw {hints:?}")
+                .into(),
+        )
+    }
+
+    /// Every persisted `ToolResultReference`'s `model_observation.recovery
+    /// .recovery_hint`, in thread order. `None` where an observation or its
+    /// recovery block is absent.
+    async fn persisted_tool_recovery_hints(&self) -> HarnessResult<Vec<Option<String>>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        Ok(history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| {
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
+            })
+            .map(|envelope| {
+                envelope
+                    .model_observation
+                    .as_ref()
+                    .and_then(|observation| observation.get("recovery"))
+                    .and_then(|recovery| recovery.get("recovery_hint"))
+                    .and_then(|hint| hint.as_str())
+                    .map(str::to_string)
+            })
+            .collect())
     }
 
     /// Every persisted `ToolResultReference`'s `(safe_summary,

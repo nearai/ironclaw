@@ -6,7 +6,7 @@ use ironclaw_host_runtime::PROFILE_SET_CAPABILITY_ID;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, memory_mounts};
 
-/// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+/// Group whose ONLY capability is `ironclaw.memory.profile_set` (E-PROFILE seam).
 /// Uses `new_with_options` (not `core_builtin_tools_from_runtime`), so
 /// `profile_filesystem` is populated from `services.local_dev_profile_filesystem_for_test()`
 /// — the read-back half of the round trip a `RebornIntegrationGroup::profile_tools()`

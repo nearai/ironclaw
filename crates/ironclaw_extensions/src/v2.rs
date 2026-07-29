@@ -1054,15 +1054,23 @@ impl CapabilityDeclV2 {
         raw: RawCapabilityV2,
         extension_id: &ExtensionId,
         host_port_catalog: &HostPortCatalog,
+        extra_id_namespace: Option<&str>,
     ) -> Result<Self, ManifestV2Error> {
         let id = CapabilityId::new(raw.id)?;
         // Provider-prefix check without an intermediate `format!` allocation:
         // capability id must be `<extension_id>.<...>` (the dot is required so
-        // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`).
-        let prefixed = id
-            .as_str()
-            .strip_prefix(extension_id.as_str())
-            .is_some_and(|rest| rest.starts_with('.'));
+        // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`). A caller
+        // may open exactly one extra reserved namespace — the v3 parser passes
+        // the stable memory-tool namespace for `[memory]`-declaring manifests
+        // (host-bundled only), so a swapped memory backend keeps the stable
+        // `ironclaw.memory.*` tool ids.
+        let in_namespace = |namespace: &str| {
+            id.as_str()
+                .strip_prefix(namespace)
+                .is_some_and(|rest| rest.starts_with('.'))
+        };
+        let prefixed =
+            in_namespace(extension_id.as_str()) || extra_id_namespace.is_some_and(in_namespace);
         if !prefixed {
             return Err(ManifestV2Error::CapabilityIdNotPrefixed {
                 id,
