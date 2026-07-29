@@ -34,6 +34,7 @@ mod auth_prompt;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
+mod command_admission;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -103,14 +104,18 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
+pub use command_admission::DirectConversationCommandAdmission;
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     RejectingProductCommandAdmissionService,
 };
 pub use commands::{
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID, ProductCommand,
+    CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
-    ProductModelCommandInput, product_command_descriptors,
+    ProductModelCommandInput, ProductStatusCommandInput, UnknownProductCommandName,
+    command_help_text, declared_command_help_text, product_command_descriptors,
+    render_command_result_text, validate_declared_product_command,
 };
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
@@ -173,7 +178,8 @@ pub use ironclaw_host_api::product_adapter::{
     ProtocolAuthFailure, ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,
     RedactedDebug, RedactedString, ScopedApprovalResolutionPayload, TargetCandidate, TargetQuery,
     TrustedInboundContext, UserMessagePayload, VerifiedAuthClaim, VerifiedInbound,
-    parse_interaction_resolution_text, parse_product_slash_command, strip_wrapping_inline_code,
+    classify_channel_inbound_text, parse_interaction_resolution_text, parse_product_slash_command,
+    strip_wrapping_inline_code,
 };
 #[cfg(feature = "host-auth-mint")]
 pub use ironclaw_host_api::product_adapter::{

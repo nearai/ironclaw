@@ -9,9 +9,10 @@
 //! Per-request order (pinned by the router contract tests):
 //! match → method / body-limit / rate-limit / deadline enforcement →
 //! verification recipe execution (host-side, constant-time; signing secrets
-//! never reach the adapter) → `ChannelAdapter::inbound` (pure, panic-isolated,
-//! bounded input) → outcome handling (durable dedupe + admission commit
-//! before any 2xx).
+//! never reach the adapter) → manifest-declared non-secret configuration
+//! resolution for the verified installation → `ChannelAdapter::inbound`
+//! (pure, panic-isolated, bounded input) → outcome handling (durable dedupe +
+//! admission commit before any 2xx).
 //!
 //! This crate stays transport-neutral: the router consumes
 //! [`IngressRequest`]/[`IngressResponse`] values and composition wraps it in
@@ -22,9 +23,9 @@ mod verifier;
 
 pub use router::{
     ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
-    InboundSink, InboundSinkError, IngressPortError, IngressRateLimitConfig, IngressRequest,
-    IngressResponse, IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStore,
-    canonical_ingress_path,
+    InboundSink, InboundSinkError, IngressConfigurationPort, IngressPortError,
+    IngressRateLimitConfig, IngressRequest, IngressResponse, IngressRouterConfig,
+    IngressSecretsPort, ReplyContextKey, ReplyContextStore, canonical_ingress_path,
 };
 pub use verifier::{
     IngressHeaders, MAX_VERIFICATION_CANDIDATES, VerificationCandidate, VerificationFailure,
