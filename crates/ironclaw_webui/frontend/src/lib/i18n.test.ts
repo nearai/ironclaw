@@ -261,6 +261,18 @@ test("locale packs include client-generated chat failure copy", () => {
   }
 });
 
+test("locale packs include composer command menu and command failure copy", () => {
+  const requiredKeys = ["chat.commandMenu", "chat.commandFailed"];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
 test("locale packs include lazy-route loading and recovery copy", () => {
   const requiredKeys = [
     "app.loadingPage",

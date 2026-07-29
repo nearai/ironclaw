@@ -85,6 +85,7 @@ function renderChat({
   consoleErrors = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
+  contextOverrides = {},
 }) {
   const components = {
     ApprovalCard() {},
@@ -140,8 +141,11 @@ function renderChat({
       removeEventListener: () => {},
     },
     useChat: () => hookState,
+    useChatCommands: () => [],
+    matchCommand: () => null,
     useInterfacePreferences: () => ({ showChatLogsShortcut }),
     useT: () => (key) => key,
+    ...contextOverrides,
   };
 
   vm.runInNewContext(chatSourceForTest(), context);
@@ -902,4 +906,109 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
   assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
+});
+
+test("Chat intercepts known slash text as a command on an active thread", async () => {
+  const sends = [];
+  const commandRuns = [];
+  const { tree, components } = renderChat({
+    activeThreadId: "thread-1",
+    contextOverrides: {
+      useChatCommands: () => [{ name: "status", usage: "/status" }],
+      matchCommand: (text) => (text.startsWith("/status") ? { name: "status" } : null),
+    },
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => {
+        sends.push(content);
+        return {};
+      },
+      runCommand: async (text) => {
+        commandRuns.push(text);
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+
+  await props.onSend("/status", {});
+  assert.deepEqual(commandRuns, ["/status"], "known slash text executes as a command");
+  assert.deepEqual(sends, [], "commands never submit a turn");
+
+  await props.onSend("/status", { images: [{ id: "img-1" }] });
+  assert.deepEqual(
+    sends,
+    ["/status"],
+    "slash text with an image submits as a message so the image is not dropped"
+  );
+  assert.deepEqual(commandRuns, ["/status"], "no second command run");
+
+  await props.onSend("plain text", {});
+  assert.deepEqual(sends, ["/status", "plain text"], "ordinary text still submits");
+});
+
+test("Chat landing view submits known slash text as a message instead of a command", async () => {
+  const sends = [];
+  const commandRuns = [];
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    contextOverrides: {
+      useChatCommands: () => [{ name: "status", usage: "/status" }],
+      matchCommand: (text) => (text.startsWith("/status") ? { name: "status" } : null),
+    },
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => {
+        sends.push(content);
+        return { thread_id: "thread-new" };
+      },
+      runCommand: async (text) => {
+        commandRuns.push(text);
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  // The landing view renders EmptyState (which owns the composer); the
+  // thread view's ChatInput is not mounted yet.
+  const landing = findComponent(tree, components.EmptyState);
+  const props = componentProps(landing, components.EmptyState);
+  await props.onSend("/status", {});
+  assert.deepEqual(commandRuns, [], "no thread yet: the command endpoint is unreachable");
+  assert.deepEqual(sends, ["/status"], "slash text opens the thread as an ordinary message");
+  assert.equal(props.commands.length, 0, "the landing composer hides the command menu");
 });

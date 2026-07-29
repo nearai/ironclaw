@@ -98,6 +98,8 @@ registerPack("zh-CN", {
   "chat.attachFiles": "附加文件",
   "chat.attachmentRemove": "移除附件",
   "chat.attachmentDropHint": "拖放文件以附加",
+  "chat.commandMenu": "命令",
+  "chat.commandFailed": "无法执行该命令。",
   "chat.attachmentTooMany": "每条消息最多可附加 {max} 个文件。",
   "chat.attachmentTooLarge": "{name} 太大（每个文件最大 {max}）。",
   "chat.attachmentTotalTooLarge": "附件超过 {max} 的总限制。",

@@ -481,6 +481,22 @@ export function sendMessage({
   );
 }
 
+// --- Product commands ---
+
+export function listChatCommands() {
+  return apiFetch(`${V2_BASE}/commands`);
+}
+
+export function executeChatCommand({ threadId, text }) {
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId ?? "")}/commands`,
+    {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    },
+  );
+}
+
 // --- Timeline ---
 
 export function fetchTimeline({ threadId, limit, cursor } = {}) {

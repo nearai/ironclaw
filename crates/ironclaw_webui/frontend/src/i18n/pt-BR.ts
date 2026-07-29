@@ -98,6 +98,8 @@ registerPack("pt-BR", {
   "chat.attachFiles": "Anexar arquivos",
   "chat.attachmentRemove": "Remover anexo",
   "chat.attachmentDropHint": "Solte os arquivos para anexar",
+  "chat.commandMenu": "Comandos",
+  "chat.commandFailed": "Não foi possível executar esse comando.",
   "chat.attachmentTooMany": "Você pode anexar no máximo {max} arquivos por mensagem.",
   "chat.attachmentTooLarge": "{name} é muito grande (máximo {max} por arquivo).",
   "chat.attachmentTotalTooLarge": "Os anexos excedem o limite total de {max}.",

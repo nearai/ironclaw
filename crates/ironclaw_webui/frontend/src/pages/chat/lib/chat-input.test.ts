@@ -121,6 +121,7 @@ function renderChatInput({
     useT: () => (key) => key,
     authScope: authScopeFn,
     stageFiles: async () => ({ staged: [], errors: [] }),
+    commandMenuMatches: () => [],
     useAttachmentConfig: () => ({
       accept: [],
       maxCount: 10,

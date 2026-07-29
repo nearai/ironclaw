@@ -98,6 +98,8 @@ registerPack("de", {
   "chat.attachFiles": "Dateien anhängen",
   "chat.attachmentRemove": "Anhang entfernen",
   "chat.attachmentDropHint": "Dateien zum Anhängen ablegen",
+  "chat.commandMenu": "Befehle",
+  "chat.commandFailed": "Dieser Befehl konnte nicht ausgeführt werden.",
   "chat.attachmentTooMany": "Sie können höchstens {max} Dateien pro Nachricht anhängen.",
   "chat.attachmentTooLarge": "{name} ist zu groß (max. {max} pro Datei).",
   "chat.attachmentTotalTooLarge": "Anhänge überschreiten das Gesamtlimit von {max}.",

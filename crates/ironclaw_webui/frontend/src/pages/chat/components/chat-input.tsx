@@ -5,6 +5,7 @@ import { useT } from "../../../lib/i18n";
 import { authScope } from "../../../lib/auth-scope";
 import { stageFiles } from "../lib/attachments";
 import { ATTACHMENTS_ONLY_CONTENT } from "../lib/attachment-sentinel";
+import { commandMenuMatches } from "../lib/chat-commands";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig";
 import {
   NEW_DRAFT_KEY,
@@ -18,6 +19,7 @@ import {
 
 export function ChatInput({
   onSend,
+  commands = [],
   onCancel,
   disabled,
   sendDisabled = disabled,
@@ -391,6 +393,7 @@ export function ChatInput({
 
   const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
+  const menuCommands = commandMenuMatches(text, commands);
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -428,6 +431,36 @@ export function ChatInput({
         (
           <div className="pointer-events-none absolute inset-1 z-10 flex items-center justify-center rounded-[16px] border border-dashed border-[color-mix(in_srgb,var(--v2-accent)_55%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-canvas)_82%,transparent)] text-sm font-medium text-[var(--v2-accent-text)]">
             {t("chat.attachmentDropHint")}
+          </div>
+        )}
+        {menuCommands.length > 0 &&
+        (
+          <div
+            role="listbox"
+            aria-label={t("chat.commandMenu")}
+            className="mb-2 overflow-hidden rounded-md border border-iron-700 bg-iron-900/80 text-xs"
+          >
+            {menuCommands.map(
+              (command) => (
+                <button
+                  key={command.name}
+                  type="button"
+                  role="option"
+                  aria-selected={false}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const next = `/${command.name} `;
+                    textRef.current = next;
+                    setText(next);
+                    textareaRef.current?.focus();
+                  }}
+                  className="flex w-full items-baseline gap-2 px-3 py-1.5 text-left hover:bg-iron-800"
+                >
+                  <span className="font-medium text-iron-100">{command.usage}</span>
+                  <span className="truncate text-iron-400">{command.description}</span>
+                </button>
+              )
+            )}
           </div>
         )}
         {attachmentError &&

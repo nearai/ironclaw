@@ -5714,3 +5714,81 @@ test("useChat.send: blocks a send addressed to a busy thread that is NOT the vie
   assert.equal(sentBody(), null, "sendMessage must not be called for the busy destination");
   assert.equal(createThreadCalls(), 0);
 });
+
+test("useChat.runCommand: threads t into the failure localizer on a client-side error", async () => {
+  const threadId = "thread-1";
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("commands should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("runCommand must not submit a turn");
+    },
+    executeChatCommand: async () => {
+      // A client-side/network failure before the request reaches the server.
+      throw new TypeError("Failed to fetch");
+    },
+    renderCommandResultMarkdown: () => "unused on the failure path",
+    // Mirror #6625: the localizer requires `t` and calls it for client-side
+    // failures. Omitting `t` (the pre-fix bug) throws here — inside
+    // runCommand's own catch — defeating the try/catch.
+    failureMessageForRequestError: (error, t) => {
+      if (typeof t !== "function") {
+        throw new TypeError("t is not a function");
+      }
+      return t("chat.commandFailed");
+    },
+    useT: () => (key) => `t:${key}`,
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: async () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  // Must resolve to null (graceful), NOT reject — the pre-fix bug threw
+  // `t is not a function` inside the catch and rejected this promise.
+  const result = await chat.runCommand("/status");
+  assert.equal(result, null);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].role, CHAT_MESSAGE_ROLES.SYSTEM);
+  assert.equal(renderedMessages[0].content, "t:chat.commandFailed");
+});

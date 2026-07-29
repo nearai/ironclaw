@@ -2,10 +2,12 @@
 import {
   cancelRun as cancelRunRequest,
   createThread as createThreadRequest,
+  executeChatCommand,
   resolveGate as resolveGateRequest,
   sendMessage,
   submitManualToken,
 } from "../../../lib/api";
+import { renderCommandResultMarkdown } from "../lib/chat-commands";
 import {
   completionMatchesGate,
   readLatestProductAuthOAuthCompletion,
@@ -1091,6 +1093,35 @@ export function useChat(threadId) {
     [send, seedThreadMessages, setMessages, threadId],
   );
 
+  // Execute composer slash text server-side and append the rendered outcome
+  // as a local SYSTEM notice. Commands are not turns: no optimistic user
+  // bubble, no run, no SSE — the response is the whole exchange.
+  const runCommand = React.useCallback(
+    async (text) => {
+      const appendNotice = (content) => {
+        const notice = {
+          id: `system-command-${pendingSeqRef.current++}`,
+          role: CHAT_MESSAGE_ROLES.SYSTEM,
+          content,
+          timestamp: new Date().toISOString(),
+          isOptimistic: false,
+        };
+        setMessages((prev) => [...prev, notice]);
+      };
+      try {
+        const response = await executeChatCommand({ threadId, text });
+        appendNotice(renderCommandResultMarkdown(response));
+        return response;
+      } catch (error) {
+        // `failureMessageForRequestError` localizes client-side failures via
+        // `t`; omitting it throws inside this very catch handler.
+        appendNotice(failureMessageForRequestError(error, t));
+        return null;
+      }
+    },
+    [threadId, setMessages, t],
+  );
+
   return {
     // v2-native
     messages,
@@ -1105,6 +1136,7 @@ export function useChat(threadId) {
     hasMore,
     cooldownSeconds,
     send,
+    runCommand,
     resolveGate,
     submitAuthToken,
     startOnboardingOAuth,
