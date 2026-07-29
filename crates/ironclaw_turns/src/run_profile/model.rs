@@ -23,8 +23,7 @@ use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 ///
 /// This is a defense-in-depth bound for every provider, not just NEAR AI. Text
 /// progress resets the watchdog so a healthy long response is not cancelled.
-/// It MUST stay below the runner lease
-/// ([`crate::turn_state_row_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
+/// It MUST stay below the process runner lease (90s by default) so a hung
 /// provider is surfaced as a retryable `Unavailable` error before the lease
 /// reclaims the runner mid-flight — the failure mode that wedged the Reborn
 /// runtime on 2026-06-24. The invariant is enforced by
@@ -670,21 +669,10 @@ fn log_milestone_failure(result: Result<(), AgentLoopHostError>, message: &'stat
 mod tests {
     use super::*;
 
-    /// The primary model-call idle timeout must fire before the runner lease can
-    /// reclaim the run mid-flight. This guards against a silent regression of
-    /// the 2026-06-24 wedge, where the provider timeout (120s) exceeded the
-    /// lease (90s) and the lease killed runners before any timeout fired.
     #[test]
     fn primary_model_call_idle_timeout_is_below_runner_lease() {
-        let lease_secs = u64::try_from(
-            crate::turn_state_row_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS,
-        )
-        .expect("runner lease TTL is non-negative");
         assert!(
-            PRIMARY_MODEL_CALL_IDLE_TIMEOUT.as_secs() < lease_secs,
-            "primary model-call idle timeout ({}s) must be below the runner lease ({}s)",
-            PRIMARY_MODEL_CALL_IDLE_TIMEOUT.as_secs(),
-            lease_secs,
+            PRIMARY_MODEL_CALL_IDLE_TIMEOUT < ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION
         );
     }
 

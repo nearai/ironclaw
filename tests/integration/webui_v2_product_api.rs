@@ -1827,7 +1827,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api-1-test").expect("valid reply target binding ref");
-    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
     let event_stream =
         ironclaw_reborn_composition::test_support::build_product_event_stream_for_test(
             event_log,
@@ -1896,7 +1896,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
 /// and resolve a pending approval gate. Mounts the real `webui_v2` router
 /// over a hand-built `RebornServices` facade wired with the harness's own
 /// turn-state-converged `ApprovalInteractionService`
-/// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
+/// (`local_dev_approval_interaction_service_with_process_gates_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`
 /// wires into `DefaultProductSurface`) and the production event-stream
 /// recipe `sse_activity_stream_replay_and_reconnect` above already pins.
@@ -1941,9 +1941,9 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         .reborn_services_for_test()
         .expect("live_approvals harness is built via new_with_options");
     let approval_interactions = reborn_services
-        .local_dev_approval_interaction_service_with_turn_state_for_test(
+        .local_dev_approval_interaction_service_with_process_gates_for_test(
             h.coordinator.clone(),
-            h.turn_store.clone(),
+            h.process_gates_for_test(),
         )
         .expect("local-dev capability policy is valid")
         .expect("harness has a local-dev runtime");
@@ -1951,7 +1951,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api2-test").expect("valid reply target binding ref");
-    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
     let event_stream =
         ironclaw_reborn_composition::test_support::build_product_event_stream_for_test(
             event_log,

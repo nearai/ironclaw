@@ -438,12 +438,13 @@ mod tests {
         use crate::planned_driver_factory::{
             PLANNED_DRIVER_DEFAULT_VERSION, SUBAGENT_PLANNED_DRIVER_ID, SUBAGENT_PLANNED_PROFILE_ID,
         };
+        use crate::runtime::ProcessRuntimeSystem;
         use crate::subagent::capability_surface::SubagentCapabilitySurfaceResolver;
         use crate::subagent::flavors::{SubagentFlavorId, lookup_flavor};
-        use crate::subagent::goal_store::{
-            SubagentGoal, SubagentGoalStorePort, in_memory_backed_subagent_goal_store,
-        };
         use crate::subagent::prompt_material::RebornSubagentPromptMaterialSource;
+        use ironclaw_processes::{
+            ProcessInputPayload, ProcessInputSubmission, ProcessKind, SubmitProcessRequest,
+        };
 
         // Full first-party builtin capability surface the host registry exposes.
         // The flavor allowlist must be a subset of these; the filter narrows the
@@ -462,6 +463,50 @@ mod tests {
 
         fn cap(value: &str) -> CapabilityId {
             CapabilityId::new(value).expect("valid capability id")
+        }
+
+        async fn process_inputs_with_goal(
+            context: &ironclaw_turns::run_profile::LoopRunContext,
+        ) -> Arc<dyn ironclaw_processes::ProcessInputPort<Error = ironclaw_turns::TurnError>>
+        {
+            let system = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
+            let mut scope = context.scope.to_resource_scope();
+            scope.invocation_id =
+                ironclaw_host_api::InvocationId::from_uuid(context.run_id.as_uuid());
+            system
+                .submission()
+                .submit_process(SubmitProcessRequest {
+                    process_id: ironclaw_host_api::ProcessId::from_uuid(context.run_id.as_uuid()),
+                    process_kind: ProcessKind::AgentTurn,
+                    scope,
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: context.actor.as_ref().map(|actor| actor.user_id.clone()),
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: Some(ProcessInputSubmission {
+                        input_ref: ironclaw_processes::ProcessInputRef::from_trusted(
+                            "subagent-goal:v1",
+                        ),
+                        payload: ProcessInputPayload::new(
+                            serde_json::to_vec(&ironclaw_loop_host::SubagentGoalRecord {
+                                task: "task".to_string(),
+                                handoff: None,
+                            })
+                            .expect("serialize goal"),
+                        )
+                        .expect("bounded goal"),
+                    }),
+                    created_at: chrono::Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .expect("seed process input");
+            system.inputs()
         }
 
         /// Inner runtime capability port standing in for the host surface. The
@@ -572,7 +617,6 @@ mod tests {
             ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
-            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let mut context = test_run_context("caller-level-attenuation");
             context.resolved_run_profile.profile_id =
                 RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent profile id");
@@ -580,19 +624,11 @@ mod tests {
                 LoopDriverId::new(SUBAGENT_PLANNED_DRIVER_ID).expect("subagent driver id");
             context.resolved_run_profile.loop_driver.version =
                 RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION);
-            goal_store
-                .put_goal(
-                    &context.scope,
-                    context.run_id,
-                    SubagentGoal {
-                        task: "task".to_string(),
-                        handoff: None,
-                    },
-                )
-                .await
-                .expect("seed goal");
             let source: Arc<dyn SubagentPromptMaterialSource> =
-                Arc::new(RebornSubagentPromptMaterialSource::new(goal_store, flavor));
+                Arc::new(RebornSubagentPromptMaterialSource::new(
+                    process_inputs_with_goal(&context).await,
+                    flavor,
+                ));
             let resolver = SubagentCapabilitySurfaceResolver::new(
                 Arc::new(StaticProfileResolver(base_allow_set)),
                 source,
@@ -790,13 +826,16 @@ mod tests {
 
         #[tokio::test]
         async fn non_subagent_surface_preserves_outer_profile_surface() {
-            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let context = test_run_context("caller-level-non-subagent");
             let base_allow_set =
                 CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);
-            let source: Arc<dyn SubagentPromptMaterialSource> = Arc::new(
-                RebornSubagentPromptMaterialSource::new(goal_store, SubagentFlavorId::Coder),
-            );
+            let source: Arc<dyn SubagentPromptMaterialSource> =
+                Arc::new(RebornSubagentPromptMaterialSource::new(
+                    ProcessRuntimeSystem::in_memory_ephemeral()
+                        .expect("process system")
+                        .inputs(),
+                    SubagentFlavorId::Coder,
+                ));
             let resolver = SubagentCapabilitySurfaceResolver::new(
                 Arc::new(StaticProfileResolver(base_allow_set.clone())),
                 source,

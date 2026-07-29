@@ -468,17 +468,20 @@ mod tests {
         LifecyclePackageRef, TurnRunRef,
     };
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        AgentId, InvocationId, ProcessId, ProjectId, ResourceScope, TenantId, ThreadId,
+        TurnGateRef, UserId,
     };
-    use ironclaw_turns::test_support::in_memory_turn_state_store;
+    use ironclaw_processes::{
+        ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
+        ProcessSuspensionKind, ProcessWorkerId, SuspendProcessRequest,
+    };
+    use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
     use ironclaw_turns::{
-        AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse,
-        DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
-        LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-        RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnId,
-        TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
-        runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
+        EventCursor, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
+        ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
+        TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     use super::*;
@@ -937,7 +940,9 @@ mod tests {
 
     #[tokio::test]
     async fn turn_gate_continuation_rejects_cross_scope_resume_through_real_coordinator() {
-        let store = Arc::new(in_memory_turn_state_store());
+        let process_system = in_memory_agent_turn_process_system();
+        let store = Arc::new(process_system.runtime());
+        let transitions = process_system.transitions();
         let coordinator = Arc::new(DefaultTurnCoordinator::new(store.clone()));
         let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let scope = TurnScope::new(
@@ -967,28 +972,40 @@ mod tests {
             .await
             .expect("submit turn");
         let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-        let runner_id = TurnRunnerId::new();
-        let lease_token = TurnLeaseToken::new();
-        store
-            .claim_next_run(ClaimRunRequest {
-                runner_id,
-                lease_token,
-                scope_filter: Some(scope),
+        let worker_id = ProcessWorkerId::from_trusted(
+            ironclaw_turns::TurnRunnerId::new().as_uuid().to_string(),
+        );
+        let claimed = transitions
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id,
+                scope_filter: None,
+                process_id_filter: None,
+                process_kind_filter: Some(ProcessKind::AgentTurn),
+                max_processes: 1,
             })
             .await
             .expect("claim run")
+            .into_iter()
+            .next()
             .expect("queued run exists");
-        store
-            .block_run(BlockRunRequest {
-                run_id,
-                runner_id,
-                lease_token,
-                checkpoint_id: TurnCheckpointId::new(),
-                state_ref: LoopCheckpointStateRef::new("checkpoint:auth-real").unwrap(),
-                reason: BlockedReason::Auth {
-                    gate_ref: GateRef::new("gate:auth-real").unwrap(),
+        assert_eq!(
+            claimed.state.process_id,
+            ProcessId::from_uuid(run_id.as_uuid())
+        );
+        transitions
+            .suspend_process(SuspendProcessRequest {
+                process_id: claimed.state.process_id,
+                worker_id: claimed.worker_id,
+                lease_token: claimed.lease_token,
+                checkpoint_ref: ProcessCheckpointRef::new("checkpoint:auth-real").unwrap(),
+                suspension: ProcessSuspension {
+                    kind: ProcessSuspensionKind::Authorization,
+                    gate_ref: Some(TurnGateRef::new("gate:auth-real").unwrap()),
+                    activity_id: None,
                     credential_requirements: Vec::new(),
+                    detail: None,
                 },
+                metadata: None,
             })
             .await
             .expect("block auth gate");

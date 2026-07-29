@@ -16,10 +16,6 @@ use std::{
 };
 
 mod await_edge_port;
-#[cfg(any(test, feature = "test-support"))]
-mod test_support;
-#[cfg(any(test, feature = "test-support"))]
-pub use test_support::in_memory_backed_checkpoint_state_store;
 mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
@@ -28,7 +24,6 @@ mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
-mod checkpoint_state_store;
 mod compaction_task;
 mod context_window_cache;
 mod filesystem_skill_bundle_source;
@@ -46,7 +41,6 @@ mod subagent_prompt_port;
 mod subagent_spawn_port;
 mod system_inference;
 mod token_estimator;
-mod turn_event_publisher;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -56,10 +50,10 @@ pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
 pub use budget_seeding::BudgetSeedingPolicy;
 pub use cancellation_port::{
-    AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory,
-    CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe, ProductLiveCancellationReadiness,
-    RunCancellationFactory, RunCancellationHandle, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, TurnStateRunCancellationFactory,
+    AgentTurnRunCancellationFactory, AlwaysAliveLoopCancellationPort,
+    AlwaysAliveRunCancellationFactory, CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe,
+    ProductLiveCancellationReadiness, RunCancellationFactory, RunCancellationHandle,
+    RunCancellationObservationKind, RunStateLoopCancellationPort,
     verify_product_live_cancellation_probe,
 };
 pub use capability_allow_set::{
@@ -76,7 +70,6 @@ pub use capability_surface_filter::{
     CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
     PerSurfaceCapabilityDenyDecorator,
 };
-pub use checkpoint_state_store::CheckpointStateStore;
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
     active_task_compaction_prompt_id, default_compaction_prompt_id,
@@ -116,8 +109,8 @@ pub use subagent_spawn_port::{
     InMemoryAwaitEdgeWriter, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
     SubagentDefinitionResolver, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
-    SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
+    SubagentSpawnDeps, SubagentSpawnLimits, SubagentThreadKind, SubagentThreadMetadata,
+    build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
@@ -133,7 +126,6 @@ pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
-pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
 

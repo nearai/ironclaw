@@ -1,5 +1,5 @@
 /// Test double substituting the production `ApprovalRequestStorePort` impl
-/// (`ApprovalRequestStore`, `crates/ironclaw_run_state/src/lib.rs`).
+/// (`ApprovalRequestStore`, `crates/ironclaw_approvals/src/lib.rs`).
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -17,17 +17,17 @@ use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
 /// / `deny_local_dev_gate` depend on. Delegation is total, so the inner store
 /// stays the single source of truth.
 pub(crate) struct RecordingApprovalRequestStore {
-    pub(crate) inner: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub(crate) inner: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     pub(crate) pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
 }
 
 #[async_trait]
-impl ironclaw_run_state::ApprovalRequestStorePort for RecordingApprovalRequestStore {
+impl ironclaw_approvals::ApprovalRequestStorePort for RecordingApprovalRequestStore {
     async fn save_pending(
         &self,
         scope: ResourceScope,
         request: ironclaw_host_api::approval::ApprovalRequest,
-    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+    ) -> Result<ironclaw_approvals::ApprovalRecord, ironclaw_approvals::ApprovalStoreError> {
         self.pending_approval_scopes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -39,7 +39,8 @@ impl ironclaw_run_state::ApprovalRequestStorePort for RecordingApprovalRequestSt
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<Option<ironclaw_run_state::ApprovalRecord>, ironclaw_run_state::RunStateError> {
+    ) -> Result<Option<ironclaw_approvals::ApprovalRecord>, ironclaw_approvals::ApprovalStoreError>
+    {
         self.inner.get(scope, request_id).await
     }
 
@@ -47,7 +48,7 @@ impl ironclaw_run_state::ApprovalRequestStorePort for RecordingApprovalRequestSt
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+    ) -> Result<ironclaw_approvals::ApprovalRecord, ironclaw_approvals::ApprovalStoreError> {
         self.inner.approve(scope, request_id).await
     }
 
@@ -55,7 +56,7 @@ impl ironclaw_run_state::ApprovalRequestStorePort for RecordingApprovalRequestSt
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+    ) -> Result<ironclaw_approvals::ApprovalRecord, ironclaw_approvals::ApprovalStoreError> {
         self.inner.deny(scope, request_id).await
     }
 
@@ -63,14 +64,15 @@ impl ironclaw_run_state::ApprovalRequestStorePort for RecordingApprovalRequestSt
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ironclaw_run_state::ApprovalRecord, ironclaw_run_state::RunStateError> {
+    ) -> Result<ironclaw_approvals::ApprovalRecord, ironclaw_approvals::ApprovalStoreError> {
         self.inner.discard_pending(scope, request_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<ironclaw_run_state::ApprovalRecord>, ironclaw_run_state::RunStateError> {
+    ) -> Result<Vec<ironclaw_approvals::ApprovalRecord>, ironclaw_approvals::ApprovalStoreError>
+    {
         self.inner.records_for_scope(scope).await
     }
 }

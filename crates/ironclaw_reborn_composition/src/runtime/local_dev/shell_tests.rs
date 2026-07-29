@@ -111,7 +111,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         ),
         approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
         capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-        gate_record_store: std::sync::Arc::new(ironclaw_run_state::GateRecordStore::new(
+        gate_record_store: std::sync::Arc::new(ironclaw_approvals::GateRecordStore::new(
             crate::wrap_scoped(std::sync::Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),

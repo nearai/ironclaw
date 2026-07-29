@@ -299,20 +299,22 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
     credential_account_result: Result<SecretHandle, CredentialStageError>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let filesystem = local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?;
+    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
+    let process_runtime: Arc<dyn ironclaw_processes::ProcessRuntimePort> = Arc::new(
+        ironclaw_processes::ProcessJournalStore::new(Arc::clone(&scoped_filesystem)),
+    );
     let services = HostRuntimeServices::new(
         Arc::new(registry),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GithubHarnessAuthorizer::new()?),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     // The typed auth-gate deny/resume paths (#6520) durably terminalize the
     // parked invocation through the run-state store; without it the decline
     // fails closed as HostUnavailable and kills the run.
-    .with_filesystem_run_state(ironclaw_reborn_composition::wrap_scoped(Arc::clone(
-        &filesystem,
-    )))
+    .with_process_journal_invocation_state(process_runtime, scoped_filesystem)
     .with_secret_store(Arc::new(StaticSecretStore::new(
         SecretHandle::new("github_manual_access")?,
         SecretMaterial::from("ghp_fake_fixture_token"),

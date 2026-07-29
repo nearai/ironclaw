@@ -102,7 +102,7 @@ where
 /// `runtime.rs` path with the real type, never a hand-mirrored copy.
 #[cfg(feature = "test-support")]
 pub fn build_approval_gate_evidence_for_test(
-    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: std::sync::Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
 ) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     crate::runtime::build_approval_gate_evidence_for_test(approval_requests)
 }

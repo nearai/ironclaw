@@ -41,6 +41,7 @@ mod memory_provider_factory;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
+mod process_gate_turn_view;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
@@ -55,7 +56,6 @@ mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_fire_access;
-mod turn_run_snapshot;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::service::RebornAutomationProductService;
@@ -347,6 +347,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     }
 }
 
+use ironclaw_approvals::ApprovalStoreError;
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
@@ -356,12 +357,10 @@ use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_resources::ResourceError;
-use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 use ironclaw_secrets::SecretMaterial;
 use ironclaw_trust::TrustPolicy;
@@ -369,19 +368,11 @@ use ironclaw_turns::TurnError;
 use ironclaw_turns::TurnRunWakeNotifier;
 use thiserror::Error;
 
-pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
-    LibSqlRootFilesystem,
-    FilesystemResourceGovernor<LibSqlRootFilesystem>,
-    ProcessStore<LibSqlRootFilesystem>,
-    ProcessResultStore<LibSqlRootFilesystem>,
->;
+pub type LibSqlProductionHostRuntimeServices =
+    HostRuntimeServices<LibSqlRootFilesystem, FilesystemResourceGovernor<LibSqlRootFilesystem>>;
 
-pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
-    PostgresRootFilesystem,
-    FilesystemResourceGovernor<PostgresRootFilesystem>,
-    ProcessStore<PostgresRootFilesystem>,
-    ProcessResultStore<PostgresRootFilesystem>,
->;
+pub type PostgresProductionHostRuntimeServices =
+    HostRuntimeServices<PostgresRootFilesystem, FilesystemResourceGovernor<PostgresRootFilesystem>>;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
 /// [`invocation_mount_view`]. Each alias resolves to
@@ -395,13 +386,13 @@ const PER_USER_ALIASES: &[&str] = &[
     "/authorization",
     "/outbound",
     "/run-state",
+    "/checkpoint-state",
     "/approvals",
     "/gate-records",
     "/replay-payloads",
     "/threads",
     "/conversations",
     "/turns",
-    "/checkpoint-state",
     "/resources",
     "/engine",
     "/skills",
@@ -507,6 +498,30 @@ where
     Arc::new(ScopedFilesystem::new(root, invocation_mount_view))
 }
 
+/// Process-journal filesystem handle with read-only access to deployed
+/// per-user legacy authorities during the explicit one-time migration.
+///
+/// The extra alias exists only for the system sentinel and only on this
+/// process-store-specific handle. Ordinary consumers cannot enumerate another
+/// tenant's filesystem tree.
+pub(crate) fn wrap_process_journal_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(root, |scope| {
+        let mut view = invocation_mount_view(scope)?;
+        if scope.is_system() {
+            view.mounts.push(MountGrant::new(
+                MountAlias::new("/legacy-tenants")?,
+                VirtualPath::new("/tenants")?,
+                MountPermissions::read_only(),
+            ));
+            view.validate()?;
+        }
+        Ok(view)
+    }))
+}
+
 /// libSQL substrate handles needed to build production host-runtime services.
 ///
 /// State, event, and audit persistence all use `runtime`. A second libSQL
@@ -569,8 +584,8 @@ pub enum RebornCompositionError {
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
-    #[error("reborn run-state substrate failed: {0}")]
-    RunState(#[from] RunStateError),
+    #[error("reborn approval store substrate failed: {0}")]
+    ApprovalStore(#[from] ApprovalStoreError),
     #[error("reborn capability lease substrate failed: {0}")]
     CapabilityLease(#[from] CapabilityLeaseError),
     #[error("reborn secret substrate failed: {0}")]
@@ -693,6 +708,32 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[tokio::test]
+    async fn process_journal_migration_mount_is_system_only_and_read_only() {
+        let root = Arc::new(InMemoryBackend::new());
+        let scoped = wrap_process_journal_scoped(root);
+        let legacy = ScopedPath::new("/legacy-tenants/tenant-a/users/user-a/run-state")
+            .expect("legacy path");
+        assert!(
+            scoped.resolve(&sample_scope(), &legacy).is_err(),
+            "ordinary user scopes must not enumerate other tenant roots"
+        );
+        assert_eq!(
+            scoped
+                .resolve(&ResourceScope::system(), &legacy)
+                .expect("system migration mount")
+                .as_str(),
+            "/tenants/tenant-a/users/user-a/run-state"
+        );
+        assert!(matches!(
+            scoped
+                .write_bytes(&ResourceScope::system(), &legacy, b"forbidden".to_vec())
+                .await
+                .expect_err("migration mount must not mutate legacy authorities"),
+            FilesystemError::PermissionDenied { .. }
+        ));
     }
 
     #[test]
@@ -945,11 +986,11 @@ mod gate_record_production_mount_tests {
     //! per-tenant path rewriting keeps identically-shaped refs from colliding
     //! across tenants.
     use super::*;
+    use ironclaw_approvals::{GateRecordStore, GateRecordStorePort};
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
     };
-    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {

@@ -115,7 +115,7 @@ pub(super) fn capability_wiring(
     let workspace_mounts = services.workspace_mounts.clone();
     let memory_mounts = services.memory_mounts.clone();
     let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
-    let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         services.approval_requests.clone();
     let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
         services.capability_leases.clone();
@@ -166,8 +166,8 @@ pub(super) fn capability_wiring(
     // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
     let capability_store_filesystem =
         crate::wrap_scoped(Arc::clone(&services.extension_filesystem));
-    let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
-        ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+    let gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort> = Arc::new(
+        ironclaw_approvals::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
     );
     let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = Arc::new(
         ironclaw_capabilities::ReplayPayloadStore::new(capability_store_filesystem),
@@ -225,11 +225,11 @@ struct RefreshingLoopCapabilityPortFactory {
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store; one instance per runtime, shared
     /// by reference into every port this factory builds.
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     /// Durable host-private replay-payload store (§5.3 Stage 2a-i); one instance
     /// per runtime, shared by reference into every port this factory builds.
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,

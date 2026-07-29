@@ -1,79 +1,134 @@
-//! Shared test double for turn-state storage.
-//!
-//! [`in_memory_turn_state_store`] is the single, workspace-wide replacement for
-//! the former public in-memory turn-state store: a [`TurnStateRowStore`]
-//! over a volatile [`InMemoryBackend`], at the store's single write-behind
-//! durability mode (#6263 Step 5b — there is no longer a durability-mode
-//! choice). Gate-park, terminal, and new-run transitions are still
-//! synchronously durable (they are recoverability-critical, see
-//! [`crate::is_recoverability_critical`]); other transitions commit at memory
-//! speed and flush asynchronously. A test that reopens a fresh store instance
-//! over the same backend (to exercise restart/rehydration) must drain the
-//! prior instance first — drop it after its last critical op, or call its
-//! `drain()` — so a pending non-critical async tail is not silently lost
-//! before the reopen reads.
+//! Process-backed fixtures for cross-crate turn projection tests.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use async_trait::async_trait;
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_processes::{
+    GetProcessCheckpointRequest, ProcessCheckpointId, ProcessCheckpointPort,
+    ProcessCheckpointRecord, ProcessJournalStore, ProcessRuntimePort, ProcessTransitionPort,
+    RecordProcessCheckpointRequest,
+};
 
-use crate::TurnStateRowStore;
+use crate::{
+    AgentTurnProcessRuntime, ProcessJournalStoreTurnAdapter, ProcessLoopCheckpointStore, TurnError,
+};
 
-/// Build the volatile, process-local turn-state store double.
-///
-/// A fresh [`InMemoryBackend`] per call, so distinct stores are isolated. To
-/// exercise reopen / rehydration, build a shared backend with
-/// [`in_memory_turns_filesystem`] and open two stores over it.
-pub fn in_memory_turn_state_store() -> TurnStateRowStore<InMemoryBackend> {
-    // The lenient (default) mode — the same shape production composition wires
-    // via `TurnStateRowStore::new`.
-    TurnStateRowStore::new(in_memory_turns_filesystem())
+#[derive(Clone)]
+pub struct InMemoryAgentTurnProcessSystem {
+    store: Arc<ProcessJournalStore<InMemoryBackend>>,
+    adapter: Arc<ProcessJournalStoreTurnAdapter>,
+    runtime: AgentTurnProcessRuntime,
 }
 
-/// A fresh scoped `/turns` filesystem over a volatile [`InMemoryBackend`].
-///
-/// Reuse the returned handle to open more than one
-/// [`TurnStateRowStore`] over the *same durable bytes* — the
-/// canonical way to cover restart / rehydration now that the row store
-/// rehydrates from durable rows rather than a handed-in snapshot.
-pub fn in_memory_turns_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
-    scoped_turns_filesystem(Arc::new(InMemoryBackend::new()))
+impl InMemoryAgentTurnProcessSystem {
+    pub fn new() -> Self {
+        let store = Arc::new(ProcessJournalStore::new(in_memory_processes_filesystem()));
+        let adapter = Arc::new(ProcessJournalStoreTurnAdapter::new(
+            Arc::clone(&store) as Arc<dyn ProcessRuntimePort>
+        ));
+        let runtime = AgentTurnProcessRuntime::from_process_adapter(Arc::clone(&adapter));
+        Self {
+            store,
+            adapter,
+            runtime,
+        }
+    }
+
+    pub fn runtime(&self) -> AgentTurnProcessRuntime {
+        self.runtime.clone()
+    }
+
+    pub fn transitions(&self) -> Arc<dyn ProcessTransitionPort<Error = TurnError>> {
+        Arc::clone(&self.adapter) as Arc<dyn ProcessTransitionPort<Error = TurnError>>
+    }
+
+    pub fn store(&self) -> Arc<ProcessJournalStore<InMemoryBackend>> {
+        Arc::clone(&self.store)
+    }
 }
 
-/// Wrap a specific backend in the scoped `/turns` mount the row store expects.
-/// Handy when a test needs to hold the backend itself — e.g. a bare
-/// [`InMemoryBackend`], or an
-/// [`ironclaw_filesystem::FaultInjecting`]`<InMemoryBackend>` so a store fault
-/// path runs through the real store's `FilesystemError -> TurnError` mapping.
-pub fn scoped_turns_filesystem<F: RootFilesystem>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>> {
+impl Default for InMemoryAgentTurnProcessSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn in_memory_agent_turn_process_system() -> InMemoryAgentTurnProcessSystem {
+    InMemoryAgentTurnProcessSystem::new()
+}
+
+/// Process-backed agent-turn projection fixture.
+pub fn in_memory_agent_turn_runtime() -> AgentTurnProcessRuntime {
+    in_memory_agent_turn_process_system().runtime()
+}
+
+pub fn in_memory_loop_checkpoint_store() -> ProcessLoopCheckpointStore {
+    ProcessLoopCheckpointStore::new(Arc::new(InMemoryProcessCheckpointPort::default()))
+}
+
+#[derive(Default)]
+struct InMemoryProcessCheckpointPort {
+    records: Mutex<HashMap<ProcessCheckpointId, ProcessCheckpointRecord>>,
+}
+
+#[async_trait]
+impl ProcessCheckpointPort for InMemoryProcessCheckpointPort {
+    type Error = TurnError;
+
+    async fn record_process_checkpoint(
+        &self,
+        request: RecordProcessCheckpointRequest,
+    ) -> Result<ProcessCheckpointRecord, Self::Error> {
+        let record = ProcessCheckpointRecord {
+            checkpoint_id: request.checkpoint_id.clone(),
+            process_id: request.process_id,
+            scope: request.scope,
+            state_ref: request.state_ref,
+            payload: request.payload,
+            created_at: request.created_at,
+            metadata: request.metadata,
+        };
+        self.records
+            .lock()
+            .map_err(|_| TurnError::Unavailable {
+                reason: "process checkpoint fixture lock poisoned".to_string(),
+            })?
+            .insert(request.checkpoint_id, record.clone());
+        Ok(record)
+    }
+
+    async fn get_process_checkpoint(
+        &self,
+        request: GetProcessCheckpointRequest,
+    ) -> Result<Option<ProcessCheckpointRecord>, Self::Error> {
+        Ok(self
+            .records
+            .lock()
+            .map_err(|_| TurnError::Unavailable {
+                reason: "process checkpoint fixture lock poisoned".to_string(),
+            })?
+            .get(&request.checkpoint_id)
+            .filter(|record| {
+                record.process_id == request.process_id && record.scope == request.scope
+            })
+            .cloned())
+    }
+}
+
+pub fn in_memory_processes_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
     let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").expect("turns alias"),
-        VirtualPath::new("/turns").expect("turns target"),
+        MountAlias::new("/processes").expect("processes alias"),
+        VirtualPath::new("/engine/processes").expect("processes target"),
         MountPermissions::read_write_list_delete(),
     )])
-    .expect("turns mount view");
-    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
-}
-
-/// Whether a row store currently retains an initialized hot snapshot.
-///
-/// This is test-only observability for cache invalidation regressions.
-pub async fn turn_state_row_store_snapshot_cache_is_initialized<F>(
-    store: &TurnStateRowStore<F>,
-) -> bool
-where
-    F: RootFilesystem,
-{
-    crate::turn_state_row_store::snapshot_cache_is_initialized_for_test(store).await
-}
-
-/// Whether a row-store mutation currently owns the snapshot-state lock.
-///
-/// This is test-only synchronization for deterministic backpressure tests.
-pub fn turn_state_row_store_snapshot_state_is_locked<F>(store: &TurnStateRowStore<F>) -> bool
-where
-    F: RootFilesystem,
-{
-    crate::turn_state_row_store::snapshot_state_is_locked_for_test(store)
+    .expect("processes mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ))
 }

@@ -14,6 +14,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
     ProjectionCursor as EventProjectionCursor, ProjectionReplay,
@@ -36,7 +37,6 @@ use ironclaw_host_api::{
     VirtualPath,
 };
 use ironclaw_outbound::OutboundStateStore;
-use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,

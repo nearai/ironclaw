@@ -57,11 +57,11 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    pub(super) approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub(super) approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     pub(super) capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store the built capability port persists
     /// pending-gate records into (wires the #6245 production gap closed).
-    pub(super) gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    pub(super) gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     /// Durable host-private replay-payload store the built capability port
     /// persists gate/auth replay payloads into and reconstitutes on resume
     /// (arch-simplification §5.3 Stage 2a-i).
@@ -154,9 +154,9 @@ struct RefreshingCapabilityPort {
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,

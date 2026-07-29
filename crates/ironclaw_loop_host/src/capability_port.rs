@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalStoreError, GateRecordStorePort};
 use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStoreError, ReplayPayloadStorePort};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
@@ -17,7 +18,6 @@ use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
     RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
 };
-use ironclaw_run_state::{GateRecordStorePort, RunStateError};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
@@ -2018,7 +2018,7 @@ impl HostRuntimeLoopCapabilityPort {
             // this branch with a stale record.
             // Mirrors `persist_replay_payload_for_fresh_gate`'s tolerance of
             // `ReplayPayloadAlreadyExists`. Publish + commit like the success path.
-            Err(RunStateError::GateRecordAlreadyExists { .. }) => {
+            Err(ApprovalStoreError::GateRecordAlreadyExists { .. }) => {
                 tracing::debug!(
                     %gate_ref,
                     "gate record already persisted for this deterministic key; keeping existing record"
@@ -2856,7 +2856,7 @@ fn gate_ref_for_resolution(resolution: &Resolution) -> Option<GateRef> {
 /// (which may carry a host path) is logged server-side at `warn` — a genuine
 /// host storage fault operators must see — and never interpolated into the
 /// model-visible summary (capability-access contract).
-fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
+fn gate_record_store_error(error: ApprovalStoreError) -> AgentLoopHostError {
     tracing::warn!(error = %error, "failed to persist capability gate record at loop host seam");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Unavailable,
@@ -2886,7 +2886,7 @@ impl GateRecordStorePort for NoopGateRecordStore {
         _scope: ResourceScope,
         _gate_ref: GateRef,
         _record: GateRecord,
-    ) -> Result<(), RunStateError> {
+    ) -> Result<(), ApprovalStoreError> {
         // silent-ok: transitional no-op — the gate record has no reader until the
         // resume-read follow-up; skipping the durable write is behavior-preserving
         // and never regresses an unwired composition path's existing gates.
@@ -2898,7 +2898,7 @@ impl GateRecordStorePort for NoopGateRecordStore {
         &self,
         _scope: &ResourceScope,
         _gate_ref: GateRef,
-    ) -> Result<Option<GateRecord>, RunStateError> {
+    ) -> Result<Option<GateRecord>, ApprovalStoreError> {
         Ok(None)
     }
 }
@@ -9767,7 +9767,7 @@ mod tests {
     /// globally unique) with the scope carried in the value for the wrong-scope
     /// isolation check the durable store applies. The durable
     /// `GateRecordStore` round-trip itself is covered by
-    /// `ironclaw_run_state`'s `gate_record_store_contract`; this fake pins that
+    /// `ironclaw_approvals`'s `gate_record_store_contract`; this fake pins that
     /// the loop_host seam calls `save` with the right record and gate ref.
     #[derive(Debug, Default)]
     struct RecordingGateRecordStore {
@@ -9787,7 +9787,7 @@ mod tests {
             scope: ResourceScope,
             gate_ref: GateRef,
             record: GateRecord,
-        ) -> Result<(), RunStateError> {
+        ) -> Result<(), ApprovalStoreError> {
             self.saves
                 .lock()
                 .expect("gate record saves lock")
@@ -9799,7 +9799,7 @@ mod tests {
             &self,
             scope: &ResourceScope,
             gate_ref: GateRef,
-        ) -> Result<Option<GateRecord>, RunStateError> {
+        ) -> Result<Option<GateRecord>, ApprovalStoreError> {
             Ok(self
                 .saves
                 .lock()
@@ -9825,7 +9825,7 @@ mod tests {
             scope: ResourceScope,
             gate_ref: GateRef,
             record: GateRecord,
-        ) -> Result<(), RunStateError> {
+        ) -> Result<(), ApprovalStoreError> {
             let fail_now = {
                 let mut failed_once = self.failed_once.lock().expect("fail-once lock");
                 let first = !*failed_once;
@@ -9833,7 +9833,7 @@ mod tests {
                 first
             };
             if fail_now {
-                return Err(RunStateError::Backend(
+                return Err(ApprovalStoreError::Backend(
                     "injected transient store fault".to_string(),
                 ));
             }
@@ -9844,7 +9844,7 @@ mod tests {
             &self,
             scope: &ResourceScope,
             gate_ref: GateRef,
-        ) -> Result<Option<GateRecord>, RunStateError> {
+        ) -> Result<Option<GateRecord>, ApprovalStoreError> {
             self.inner.load(scope, gate_ref).await
         }
     }
@@ -9883,7 +9883,7 @@ mod tests {
             scope: ResourceScope,
             gate_ref: GateRef,
             record: GateRecord,
-        ) -> Result<(), RunStateError> {
+        ) -> Result<(), ApprovalStoreError> {
             if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 // First save: announce entry (reservation is now InFlight) and
                 // block until released — the cancellation test drops this future
@@ -9898,7 +9898,7 @@ mod tests {
             &self,
             scope: &ResourceScope,
             gate_ref: GateRef,
-        ) -> Result<Option<GateRecord>, RunStateError> {
+        ) -> Result<Option<GateRecord>, ApprovalStoreError> {
             self.inner.load(scope, gate_ref).await
         }
     }
@@ -10147,7 +10147,7 @@ mod tests {
     /// token intact). Drives the production caller (`invoke_capability`) and
     /// asserts at the store seam that the record round-trips. The durable
     /// `GateRecordStore` round-trip is covered separately by
-    /// `ironclaw_run_state`'s `gate_record_store_contract`.
+    /// `ironclaw_approvals`'s `gate_record_store_contract`.
     #[tokio::test]
     async fn approval_gate_outcome_persists_gate_record_at_the_seam() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");

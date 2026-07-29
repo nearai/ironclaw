@@ -13,15 +13,17 @@ use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
+use ironclaw_processes::{
+    ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
+    ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId, SuspendProcessRequest,
+};
 use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_secrets::SecretStore;
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
-    RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
-    runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use std::sync::Mutex;
@@ -201,34 +203,15 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .await
         .expect("submit turn");
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    runtime_surfaces
-        .turn_state
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter: Some(scope.clone()),
-        })
-        .await
-        .expect("claim run")
-        .expect("queued run exists");
     let gate_ref = ironclaw_turns::GateRef::new("gate:auth-callback").unwrap();
-    runtime_surfaces
-        .turn_state
-        .block_run(BlockRunRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            checkpoint_id: TurnCheckpointId::new(),
-            state_ref: LoopCheckpointStateRef::new("checkpoint:auth-callback").unwrap(),
-            reason: BlockedReason::Auth {
-                gate_ref: gate_ref.clone(),
-                credential_requirements: Vec::new(),
-            },
-        })
-        .await
-        .expect("block auth gate");
+    suspend_auth_process(
+        runtime_surfaces.processes.transitions(),
+        &scope,
+        run_id,
+        gate_ref.clone(),
+        Vec::new(),
+    )
+    .await;
     let auth_scope = auth_scope_for_turn(&scope, &actor);
     let flow = product_auth
         .flow_manager()
@@ -412,7 +395,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     .expect("production services build");
     let product_auth = &services.product_auth;
     let turn_coordinator = &services.turn_coordinator;
-    let turn_state = &services.turn_state;
+    let process_transitions = services.processes.transitions();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let first_scope = turn_scope();
     let second_scope = TurnScope::new_with_owner(
@@ -424,7 +407,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     );
     let first_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        turn_state.as_ref(),
+        Arc::clone(&process_transitions),
         first_scope.clone(),
         actor.clone(),
         "first",
@@ -434,7 +417,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     .await;
     let second_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        turn_state.as_ref(),
+        process_transitions,
         second_scope.clone(),
         actor.clone(),
         "second",
@@ -463,7 +446,11 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             .get_run_state(GetRunStateRequest { scope, run_id })
             .await
             .expect("run state");
-        assert_eq!(state.status, TurnStatus::Queued);
+        assert_eq!(
+            state.status,
+            TurnStatus::Queued,
+            "provider callback did not resume run {run_id}"
+        );
         assert_eq!(state.gate_ref, None);
     }
 }
@@ -821,7 +808,7 @@ fn in_memory_product_auth_ports() -> RebornProductAuthServicePorts {
 #[cfg(test)]
 async fn submit_and_block_provider_auth_run(
     turn_coordinator: &dyn TurnCoordinator,
-    transition: &dyn TurnRunTransitionPort,
+    transition: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     scope: TurnScope,
     actor: TurnActor,
     suffix: &str,
@@ -850,44 +837,68 @@ async fn submit_and_block_provider_auth_run(
         .await
         .expect("submit turn");
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    transition
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter: Some(scope),
-        })
-        .await
-        .expect("claim run")
-        .expect("queued run exists");
-    transition
-        .block_run(BlockRunRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            checkpoint_id: TurnCheckpointId::new(),
-            state_ref: LoopCheckpointStateRef::new(format!("checkpoint:fanout-{suffix}")).unwrap(),
-            reason: BlockedReason::Auth {
-                gate_ref: GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
-                credential_requirements: vec![
-                    ironclaw_host_api::RuntimeCredentialAuthRequirement {
-                        provider: ironclaw_host_api::VendorId::new(provider).unwrap(),
-                        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
-                            scopes: Vec::new(),
-                        },
-                        requester_extension: ironclaw_host_api::ExtensionId::new(
-                            requester_extension,
-                        )
-                        .unwrap(),
-                        provider_scopes: Vec::new(),
-                    },
-                ],
-            },
-        })
-        .await
-        .expect("block auth gate");
+    suspend_auth_process(
+        transition,
+        &scope,
+        run_id,
+        GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
+        vec![ironclaw_host_api::RuntimeCredentialAuthRequirement {
+            provider: ironclaw_host_api::VendorId::new(provider).unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            requester_extension: ironclaw_host_api::ExtensionId::new(requester_extension).unwrap(),
+            provider_scopes: Vec::new(),
+        }],
+    )
+    .await;
     run_id
+}
+
+async fn suspend_auth_process(
+    transition: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+    gate_ref: GateRef,
+    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+) {
+    let worker_id = ProcessWorkerId::from_trusted(format!("auth-test-{run_id}"));
+    let claimed = transition
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: worker_id.clone(),
+            scope_filter: Some(scope.to_resource_scope()),
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim process")
+        .into_iter()
+        .next()
+        .expect("queued process exists");
+    assert_eq!(
+        claimed.state.process_id,
+        ironclaw_turns::process_projection::process_id_from_turn_run_id(run_id)
+    );
+    transition
+        .suspend_process(SuspendProcessRequest {
+            process_id: claimed.state.process_id,
+            worker_id,
+            lease_token: claimed.lease_token,
+            checkpoint_ref: ProcessCheckpointRef::from_trusted(
+                ironclaw_turns::TurnCheckpointId::new()
+                    .as_uuid()
+                    .to_string(),
+            ),
+            suspension: ProcessSuspension {
+                kind: ProcessSuspensionKind::Authorization,
+                gate_ref: Some(gate_ref),
+                activity_id: None,
+                credential_requirements,
+                detail: None,
+            },
+            metadata: None,
+        })
+        .await
+        .expect("suspend auth process");
 }
 
 #[cfg(test)]
@@ -965,33 +976,14 @@ async fn submit_and_block_auth_run(
         .await
         .expect("submit turn");
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    runtime_surfaces
-        .turn_state
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter: Some(scope),
-        })
-        .await
-        .expect("claim run")
-        .expect("queued run exists");
-    runtime_surfaces
-        .turn_state
-        .block_run(BlockRunRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            checkpoint_id: TurnCheckpointId::new(),
-            state_ref: LoopCheckpointStateRef::new("checkpoint:auth-callback-2").unwrap(),
-            reason: BlockedReason::Auth {
-                gate_ref: ironclaw_turns::GateRef::new(gate_ref).unwrap(),
-                credential_requirements: Vec::new(),
-            },
-        })
-        .await
-        .expect("block auth gate");
+    suspend_auth_process(
+        runtime_surfaces.processes.transitions(),
+        &scope,
+        run_id,
+        ironclaw_turns::GateRef::new(gate_ref).unwrap(),
+        Vec::new(),
+    )
+    .await;
     run_id
 }
 

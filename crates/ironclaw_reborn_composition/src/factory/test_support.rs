@@ -240,7 +240,7 @@ impl RebornRuntimeStores {
     /// continuation can see the runs that group actually executes; production
     /// composition uses one coordinator/store and needs no override.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) async fn pairing_consume_for_test<F>(
+    pub(crate) async fn pairing_consume_for_test(
         &self,
         extension_id: &str,
         authenticated_installation_id: &str,
@@ -248,13 +248,10 @@ impl RebornRuntimeStores {
         actor: (&str, &str, Option<&str>, &str),
         turn_world: (
             Arc<dyn ironclaw_turns::TurnCoordinator>,
-            Arc<ironclaw_turns::TurnStateRowStore<F>>,
+            Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
             ironclaw_host_api::TenantId,
         ),
-    ) -> Result<Option<ironclaw_host_api::UserId>, String>
-    where
-        F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
-    {
+    ) -> Result<Option<ironclaw_host_api::UserId>, String> {
         let (actor_kind, external_actor_id, conversation_space_id, conversation_id) = actor;
         let Some(service) = self
             .channel_pairing
@@ -289,10 +286,7 @@ impl RebornRuntimeStores {
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
-            let continuation = auth_continuation_dispatcher(
-                turn_coordinator,
-                Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
-            );
+            let continuation = auth_continuation_dispatcher(turn_coordinator, Some(turn_state));
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
                 .await
@@ -395,7 +389,7 @@ impl RebornRuntimeStores {
 
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_approval_test_parts(&self) -> Option<RebornApprovalTestParts> {
-        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+        let approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
             self.approval_requests.clone();
         let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
             self.capability_leases.clone();
@@ -404,8 +398,8 @@ impl RebornRuntimeStores {
         // threads/turns and round-trip identically to production.
         let capability_store_filesystem =
             crate::wrap_scoped(Arc::clone(&self.extension_filesystem));
-        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
-            ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+        let gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort> = Arc::new(
+            ironclaw_approvals::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
         );
         let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = Arc::new(
             ironclaw_capabilities::ReplayPayloadStore::new(capability_store_filesystem),
@@ -792,11 +786,11 @@ pub struct AttachmentTestSupport {
 #[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub struct RebornApprovalTestParts {
-    pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store, shared across the group's threads
     /// so a gate raised on one thread can be read back on another.
-    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    pub gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     /// Durable host-private replay-payload store (§5.3 Stage 2a-i), shared across
     /// the group's threads/turns so a gate/auth resume reconstitutes the input the
     /// original raise persisted. Backed by the same composite root as production
@@ -892,7 +886,7 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 }
 
 /// Test-only (C-DURABLE seam): open a FRESH, independent
-/// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
+/// [`ironclaw_approvals::ApprovalRequestStore`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
 /// (same on-disk root; a sibling capability store). Reuses
 /// [`mount_default_local_dev_database_roots`] + the production [`crate::wrap_scoped`]
@@ -902,7 +896,7 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_local_dev_approval_request_store_for_test(
     storage_root: &Path,
-) -> Result<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>, RebornBuildError> {
+) -> Result<Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>, RebornBuildError> {
     let mut composite = CompositeRootFilesystem::new();
     mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));

@@ -46,10 +46,10 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition, GetRunStateRequest,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
     IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
+    TurnScope, TurnStatus,
 };
 
 use super::capability_backend::{
@@ -57,7 +57,7 @@ use super::capability_backend::{
 };
 use super::doubles::ParkingCapabilityGate;
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ThreadModelMode};
-use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
+use super::harness::{HarnessCapabilityRecorder, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
@@ -712,7 +712,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_runtime: Arc<ironclaw_turns::AgentTurnProcessRuntime>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -1017,8 +1017,23 @@ impl RebornIntegrationHarness {
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the
     /// capability harness's disjoint bootstrap store.
-    pub(crate) fn turn_state_store_for_test(&self) -> Arc<TurnStateRowStore<HarnessTurnBackend>> {
-        Arc::clone(&self._shared.turn_store)
+    pub(crate) fn agent_turn_runtime_for_test(&self) -> Arc<dyn AgentTurnRuntimePort> {
+        Arc::clone(&self._shared.turn_runtime) as Arc<dyn AgentTurnRuntimePort>
+    }
+
+    pub(crate) fn process_gates_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>
+    {
+        self._shared.process_system.gates()
+    }
+
+    pub(crate) fn turn_event_projection_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_turns::TurnEventProjectionSource> {
+        Arc::new(ironclaw_turns::TurnEventProjectionFromProcessJournal::new(
+            self._shared.process_system.journal(),
+        ))
     }
 
     /// Register a scripted model gateway for a scope OTHER than this
@@ -1206,18 +1221,19 @@ impl RebornIntegrationHarness {
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            // The live store exposes its hot snapshot before a critical append's
-            // caller receives the durable ack. Rebuild this fresh row-store view
-            // on every attempt so an early Running read is not cached indefinitely.
-            let fresh_turn_store = TurnStateRowStore::new(scoped_turns_fs_composite(
-                Arc::clone(&fresh_composite),
-                &self._shared.canonical_binding,
-            )?);
-            let state = fresh_turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
+            let fresh_process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+                scoped_processes_fs_composite(
+                    Arc::clone(&fresh_composite),
+                    &self._shared.canonical_binding,
+                )?,
+            ));
+            let fresh_processes =
+                ironclaw_runner::runtime::ProcessRuntimeSystem::from_process_journal_store(
+                    fresh_process_store,
+                );
+            let state = fresh_processes
+                .agent_turn_runtime()
+                .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if state.status == TurnStatus::BlockedApproval {
                 return match state.gate_ref.as_ref().map(GateRef::as_str) {
@@ -1648,11 +1664,8 @@ impl RebornIntegrationHarness {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let state = self
-                .turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
+                .turn_runtime
+                .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if let ControlFlow::Break(outcome) = decide(&state) {
                 return outcome;
@@ -1707,11 +1720,8 @@ impl RebornIntegrationHarness {
     /// value rather than a settled one.
     pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
         Ok(self
-            .turn_store
-            .get_run_state(GetRunStateRequest {
-                scope: self.turn_scope.clone(),
-                run_id,
-            })
+            .turn_runtime
+            .get_run_state(&self.turn_scope, run_id)
             .await?)
     }
 
@@ -2277,16 +2287,24 @@ pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgr
 /// is mounted. The 4-arm match lives in `filesystem::turns_scope_path`; the
 /// binary-E2E tier reuses it via `scoped_turns_fs` in `harness.rs` with the
 /// `/engine` prefix.
-pub(crate) fn scoped_turns_fs_composite(
+pub(crate) fn scoped_processes_fs_composite(
     composite: Arc<CompositeRootFilesystem>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
     let target = super::filesystem::turns_scope_path("", binding);
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").expect("valid turns alias"),
-        VirtualPath::new(target).expect("valid turns target"),
-        MountPermissions::read_write_list_delete(),
-    )])?;
+    let target = VirtualPath::new(target).expect("valid process target");
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").expect("valid processes alias"),
+            target.clone(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/turns").expect("valid turns alias"),
+            target,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])?;
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         composite, mounts,
     )))

@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
@@ -8,7 +11,8 @@ use ironclaw_observability::live_latency_started_at;
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
+    IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    path_prefix_matches,
 };
 
 /// Resolver from a per-invocation [`ResourceScope`] to the [`MountView`] that
@@ -31,7 +35,7 @@ pub type MountViewResolver =
 /// resolving the caller's [`ScopedPath`] to a [`VirtualPath`] before the
 /// underlying [`RootFilesystem`] is touched.
 ///
-/// Higher-level stores (SecretStorePort, ProcessStorePort, …) accept a
+/// Higher-level stores (SecretStorePort, process repositories, …) accept a
 /// `Arc<ScopedFilesystem<F>>` and call the unified `put`/`get`/`query`/etc.
 /// ops on it, plumbing the request scope through every call. The
 /// [`ScopedFilesystem`] is the *single* per-process FS handle; tenant
@@ -313,6 +317,22 @@ where
         result
     }
 
+    /// Ordered keyset query over one declared indexed projection.
+    pub async fn query_ordered(
+        &self,
+        scope: &ResourceScope,
+        prefix: &ScopedPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let virtual_path =
+            self.resolve_with_permission(scope, prefix, FilesystemOperation::Query)?;
+        let result = self.root.query_ordered(&virtual_path, filter, page).await;
+        trace_fs_latency("query_ordered", prefix, started_at, &result, None);
+        result
+    }
+
     /// Declare an index on the mount under `prefix`.
     pub async fn ensure_index(
         &self,
@@ -323,9 +343,26 @@ where
         let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)?;
-        let result = self.root.ensure_index(&virtual_path, spec).await;
-        trace_fs_latency("ensure_index", prefix, started_at, &result, None);
-        result
+        const MAX_ATTEMPTS: u32 = 4;
+        const INITIAL_BACKOFF: Duration = Duration::from_millis(10);
+
+        let mut attempt = 0;
+        loop {
+            let result = self.root.ensure_index(&virtual_path, spec).await;
+            if matches!(result, Err(FilesystemError::BackendBusy { .. }))
+                && attempt + 1 < MAX_ATTEMPTS
+            {
+                // Index declarations are idempotent by contract. A short,
+                // bounded retry absorbs SQLite schema-lock races and
+                // PostgreSQL serialization/deadlock retries without widening
+                // retry behavior for ordinary reads or writes.
+                tokio::time::sleep(INITIAL_BACKOFF * 2u32.pow(attempt)).await;
+                attempt += 1;
+                continue;
+            }
+            trace_fs_latency("ensure_index", prefix, started_at, &result, None);
+            return result;
+        }
     }
 
     /// Begin a multi-key transaction (capability-gated).
@@ -780,6 +817,16 @@ impl StorageTxn for ScopedStorageTxn {
         self.check(FilesystemOperation::ReserveSeq)?;
         self.check_path(path)?;
         self.inner.reserve_sequence(path).await
+    }
+
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check(FilesystemOperation::ReserveSeq)?;
+        self.check_path(path)?;
+        self.inner.reserve_sequence_range(path, count).await
     }
 
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {

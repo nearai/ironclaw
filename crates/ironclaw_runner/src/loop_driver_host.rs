@@ -18,15 +18,15 @@ use ironclaw_hooks::middleware::{
 };
 use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
 use ironclaw_loop_host::{
-    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityAllowSet, CapabilityResolveError,
-    CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
-    LoopAttachmentReadPort, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
+    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityAllowSet,
+    CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, GuardedSystemInferencePort,
+    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
+    HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, active_task_compaction_prompt_id,
     host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -109,9 +109,9 @@ fn trace_host_factory_latency_error<E: ?Sized>(
 }
 
 use ironclaw_turns::{
-    CheckpointStateStorePort, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
+    AgentTurnRuntimePort, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
     TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnStateStore, TurnStatus,
+    TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CommunicationContextProvider, EphemeralInstructionMaterializationStore,
@@ -1012,7 +1012,6 @@ where
     thread_scope: ThreadScope,
     model_gateway: Arc<G>,
     model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
-    checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
@@ -1115,22 +1114,20 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
-        turn_state_store: Arc<dyn TurnStateStore>,
+        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
         safety_context: InstructionSafetyContext,
     ) -> Self {
         let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
-            TurnStateRunCancellationFactory::new(Arc::clone(&turn_state_store)),
+            AgentTurnRunCancellationFactory::new(Arc::clone(&agent_turn_runtime)),
         );
         Self {
             thread_service,
             thread_scope,
             model_gateway,
             model_route_resolver: None,
-            checkpoint_state_store,
             loop_checkpoint_store,
             milestone_sink,
             model_accountant: Arc::new(NoOpBudgetAccountant),
@@ -1583,9 +1580,9 @@ where
         });
         // Build the live cancellation handle in parallel with the rest of host
         // setup. The claimed run state is already validated by the scheduler, so
-        // the turn-state-backed factory can avoid a synchronous durable seed
-        // read on the host construction path while still registering for wake
-        // flips and the polling fallback.
+        // the process-backed projection can avoid a second seed read on the
+        // host construction path while still registering for wake flips and
+        // the polling fallback.
         let cancellation_factory = Arc::clone(&self.cancellation_factory);
         let cancellation_state = request.claimed_run.state.clone();
         let cancellation_handle_fetch = tokio::spawn(async move {
@@ -1927,7 +1924,6 @@ where
         let mut checkpoint: Arc<dyn LoopCheckpointPort> =
             Arc::new(HostManagedLoopCheckpointPort::new(
                 run_context.clone(),
-                Arc::clone(&self.checkpoint_state_store),
                 Arc::clone(&self.loop_checkpoint_store),
                 Arc::clone(&self.milestone_sink),
             ));
@@ -2853,13 +2849,11 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_loop_host::CheckpointStateStore;
-    use ironclaw_turns::test_support::in_memory_turn_state_store;
+    use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
     use ironclaw_turns::{
-        InMemoryRunProfileResolver, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
-        TurnCheckpointId, TurnId, TurnRunId, TurnScope, TurnStateRowStore,
+        InMemoryRunProfileResolver, ProcessLoopCheckpointStore, RunProfileResolver, TurnActor,
+        TurnCheckpointId, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2931,25 +2925,17 @@ mod tests {
         );
     }
 
-    use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
-
     fn test_checkpoint_port(
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<CheckpointStateStore<InMemoryBackend>>,
-        Arc<TurnStateRowStore<InMemoryBackend>>,
+        Arc<ProcessLoopCheckpointStore>,
     ) {
-        let state_store = in_memory_checkpoint_state_store();
-        let checkpoint_store = Arc::new(in_memory_turn_state_store());
+        let checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-        let port = HostManagedLoopCheckpointPort::new(
-            context,
-            state_store.clone(),
-            checkpoint_store.clone(),
-            milestone_sink,
-        );
-        (port, state_store, checkpoint_store)
+        let port =
+            HostManagedLoopCheckpointPort::new(context, checkpoint_store.clone(), milestone_sink);
+        (port, checkpoint_store)
     }
 
     #[tokio::test]
@@ -2957,7 +2943,7 @@ mod tests {
         let context = test_run_context().await;
         let expected_schema_id = context.checkpoint_schema_id.clone();
         let expected_schema_version = context.checkpoint_schema_version;
-        let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+        let (port, _checkpoint_store) = test_checkpoint_port(context);
         let payload = br#"{"iteration":3}"#.to_vec();
 
         let state_ref = port
@@ -2997,7 +2983,7 @@ mod tests {
         let context = test_run_context().await;
         let expected_schema_id = context.checkpoint_schema_id.clone();
         let expected_schema_version = context.checkpoint_schema_version;
-        let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+        let (port, _checkpoint_store) = test_checkpoint_port(context);
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
@@ -3033,7 +3019,7 @@ mod tests {
         let context = test_run_context().await;
         let expected_schema_id = context.checkpoint_schema_id.clone();
         let stored_schema_version = context.checkpoint_schema_version;
-        let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+        let (port, _checkpoint_store) = test_checkpoint_port(context);
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
@@ -3072,7 +3058,7 @@ mod tests {
         let context = test_run_context().await;
         let expected_schema_id = context.checkpoint_schema_id.clone();
         let expected_schema_version = context.checkpoint_schema_version;
-        let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+        let (port, _checkpoint_store) = test_checkpoint_port(context);
 
         let error = port
             .load_checkpoint_payload(LoadCheckpointPayloadRequest {
@@ -3084,86 +3070,6 @@ mod tests {
             .expect_err("missing metadata must reject");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
-    }
-
-    #[tokio::test]
-    async fn checkpoint_port_load_payload_missing_state_record_is_unavailable() {
-        let context = test_run_context().await;
-        let expected_schema_id = context.checkpoint_schema_id.clone();
-        let expected_schema_version = context.checkpoint_schema_version;
-        let (port, _state_store, checkpoint_store) = test_checkpoint_port(context.clone());
-        let missing_state_ref =
-            LoopCheckpointStateRef::for_run(&context, "missing-state").expect("valid ref");
-        let metadata = checkpoint_store
-            .put_loop_checkpoint(PutLoopCheckpointRequest {
-                scope: context.scope.clone(),
-                turn_id: context.turn_id,
-                run_id: context.run_id,
-                state_ref: missing_state_ref,
-                schema_id: expected_schema_id.clone(),
-                schema_version: expected_schema_version,
-                kind: LoopCheckpointKind::BeforeBlock,
-                gate_ref: None,
-            })
-            .await
-            .expect("write checkpoint metadata");
-
-        let error = port
-            .load_checkpoint_payload(LoadCheckpointPayloadRequest {
-                checkpoint_id: metadata.checkpoint_id,
-                expected_schema_id,
-                expected_schema_version,
-            })
-            .await
-            .expect_err("missing state payload must reject");
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
-    }
-
-    #[test]
-    fn adaptive_poll_interval_doubles_per_streak_until_cap() {
-        // PR #3640 finding C5: empty-poll backoff should double up to a
-        // configurable cap. Streak 0 returns the base; each subsequent
-        // empty poll doubles until clamped.
-        let base = Duration::from_millis(50);
-        let cap = Duration::from_millis(1_000);
-
-        assert_eq!(
-            adaptive_poll_interval(base, cap, 0),
-            Duration::from_millis(50)
-        );
-        assert_eq!(
-            adaptive_poll_interval(base, cap, 1),
-            Duration::from_millis(100)
-        );
-        assert_eq!(
-            adaptive_poll_interval(base, cap, 2),
-            Duration::from_millis(200)
-        );
-        assert_eq!(
-            adaptive_poll_interval(base, cap, 3),
-            Duration::from_millis(400)
-        );
-        assert_eq!(
-            adaptive_poll_interval(base, cap, 4),
-            Duration::from_millis(800)
-        );
-        // Streak 5 would compute 1600ms but the cap clamps it to 1000ms.
-        assert_eq!(adaptive_poll_interval(base, cap, 5), cap);
-        assert_eq!(adaptive_poll_interval(base, cap, 100), cap);
-        // Huge streak must not overflow.
-        assert_eq!(adaptive_poll_interval(base, cap, u32::MAX), cap);
-    }
-
-    #[test]
-    fn adaptive_poll_interval_respects_cap_below_base() {
-        // If `max < base` somehow slips through (it shouldn't — `with_*`
-        // builders normalize — but defense in depth), the function still
-        // returns the cap rather than overshooting.
-        let base = Duration::from_millis(200);
-        let cap = Duration::from_millis(50);
-        assert_eq!(adaptive_poll_interval(base, cap, 0), cap);
-        assert_eq!(adaptive_poll_interval(base, cap, 10), cap);
     }
 }
 

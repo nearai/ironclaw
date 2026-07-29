@@ -1579,7 +1579,7 @@ mod tests {
             ),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -1889,7 +1889,7 @@ mod tests {
             ),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -2407,7 +2407,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -2657,7 +2657,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -2741,7 +2741,7 @@ mod tests {
             ),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -2943,7 +2943,7 @@ mod tests {
             ),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -3280,7 +3280,7 @@ mod tests {
             ),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -3710,7 +3710,7 @@ mod tests {
             ),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -3839,8 +3839,8 @@ mod tests {
         // (§5.3 Stage 0), keyed by the canonical `GateRef::for_approval_request`
         // that the product read model re-derives, so a host-persisted gate is
         // findable.
-        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> =
-            Arc::new(ironclaw_run_state::GateRecordStore::new(
+        let gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort> =
+            Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             ));
         let factory = RefreshingLoopCapabilityPortFactory {
@@ -4092,7 +4092,7 @@ mod tests {
         let mut missing_approval_scope = run_context.scope.to_resource_scope();
         missing_approval_scope.user_id = owner_user_id.clone();
         missing_approval_scope.invocation_id = missing_invocation_id;
-        let missing_correlation_id = ironclaw_run_state::ApprovalRequestStorePort::get(
+        let missing_correlation_id = ironclaw_approvals::ApprovalRequestStorePort::get(
             runtime_surfaces.approval_requests_for_test().as_ref(),
             &missing_approval_scope,
             missing_approval_request_id,
@@ -4241,7 +4241,7 @@ mod tests {
             let mut correlation_scope = run_context.scope.to_resource_scope();
             correlation_scope.user_id = owner_user_id.clone();
             correlation_scope.invocation_id = set_invocation_id;
-            let correlation_id = ironclaw_run_state::ApprovalRequestStorePort::get(
+            let correlation_id = ironclaw_approvals::ApprovalRequestStorePort::get(
                 runtime_surfaces.approval_requests_for_test().as_ref(),
                 &correlation_scope,
                 approval_request_id,
@@ -4723,7 +4723,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -4839,7 +4839,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -5089,7 +5089,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
@@ -5208,7 +5208,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+            gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(

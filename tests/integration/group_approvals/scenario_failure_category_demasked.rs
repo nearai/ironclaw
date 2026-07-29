@@ -2,7 +2,7 @@
 //! not the masking `driver_protocol_violation`.
 //!
 //! `RebornIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
-//! ~line 472) wires `.with_checkpoint_state_store(..)` onto the group-level
+//! wiring uses the process-backed checkpoint projection on the group-level
 //! `ThreadCheckpointLoopExitEvidencePort` -- the de-mask fix. Without it,
 //! `verify_failure_evidence` (`crates/ironclaw_runner/src/loop_exit_applier.rs`)
 //! short-circuits `Ok(false)` on a `None` store, so `validate_failed_exit`
@@ -47,7 +47,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     if failure.category() == "driver_protocol_violation" {
         return Err(format!(
             "failure category was the masking sentinel \"driver_protocol_violation\"; \
-             the group-level checkpoint_state_store wiring (group.rs ~line 472) is not \
+             the group-level process checkpoint wiring is not \
              de-masking the real failure category (got: {failure:?})"
         )
         .into());

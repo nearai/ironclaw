@@ -3682,11 +3682,12 @@ async fn cancel_run_propagates_to_subagent_children() {
         run_id: parent_run_id,
         ..
     } = parent;
-    let child_scope = TurnScope::new(
+    let child_scope = TurnScope::new_with_owner(
         parent_scope.tenant_id.clone(),
         parent_scope.agent_id.clone(),
         parent_scope.project_id.clone(),
         ThreadId::new("runtime-cancel-child-thread").unwrap(),
+        parent_scope.explicit_owner_user_id().cloned(),
     );
     let child = runtime
         .turn_tree_store
@@ -3704,6 +3705,8 @@ async fn cancel_run_propagates_to_subagent_children() {
                 received_at: Utc::now(),
                 requested_run_id: None,
                 spawn_tree_descendant_cap: 4,
+                process_dependency: None,
+                process_input: None,
             },
             &AllowAllTurnAdmissionPolicy,
             &InMemoryRunProfileResolver::default(),
@@ -3840,7 +3843,7 @@ async fn send_user_message_uses_caller_supplied_skill_context_source() {
     assert_ne!(reply.status, TurnStatus::Completed);
     assert_eq!(
         skill_context_source.calls.load(Ordering::SeqCst),
-        ironclaw_turns::TurnStateStoreLimits::default().max_crash_recovery_reclaims as usize,
+        ironclaw_processes::MAX_CRASH_RECOVERY_RECLAIMS as usize,
         "composition should retry caller-supplied transient skill context failures only up to the durable claim bound"
     );
     assert!(

@@ -10,7 +10,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_run_state::ApprovalStatus;
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
