@@ -22,31 +22,81 @@ Keep the capability-based microkernel model and the **mechanically enforced 7-la
 
 ```text
 crates/
-├── contracts/    neutral vocabulary & ports (leaf tier — no execution, no frameworks)
-│     ironclaw_host_api · ironclaw_common · ironclaw_prompt_envelope
-│     ironclaw_loop_contracts (NEW) · ironclaw_extension_contracts (NEW) · ironclaw_product_contracts (NEW)
-├── substrate/    privileged mechanism substrates the kernel mediates
-│     ironclaw_filesystem · ironclaw_secrets · ironclaw_network · ironclaw_safety · ironclaw_observability
-├── events/       evidence → derived views → transport streams (three contracts, four crates)
-│     ironclaw_events · ironclaw_event_store · ironclaw_event_projections · ironclaw_event_streams
-├── domains/      typed record/service domains behind the kernel (backend-neutral)
-│     threads · conversations · triggers · memory{,_native,_mem0} · skills · auth · attachments
-│     extractors · projects · identity · llm · traces · outbound
-├── kernel/       the authority perimeter — deliberately nine focused crates, not one
-│     trust · authorization · approvals · resources · runtime_policy · capabilities
-│     processes · turns · host_runtime   (+ run_state, transitional until the journal collapse lands)
-├── lanes/        execution mechanisms for already-authorized work
-│     wasm · wasm_limiter · mcp · sandbox (NEW, by merging three unwired fragments)
-├── loop/         loop userland and its hosting adapters
-│     agent_loop · loop_host · runner · hooks
-├── extensions/   everything "installable package"
-│     ironclaw_extensions (registry/records) · ironclaw_extension_host (generic host)
-│     ironclaw_extension_manager (NEW — product-side management) · packages/{first_party, slack, telegram, …}
-├── product/      first-party userland above the kernel
-│     product · operator · openai_compat · webui · host_ingress
-└── app/          assembly & enforcement
-      composition · cli (binary `ironclaw`) · config · architecture
-tools/            stress harness, excluded helpers
+├── contracts/                          # neutral vocabulary & ports (leaf tier — no execution, no frameworks)
+│   ├── ironclaw_host_api
+│   ├── ironclaw_common
+│   ├── ironclaw_prompt_envelope
+│   ├── ironclaw_loop_contracts        # NEW
+│   ├── ironclaw_extension_contracts   # NEW
+│   └── ironclaw_product_contracts     # NEW
+├── substrate/                          # privileged mechanism substrates the kernel mediates
+│   ├── ironclaw_filesystem
+│   ├── ironclaw_secrets
+│   ├── ironclaw_network
+│   ├── ironclaw_safety
+│   └── ironclaw_observability
+├── events/                             # evidence → derived views → transport streams
+│   ├── ironclaw_events
+│   ├── ironclaw_event_store           # renamed from ironclaw_reborn_event_store
+│   ├── ironclaw_event_projections
+│   └── ironclaw_event_streams
+├── domains/                            # typed record/service domains behind the kernel (backend-neutral)
+│   ├── ironclaw_threads
+│   ├── ironclaw_conversations
+│   ├── ironclaw_triggers
+│   ├── ironclaw_memory
+│   ├── ironclaw_memory_native
+│   ├── ironclaw_memory_mem0
+│   ├── ironclaw_skills
+│   ├── ironclaw_auth
+│   ├── ironclaw_attachments
+│   ├── ironclaw_extractors
+│   ├── ironclaw_projects
+│   ├── ironclaw_identity              # renamed from ironclaw_reborn_identity
+│   ├── ironclaw_llm
+│   ├── ironclaw_traces                # renamed from ironclaw_reborn_traces
+│   └── ironclaw_outbound
+├── kernel/                             # the authority perimeter — deliberately nine focused crates, not one
+│   ├── ironclaw_trust
+│   ├── ironclaw_authorization
+│   ├── ironclaw_approvals
+│   ├── ironclaw_resources
+│   ├── ironclaw_runtime_policy
+│   ├── ironclaw_capabilities
+│   ├── ironclaw_processes
+│   ├── ironclaw_turns
+│   ├── ironclaw_host_runtime
+│   └── ironclaw_run_state             # transitional — deleted once the journal collapse lands
+├── lanes/                              # execution mechanisms for already-authorized work
+│   ├── ironclaw_wasm
+│   ├── ironclaw_wasm_limiter
+│   ├── ironclaw_mcp
+│   └── ironclaw_sandbox               # NEW — merges three currently-unwired fragments
+├── loop/                               # loop userland and its hosting adapters
+│   ├── ironclaw_agent_loop
+│   ├── ironclaw_loop_host
+│   ├── ironclaw_runner
+│   └── ironclaw_hooks
+├── extensions/                         # everything "installable package"
+│   ├── ironclaw_extensions            # manifests, registry, installation records
+│   ├── ironclaw_extension_host        # generic hosting: verify, bind, deliver
+│   ├── ironclaw_extension_manager     # NEW — product-side extension management
+│   └── packages/                      # one self-contained directory per package
+│       ├── first_party/               # inventory + native executors + assets
+│       ├── slack/
+│       └── telegram/                  # absorbs ironclaw_telegram_v2_adapter
+├── product/                            # first-party userland above the kernel
+│   ├── ironclaw_product
+│   ├── ironclaw_operator
+│   ├── ironclaw_openai_compat         # renamed from ironclaw_reborn_openai_compat
+│   ├── ironclaw_webui
+│   └── ironclaw_host_ingress
+└── app/                                # assembly & enforcement
+    ├── ironclaw_composition           # renamed from ironclaw_reborn_composition
+    ├── ironclaw_cli                   # binary `ironclaw` (dir renamed from ironclaw_reborn_cli)
+    ├── ironclaw_config                # renamed from ironclaw_reborn_config
+    └── ironclaw_architecture
+tools/                                  # stress harness, excluded helpers
 ```
 
 ## Family roles and responsibilities (summary)
