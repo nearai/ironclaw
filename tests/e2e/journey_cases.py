@@ -281,6 +281,10 @@ PRODUCT_JOURNEY_CASES = (
             source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
             test="test_reborn_v2_text_turn_persists",
         ),
+        browser_evidence=PytestEvidence(
+            source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+            test="test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages",
+        ),
     ),
     ProductJourneyCase(
         case_id="slack_inbound_real_turn_reply",

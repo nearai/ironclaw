@@ -97,5 +97,7 @@ class ProviderJourneyCase(JourneyCaseBase):
 class ProductJourneyCase(JourneyCaseBase):
     """A trace-less product journey proved by its owning executable test."""
 
+    browser_evidence: PytestEvidence | None = None
+
 
 JourneyCase: TypeAlias = ProviderJourneyCase | ProductJourneyCase

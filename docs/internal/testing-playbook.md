@@ -529,3 +529,18 @@ without representative journey evidence fails CI.
 Prefer one representative whole-path case per supported ingress and delivery
 mechanism. Do not multiply every provider operation by every ingress or move
 provider-specific assertions into the generic registry.
+
+## Product-surface coverage report
+
+The Reborn E2E lane publishes `product-surface-coverage-<sha>` as JSON and
+Markdown. `tests/e2e/product_surface_coverage.py` joins the production-derived
+capability inventory, `ProviderOperationCase`, `JourneyCase`, representative
+fault cases, and the existing owned backlog. Do not add a second hand-maintained
+capability or journey list to reporting code.
+
+The five evidence axes are `contract`, `journey`, `faults`, `browser`, and
+`live`. Empty optional cells are reported honestly. Missing production
+classifications or a `tested` capability with no executable evidence fail the
+lane; owned gaps, waivers, and live-only rows remain prominent but do not
+silently become passing evidence. A harvested live-QA fixture is not current
+live evidence unless a stable live result artifact binds back to its typed row.

@@ -117,6 +117,13 @@ is post-merge nightly coverage, not a required merge check. Failed nightly
 shards upload server logs, Playwright traces, screenshots, and videos, and the
 nightly watchdog owns alerting for that workflow.
 
+The Reborn E2E job also publishes `product-surface-coverage-<sha>`. Its JSON and
+Markdown files join the shipped capability denominator with typed contract,
+journey, and fault registries. The generator fails on unclassified or
+unevidenced tested capabilities and lists owned gaps, waivers, and live-only
+rows separately. Reporting imports the existing registries; it does not own a
+duplicate CI capability or journey list.
+
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
 the configuration:

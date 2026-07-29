@@ -147,6 +147,7 @@ full-path Emulate tests still start the legacy gateway binary.
 | `test_provider_fault_proxy.py` | Harness self-tests for reusable provider status, response, timeout, connection-reset, and lost-acknowledgement profiles plus safe request evidence and reset |
 | `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
 | `test_journey_coverage.py` | Fast whole-path completeness gate. Harvested provider traces are typed `JourneyCase` entries, while representative WebUI, Slack, Telegram, and scheduled-trigger journeys name exact executable Pytest or Cargo evidence. Production channel manifests cannot add an inbound or outbound surface without journey evidence. |
+| `test_product_surface_coverage.py` | Generated-report contract and sabotage tests. The report joins the production capability inventory, typed operation/journey/fault registries, and owned backlog into JSON and Markdown without copying their denominators. |
 | `test_reborn_qa_trace_full_path.py` | Harvested and typed provider operations through standalone Reborn and Emulate, including representative read/idempotent-write/non-idempotent-write fault cases with provider readback |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
@@ -335,10 +336,33 @@ inventory now says so mechanically.** Coverage is counted per
 Everything not yet meeting those rules is listed in `coverage_backlog` with an
 owner, reason, issue, and review condition. The backlog is a ratchet: entries
 must be removed as coverage lands, and the gate fails if an entry names a write
-that now has a case, or a read that now covers every required outcome class. As
-of this writing it holds no write capabilities and 48 read capabilities missing
-an empty-result case. That gap was previously invisible because a harvested
+that now has a case, or a read that now covers every required outcome class.
+Use the generated product-surface report for the current count instead of
+copying it into prose. That gap was previously invisible because a harvested
 tool-call name satisfied the old gate.
+
+### Product-surface coverage artifact
+
+`product_surface_coverage.py` emits a stable JSON artifact and a human-readable
+Markdown matrix with `contract`, `journey`, `faults`, `browser`, and `live`
+columns. It derives capability IDs and operation kinds from shipped extension
+manifests and imports the typed evidence registries. The only policy metadata
+it consumes is the existing classification, waiver, and owned-backlog manifest.
+
+The generator exits non-zero for an unclassified production capability or a
+capability classified as tested with no executable evidence. Owned backlog
+items, waivers, and live-only classifications remain visible in dedicated
+sections without being laundered into missing coverage. The `live` column must
+only use a stable live-result binding; the fact that a hermetic fixture was
+originally harvested from live QA is provenance, not current live evidence.
+
+Run it locally with:
+
+```bash
+python tests/e2e/product_surface_coverage.py \
+  --json artifacts/product-surface-coverage/matrix.json \
+  --markdown artifacts/product-surface-coverage/matrix.md
+```
 
 ### Environment passed to ironclaw in tests
 
