@@ -237,10 +237,18 @@ jobs:
       # Pre-build the reborn binary under the same llvm-cov env so the E2E
       # fixtures find it cached instead of doing a cold instrumented build
       # inside a pytest timeout. The WebChat v2 and OpenAI-compatible route
-      # surfaces are both unconditional, so one binary covers every scenario
-      # selected below.
+      # surfaces are both unconditional. The test-support feature adds only
+      # the guarded loopback SSO-provider seam used by the selected SSO E2E.
       - name: Build instrumented ironclaw-reborn
-        run: cargo build -p ironclaw --bin ironclaw
+        run: |
+          set -euo pipefail
+          rm -f target/debug/ironclaw
+          cargo build -p ironclaw --bin ironclaw
+          cp target/debug/ironclaw target/debug/ironclaw-default
+          rm -f target/debug/ironclaw
+          cargo build -p ironclaw --bin ironclaw --features e2e-test-support
+          cp target/debug/ironclaw target/debug/ironclaw-e2e-sso
+          cp target/debug/ironclaw-default target/debug/ironclaw
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp

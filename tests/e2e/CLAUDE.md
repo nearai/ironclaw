@@ -87,6 +87,7 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_webui_v2_sso.py` | Google-shaped SSO login through a local mock OIDC provider, one-time ticket exchange, two-user thread/timeline isolation, and logout revocation against the standalone `ironclaw serve` binary |
 | `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
@@ -141,6 +142,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build -p ironclaw` (timeout 600s). |
 | `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
 | `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
+| `reborn_v2_sso_server` | Starts the same standalone binary with the guarded debug-only Google endpoint seam pointed at `mock_oauth_idp`; queues Alice and Bob OIDC profiles for full SSO and scope-isolation coverage. |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
 | `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, Sheets, and Slides. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |

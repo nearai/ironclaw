@@ -58,6 +58,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
+| `test_reborn_webui_v2_sso.py` | Standalone Reborn SSO login, ticket exchange, logout revocation, and two-user thread/timeline isolation through a local mock OIDC provider |
 | `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
 | `test_provider_fault_proxy.py` | Self-tests the transparent provider fault proxy, reusable status/transport/response profiles, safe request ledger, reset behavior, and commit-then-disconnect semantics |
 | `test_reborn_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |

@@ -485,6 +485,37 @@ def ironclaw_reborn_binary():
 
 
 @pytest.fixture(scope="session")
+def ironclaw_reborn_sso_binary():
+    """Build the debug-only Reborn binary variant used by the SSO mock."""
+    target_dir = _cargo_target_dir()
+    cargo_binary = target_dir / "debug" / "ironclaw"
+    binary = target_dir / "debug" / "ironclaw-e2e-sso"
+    if _binary_needs_rebuild(binary):
+        print("Building Reborn ironclaw with E2E test support (this may take a while)...")
+        # Cargo fingerprints feature sets separately but publishes both at
+        # the same top-level path. Removing that generated output forces Cargo
+        # to materialize the requested feature variant before we copy it.
+        cargo_binary.unlink(missing_ok=True)
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw",
+                "--features", "e2e-test-support",
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+        shutil.copy2(cargo_binary, binary)
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
 def ironclaw_reborn_openai_compat_binary():
     """Ensure Reborn `ironclaw` is built for the OpenAI-compatible scenarios.
 

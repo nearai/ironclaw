@@ -200,10 +200,17 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build ironclaw-reborn with WebChat v2 surface
-        run: >-
-          cargo build
-          -p ironclaw
-          --bin ironclaw
+        run: |
+          set -euo pipefail
+          # Preserve the shipping-feature binary separately before compiling
+          # the debug-only SSO test seam into the same Cargo target name.
+          rm -f target/debug/ironclaw
+          cargo build -p ironclaw --bin ironclaw
+          cp target/debug/ironclaw target/debug/ironclaw-default
+          rm -f target/debug/ironclaw
+          cargo build -p ironclaw --bin ironclaw --features e2e-test-support
+          cp target/debug/ironclaw target/debug/ironclaw-e2e-sso
+          cp target/debug/ironclaw-default target/debug/ironclaw
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
@@ -228,7 +235,12 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run Reborn WebUI v2 smoke
-        run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+          tests/e2e/scenarios/test_reborn_webui_v2_sso.py
+          -v
+          --timeout=120
 
       - name: Run harvested QA replay and provider contracts with Emulate
         env:
@@ -300,6 +312,8 @@ jobs:
         id: live_canary_binary
         run: |
           set -euo pipefail
+          # The build step restored this path from the separately preserved
+          # shipping-feature binary; the SSO scenario runs its own copy.
           product_ref="$(git rev-parse HEAD)"
           artifact_dir="artifacts/reborn-webui-v2-binary"
           mkdir -p "${artifact_dir}"

@@ -1,8 +1,10 @@
-"""Reusable mock OAuth 2.0 authorization server with PKCE support.
+"""Reusable mock OAuth 2.0 / OIDC authorization server with PKCE support.
 
 Implements the minimum surface needed for Reborn product-auth E2E tests:
   - GET  /authorize  — redirects to callback URL with ?code=&state=
   - POST /token      — issues a fake access_token + refresh_token
+  - optional queued OIDC profiles — adds a Google-shaped ``id_token`` so
+    WebUI SSO tests can log in distinct users through the real provider path
 
 Security assertions this fixture supports:
   - PKCE S256 challenge round-trip (can be toggled off for negative tests)
@@ -33,7 +35,10 @@ from __future__ import annotations
 
 import hashlib
 import base64
+import json
 import secrets
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import parse_qs, urlparse
@@ -62,6 +67,16 @@ class MockOAuthCodeGrant:
     state: str
 
 
+@dataclass(frozen=True)
+class MockOidcProfile:
+    """One identity returned by the next authorization-code exchange."""
+
+    subject: str
+    email: str
+    display_name: str
+    hosted_domain: str | None = None
+
+
 @dataclass
 class MockOAuthIdpHandle:
     base_url: str
@@ -70,6 +85,8 @@ class MockOAuthIdpHandle:
     # Maps refresh_token → client_id for RFC 6749 §10.4 binding validation.
     issued_refresh_tokens: dict[str, str] = field(default_factory=dict)
     _pending_codes: dict[str, dict] = field(default_factory=dict)
+    _initial_oidc_profiles: tuple[MockOidcProfile, ...] = field(default_factory=tuple)
+    _oidc_profiles: deque[MockOidcProfile] = field(default_factory=deque)
 
     @property
     def authorize_url(self) -> str:
@@ -84,6 +101,7 @@ class MockOAuthIdpHandle:
         self.issued_tokens.clear()
         self.issued_refresh_tokens.clear()
         self._pending_codes.clear()
+        self._oidc_profiles = deque(self._initial_oidc_profiles)
 
     def make_authorization_url(
         self,
@@ -108,6 +126,36 @@ class MockOAuthIdpHandle:
             params["code_challenge"] = code_challenge
             params["code_challenge_method"] = "S256"
         return f"{self.authorize_url}?{urlencode(params)}"
+
+
+def _google_id_token(profile: MockOidcProfile, client_id: str) -> str:
+    """Build a non-secret JWT-shaped ID token for insecure test decoding.
+
+    The production Google provider validates the claims and algorithm after
+    receiving the token over the configured token endpoint, but deliberately
+    does not verify this response token's signature. The mock still includes a
+    non-empty signature segment so the fixture has a valid JWT wire shape.
+    """
+
+    def encode_json(value: dict[str, object]) -> str:
+        raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    claims: dict[str, object] = {
+        "sub": profile.subject,
+        "aud": client_id,
+        "iss": "https://accounts.google.com",
+        "email": profile.email,
+        "email_verified": True,
+        "name": profile.display_name,
+        "exp": int(time.time()) + 3600,
+    }
+    if profile.hosted_domain:
+        claims["hd"] = profile.hosted_domain
+    header = encode_json({"alg": "RS256", "typ": "JWT"})
+    payload = encode_json(claims)
+    signature = base64.urlsafe_b64encode(b"mock-oidc-signature").rstrip(b"=").decode()
+    return f"{header}.{payload}.{signature}"
 
 
 async def issue_oauth_code(
@@ -145,9 +193,17 @@ async def issue_oauth_code(
     )
 
 
-async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHandle]:
+async def start_mock_oauth_idp(
+    *,
+    port: int = 0,
+    oidc_profiles: tuple[MockOidcProfile, ...] = (),
+) -> AsyncIterator[MockOAuthIdpHandle]:
     """Context manager that starts the mock IDP and yields a handle."""
-    handle = MockOAuthIdpHandle(base_url="")  # filled after bind
+    handle = MockOAuthIdpHandle(
+        base_url="",
+        _initial_oidc_profiles=oidc_profiles,
+        _oidc_profiles=deque(oidc_profiles),
+    )  # base_url filled after bind
 
     async def authorize(request: web.Request) -> web.Response:
         """Simulate the IdP authorization endpoint.
@@ -160,15 +216,27 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
         state = qs.get("state", "")
         code_challenge = qs.get("code_challenge")
         code_challenge_method = qs.get("code_challenge_method", "S256")
+        client_id = qs.get("client_id", "")
 
-        if not redirect_uri or not state:
-            return web.Response(status=400, text="missing redirect_uri or state")
+        if not redirect_uri or not state or not client_id:
+            return web.Response(
+                status=400,
+                text="missing client_id, redirect_uri, or state",
+            )
+
+        oidc_profile = None
+        if handle._initial_oidc_profiles:
+            if not handle._oidc_profiles:
+                return web.Response(status=409, text="no mock OIDC profiles remain")
+            oidc_profile = handle._oidc_profiles.popleft()
 
         code = f"fake_code_{secrets.token_urlsafe(12)}"
         handle._pending_codes[code] = {
+            "client_id": client_id,
             "redirect_uri": redirect_uri,
             "code_challenge": code_challenge,
             "code_challenge_method": code_challenge_method,
+            "oidc_profile": oidc_profile,
         }
 
         from urllib.parse import urlencode
@@ -194,6 +262,16 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
                     {"error": "invalid_grant", "error_description": "redirect_uri mismatch"},
                     status=400,
                 )
+            submitted_client_id = body.get("client_id", "")
+            if submitted_client_id and submitted_client_id != pending["client_id"]:
+                return web.json_response(
+                    {"error": "invalid_grant", "error_description": "client_id mismatch"},
+                    status=400,
+                )
+            # Some product-auth fixtures model a public client and omit
+            # client_id at exchange. Retain the authorization request's
+            # binding in that case; reject only an explicitly different id.
+            client_id = submitted_client_id or pending["client_id"]
 
             # PKCE S256: verifier required when challenge was registered.
             expected_challenge = pending.get("code_challenge")
@@ -213,16 +291,19 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
             handle.received_codes.append(code)
             access_token = f"fake_access_{secrets.token_urlsafe(16)}"
             refresh_token = f"fake_refresh_{secrets.token_urlsafe(16)}"
-            client_id = body.get("client_id", "")
             handle.issued_tokens.append(access_token)
             handle.issued_refresh_tokens[refresh_token] = client_id
-            return web.json_response({
+            response = {
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "token_type": "Bearer",
                 "expires_in": 3600,
                 "scope": "openid email",
-            })
+            }
+            oidc_profile = pending.get("oidc_profile")
+            if oidc_profile is not None:
+                response["id_token"] = _google_id_token(oidc_profile, client_id)
+            return web.json_response(response)
 
         if grant_type == "refresh_token":
             refresh_token = body.get("refresh_token", "")
