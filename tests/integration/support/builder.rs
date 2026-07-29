@@ -1710,11 +1710,8 @@ impl RebornIntegrationHarness {
     /// value rather than a settled one.
     pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
         Ok(self
-            .turn_store
-            .get_run_state(GetRunStateRequest {
-                scope: self.turn_scope.clone(),
-                run_id,
-            })
+            .turn_runtime
+            .get_run_state(&self.turn_scope, run_id)
             .await?)
     }
 
