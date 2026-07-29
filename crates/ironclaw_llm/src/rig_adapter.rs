@@ -62,6 +62,15 @@ pub struct RigAdapter<M: CompletionModel> {
     /// `CompletionModel` does not expose model discovery, so this is wired
     /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
     models_endpoint: Option<ModelsEndpoint>,
+    /// Provider-specific cleanup applied after the shared JSON Schema shaping.
+    tool_schema_compatibility: ToolSchemaCompatibility,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ToolSchemaCompatibility {
+    #[default]
+    Default,
+    Gemini,
 }
 
 /// Auth scheme applied to a model-discovery request.
@@ -255,6 +264,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             unsupported_params: HashSet::new(),
             default_additional_params: None,
             models_endpoint: None,
+            tool_schema_compatibility: ToolSchemaCompatibility::Default,
         }
     }
 
@@ -301,6 +311,13 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Supported parameter names: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
     pub fn with_unsupported_params(mut self, params: Vec<String>) -> Self {
         self.unsupported_params = params.into_iter().collect();
+        self
+    }
+
+    /// Adapt tool schemas to the subset accepted by Gemini's native
+    /// `functionDeclarations` API.
+    pub(crate) fn with_gemini_tool_schemas(mut self) -> Self {
+        self.tool_schema_compatibility = ToolSchemaCompatibility::Gemini;
         self
     }
 
@@ -636,15 +653,25 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 /// append an advisory hint to the tool description, so we pass an owned
 /// clone through and read it back.
 fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
+    convert_tools_with_compatibility(tools, ToolSchemaCompatibility::Default)
+}
+
+fn convert_tools_with_compatibility(
+    tools: &[IronToolDefinition],
+    compatibility: ToolSchemaCompatibility,
+) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .map(|t| {
             let mut description = t.description.clone();
-            let parameters = shape_tool_schema(
+            let mut parameters = shape_tool_schema(
                 ToolSchemaPolicy::StrictOpenAi,
                 &t.parameters,
                 &mut description,
             );
+            if matches!(compatibility, ToolSchemaCompatibility::Gemini) {
+                normalize_gemini_schema(&mut parameters);
+            }
             RigToolDefinition {
                 name: t.name.clone(),
                 description,
@@ -652,6 +679,106 @@ fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
             }
         })
         .collect()
+}
+
+/// Reduce JSON Schema constructs that rig-core cannot represent in Gemini's
+/// typed `Schema`. In particular, rig serializes a missing type as `""` and
+/// retains `items` after choosing the first member of a type union, both of
+/// which Gemini rejects before inference.
+fn normalize_gemini_schema(schema: &mut serde_json::Value) {
+    fn concrete_type(schema: &serde_json::Value) -> Option<String> {
+        let object = schema.as_object()?;
+        match object.get("type") {
+            Some(serde_json::Value::String(kind)) if kind != "null" => {
+                return Some(kind.clone());
+            }
+            Some(serde_json::Value::Array(kinds)) => {
+                if let Some(kind) = kinds
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .find(|kind| *kind != "null")
+                {
+                    return Some(kind.to_string());
+                }
+            }
+            _ => {}
+        }
+        if object.contains_key("properties") {
+            return Some("object".to_string());
+        }
+        if object.contains_key("items") {
+            return Some("array".to_string());
+        }
+        ["oneOf", "anyOf", "allOf"]
+            .iter()
+            .filter_map(|keyword| object.get(*keyword))
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .find_map(concrete_type)
+    }
+
+    let inferred_type = concrete_type(schema);
+
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+
+    if !object.contains_key("type")
+        && let Some(inferred_type) = inferred_type
+    {
+        object.insert("type".to_string(), serde_json::Value::String(inferred_type));
+    }
+
+    if let Some(types) = object.get("type").and_then(serde_json::Value::as_array) {
+        let selected = types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|kind| *kind != "null")
+            .unwrap_or("string")
+            .to_string();
+        object.insert("type".to_string(), serde_json::Value::String(selected));
+    }
+
+    if !object.contains_key("type") {
+        let inferred = if object.contains_key("properties") {
+            "object"
+        } else if object.contains_key("items") {
+            "array"
+        } else {
+            "string"
+        };
+        object.insert(
+            "type".to_string(),
+            serde_json::Value::String(inferred.to_string()),
+        );
+    }
+
+    let is_array = object.get("type").and_then(serde_json::Value::as_str) == Some("array");
+    if !is_array {
+        object.remove("items");
+    }
+
+    if let Some(properties) = object
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for property in properties.values_mut() {
+            normalize_gemini_schema(property);
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        normalize_gemini_schema(items);
+    }
+    for keyword in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = object
+            .get_mut(keyword)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for variant in variants {
+                normalize_gemini_schema(variant);
+            }
+        }
+    }
 }
 
 /// Convert IronClaw tool_choice string to rig-core ToolChoice.
@@ -1273,7 +1400,10 @@ where
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = match self.tool_schema_compatibility {
+            ToolSchemaCompatibility::Default => convert_tools(&request.tools),
+            compatibility => convert_tools_with_compatibility(&request.tools, compatibility),
+        };
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
@@ -1363,7 +1493,10 @@ where
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = match self.tool_schema_compatibility {
+            ToolSchemaCompatibility::Default => convert_tools(&request.tools),
+            compatibility => convert_tools_with_compatibility(&request.tools, compatibility),
+        };
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
@@ -2864,6 +2997,70 @@ mod tests {
         assert!(
             tool.description.contains("create_issue") && tool.description.contains("list_issues"),
             "variant info must be retained in the hint"
+        );
+    }
+
+    #[test]
+    fn test_gemini_tool_schemas_have_concrete_types_and_valid_items() {
+        let tools = [IronToolDefinition {
+            name: "builtin__compatibility".to_string(),
+            description: "Gemini schema regression".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "description": "String or JSON request body",
+                        "type": ["string", "object", "array", "number", "boolean", "null"]
+                    },
+                    "data": {
+                        "description": "JSON string or JSON value to process"
+                    },
+                    "timestamp": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "number" }
+                        ]
+                    },
+                    "schedule": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "const": "cron" },
+                                    "expression": { "type": "string" }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "const": "once" },
+                                    "at": { "type": "string" }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }),
+        }];
+
+        let converted = convert_tools_with_compatibility(&tools, ToolSchemaCompatibility::Gemini);
+        let properties = &converted[0].parameters["properties"];
+
+        assert_eq!(properties["body"]["type"], "string");
+        assert!(
+            properties["body"].get("items").is_none(),
+            "Gemini rejects items on non-array schemas"
+        );
+        assert_eq!(properties["data"]["type"], "string");
+        assert_eq!(properties["timestamp"]["type"], "string");
+        assert_eq!(properties["schedule"]["type"], "object");
+        assert_eq!(
+            properties["schedule"]["anyOf"][0]["oneOf"][0]["properties"]["kind"]["type"], "string",
+            "the first nested union variant must have concrete nested types"
+        );
+        assert_eq!(
+            properties["schedule"]["anyOf"][0]["oneOf"][1]["properties"]["kind"]["type"], "string",
+            "the second nested union variant must have concrete nested types"
         );
     }
 

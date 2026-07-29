@@ -822,6 +822,7 @@ fn create_gemini_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_gemini_tool_schemas()
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
