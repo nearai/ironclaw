@@ -47,7 +47,7 @@ use crate::{
         ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
         HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
         RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RunnerFailureRecovery, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 

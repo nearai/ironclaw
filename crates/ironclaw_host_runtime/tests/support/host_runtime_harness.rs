@@ -116,7 +116,7 @@ impl HostPolicyFacts for PermissiveHostPolicyFacts {
 pub(crate) async fn libsql_scoped_turns_fs(
     db: Arc<libsql::Database>,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let view = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").unwrap(),

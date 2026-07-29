@@ -36,9 +36,9 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
-    ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornHostBindings,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProcessBinding,
-    ResolveExternalIdentity, SurfaceKind, build_reborn_runtime,
+    ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProcessBinding, ResolveExternalIdentity, SurfaceKind,
+    build_reborn_runtime,
 };
 
 #[path = "support/first_party.rs"]
@@ -96,14 +96,15 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "prod-identity-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,

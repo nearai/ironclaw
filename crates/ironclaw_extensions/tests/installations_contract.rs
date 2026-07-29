@@ -1267,7 +1267,7 @@ async fn normalized_v2_contract_runs_on_libsql() {
             .await
             .unwrap(),
     );
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(database));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(database).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
     assert_normalized_backend_contract(

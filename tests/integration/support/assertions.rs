@@ -344,6 +344,26 @@ impl RebornIntegrationHarness {
         )
     }
 
+    /// Assert the exact ordered vendor-seam calls made by explicit fallback
+    /// routing. Reaching the distinct fallback vendor and completing the turn
+    /// proves the gateway's index-1 evidence survived the loop-host check.
+    pub async fn assert_ordered_fallback_vendor_calls(&self) -> HarnessResult<()> {
+        let probe = self
+            .fallback_provider_call_probe
+            .as_ref()
+            .ok_or("fallback provider call probe is not enabled for this harness")?;
+        let primary = probe.primary_calls();
+        let fallback = probe.fallback_calls();
+        if primary == 1 && fallback == 1 {
+            return Ok(());
+        }
+        Err(format!(
+            "expected one primary route-0 call and one fallback route-1 call; \
+             observed primary={primary}, fallback={fallback}"
+        )
+        .into())
+    }
+
     /// Assert the exact number of times `needle` occurs across every request
     /// seen by the recoverable-failure provider, including injected failures
     /// that never reach the delegated `TraceLlm`.
@@ -671,6 +691,20 @@ impl RebornIntegrationHarness {
         let events = self.recorded_turn_events();
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
         Err(format!("no recorded turn event of kind {kind:?} after waiting; saw {seen:?}").into())
+    }
+
+    /// Assert no terminal lifecycle event of `kind` was emitted for this
+    /// harness after a different terminal event has already been observed.
+    pub async fn assert_no_turn_event_recorded(
+        &self,
+        kind: ironclaw_turns::TurnEventKind,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_turn_events();
+        if events.iter().all(|event| event.kind != kind) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
+        Err(format!("unexpected recorded turn event of kind {kind:?}; saw {seen:?}").into())
     }
 
     /// Assert the always-wired security-audit recorder captured an event with

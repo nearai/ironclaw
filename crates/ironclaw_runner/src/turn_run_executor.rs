@@ -19,7 +19,7 @@ use ironclaw_turns::{
     run_profile::AgentLoopDriverHost,
     runner::{
         ClaimedTurnRun, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
-        TurnRunTransitionPort,
+        RunnerFailureRecovery, TurnRunTransitionPort,
     },
 };
 use tracing::{debug, error, warn};
@@ -604,6 +604,7 @@ impl RebornTurnRunExecutor {
                 runner_id,
                 lease_token,
                 failure,
+                recovery: RunnerFailureRecovery::Terminal,
             })
             .await
         {

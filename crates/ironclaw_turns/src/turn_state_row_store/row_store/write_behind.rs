@@ -4,16 +4,15 @@
 //! verbatim from the module root during the #6263 decomposition; behavior is
 //! unchanged.
 
-use std::sync::Arc;
-
 use ironclaw_filesystem::RootFilesystem;
+use tokio::sync::MutexGuard;
 
 use crate::TurnError;
 
 use super::{
     PendingRowCommit, TurnStateRowStore,
     delta::{RowSnapshotState, SnapshotDelta},
-    journal::{DeltaAck, DeltaJournal},
+    journal::{DeltaAck, DeltaJournal, DeltaJournalHealth},
 };
 
 impl<F> TurnStateRowStore<F>
@@ -25,20 +24,23 @@ where
     /// exits.
     ///
     /// Awaits the oldest-first backpressure window populated by
-    /// [`track_write_behind_ack_if_async`](Self::track_write_behind_ack_if_async),
+    /// the reserve-enqueue-track critical sections in the mutation paths,
     /// giving a planned/graceful restart a clean durable tail. A hard crash
     /// (SIGKILL/OOM) still loses only the un-acked non-critical (non-critical =
     /// not gate-park/terminal/brand-new-run) tail; gate-park, terminal, and
     /// brand-new-run transitions are synchronously durable and never wait on
     /// this drain.
     ///
-    /// Idempotent. On an append failure the flusher has halted and latched the
-    /// store degraded; the error is surfaced and the hot cache is rolled back to
-    /// the last consistent durable point (mirroring the backpressure path).
+    /// Idempotent. Retryable contention keeps the oldest acknowledgement
+    /// pending until its retained batch commits. A fatal append failure is
+    /// surfaced and rolls the hot cache back to the last consistent durable
+    /// point.
     pub async fn drain(&self) -> Result<(), TurnError> {
         let mut window = self.pending_write_behind.lock().await;
-        while let Some(ack) = window.pop_front() {
-            if let Err(error) = DeltaJournal::await_ack(Some(ack)).await {
+        while let Some(ack) = window.front_mut() {
+            let result = DeltaJournal::await_ack_ref(ack).await;
+            window.pop_front();
+            if let Err(error) = result {
                 drop(window);
                 self.clear_snapshot_cache().await;
                 return Err(error);
@@ -51,44 +53,33 @@ where
     /// read-your-writes. A non-critical mutation returns `Ok` after updating
     /// the hot cache but before its durable append, so a durable-row read
     /// could miss it. The hot cache is the single-writer authority. Once the
-    /// journal has degraded the cache is cleared and reads must fall back to
-    /// the last consistent durable point.
-    pub(super) fn is_write_behind_healthy(&self) -> bool {
-        !self.delta_journal.is_degraded()
+    /// journal has failed fatally the cache is cleared and reads must fall back
+    /// to the last consistent durable point. During contention recovery, the
+    /// exact accepted batch is still owned by the flusher, so reads continue
+    /// using the hot snapshot.
+    pub(super) fn can_serve_hot_snapshot(&self) -> bool {
+        self.delta_journal.health() != DeltaJournalHealth::FailedFatal
     }
 
-    /// Reset the hot cache after a mutation the embedded engine REJECTED (a
-    /// domain error such as `ThreadBusy` / `InvalidTransition`).
-    ///
-    /// The op ran against the shared cached engine, so it may have left a
-    /// partial mutation; that must be discarded. Durable LAGS the cache
-    /// (un-acked non-critical ops), so a reload-from-durable would silently
-    /// drop acked-but-unflushed ops the caller was told succeeded. Instead,
-    /// rebuild the embedded engine from the cached snapshot (which still
-    /// includes those un-flushed ops), discarding only the failed op's
-    /// partial mutation.
-    pub(super) fn reset_cache_after_rejected_mutation(
-        &self,
-        guard: &mut Option<RowSnapshotState>,
-    ) -> Result<(), TurnError> {
-        if let Some(state) = guard.as_mut() {
-            state.store = Arc::new(self.build_in_memory_store(state.snapshot.clone())?);
-        }
-        Ok(())
-    }
-
-    /// Fail a mutation fast when the store has degraded after a write-behind
-    /// append failure. Clears the diverged hot cache (reads then reload from the
-    /// last consistent durable point) and returns a retryable error.
-    pub(super) async fn ensure_not_degraded(&self) -> Result<(), TurnError> {
-        if self.delta_journal.is_degraded() {
-            self.clear_snapshot_cache().await;
-            return Err(TurnError::Unavailable {
-                reason: "turn-state row store degraded after a write-behind durable append failure"
+    /// Fail new mutation admission while the journal is recovering an accepted
+    /// batch or after it has failed fatally. Recovery preserves the hot cache;
+    /// only a fatal failure discards it and reloads the last durable point.
+    pub(super) async fn ensure_mutation_admitted(&self) -> Result<(), TurnError> {
+        match self.delta_journal.health() {
+            DeltaJournalHealth::Healthy => Ok(()),
+            DeltaJournalHealth::RecoveringContention => Err(TurnError::Unavailable {
+                reason: "turn-state row store is recovering from durable storage contention"
                     .to_string(),
-            });
+            }),
+            DeltaJournalHealth::FailedFatal => {
+                self.clear_snapshot_cache().await;
+                Err(TurnError::Unavailable {
+                    reason:
+                        "turn-state row store halted after a write-behind durable append failure"
+                            .to_string(),
+                })
+            }
         }
-        Ok(())
     }
 
     /// Commit a prepared [`PendingRowCommit`].
@@ -122,9 +113,14 @@ where
     /// the journal independently of that lock, so awaiting the oldest pending
     /// ack here is backpressure, not deadlock. At the cap, await (and drop) the
     /// OLDEST pending ack first, bounding both memory and the crash-loss window.
-    /// A degraded (append-failure) ack propagates; the caller clears the hot
-    /// cache and fails fast.
-    pub(super) async fn reserve_write_behind_slot(&self) -> Result<(), TurnError> {
+    /// A fatal append acknowledgement propagates; retryable contention keeps
+    /// the acknowledgement pending until the retained batch succeeds. The
+    /// returned guard reserves the slot through enqueue and synchronous ack
+    /// tracking, so cancellation cannot lose an accepted acknowledgement.
+    pub(super) async fn reserve_write_behind_slot<'a>(
+        &'a self,
+        snapshot_state: &mut Option<RowSnapshotState>,
+    ) -> Result<MutexGuard<'a, std::collections::VecDeque<DeltaAck>>, TurnError> {
         let cap = self.limits.max_pending_write_behind_deltas.max(1);
         let mut window = self.pending_write_behind.lock().await;
         while window.len() >= cap {
@@ -140,31 +136,17 @@ where
             };
             let result = DeltaJournal::await_ack_ref(front).await;
             window.pop_front();
-            result?;
-        }
-        Ok(())
-    }
-
-    /// For a non-critical write-behind commit, move the durable ack into the
-    /// bounded pending window (its slot was reserved by
-    /// [`reserve_write_behind_slot`](Self::reserve_write_behind_slot) before the
-    /// enqueue) and return `None` so [`commit_pending`](Self::commit_pending)
-    /// returns without awaiting. Otherwise return the ack unchanged for the
-    /// caller to await (a critical barrier). Runs under
-    /// `snapshot_state`, so the reserve→enqueue→track sequence is serialized and
-    /// the window can never exceed the cap.
-    pub(super) async fn track_write_behind_ack_if_async(
-        &self,
-        critical: bool,
-        ack: Option<DeltaAck>,
-    ) -> Option<DeltaAck> {
-        if !critical {
-            if let Some(ack) = ack {
-                self.pending_write_behind.lock().await.push_back(ack);
+            if let Err(error) = result {
+                // Reservation runs while the caller owns `snapshot_state`.
+                // Invalidate through that existing guard: reacquiring the
+                // snapshot mutex here would self-deadlock. Retryable storage
+                // contention never resolves the retained ack with an error,
+                // so only a fatal journal generation reaches this branch.
+                self.drop_cache_if_failed_fatal(snapshot_state);
+                return Err(error);
             }
-            return None;
         }
-        ack
+        Ok(window)
     }
 
     /// Read-side write-behind barrier (#6298).
@@ -187,9 +169,9 @@ where
     /// observes them. This is a read-side barrier symmetric to a critical
     /// transition's write-side barrier, and keeps the durable read's exact
     /// semantics stable (only WHEN it reads changes, never WHAT it reads). On a
-    /// drained ack failure the flusher has halted and latched the store
-    /// degraded; clear the diverged hot cache and surface the retryable error,
-    /// mirroring the backpressure path.
+    /// A fatal drained acknowledgement clears the diverged hot cache and
+    /// surfaces a retryable host error. Contention acknowledgements remain
+    /// pending and do not reach this branch until recovery succeeds.
     pub(super) async fn flush_pending_write_behind_for_read(&self) -> Result<(), TurnError> {
         // Await each pending ack IN PLACE under the window lock (peek-await-pop),
         // removing it only once it resolves. Holding the lock across the awaits
@@ -233,15 +215,18 @@ where
         match tokio::time::timeout(self.apply_timeout, self.await_delta_ack(pending.ack)).await {
             Ok(Ok(())) => Ok(pending.value),
             Ok(Err(error)) => {
-                self.clear_snapshot_cache().await;
+                self.clear_snapshot_cache_if_fatal().await;
                 Err(error)
             }
-            Err(_) => {
-                self.clear_snapshot_cache().await;
-                Err(TurnError::Unavailable {
-                    reason: timeout_reason.to_string(),
-                })
-            }
+            Err(_) => Err(TurnError::Unavailable {
+                reason: timeout_reason.to_string(),
+            }),
+        }
+    }
+
+    async fn clear_snapshot_cache_if_fatal(&self) {
+        if self.delta_journal.health() == DeltaJournalHealth::FailedFatal {
+            self.clear_snapshot_cache().await;
         }
     }
 }

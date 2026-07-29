@@ -350,6 +350,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -426,6 +427,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await

@@ -153,6 +153,7 @@ mod tests {
         HostManagedModelRequest {
             model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
                 .expect("valid model profile id"),
+            fallback_index: 0,
             messages: Vec::new(),
             surface_version: None,
             resolved_model_route: None,
