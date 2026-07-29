@@ -561,7 +561,9 @@ async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root(
         LifecycleIsolationFixture::reopen(root, storage_root, tenant_id, agent_id, operator_id)
             .await;
 
-    rebuilt.assert_user_phase(rebuilt.operator(), "active").await;
+    rebuilt
+        .assert_user_phase(rebuilt.operator(), "active")
+        .await;
     let loaded_root = rebuilt
         .runtime
         .extension_bound_package_root_for_test(EXTENSION_ID)

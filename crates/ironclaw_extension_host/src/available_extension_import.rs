@@ -652,6 +652,13 @@ prompt_doc_ref = "prompts/run.md"
                 .expect("complete wasm tool bundle must import");
         assert_eq!(package.source, ManifestSource::InstalledLocal);
         assert_eq!(package.package_ref.id.as_str(), "uploaded-tool");
+        // The two-pass root attach (parse with root=None to learn the id,
+        // then rebuild via `from_resolved` with the id-derived root) must
+        // survive onto the resolved contract, not just `package.package.root`.
+        assert_eq!(
+            package.resolved_manifest.root,
+            Some(VirtualPath::new("/system/extensions/uploaded-tool").unwrap())
+        );
     }
 
     #[tokio::test]
