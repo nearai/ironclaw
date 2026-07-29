@@ -1008,7 +1008,7 @@ pub(crate) struct RebornRuntimeStores {
     /// binding store plus the assembled driver, dispatched by the gate/resolve
     /// ingress once a turn reaches `AttestedResolved`. `None` on production
     /// profiles until the durable attested backends are wired.
-    pub(crate) attested_signing: Option<Arc<crate::attested::RebornAttestedComposition>>,
+    pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,

@@ -1,5 +1,12 @@
 pub use admin_token::AdminApiTokenMinter;
-pub use attested::{NoopBroadcaster, RebornAttestedComposition, RegisterAttestedGateError};
+#[cfg(all(feature = "libsql", feature = "attested-broadcast"))]
+pub use attested::LibSqlAttestedComposition;
+#[cfg(all(feature = "postgres", feature = "attested-broadcast"))]
+pub use attested::PostgresAttestedComposition;
+pub use attested::{
+    InMemoryAttestedComposition, NoopBroadcaster, RebornAttestedComposition,
+    RegisterAttestedGateError,
+};
 pub use attested_continuation::RebornAttestedContinuation;
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;

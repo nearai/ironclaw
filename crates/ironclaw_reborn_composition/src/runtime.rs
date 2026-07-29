@@ -695,7 +695,7 @@ pub struct RebornRuntime {
     /// `None` on production profiles until the durable attested backends are
     /// wired — the gate ingress then has nothing to dispatch to and fails
     /// closed, rather than half-resolving a signature.
-    pub(crate) attested_signing: Option<Arc<crate::attested::RebornAttestedComposition>>,
+    pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
@@ -1446,7 +1446,7 @@ impl RebornRuntime {
     /// authoritative binding store through this one handle, rather than
     /// assembling them from runtime internals — so there is exactly one place a
     /// signing continuation can be obtained.
-    pub fn attested_signing(&self) -> Option<&Arc<crate::attested::RebornAttestedComposition>> {
+    pub fn attested_signing(&self) -> Option<&Arc<crate::attested::InMemoryAttestedComposition>> {
         self.attested_signing.as_ref()
     }
 
