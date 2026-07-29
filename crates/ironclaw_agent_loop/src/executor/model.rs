@@ -9,7 +9,9 @@ use ironclaw_turns::{
 use tracing::debug;
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState, PendingModelRetryDirective},
+    state::{
+        CheckpointKind, LoopExecutionState, PendingModelRetryDirective, TerminalWarningObservation,
+    },
     strategies::{
         GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope,
         model_error_to_failure_kind,
@@ -150,6 +152,40 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     // proves the model received its recovery turn.
                     state.pending_model_error_observation = None;
                     state.pending_model_retry_directive = None;
+                    if error.kind == AgentLoopHostErrorKind::BudgetAccountingFailed
+                        && state
+                            .terminal_warning_state
+                            .schedule(TerminalWarningObservation::budget_accounting_failed())
+                    {
+                        // Persist the one-shot accounting warning before
+                        // rebuilding the prompt. A resumed worker must not
+                        // grant the same recovery turn again, and the next
+                        // model admission remains fail-closed until the host
+                        // accountant has reconciled the prior attempt.
+                        state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                            CancelCheck::Continue(next) => *next,
+                            CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                        };
+                        state = CheckpointStage
+                            .write(ctx, state, CheckpointKind::BeforeModel)
+                            .await?
+                            .state;
+                        CheckpointStage
+                            .emit_progress(
+                                ctx,
+                                LoopProgressEvent::driver_note(
+                                    LoopDriverNoteKind::Retrying,
+                                    "retrying model request after resource accounting recovery",
+                                )
+                                .map_err(|_| {
+                                    AgentLoopExecutorError::PlannerContract {
+                                        detail: "accounting recovery progress summary was invalid",
+                                    }
+                                })?,
+                            )
+                            .await;
+                        return Ok(ModelStep::RetryIteration(Box::new(state)));
+                    }
                     let Some(class) = model_error_class(&error) else {
                         let raw_summary = error.safe_summary;
                         let (safe_summary, rejected_summary_detail) =

@@ -284,12 +284,12 @@ async fn run_matrix_row(row: &MatrixRow) {
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
     match setup {
         FailureSetup::ModelError => {
-            // One more error than the availability retry budget so the abort
-            // (and its category) is driven by the Unavailable class rather
-            // than the mock's script-exhausted Internal fallback.
+            // The availability retry budget plus its one observation turn and
+            // the final repeated error drive the typed Unavailable abort,
+            // rather than the mock's script-exhausted Internal fallback.
             let unavailable_error_count = crate::strategies::DefaultRecoveryStrategy::default()
                 .max_model_availability_attempts as usize
-                + 1;
+                + 2;
             let host = MockHost::new(Vec::new()).with_model_errors(
                 (0..unavailable_error_count)
                     .map(|_| {

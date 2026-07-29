@@ -93,7 +93,14 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::ContentFiltered => Some(ModelErrorClass::ContentFiltered),
+        // Legacy generic capacity errors keep the historic context-overflow
+        // projection. Live model-call producers use the precise variants below.
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
+        AgentLoopHostErrorKind::ContextOverflow => Some(ModelErrorClass::ContextOverflow),
+        AgentLoopHostErrorKind::OutputTruncated => Some(ModelErrorClass::OutputTruncated),
+        // Exhausted configured spend is terminal: another model call cannot
+        // succeed until the budget changes, and shrinking context is irrelevant.
+        AgentLoopHostErrorKind::SpendBudgetExceeded => None,
         // Accounting storage failed before the host could establish a
         // trustworthy budget outcome. Preserve the typed host error instead
         // of retrying it as a provider availability failure.
@@ -161,6 +168,9 @@ pub(super) fn capability_port_error_is_terminal(kind: AgentLoopHostErrorKind) ->
         | AgentLoopHostErrorKind::Unavailable
         | AgentLoopHostErrorKind::Internal
         | AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::SpendBudgetExceeded
+        | AgentLoopHostErrorKind::ContextOverflow
+        | AgentLoopHostErrorKind::OutputTruncated
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
         | AgentLoopHostErrorKind::CheckpointRejected
@@ -282,6 +292,7 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::ContextOverflow => "model_context_overflow",
         ModelErrorClass::ContentFiltered => "model_content_filtered",
         ModelErrorClass::InvalidOutput => "model_invalid_output",
+        ModelErrorClass::OutputTruncated => "model_output_truncated",
         ModelErrorClass::Unavailable => "model_unavailable",
         ModelErrorClass::Internal => "model_internal",
         ModelErrorClass::StaleRequest => "model_stale_request",
@@ -478,6 +489,9 @@ mod tests {
             (K::InvalidOutput, Some(C::InvalidOutput)),
             (K::ContentFiltered, Some(C::ContentFiltered)),
             (K::BudgetExceeded, Some(C::ContextOverflow)),
+            (K::SpendBudgetExceeded, None),
+            (K::ContextOverflow, Some(C::ContextOverflow)),
+            (K::OutputTruncated, Some(C::OutputTruncated)),
             // Model-fixable-by-rebuild: iteration retry refreshes the surface
             // and prompt bundle; exhaustion -> `model_stale_request`.
             (K::StaleSurface, Some(C::StaleRequest)),
@@ -510,6 +524,7 @@ mod tests {
     fn stale_request_and_precise_terminal_classes_have_precise_categories() {
         for (class, category) in [
             (ModelErrorClass::StaleRequest, "model_stale_request"),
+            (ModelErrorClass::OutputTruncated, "model_output_truncated"),
             (
                 ModelErrorClass::Unauthorized,
                 "model_credentials_unavailable",

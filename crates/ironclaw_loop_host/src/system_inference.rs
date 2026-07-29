@@ -184,7 +184,10 @@ where
 fn map_model_error(kind: HostManagedModelErrorKind) -> SystemInferenceError {
     let safe_summary = match kind {
         HostManagedModelErrorKind::Cancelled => return SystemInferenceError::Cancelled,
-        HostManagedModelErrorKind::BudgetExceeded => "system inference budget exceeded",
+        HostManagedModelErrorKind::BudgetExceeded
+        | HostManagedModelErrorKind::SpendBudgetExceeded => "system inference budget exceeded",
+        HostManagedModelErrorKind::ContextOverflow => "system inference context exceeded",
+        HostManagedModelErrorKind::OutputTruncated => "system inference output truncated",
         HostManagedModelErrorKind::BudgetAccountingFailed => {
             "system inference resource accounting unavailable"
         }
@@ -204,11 +207,17 @@ fn map_model_error(kind: HostManagedModelErrorKind) -> SystemInferenceError {
 fn map_gateway_error(error: LoopModelGatewayError) -> SystemInferenceError {
     match error.kind {
         AgentLoopHostErrorKind::Cancelled => SystemInferenceError::Cancelled,
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetApprovalRequired => {
-            SystemInferenceError::Failed {
-                safe_summary: safe("system inference budget exceeded"),
-            }
-        }
+        AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::SpendBudgetExceeded
+        | AgentLoopHostErrorKind::BudgetApprovalRequired => SystemInferenceError::Failed {
+            safe_summary: safe("system inference budget exceeded"),
+        },
+        AgentLoopHostErrorKind::ContextOverflow => SystemInferenceError::Failed {
+            safe_summary: safe("system inference context exceeded"),
+        },
+        AgentLoopHostErrorKind::OutputTruncated => SystemInferenceError::Failed {
+            safe_summary: safe("system inference output truncated"),
+        },
         AgentLoopHostErrorKind::BudgetAccountingFailed => SystemInferenceError::Failed {
             safe_summary: safe("system inference resource accounting unavailable"),
         },

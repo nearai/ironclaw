@@ -1,6 +1,6 @@
 use crate::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
 };
 use ironclaw_turns::ModelInvalidOutputDetailReason;
 
@@ -67,6 +67,9 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         }
         "model_invalid_output" => {
             "The run failed because the model returned output the runner could not use. Retry the run or choose a different model."
+        }
+        "model_output_truncated" => {
+            "The run failed because the model repeatedly reached its output limit. Retry with a request for a shorter answer or increase the output limit."
         }
         "model_stale_request" => {
             "The run failed because the available tools changed while a model request was in flight. Retry the run."
@@ -239,6 +242,9 @@ pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static st
         ),
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY => Some(
+            "The run stopped because its configured model spend budget was exhausted. Increase the budget or start a new run.",
         ),
         BUDGET_ACCOUNTING_FAILED_CATEGORY => Some(
             "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",

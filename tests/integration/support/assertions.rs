@@ -387,6 +387,25 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the exact number of text-only system-inference provider calls.
+    pub async fn assert_text_model_provider_call_count(
+        &self,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.text_calls();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected {expected} text-only model provider call(s), observed {actual}")
+                .into(),
+        )
+    }
+
     /// Assert no request seen by the recoverable-failure provider contains
     /// `needle`, including requests rejected before `TraceLlm` delegation.
     pub async fn assert_model_message_content_not_contains(

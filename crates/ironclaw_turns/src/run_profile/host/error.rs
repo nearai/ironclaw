@@ -26,7 +26,15 @@ pub enum AgentLoopHostErrorKind {
     /// filter rejected the request or response.
     ContentFiltered,
     PolicyDenied,
+    /// Generic non-model resource/capacity exhaustion. Model-call budget and
+    /// token-window outcomes use the three precise variants below.
     BudgetExceeded,
+    /// The configured host-side spend budget cannot admit another model call.
+    SpendBudgetExceeded,
+    /// The model input exceeded the provider's context window.
+    ContextOverflow,
+    /// The provider stopped because generated output hit its token ceiling.
+    OutputTruncated,
     /// The model call would push utilization past the configured pause
     /// threshold. Callers surface an approval gate (foreground or
     /// background) and retry after the user resolves it.
@@ -56,6 +64,9 @@ impl AgentLoopHostErrorKind {
             Self::ContentFiltered => "content_filtered",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
+            Self::SpendBudgetExceeded => "spend_budget_exceeded",
+            Self::ContextOverflow => "context_overflow",
+            Self::OutputTruncated => "output_truncated",
             Self::BudgetApprovalRequired => "budget_approval_required",
             Self::BudgetAccountingFailed => "budget_accounting_failed",
             Self::Unavailable => "unavailable",
@@ -82,9 +93,10 @@ impl AgentLoopHostErrorKind {
             Self::InvalidOutput => FailureKind::OutputDecode,
             Self::ContentFiltered => FailureKind::OperationFailed,
             Self::PolicyDenied => FailureKind::PolicyDenied,
-            // A budget limit the model could work around (smaller call, fewer
-            // tools) — the honest resource-quota kind.
-            Self::BudgetExceeded => FailureKind::Resource,
+            Self::BudgetExceeded | Self::SpendBudgetExceeded | Self::ContextOverflow => {
+                FailureKind::Resource
+            }
+            Self::OutputTruncated => FailureKind::OutputTooLarge,
             // "Callers surface an approval gate and retry after the user
             // resolves it" (variant doc) — a PARK semantic, so the projection
             // must carry the Park-fated kind, not a model-visible tool error.
@@ -236,10 +248,18 @@ mod tests {
                 .failure_kind()
                 .is_retryable()
         );
-        // The genuine budget outcome keeps the resource-quota kind.
+        // Generic capacity, configured spend, and context-window exhaustion
+        // remain resource-shaped, while truncated output is output-shaped.
+        for kind in [
+            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::SpendBudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
+        ] {
+            assert_eq!(kind.failure_kind(), FailureKind::Resource);
+        }
         assert_eq!(
-            AgentLoopHostErrorKind::BudgetExceeded.failure_kind(),
-            FailureKind::Resource
+            AgentLoopHostErrorKind::OutputTruncated.failure_kind(),
+            FailureKind::OutputTooLarge
         );
     }
 }

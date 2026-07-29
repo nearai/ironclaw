@@ -492,7 +492,7 @@ impl GovernorBackedAccountant {
                 Err(error)
             }
             Err(ResourceError::LimitExceeded { denial, .. }) => Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
                 format!("budget exhausted for {}", denial.dimension),
             )
             .map_err(internal_summary_error)?),
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_model_call_returns_budget_exceeded_when_limit_zero_but_negative() {
+    async fn pre_model_call_returns_spend_budget_exceeded_when_hard_limit_is_crossed() {
         // A negative-USD estimate would be invalid input, but our default
         // path always produces non-negative estimates. Instead verify that
         // a very tight USD limit hard-denies.
@@ -998,7 +998,7 @@ mod tests {
             .pre_model_call(&context, &request)
             .await
             .unwrap_err();
-        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetExceeded);
+        assert_eq!(err.kind, AgentLoopHostErrorKind::SpendBudgetExceeded);
     }
 
     #[tokio::test]
@@ -1037,12 +1037,13 @@ mod tests {
             .await
             .unwrap_err();
         // 75 × 0.10 = $7.50; input_tokens=64*0.10=$6.40; total=$13.90 → over hard cap.
-        // We expect BudgetExceeded since utilization > 100%, OR
+        // We expect SpendBudgetExceeded since utilization > 100%, OR
         // BudgetApprovalRequired if just below. Either is acceptable —
         // confirm we got a budget-class outcome, not Internal.
         assert!(matches!(
             err.kind,
-            AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetApprovalRequired
+            AgentLoopHostErrorKind::SpendBudgetExceeded
+                | AgentLoopHostErrorKind::BudgetApprovalRequired
         ));
     }
 

@@ -1895,7 +1895,12 @@ pub enum HostManagedModelErrorKind {
     ContentFiltered,
     PolicyDenied,
     ConfigurationError,
+    /// Generic host-side resource/capacity exhaustion. Provider model-call
+    /// outcomes use the precise variants below.
     BudgetExceeded,
+    SpendBudgetExceeded,
+    ContextOverflow,
+    OutputTruncated,
     BudgetApprovalRequired,
     /// Durable host-side resource accounting failed. This is an
     /// infrastructure failure, not a provider credit or configured-budget
@@ -2310,6 +2315,11 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+        HostManagedModelErrorKind::SpendBudgetExceeded => {
+            AgentLoopHostErrorKind::SpendBudgetExceeded
+        }
+        HostManagedModelErrorKind::ContextOverflow => AgentLoopHostErrorKind::ContextOverflow,
+        HostManagedModelErrorKind::OutputTruncated => AgentLoopHostErrorKind::OutputTruncated,
         HostManagedModelErrorKind::BudgetApprovalRequired => {
             AgentLoopHostErrorKind::BudgetApprovalRequired
         }
@@ -2333,6 +2343,15 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
+        HostManagedModelErrorKind::SpendBudgetExceeded => {
+            "model request exceeded its configured spend budget"
+        }
+        HostManagedModelErrorKind::ContextOverflow => {
+            "model request exceeded the provider context window"
+        }
+        HostManagedModelErrorKind::OutputTruncated => {
+            "model response was truncated before completion"
+        }
         HostManagedModelErrorKind::BudgetApprovalRequired => "model request needs budget approval",
         HostManagedModelErrorKind::BudgetAccountingFailed => {
             "resource accounting storage is unavailable"
@@ -2435,6 +2454,31 @@ mod tests {
             mapped.safe_summary,
             "resource accounting storage is unavailable"
         );
+    }
+
+    #[test]
+    fn model_gateway_error_preserves_precise_budget_and_token_limit_kinds() {
+        for (gateway_kind, host_kind) in [
+            (
+                HostManagedModelErrorKind::SpendBudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
+            ),
+            (
+                HostManagedModelErrorKind::ContextOverflow,
+                AgentLoopHostErrorKind::ContextOverflow,
+            ),
+            (
+                HostManagedModelErrorKind::OutputTruncated,
+                AgentLoopHostErrorKind::OutputTruncated,
+            ),
+        ] {
+            let mapped = model_gateway_error(HostManagedModelError::safe(
+                gateway_kind,
+                "model request could not complete",
+            ));
+
+            assert_eq!(mapped.kind, host_kind);
+        }
     }
 
     #[test]

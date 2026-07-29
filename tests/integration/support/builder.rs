@@ -317,6 +317,16 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Report output truncation `failures` times, then resume scripted
+    /// playback through the real provider gateway and recovery path.
+    pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::OutputTruncated,
+            failures,
+        ));
+        self
+    }
+
     /// Park this harness's tool/capability dispatch until released
     /// (tool-path analog of `park_model`, issue #5476 lease-wedge coverage).
     /// Only the `BuiltinHttpTools` backend wires this today. See

@@ -220,6 +220,9 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
             detail: error.detail.clone(),
         },
         AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::SpendBudgetExceeded
+        | AgentLoopHostErrorKind::ContextOverflow
+        | AgentLoopHostErrorKind::OutputTruncated
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
         | AgentLoopHostErrorKind::ContentFiltered

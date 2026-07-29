@@ -67,7 +67,8 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
     ) -> Result<(), LoopModelGatewayError>;
 
     /// Called **before** dispatching the model request. Return `Err` with
-    /// `AgentLoopHostErrorKind::BudgetExceeded` to reject the call.
+    /// `AgentLoopHostErrorKind::SpendBudgetExceeded` to reject the call when
+    /// the configured model-spend budget is exhausted.
     async fn pre_model_call(
         &self,
         context: &LoopRunContext,

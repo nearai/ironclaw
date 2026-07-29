@@ -38,6 +38,41 @@ impl ModelErrorRecoveryObservation {
         }
     }
 
+    pub fn transient() -> Self {
+        Self {
+            schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorRecoveryDetail::Transient,
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self {
+            schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorRecoveryDetail::Unavailable,
+        }
+    }
+
+    pub fn internal() -> Self {
+        Self {
+            schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorRecoveryDetail::Internal,
+        }
+    }
+
+    pub fn stale_request() -> Self {
+        Self {
+            schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorRecoveryDetail::StaleRequest,
+        }
+    }
+
+    pub fn output_truncated() -> Self {
+        Self {
+            schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorRecoveryDetail::OutputTruncated,
+        }
+    }
+
     pub fn class(&self) -> ModelErrorObservationClass {
         match self.detail {
             ModelErrorRecoveryDetail::ContextOverflow => {
@@ -48,6 +83,13 @@ impl ModelErrorRecoveryObservation {
             }
             ModelErrorRecoveryDetail::InvalidOutput { .. } => {
                 ModelErrorObservationClass::InvalidOutput
+            }
+            ModelErrorRecoveryDetail::Transient => ModelErrorObservationClass::Transient,
+            ModelErrorRecoveryDetail::Unavailable => ModelErrorObservationClass::Unavailable,
+            ModelErrorRecoveryDetail::Internal => ModelErrorObservationClass::Internal,
+            ModelErrorRecoveryDetail::StaleRequest => ModelErrorObservationClass::StaleRequest,
+            ModelErrorRecoveryDetail::OutputTruncated => {
+                ModelErrorObservationClass::OutputTruncated
             }
         }
     }
@@ -80,6 +122,26 @@ impl ModelErrorRecoveryObservation {
                     "model error observation: invalid_output reason={reason}; repair the response and continue"
                 )
             }
+            ModelErrorRecoveryDetail::Transient => {
+                "model error observation: model service temporarily failed; service may have recovered; continue the task from the current state"
+                    .to_string()
+            }
+            ModelErrorRecoveryDetail::Unavailable => {
+                "model error observation: model service was unavailable; service may have recovered; continue the task from the current state"
+                    .to_string()
+            }
+            ModelErrorRecoveryDetail::Internal => {
+                "model error observation: internal model gateway failure interrupted the prior attempt; gateway may have recovered; continue the task from the current state"
+                    .to_string()
+            }
+            ModelErrorRecoveryDetail::StaleRequest => {
+                "model error observation: model request context changed before completion; use the refreshed context and capability surface and continue"
+                    .to_string()
+            }
+            ModelErrorRecoveryDetail::OutputTruncated => {
+                "model error observation: output was truncated; continue without repeating if prior partial text is available, otherwise provide a concise complete answer"
+                    .to_string()
+            }
         }
     }
 }
@@ -97,6 +159,11 @@ enum ModelErrorRecoveryDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<ModelInvalidOutputDetailReason>,
     },
+    Transient,
+    Unavailable,
+    Internal,
+    StaleRequest,
+    OutputTruncated,
 }
 
 /// Prompt-shape control that must survive the retry-transition checkpoint.
@@ -142,5 +209,53 @@ mod tests {
         observation.schema_version += 1;
 
         assert!(observation.validate().is_err());
+    }
+
+    #[test]
+    fn availability_and_stale_observations_are_typed_and_actionable() {
+        for (observation, expected_class, expected_instruction) in [
+            (
+                ModelErrorRecoveryObservation::transient(),
+                ModelErrorObservationClass::Transient,
+                "temporarily failed",
+            ),
+            (
+                ModelErrorRecoveryObservation::unavailable(),
+                ModelErrorObservationClass::Unavailable,
+                "was unavailable",
+            ),
+            (
+                ModelErrorRecoveryObservation::internal(),
+                ModelErrorObservationClass::Internal,
+                "internal model gateway failure",
+            ),
+            (
+                ModelErrorRecoveryObservation::stale_request(),
+                ModelErrorObservationClass::StaleRequest,
+                "request context changed",
+            ),
+            (
+                ModelErrorRecoveryObservation::output_truncated(),
+                ModelErrorObservationClass::OutputTruncated,
+                "continue without repeating",
+            ),
+        ] {
+            observation.validate().expect("observation validates");
+            assert_eq!(observation.class(), expected_class);
+            assert!(
+                observation
+                    .model_instruction()
+                    .contains(expected_instruction),
+                "{expected_class:?} observation must state the cause"
+            );
+            assert!(
+                observation.model_instruction().contains("continue"),
+                "{expected_class:?} observation must tell the model what to do"
+            );
+            let encoded = serde_json::to_value(&observation).expect("serialize observation");
+            let restored: ModelErrorRecoveryObservation =
+                serde_json::from_value(encoded).expect("deserialize observation");
+            assert_eq!(restored, observation);
+        }
     }
 }
