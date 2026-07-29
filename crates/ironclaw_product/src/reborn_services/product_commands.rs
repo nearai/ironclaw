@@ -37,10 +37,11 @@ where
                 Ok(record.status == AdminUserStatus::Active && record.role.is_admin())
             }
             Ok(None) => Ok(false),
-            // Directory temporarily unreachable: retryable, never silently
-            // "not admin" (that would let a demoted-admin race widen access).
-            Err(AdminUserError::Unavailable) => Err(ProductSurfaceError::service_unavailable(true)),
-            Err(_) => Err(ProductSurfaceError::internal()),
+            // Same sanitized directory-error taxonomy `authorize_admin` uses:
+            // `Unavailable` is retryable (503), everything else is not (never
+            // silently "not admin" — that would let a demoted-admin race
+            // widen access).
+            Err(error) => Err(map_admin_user_error(error)),
         }
     }
 

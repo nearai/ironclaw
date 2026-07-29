@@ -15448,26 +15448,36 @@ async fn member_execute_unknown_command_help_excludes_admin_names() {
         .rejection
         .expect("unknown command must be rejected");
     assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
-    assert!(
-        rejection.message.contains("/model"),
-        "{}",
-        rejection.message
+    // Exact equality (not a substring check): pins that the member help text
+    // is EXACTLY the two User-audience commands, in registry order — no
+    // lifecycle name can sneak in under a future descriptor addition.
+    assert_eq!(rejection.message, "Available commands:\n/model\n/status");
+}
+
+#[tokio::test]
+async fn member_execute_non_slash_text_is_invalid_request_with_empty_command() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
     );
-    assert!(
-        rejection.message.contains("/status"),
-        "{}",
-        rejection.message
-    );
-    assert!(
-        !rejection.message.contains("extension_configure"),
-        "member help must not name admin-only lifecycle commands: {}",
-        rejection.message
-    );
-    assert!(
-        !rejection.message.contains("skill_remove"),
-        "member help must not name admin-only lifecycle commands: {}",
-        rejection.message
-    );
+
+    // "hello" has no leading slash: `parse_product_slash_command` returns
+    // `Ok(None)` (ordinary text) — a DIFFERENT parse-stage-failure branch than
+    // an unrecognized slash command name (`ProductCommand::Unknown`, covered
+    // above). No command token is ever identified, so `command` is empty.
+    let response =
+        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "hello")
+            .await
+            .expect("ordinary text is a rejection, not a transport error");
+
+    assert_eq!(response.command, "");
+    assert!(response.result.is_none());
+    let rejection = response.rejection.expect("non-slash text must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
 }
 
 // Mirrors the cross-user-access idiom used throughout this file (e.g.
@@ -15479,9 +15489,10 @@ async fn member_execute_unknown_command_help_excludes_admin_names() {
 // view — so a caller probing another user's thread_id via `/status` gets
 // exactly the same answer as probing a thread_id that was never created:
 // Alice's thread is never distinguishable from "nothing here" through this
-// entry point.
+// entry point. Proven here by asserting full response equality against a
+// thread_id nobody ever created, not just spot-checking the idle shape.
 #[tokio::test]
-async fn execute_status_on_foreign_thread_is_not_found() {
+async fn execute_status_on_foreign_thread_is_indistinguishable_from_unknown() {
     let services = command_palette_services(
         FakeAdminUsers::with([admin_record(
             "user-alpha",
@@ -15491,18 +15502,29 @@ async fn execute_status_on_foreign_thread_is_not_found() {
         Arc::new(SetupRecordingLlmConfigService::default()),
     );
     create_thread_for(&services, caller(), "thread-alice").await;
+    let bob = caller_for_user("user-beta");
 
-    let response = execute_product_command_via_invoke(
+    let foreign_thread_response =
+        execute_product_command_via_invoke(&services, bob.clone(), "thread-alice", "/status")
+            .await
+            .expect("cross-user status read settles rather than transport-erroring");
+    let never_created_response = execute_product_command_via_invoke(
         &services,
-        caller_for_user("user-beta"),
-        "thread-alice",
+        bob,
+        "thread-never-created-by-anyone",
         "/status",
     )
     .await
-    .expect("cross-user status read settles rather than transport-erroring");
+    .expect("status on an unknown thread settles rather than transport-erroring");
 
-    assert!(response.rejection.is_none());
-    let result = response.result.expect("status must return the idle view");
+    assert_eq!(
+        foreign_thread_response, never_created_response,
+        "a foreign thread must be indistinguishable from a nonexistent one"
+    );
+    assert!(foreign_thread_response.rejection.is_none());
+    let result = foreign_thread_response
+        .result
+        .expect("status must return the idle view");
     assert_eq!(result.title, "Status");
     assert_eq!(
         result
@@ -15511,6 +15533,116 @@ async fn execute_status_on_foreign_thread_is_not_found() {
             .find(|field| field.label == "State")
             .map(|field| field.value.as_str()),
         Some("idle"),
-        "a foreign thread must be indistinguishable from a nonexistent one: {result:?}"
+        "{result:?}"
     );
+}
+
+// FINDING 1 (Task 3 re-review): the Lifecycle family must stay listing-only
+// (non-executable) from the WebUI composer even for an admin caller —
+// per-PR-2 spec, `product_commands.rs`'s match-arm ordering is the ONLY thing
+// enforcing this. A future refactor that routes `ProductCommand::Lifecycle`
+// to `self.lifecycle_service.execute(...)` instead of the fixed InvalidRequest
+// rejection would silently hand the browser command palette live
+// extension-install/remove execution. `extension_list` takes no arguments, so
+// this exercises the simplest Lifecycle command with no confounding parse
+// error. The default `UnsupportedLifecycleProductService` (never wired here)
+// would produce a materially different response shape (an `Ok` projection
+// carrying `InstallationState::Unsupported`, not this rejection) if the arm
+// were ever mis-routed to call it — so `result.is_none()` +
+// `rejection.kind == InvalidRequest` genuinely fences the arm.
+#[tokio::test]
+async fn admin_execute_lifecycle_command_stays_listing_only() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Admin,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/extension_list",
+    )
+    .await
+    .expect("lifecycle listing-only is a rejection, not a transport error");
+
+    assert!(
+        response.result.is_none(),
+        "admin must not receive an executed lifecycle result: {response:?}"
+    );
+    let rejection = response
+        .rejection
+        .expect("lifecycle commands must be rejected as non-executable here");
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+// FINDING 2 (Task 3 re-review): only an ACTIVE admin record counts on both
+// doors — a suspended admin must be treated as a plain member, same contract
+// `authorize_admin` enforces for the rest of the admin surface.
+#[tokio::test]
+async fn suspended_admin_is_treated_as_member_on_both_doors() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Admin,
+            AdminUserStatus::Suspended,
+        )]),
+        llm_config.clone(),
+    );
+
+    let list_response = list_product_commands_via_invoke(&services, caller())
+        .await
+        .expect("suspended admin may still list (as a member)");
+    assert_eq!(
+        list_response.commands.len(),
+        2,
+        "{:?}",
+        list_response.commands
+    );
+
+    let execute_response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model set fake",
+    )
+    .await
+    .expect("access-denied is a rejection, not a transport error");
+
+    assert!(execute_response.result.is_none());
+    let rejection = execute_response
+        .rejection
+        .expect("suspended admin model-set must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::AccessDenied);
+    assert_eq!(
+        llm_config.set_active_count(),
+        0,
+        "the admin gate must reject before the LLM-config seam is ever invoked"
+    );
+}
+
+// FINDING 3 (Task 3 re-review): the directory-error taxonomy is also the
+// DEFAULT composition shape — a `RebornServices` built without
+// `with_admin_user_service` (composition simply never wiring the admin
+// surface) falls back to `RejectingAdminUserService`, whose `get_user` always
+// returns `Err(AdminUserError::Unavailable)`. That must surface as a
+// retryable 503, never a silent "not admin" or an opaque 500.
+#[tokio::test]
+async fn list_commands_surfaces_directory_unavailable_as_retryable_503() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = list_product_commands_via_invoke(&services, caller())
+        .await
+        .expect_err("an unwired admin directory must not silently resolve a role");
+
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable);
 }
