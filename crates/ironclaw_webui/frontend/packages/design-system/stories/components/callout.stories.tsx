@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Callout } from "../../src/callout";
 
 const meta = {
-  title: "Components/Callout",
+  title: "Components/Feedback/Callout",
   component: Callout,
   parameters: {
     docs: {

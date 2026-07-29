@@ -85,6 +85,7 @@ function renderApprovalCard({
     ),
     Button() {},
     Badge() {},
+    Checkbox() {},
     Icon() {},
     Link() {},
     classifyRisk: () => ({ key: "tool.riskExec", tone: "danger" }),

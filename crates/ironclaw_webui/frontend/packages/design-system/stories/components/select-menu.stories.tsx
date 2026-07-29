@@ -3,7 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { SelectMenu } from "../../src/select-menu";
 
 const meta = {
-  title: "Components/SelectMenu",
+  title: "Components/Forms/SelectMenu",
   component: SelectMenu,
   parameters: {
     docs: {

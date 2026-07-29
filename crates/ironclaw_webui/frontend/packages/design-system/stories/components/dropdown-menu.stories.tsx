@@ -11,7 +11,7 @@ import { Button } from "../../src/button";
 import { Icon } from "../../src/icons";
 
 const meta = {
-  title: "Components/DropdownMenu",
+  title: "Components/Navigation/DropdownMenu",
   component: DropdownMenu,
   parameters: {
     docs: {

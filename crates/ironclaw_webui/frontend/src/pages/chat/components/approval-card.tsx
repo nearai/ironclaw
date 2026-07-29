@@ -13,7 +13,7 @@
 import React from "react";
 import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
-import { Button } from "@ironclaw/design-system";
+import { Button, Checkbox } from "@ironclaw/design-system";
 import { Badge } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import { classifyRisk } from "../lib/approval-risk";
@@ -141,12 +141,11 @@ export function ApprovalCard({
       {allowAlways &&
       (
         <label className="mb-3 flex items-center gap-2 text-xs text-[var(--v2-text)]">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={always}
-            onChange={(event) => setAlways(event.currentTarget.checked)}
+            onCheckedChange={(checked) => setAlways(checked === true)}
             disabled={isResolving}
-            className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
+            className="h-3.5 w-3.5"
           />
           {t("approval.alwaysAllowToolLabel", { tool: toolLabel })}
         </label>

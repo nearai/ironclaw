@@ -4,7 +4,7 @@ import { Button } from "../../src/button";
 import { Icon } from "../../src/icons";
 
 const meta = {
-  title: "Components/Tooltip",
+  title: "Components/Surfaces/Tooltip",
   component: Tooltip,
   decorators: [
     (Story) => (

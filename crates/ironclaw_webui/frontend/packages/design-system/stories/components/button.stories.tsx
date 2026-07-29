@@ -3,7 +3,7 @@ import { Button } from "../../src/button";
 import { Icon } from "../../src/icons";
 
 const meta = {
-  title: "Components/Button",
+  title: "Components/Forms/Button",
   component: Button,
   parameters: {
     docs: {

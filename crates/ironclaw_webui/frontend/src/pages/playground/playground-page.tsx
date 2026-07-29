@@ -73,22 +73,49 @@ const SECTIONS = [
       { id: "z-index", name: "Z-index", icon: "logs", render: ZIndexSection, blurb: "The five-layer ladder. Every overlay picks a layer, never a number." },
     ],
   },
+  /* Component groups mirror the Storybook taxonomy: atoms first, then
+     the parts they compose into. Item ids are stable deep-link anchors. */
   {
-    label: "Components",
+    label: "Primitives",
+    items: [
+      { id: "icons", name: "Icons", icon: "settings", render: IconSection, blurb: "Inline 24px stroke icons. Add new glyphs to icons.tsx, never inline new SVG." },
+      { id: "display", name: "Avatar / Skeleton / Scroll", icon: "layers", render: AvatarSkeletonSection, blurb: "Avatar, Skeleton, Separator, and ScrollArea." },
+    ],
+  },
+  {
+    label: "Forms",
     items: [
       { id: "button", name: "Button", icon: "bolt", render: ButtonSection, blurb: "Five variants, five sizes. Primary is for the single main action on a surface." },
-      { id: "badge", name: "Badge", icon: "check", render: BadgeSection, blurb: "Status chips. Tone communicates state; label carries the translated copy." },
-      { id: "card", name: "Card", icon: "folder", render: CardSection, blurb: "The panel surface. Compose with CardHeader / CardBody / CardFooter / CardLabel." },
       { id: "input", name: "Inputs", icon: "terminal", render: InputSection, blurb: "Input, Textarea, Select, Label, and the FormField wrapper with hint/error slots." },
       { id: "select-menu", name: "SelectMenu", icon: "chevron", render: SelectMenuSection, blurb: "Listbox-backed custom select: option tones, keyboard support, and an inline prefix label for dense toolbars." },
-      { id: "tabs", name: "Tabs", icon: "list", render: TabsSection, blurb: "Underline tab row for single-select filters — sized by the control tokens so it aligns with adjacent toolbar controls." },
+      { id: "controls", name: "Checkbox / Switch / Radio / Slider", icon: "check", render: CheckboxSwitchSection, blurb: "Radix form controls styled with --v2-* tokens." },
+    ],
+  },
+  {
+    label: "Surfaces",
+    items: [
+      { id: "card", name: "Card", icon: "folder", render: CardSection, blurb: "The panel surface. Compose with CardHeader / CardBody / CardFooter / CardLabel." },
       { id: "modal", name: "Modal", icon: "plus", render: ModalSection, blurb: "Radix Dialog + IronClaw motion. Escape + backdrop close, focus trap, modal layer." },
       { id: "tooltip", name: "Tooltip", icon: "spark", render: TooltipSection, blurb: "Radix Tooltip for short hover/focus hints." },
-      { id: "controls", name: "Checkbox / Switch / Radio / Slider", icon: "check", render: CheckboxSwitchSection, blurb: "Radix form controls styled with --v2-* tokens." },
       { id: "menus", name: "Dropdown / Popover", icon: "more", render: DropdownPopoverSection, blurb: "Action menus (DropdownMenu) and anchored content (Popover)." },
-      { id: "display", name: "Avatar / Skeleton / Scroll", icon: "layers", render: AvatarSkeletonSection, blurb: "Avatar, Skeleton, Separator, and ScrollArea." },
-      { id: "icons", name: "Icons", icon: "settings", render: IconSection, blurb: "Inline 24px stroke icons. Add new glyphs to icons.tsx, never inline new SVG." },
-      { id: "primitives", name: "Primitives", icon: "shield", render: PrimitivesSection, blurb: "Higher-level composites: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel." },
+    ],
+  },
+  {
+    label: "Navigation",
+    items: [
+      { id: "tabs", name: "Tabs", icon: "list", render: TabsSection, blurb: "Underline tab row for single-select filters — sized by the control tokens so it aligns with adjacent toolbar controls." },
+    ],
+  },
+  {
+    label: "Feedback",
+    items: [
+      { id: "badge", name: "Badge", icon: "check", render: BadgeSection, blurb: "Status chips. Tone communicates state; label carries the translated copy." },
+    ],
+  },
+  {
+    label: "Composites",
+    items: [
+      { id: "primitives", name: "Page blocks", icon: "shield", render: PrimitivesSection, blurb: "Higher-level composites: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel." },
     ],
   },
 ];

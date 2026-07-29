@@ -18,7 +18,7 @@
  *   ...rest   forwarded to the element (type, onClick, href, …)
  */
 import { cva, type VariantProps } from "class-variance-authority";
-import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ElementType, ReactNode, Ref } from "react";
 import { cn } from "./cn";
 import { Spinner } from "./spinner";
 
@@ -84,6 +84,8 @@ type ButtonOwnProps = {
   loading?: boolean;
   disabled?: boolean;
   as?: ElementType;
+  /** React 19 ref-as-prop; forwarded to the rendered element via rest. */
+  ref?: Ref<HTMLButtonElement | HTMLAnchorElement>;
 } & VariantProps<typeof buttonVariants>;
 
 type ButtonNativeProps = Omit<

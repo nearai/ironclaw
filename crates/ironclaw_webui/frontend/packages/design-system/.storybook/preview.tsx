@@ -24,6 +24,8 @@ const preview: Preview = {
                   ["Getting started", "Generative UI", "Brand principles", "Voice & copy", "Contributing", "Brand token spec"],
           "Tokens",
           "Components",
+          // Taxonomy: atoms first, then the parts they compose into.
+          ["Primitives", "Forms", "Surfaces", "Navigation", "Feedback", "Composites"],
           "Compositions",
         ],
       },

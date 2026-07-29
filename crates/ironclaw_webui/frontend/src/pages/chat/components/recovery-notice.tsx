@@ -1,3 +1,4 @@
+import { Button } from "@ironclaw/design-system";
 
 export function RecoveryNotice({ notice, onRecover }) {
   return (
@@ -5,13 +6,14 @@ export function RecoveryNotice({ notice, onRecover }) {
       <span>{notice.message}</span>
       {notice.status !== "loading" &&
       (
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={onRecover}
-          className="rounded-md border border-[var(--v2-warning-text)]/40 px-2.5 py-1 text-xs font-medium hover:bg-[var(--v2-warning-soft)]"
+          className="border border-[var(--v2-warning-text)]/40 text-[var(--v2-warning-text)] hover:bg-[var(--v2-warning-soft)] hover:text-[var(--v2-warning-text)]"
         >
           Reload history
-        </button>
+        </Button>
       )}
     </div>
   );

@@ -11,7 +11,7 @@ const ICON_NAMES = [
 ] as const;
 
 const meta = {
-  title: "Components/Icon",
+  title: "Components/Primitives/Icon",
   component: Icon,
   parameters: {
     docs: {

@@ -4,7 +4,7 @@ import { Button } from "../../src/button";
 import { FormField, Input } from "../../src/input";
 
 const meta = {
-  title: "Components/Popover",
+  title: "Components/Surfaces/Popover",
   component: Popover,
   parameters: {
     docs: {

@@ -5,7 +5,7 @@ import { ListRow } from "../../src/list";
 import { ToolIcon } from "../../src/tool-icon";
 
 const meta = {
-  title: "Components/ToolIcon",
+  title: "Components/Primitives/ToolIcon",
   component: ToolIcon,
   parameters: {
     docs: {

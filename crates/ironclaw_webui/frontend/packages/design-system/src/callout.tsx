@@ -55,16 +55,32 @@ export interface CalloutProps {
   title?: ReactNode;
   /** Icon name override; pass `null` to render without an icon. */
   icon?: string | null;
+  /**
+   * ARIA role — "note" by default; pass "alert" for errors that appear
+   * dynamically or "status" for polite live updates.
+   */
+  role?: "note" | "alert" | "status";
   className?: string;
   children?: ReactNode;
+  /** data-* / aria-* pass-through. */
+  [key: `data-${string}`]: unknown;
 }
 
-export function Callout({ tone = "info", title, icon, className = "", children }: CalloutProps) {
+export function Callout({
+  tone = "info",
+  title,
+  icon,
+  role = "note",
+  className = "",
+  children,
+  ...rest
+}: CalloutProps) {
   const resolvedTone = TONE_CLASSES[tone] ? tone : "info";
   const iconName = icon === undefined ? TONE_ICON[resolvedTone] : icon;
   return (
     <aside
-      role="note"
+      role={role}
+      {...rest}
       className={cn(
         "grid gap-2.5 rounded-[var(--v2-radius-lg)] border px-4 py-3.5",
         iconName ? "grid-cols-[1.25rem_minmax(0,1fr)]" : "grid-cols-1",

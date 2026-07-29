@@ -4,7 +4,7 @@ import { Button } from "../../src/button";
 import { Badge } from "../../src/badge";
 
 const meta = {
-  title: "Components/Card",
+  title: "Components/Surfaces/Card",
   component: Card,
   parameters: {
     layout: "padded",

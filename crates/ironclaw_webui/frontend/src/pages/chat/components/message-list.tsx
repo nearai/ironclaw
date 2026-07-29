@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
 import { ActivityRun } from "./activity-run";
 import { MessageBubble } from "./message-bubble";
-import { Icon } from "@ironclaw/design-system";
+import { Button, Icon } from "@ironclaw/design-system";
 import { groupMessages } from "../lib/message-groups";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
@@ -373,16 +373,18 @@ export function MessageList({
         {hasMore &&
         (
           <div className="text-center">
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={loadOlder}
               disabled={isLoading}
               data-testid="message-list-load-older"
-              className="v2-button rounded-md border border-[var(--v2-panel-border)] px-3 py-1.5 text-xs text-[var(--v2-text-muted)] hover:border-[var(--v2-accent)]/35 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
+              className="rounded-md border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:border-[var(--v2-accent)]/35 hover:text-[var(--v2-text-strong)]"
             >
               {isLoading
                 ? t("chat.history.loading")
                 : t("chat.history.loadOlder")}
-            </button>
+            </Button>
           </div>
         )}
         {grouped.map((item) =>

@@ -24,8 +24,6 @@ export function AgentAvatar({ className = "" }: { className?: string }) {
   );
 }
 
-/* ── ChatMessage ──────────────────────────────────────────────────── */
-
 export interface ChatMessageProps {
   role: "agent" | "user";
   /** Override the leading avatar (agent turns only). */
@@ -33,6 +31,83 @@ export interface ChatMessageProps {
   className?: string;
   children?: ReactNode;
 }
+
+/* ── TypingIndicator ──────────────────────────────────────────────── */
+
+/**
+ * The agent-is-working bubble: three dots on the ambient typing loop
+ * (`.v2-typing-dot`, tokens.css — the one sanctioned ambient animation
+ * in the chat surface; static under prefers-reduced-motion).
+ */
+export function TypingIndicator({ className = "" }: { className?: string }) {
+  return (
+    <div
+      data-testid="typing-indicator"
+      className={cn(
+        "w-fit rounded-[var(--v2-radius-bubble)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3",
+        className
+      )}
+    >
+      <div className="flex gap-1">
+        <span className="v2-typing-dot h-2 w-2 rounded-full bg-[var(--v2-text)]" />
+        <span className="v2-typing-dot h-2 w-2 rounded-full bg-[var(--v2-text)]" />
+        <span className="v2-typing-dot h-2 w-2 rounded-full bg-[var(--v2-text)]" />
+      </div>
+    </div>
+  );
+}
+
+/* ── SuggestionChip ───────────────────────────────────────────────── */
+
+export interface SuggestionChipProps {
+  onClick?: () => void;
+  disabled?: boolean;
+  className?: string;
+  children?: ReactNode;
+}
+
+/**
+ * Prompt-suggestion pill under the composer: quiet until hover, where it
+ * takes the accent. Compose inside SuggestionChipRow.
+ */
+export function SuggestionChip({
+  onClick,
+  disabled = false,
+  className = "",
+  children,
+}: SuggestionChipProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "inline-flex cursor-pointer rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
+        "px-3 py-1.5 text-xs text-[var(--v2-text-strong)]",
+        "transition-[border-color,color] duration-[var(--v2-duration-fast)] ease-[var(--v2-ease-standard)]",
+        "hover:border-[var(--v2-accent)]/40 hover:text-[var(--v2-accent-text)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/50",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Wrapping row for SuggestionChips. */
+export function SuggestionChipRow({
+  className = "",
+  children,
+}: {
+  className?: string;
+  children?: ReactNode;
+}) {
+  return <div className={cn("flex flex-wrap gap-2", className)}>{children}</div>;
+}
+
+/* ── ChatMessage ──────────────────────────────────────────────────── */
 
 export function ChatMessage({ role, avatar, className = "", children }: ChatMessageProps) {
   if (role === "user") {

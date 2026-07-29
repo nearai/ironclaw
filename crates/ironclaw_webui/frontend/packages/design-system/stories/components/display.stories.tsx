@@ -6,7 +6,7 @@ import { ScrollArea } from "../../src/scroll-area";
 import { Spinner } from "../../src/spinner";
 
 const meta = {
-  title: "Components/Display",
+  title: "Components/Primitives/Display",
   parameters: {
     docs: {
       description: {

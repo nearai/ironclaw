@@ -205,6 +205,7 @@
   --v2-radius-sm:   8px;
   --v2-radius-md:   10px;
   --v2-radius-lg:   16px;
+  --v2-radius-bubble: 18px; /* chat bubbles + notice cards */
   --v2-radius-xl:   20px;
   --v2-radius-2xl:  24px;
   --v2-radius-full: 9999px;
@@ -390,6 +391,22 @@
   }
 }
 
+/* Typing dots — the one intentional ambient loop in the chat surface
+   (motion policy: ambient loops are limited to work indicators).
+   Consumed by the TypingIndicator component. */
+@keyframes v2-typing-bounce {
+  0%, 80%, 100% { transform: translateY(0);    opacity: 0.45; }
+  40%           { transform: translateY(-4px); opacity: 1; }
+}
+.v2-typing-dot {
+  animation: v2-typing-bounce var(--v2-duration-typing) var(--v2-ease-standard) infinite;
+}
+.v2-typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.v2-typing-dot:nth-child(3) { animation-delay: 0.3s; }
+@media (prefers-reduced-motion: reduce) {
+  .v2-typing-dot { animation: none !important; }
+}
+
 /* Tabs underline — quick scale-in when a tab becomes active. */
 @keyframes v2-underline-in {
   from { transform: scaleX(0.6); opacity: 0; }
@@ -402,6 +419,9 @@
   .v2-tab-underline { animation: none; }
 }
 
+.v2-breathing-dot {
+  animation: v2-breathe var(--v2-duration-breathe) var(--v2-ease-in-out) infinite;
+}
 @keyframes v2-breathe {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.35; }

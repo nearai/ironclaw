@@ -47,12 +47,21 @@ const HEX_RE = /#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b/g;
 // is still caught.
 const RGB_RE = /(?<![A-Za-z0-9-])rgba?\(/g;
 // Legacy alias utilities (remapped by the app.css compat shim /
-// index.html @theme block). Matches the utility with any prefix
-// variant (hover:, focus:, md:, …) via the leading quote/space/colon
-// boundary. `text-white` is the canonical trap: it renders
-// --v2-text-strong (dark ink in light mode), not white.
-const LEGACY_ALIAS_RE =
-  /(?<![A-Za-z0-9_/[-])(?:text-white|(?:text|bg|border)-(?:iron-\d+|signal|copper|mint|red-\d+)|(?:bg|border)-white\/)/g;
+// index.html @theme block) plus the whole Tailwind default palette:
+// any `text-sky-500`-style class is by definition off the token
+// system. Matches the utility with any prefix variant (hover:,
+// focus:, md:, …) via the leading quote/space/colon boundary.
+// `text-white` is the canonical trap: it renders --v2-text-strong
+// (dark ink in light mode), not white. Scrims/overlays must use
+// --v2-scrim, never bg-black/N or bg-white/N.
+const DEFAULT_PALETTE =
+  "amber|sky|emerald|zinc|slate|gray|neutral|stone|orange|yellow|lime|green|teal|cyan|blue|indigo|violet|purple|fuchsia|pink|rose|red";
+const LEGACY_ALIAS_RE = new RegExp(
+  "(?<![A-Za-z0-9_/[-])(?:text-white" +
+    `|(?:text|bg|border|ring|fill|stroke)-(?:iron-\\d+|signal|copper|mint|(?:${DEFAULT_PALETTE})-\\d+)` +
+    "|(?:bg|border)-(?:white|black)/)",
+  "g",
+);
 
 const SOURCE_EXTENSIONS = [".js", ".mjs", ".jsx", ".ts", ".tsx"];
 const TEST_MARKERS = [".test.", ".spec."];

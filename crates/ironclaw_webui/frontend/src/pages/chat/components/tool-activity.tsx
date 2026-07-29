@@ -6,7 +6,7 @@ import { useT } from "../../../lib/i18n";
 /* Status dot colour by tool status. Running shows the breathing dot (a no-op
    under the static motion policy, matching the Badge component's approach). */
 const DOT_STYLE = {
-  running: "bg-[var(--v2-accent)] animate-[v2-breathe_1.6s_ease-in-out_infinite]",
+  running: "bg-[var(--v2-accent)] v2-breathing-dot",
   success: "bg-[var(--v2-positive-text)]",
   declined: "bg-[var(--v2-text-faint)]",
   error: "bg-[var(--v2-danger-text)]",
@@ -19,7 +19,7 @@ const STATUS_LABEL_KEY = {
   running: "tool.statusRunning",
 };
 const PRE_WRAP_CLASS =
-  "v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono";
+  "v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-[var(--v2-code-bg)] p-2 font-mono";
 
 function statusLabelKey(status) {
   return STATUS_LABEL_KEY[status] || STATUS_LABEL_KEY.running;
@@ -260,7 +260,7 @@ function ToolDetailPanel({
     <div
       id={controlsId}
       data-testid="tool-activity-detail"
-      className="min-w-0 overflow-hidden rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950"
+      className="min-w-0 overflow-hidden rounded-b-lg border-x border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]"
     >
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-[var(--v2-panel-border)] px-2 pt-1.5">
         {tabs.map(
@@ -294,13 +294,13 @@ function ToolDetailPanel({
         {active === "details" &&
         (<div className="v2-wrap-anywhere whitespace-pre-wrap text-[var(--v2-text)]">{toolDetail}</div>)}
         {active === "params" &&
-        (<pre className={[PRE_WRAP_CLASS, "text-iron-100"].join(" ")}>{toolParameters}</pre>)}
+        (<pre className={[PRE_WRAP_CLASS, "text-[var(--v2-text-strong)]"].join(" ")}>{toolParameters}</pre>)}
         {active === "result" && (<ToolResult text={toolResultPreview} />)}
         {(active === "error" || active === "declined") &&
         (<pre
           className={[
             PRE_WRAP_CLASS,
-            active === "declined" ? "text-iron-300" : "text-[var(--v2-danger-text)]",
+            active === "declined" ? "text-[var(--v2-text-muted)]" : "text-[var(--v2-danger-text)]",
           ].join(" ")}
         >{toolError}</pre>)}
       </div>
@@ -340,7 +340,7 @@ function ToolResult({ text }) {
       }, new Set())
     );
     return (
-      <div className="max-w-full overflow-x-auto rounded border border-iron-700/60">
+      <div className="max-w-full overflow-x-auto rounded border border-[var(--v2-panel-border)]">
         <table className="w-full border-collapse text-left font-mono text-[11px]">
           <thead>
             <tr>

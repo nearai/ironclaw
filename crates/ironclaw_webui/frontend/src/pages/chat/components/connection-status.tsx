@@ -76,7 +76,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
               className={[
                 "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
                 status === CONNECTION_STATUS.RECONNECTING
-                  ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
+                  ? "v2-breathing-dot"
                   : "",
               ].join(" ")}
             />
@@ -100,7 +100,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
               className={[
                 "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
                 status === CONNECTION_STATUS.RECONNECTING
-                  ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
+                  ? "v2-breathing-dot"
                   : "",
               ].join(" ")}
             />
@@ -110,7 +110,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
             data-testid="connection-status-label"
             aria-hidden={expanded ? "false" : "true"}
             className={[
-              "pointer-events-none absolute right-0 top-[calc(100%+0.375rem)] z-50 w-max max-w-[calc(100vw_-_1.5rem)] rounded-lg border px-3 py-2 text-xs font-medium shadow-[var(--v2-shadow-menu)] transition duration-150 sm:hidden",
+              "pointer-events-none absolute right-0 top-[calc(100%+0.375rem)] z-50 w-max max-w-[calc(100vw_-_1.5rem)] rounded-lg border px-3 py-2 text-xs font-medium shadow-[var(--v2-shadow-menu)] transition duration-[var(--v2-duration-fast)] sm:hidden",
               expanded
                 ? "visible translate-y-0 opacity-100"
                 : "invisible -translate-y-1 opacity-0",

@@ -325,7 +325,7 @@ test("error messages render as inline chat bubbles, not centered notices", async
   );
   assert.match(
     html,
-    /mr-auto[^"]*text-left text-red-200/,
+    /mr-auto[^"]*text-left text-\[var\(--v2-danger-text\)\]/,
     "error role should align with the assistant-side chat stream",
   );
   assert.doesNotMatch(
@@ -374,7 +374,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100/,
+    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-\[var\(--v2-text-faint\)\] opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100/,
     "timestamp and controls should stay hidden until message hover or focus without being constrained to the bubble width",
   );
   assert.match(
@@ -414,7 +414,7 @@ test("optimistic message opacity does not fade attached image previews", () => {
 
   assert.match(
     messageBubbleSource,
-    /images && images\.length > 0 && \([\s\S]*<img key=\{i\} src=\{src\} className="max-h-48 rounded-lg border border-iron-700 object-cover"/,
+    /images && images\.length > 0 && \([\s\S]*<img key=\{i\} src=\{src\} className="max-h-48 rounded-lg border border-\[var\(--v2-panel-border\)\] object-cover"/,
     "inline image previews should render outside the optimistic text opacity wrapper",
   );
   assert.match(

@@ -74,7 +74,7 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
         (<span
           className={cn(
             "h-[0.3125rem] w-[0.3125rem] shrink-0 rounded-full bg-current",
-            isLive && "animate-[v2-breathe_2s_ease-in-out_infinite]"
+            isLive && "v2-breathing-dot"
           )}
         />)}
       {label}

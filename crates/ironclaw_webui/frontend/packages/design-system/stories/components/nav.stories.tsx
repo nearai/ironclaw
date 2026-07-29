@@ -4,7 +4,7 @@ import { NavItem, NavList } from "../../src/nav";
 import { Separator } from "../../src/separator";
 
 const meta = {
-  title: "Components/Navigation",
+  title: "Components/Navigation/Sidebar nav",
   component: NavItem,
   parameters: {
     docs: {

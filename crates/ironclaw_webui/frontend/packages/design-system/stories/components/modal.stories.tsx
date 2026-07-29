@@ -6,7 +6,7 @@ import { Button } from "../../src/button";
 import { FormField, Input } from "../../src/input";
 
 const meta = {
-  title: "Components/Modal",
+  title: "Components/Surfaces/Modal",
   component: Modal,
   parameters: {
     docs: {

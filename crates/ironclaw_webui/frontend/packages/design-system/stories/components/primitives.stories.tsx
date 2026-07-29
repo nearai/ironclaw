@@ -9,7 +9,7 @@ import {
 import { Button } from "../../src/button";
 
 const meta = {
-  title: "Components/Primitives",
+  title: "Components/Composites/Page blocks",
   parameters: {
     layout: "padded",
     docs: {

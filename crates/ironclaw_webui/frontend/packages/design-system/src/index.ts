@@ -16,8 +16,14 @@ export { Callout } from "./callout";
 export type { CalloutProps, CalloutTone } from "./callout";
 export { Card, CardBody, CardFooter, CardHeader, CardLabel } from "./card";
 export type { CardPadding, CardProps, CardRadius, CardSectionProps, CardVariant } from "./card";
-export { AgentAvatar, ChatMessage } from "./chat";
-export type { ChatMessageProps } from "./chat";
+export {
+  AgentAvatar,
+  ChatMessage,
+  SuggestionChip,
+  SuggestionChipRow,
+  TypingIndicator,
+} from "./chat";
+export type { ChatMessageProps, SuggestionChipProps } from "./chat";
 export { Checkbox } from "./checkbox";
 export { ConfirmDialog } from "./confirm-dialog";
 export {
@@ -66,6 +72,8 @@ export { Slider } from "./slider";
 export { Spinner } from "./spinner";
 export { Switch } from "./switch";
 export { Tabs } from "./tabs";
+export { Heading, Text } from "./text";
+export type { HeadingProps, TextProps, TextTone, TextVariant, TextWeight } from "./text";
 export type { TabItem } from "./tabs";
 export { ToolIcon } from "./tool-icon";
 export type { ToolIconProps } from "./tool-icon";

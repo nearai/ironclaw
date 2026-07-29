@@ -1,12 +1,18 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { useState } from "react";
 import { Badge } from "../../src/badge";
 import { Button } from "../../src/button";
 import { Card, CardBody, CardFooter, CardHeader } from "../../src/card";
-import { ChatMessage } from "../../src/chat";
+import {
+  ChatMessage,
+  SuggestionChip,
+  SuggestionChipRow,
+  TypingIndicator,
+} from "../../src/chat";
 import { Icon } from "../../src/icons";
 
 const meta = {
-  title: "Components/Chat",
+  title: "Components/Composites/Chat",
   component: ChatMessage,
   parameters: {
     docs: {
@@ -73,4 +79,56 @@ export const Exchange: Story = {
       </ChatMessage>
     </div>
   ),
+};
+
+export const Typing: Story = {
+  name: "TypingIndicator",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The agent-is-working bubble. Its three-dot bounce is the one " +
+          "sanctioned ambient loop in the chat surface and goes static under " +
+          "prefers-reduced-motion.",
+      },
+    },
+  },
+  render: () => (
+    <div className="grid w-[34rem] gap-4">
+      <ChatMessage role="user">What changed in the repo overnight?</ChatMessage>
+      <TypingIndicator />
+    </div>
+  ),
+};
+
+export const Suggestions: Story = {
+  name: "SuggestionChips",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Prompt-suggestion pills under the composer. Quiet until hover, " +
+          "where they take the accent; compose them inside SuggestionChipRow.",
+      },
+    },
+  },
+  render: function SuggestionsStory() {
+    const [picked, setPicked] = useState("");
+    return (
+      <div className="grid w-[34rem] gap-3">
+        <SuggestionChipRow>
+          {[
+            "Summarize my unread email",
+            "What runs failed today?",
+            "Draft a standup update",
+          ].map((text) => (
+            <SuggestionChip key={text} onClick={() => setPicked(text)}>
+              {text}
+            </SuggestionChip>
+          ))}
+        </SuggestionChipRow>
+        {picked && <ChatMessage role="user">{picked}</ChatMessage>}
+      </div>
+    );
+  },
 };

@@ -6,13 +6,26 @@ import surface for every IronClaw UI — the WebUI v2 agent workspace consumes
 it today, and any future repository (marketing, sub-UIs, third-party hosts)
 can import the same package for brand-consistent UI.
 
-- **Components** — Button, Input/Textarea/Select/FormField, Card, Badge/StatusPill,
-  Modal/ConfirmDialog, DropdownMenu, SelectMenu, Popover, Tooltip, Tabs,
-  Checkbox, Switch, RadioGroup, Slider, Avatar, Separator, Skeleton,
-  ScrollArea, Spinner, Icon, and layout primitives (Panel, SectionHeader,
-  StatCard, FlowList, EmptyPanel, SubLabel). All interactive components sit
-  on Radix primitives (keyboard navigation, focus management, ARIA) and are
-  styled with Tailwind classes bound to `--v2-*` tokens.
+- **Components** — organized by what you reach for (the Storybook sidebar
+  mirrors the same taxonomy):
+  - **Primitives** — `Text` / `Heading` (the typography scale as components),
+    `Icon`, `ToolIcon`, `Avatar`, `Separator`, `Skeleton`, `ScrollArea`,
+    `Spinner`.
+  - **Forms** — `Button`, `Input` / `Textarea` / `Select` / `Label` /
+    `FormField`, `SelectMenu`, `Checkbox`, `Switch`, `RadioGroup`, `Slider`.
+  - **Surfaces** — the `Card` family (+ `Panel` alias), `Modal` /
+    `ConfirmDialog`, `Popover`, `Tooltip`.
+  - **Navigation** — `Tabs`, `DropdownMenu`, `NavItem` / `NavList`.
+  - **Feedback & status** — `Badge` / `StatusPill`, `Callout`, `StatCard`,
+    `EmptyPanel`.
+  - **Composites** — `ListRow`, `SectionHeader`, `FlowList`, `SubLabel`, and
+    the chat vocabulary promoted from the product: `ChatMessage`,
+    `AgentAvatar`, `TypingIndicator`, `SuggestionChip` / `SuggestionChipRow`.
+
+  All interactive components sit on Radix primitives (keyboard navigation,
+  focus management, ARIA) and are styled with Tailwind classes bound to
+  `--v2-*` tokens. Everything is exported from the flat package barrel —
+  the grouping is a map, not a module boundary.
 - **Tokens** — `tokens.css` carries every `--v2-*` custom property (light +
   dark themes via `[data-theme]`) plus the Tailwind v4 `@theme` mapping.
   `tokens.ts` is the machine-readable index of the same tokens (powers the
@@ -102,9 +115,18 @@ point at TypeScript source, so a bundler that compiles TSX from
 ## Usage
 
 ```tsx
-import { Button, Card, CardBody, Modal, SelectMenu } from "@ironclaw/design-system";
+import { Button, Card, CardBody, Heading, Modal, SelectMenu, Text } from "@ironclaw/design-system";
 import { COLOR_TOKENS, STATUS_CANON } from "@ironclaw/design-system/tokens";
 import { MOTION_DURATION } from "@ironclaw/design-system/motion";
+```
+
+Typography goes through the `Text` / `Heading` primitives instead of
+re-deriving font-size/color utility combos per call site:
+
+```tsx
+<Heading level={2}>Recent activity</Heading>
+<Text variant="caption" tone="muted">Last synced 2 minutes ago</Text>
+<Text variant="eyebrow" tone="accent">Admin</Text>
 ```
 
 ## Rules of the road

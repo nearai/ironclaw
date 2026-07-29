@@ -119,6 +119,7 @@ export const RADIUS_TOKENS = [
   { var: "--v2-radius-sm", note: "Small chips, code spans" },
   { var: "--v2-radius-md", note: "Compact controls, inputs (mobile)" },
   { var: "--v2-radius-lg", note: "Buttons, inputs (desktop), cards" },
+  { var: "--v2-radius-bubble", note: "Chat bubbles, notice cards" },
   { var: "--v2-radius-xl", note: "Large cards, composer (mobile)" },
   { var: "--v2-radius-2xl", note: "Modals, hero surfaces" },
   { var: "--v2-radius-full", note: "Pills, round icon chips" },

@@ -103,7 +103,7 @@ function ReasoningItem({ content, streaming = false }: ReasoningItemProps) {
       >
         <Icon name="spark" className="h-4 w-4" />
       </div>
-      <div className="min-w-0 flex-1 border-l-2 border-white/10 pl-3 text-iron-300 v2-chat-readable-width">
+      <div className="min-w-0 flex-1 border-l-2 border-[var(--v2-panel-border)] pl-3 text-[var(--v2-text-muted)] v2-chat-readable-width">
         <MarkdownRenderer
           content={content}
           className="text-[13px]"

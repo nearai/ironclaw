@@ -7,7 +7,7 @@ import { Slider } from "../../src/slider";
 import { Label } from "../../src/input";
 
 const meta = {
-  title: "Components/Selection controls",
+  title: "Components/Forms/Selection controls",
   parameters: {
     docs: {
       description: {
