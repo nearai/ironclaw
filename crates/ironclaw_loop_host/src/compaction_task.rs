@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::sync::Arc;
 
 use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
@@ -399,14 +399,13 @@ where
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
         let mut text = String::new();
-        let mut body_ranges = Vec::with_capacity(range.messages.len());
         let mut redacted_leak_count = 0_u32;
         for message in &range.messages {
             let body = message.body.as_str();
             if !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
             }
-            let redaction = self.redact_leaks(body, None)?;
+            let redaction = self.redact_leaks(body)?;
             let body = redaction.content.as_deref().unwrap_or(body);
             if redaction.count > 0 && !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
@@ -414,37 +413,33 @@ where
             redacted_leak_count = redacted_leak_count
                 .checked_add(redaction.count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
-            body_ranges.push(append_escaped_message_checked(
+
+            let escaped_body = escape_xml_checked(body, self.max_input_bytes)?;
+            let escaped_redaction = self.redact_leaks(&escaped_body)?;
+            let escaped_body = escaped_redaction
+                .content
+                .as_deref()
+                .unwrap_or(&escaped_body);
+            redacted_leak_count = redacted_leak_count
+                .checked_add(escaped_redaction.count)
+                .ok_or(CompactionError::LeakRedactionFailed)?;
+            append_message_checked(
                 &mut text,
                 message.sequence,
                 message.kind,
-                body,
+                escaped_body,
                 self.max_input_bytes,
-            )?);
+            )?;
         }
-        // The raw per-message scan is the primary guard. This second pass is
-        // intentionally over the exact serialized input that reaches system
-        // inference, catching delimiter/escaping interactions in the final
-        // model-visible shape.
+        // The per-message scans redact only inside message bodies. These final
+        // validation-only scans cover the exact model-visible envelope and
+        // reject any unsafe content spanning structural boundaries.
         if !self.injection_scanner.scan_injection(&text).is_empty() {
             return Err(CompactionError::InjectionDetected);
         }
-        let serialized_redaction = self.redact_leaks(&text, Some(&body_ranges))?;
-        if let Some(redacted) = serialized_redaction.content {
-            text = redacted;
-            if text.len() > self.max_input_bytes {
-                return Err(CompactionError::InputTooLarge {
-                    cap: self.max_input_bytes,
-                    observed_bytes: text.len(),
-                });
-            }
-            if !self.injection_scanner.scan_injection(&text).is_empty() {
-                return Err(CompactionError::InjectionDetected);
-            }
+        if !self.leak_detector.scan_leaks(&text).is_clean() {
+            return Err(CompactionError::LeakRedactionFailed);
         }
-        redacted_leak_count = redacted_leak_count
-            .checked_add(serialized_redaction.count)
-            .ok_or(CompactionError::LeakRedactionFailed)?;
         Ok(CompactionInput {
             text,
             redacted_leak_count,
@@ -486,7 +481,7 @@ where
         {
             return Err(CompactionError::InjectionDetected);
         }
-        let redaction = self.redact_leaks(&response.output_text, None)?;
+        let redaction = self.redact_leaks(&response.output_text)?;
         let output_text = redaction
             .content
             .as_deref()
@@ -511,11 +506,7 @@ where
         })
     }
 
-    fn redact_leaks(
-        &self,
-        content: &str,
-        allowed_ranges: Option<&[Range<usize>]>,
-    ) -> Result<LeakRedaction, CompactionError> {
+    fn redact_leaks(&self, content: &str) -> Result<LeakRedaction, CompactionError> {
         // Compaction is a retention boundary, so every declared action
         // (Block, Redact, or Warn) becomes deterministic value redaction.
         // Observability is the aggregate count returned to the loop; match
@@ -526,16 +517,6 @@ where
                 content: None,
                 count: 0,
             });
-        }
-        if let Some(allowed_ranges) = allowed_ranges
-            && scan.matches.iter().any(|leak_match| {
-                !allowed_ranges.iter().any(|allowed| {
-                    allowed.start <= leak_match.location.start
-                        && leak_match.location.end <= allowed.end
-                })
-            })
-        {
-            return Err(CompactionError::LeakRedactionFailed);
         }
         let redacted_leak_count = u32::try_from(scan.matches.len()).map_err(|error| {
             tracing::error!(%error, "compaction leak match count exceeded telemetry bound");
@@ -740,23 +721,21 @@ fn compaction_message_body(
         .ok_or(CompactionError::InvalidCutPoint)
 }
 
-fn append_escaped_message_checked(
+fn append_message_checked(
     output: &mut String,
     sequence: u64,
     kind: MessageKind,
-    body: &str,
+    escaped_body: &str,
     cap: usize,
-) -> Result<Range<usize>, CompactionError> {
+) -> Result<(), CompactionError> {
     push_checked(output, "<message sequence=\"", cap)?;
     push_checked(output, &sequence.to_string(), cap)?;
     push_checked(output, "\" kind=\"", cap)?;
     push_checked(output, message_kind_name(kind), cap)?;
     push_checked(output, "\">", cap)?;
-    let body_start = output.len();
-    append_escaped_xml_checked(output, body, cap)?;
-    let body_end = output.len();
+    push_checked(output, escaped_body, cap)?;
     push_checked(output, "</message>\n", cap)?;
-    Ok(body_start..body_end)
+    Ok(())
 }
 
 fn message_kind_name(kind: MessageKind) -> &'static str {
@@ -802,6 +781,12 @@ fn append_escaped_xml_checked(
         push_checked(output, &value[start..], cap)?;
     }
     Ok(())
+}
+
+fn escape_xml_checked(value: &str, cap: usize) -> Result<String, CompactionError> {
+    let mut escaped = String::new();
+    append_escaped_xml_checked(&mut escaped, value, cap)?;
+    Ok(escaped)
 }
 
 fn push_checked(output: &mut String, segment: &str, cap: usize) -> Result<(), CompactionError> {

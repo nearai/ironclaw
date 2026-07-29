@@ -851,6 +851,35 @@ mod tests {
     }
 
     #[test]
+    fn private_key_redaction_covers_every_supported_delimiter_pair() {
+        let detector = LeakDetector::new();
+
+        for label in [
+            "RSA PRIVATE KEY",
+            "PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "DSA PRIVATE KEY",
+        ] {
+            let content = format!(
+                "before\n-----BEGIN {label}-----\nTEST_PRIVATE_KEY_MATERIAL\n-----END {label}-----\nafter"
+            );
+
+            let scan = detector.scan(&content);
+            let redacted = scan
+                .redact_all_matches(&content)
+                .expect("valid detector ranges")
+                .expect("private key should be redacted");
+
+            assert_eq!(redacted, "before\n[REDACTED]\nafter", "label: {label}");
+            assert!(
+                !redacted.contains("TEST_PRIVATE_KEY_MATERIAL"),
+                "label: {label}"
+            );
+        }
+    }
+
+    #[test]
     fn unterminated_private_key_redaction_consumes_the_bounded_remainder() {
         let detector = LeakDetector::new();
         let content = concat!(

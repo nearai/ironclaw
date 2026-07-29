@@ -444,6 +444,45 @@ async fn compaction_port_rejects_residual_output_match_after_redaction() {
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_invalid_leak_scanner_range_before_inference() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(InvalidRangeLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("an invalid scanner range must fail closed");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(
+        inference.last_input().is_empty(),
+        "invalid scanner output must not reach inference"
+    );
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.summary_artifacts.is_empty(),
+        "invalid scanner output must not be persisted"
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_rejects_serialized_cross_boundary_matches() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible").await;
@@ -1645,13 +1684,36 @@ impl LeakScanner for CrossBoundaryLeakScanner {
     }
 }
 
+struct InvalidRangeLeakScanner;
+
+impl LeakScanner for InvalidRangeLeakScanner {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        if content == "visible" {
+            return LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "invalid_range".to_string(),
+                    severity: LeakSeverity::Critical,
+                    action: LeakAction::Block,
+                    location: content.len()..content.len().saturating_add(1),
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: true,
+                redacted_content: None,
+            };
+        }
+        LeakScanResult {
+            matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
 struct SerializedEntityLeakScanner;
 
 impl LeakScanner for SerializedEntityLeakScanner {
     fn scan_leaks(&self, content: &str) -> LeakScanResult {
-        if content.starts_with("<message")
-            && let Some(start) = content.find("&amp;")
-        {
+        if let Some(start) = content.find("&amp;") {
             return LeakScanResult {
                 matches: vec![LeakMatch {
                     pattern_name: "serialized_entity".to_string(),
@@ -1676,13 +1738,6 @@ struct ExpandingSerializedEntityLeakScanner;
 
 impl LeakScanner for ExpandingSerializedEntityLeakScanner {
     fn scan_leaks(&self, content: &str) -> LeakScanResult {
-        if !content.starts_with("<message") {
-            return LeakScanResult {
-                matches: Vec::new(),
-                should_block: false,
-                redacted_content: None,
-            };
-        }
         let matches = content
             .match_indices("&amp;")
             .map(|(start, _)| LeakMatch {
