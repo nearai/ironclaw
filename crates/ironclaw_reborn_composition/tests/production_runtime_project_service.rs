@@ -36,7 +36,7 @@ use ironclaw_product::{
     PROJECT_CREATE_COMMAND, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
 };
 
@@ -92,7 +92,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             OWNER,
             db,

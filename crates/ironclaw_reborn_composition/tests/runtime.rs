@@ -74,7 +74,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
             .unwrap(),
     );
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
             ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
             "runtime-migration-dry-run-owner",
             db,

@@ -89,16 +89,12 @@ async fn libsql_substrate_readiness_diagnostics_cover_required_backend_gaps() {
 async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let database = Arc::new(
-        libsql::Builder::new_local(state_db_path.display().to_string())
-            .build()
-            .await
-            .expect("build local libSQL state database"),
-    );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         runtime: Arc::new(
-            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+            ironclaw_libsql_runtime::LibSqlRuntime::open(state_db_path.display().to_string(), None)
+                .await
+                .expect("libSQL runtime"),
         ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
@@ -132,16 +128,12 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
     );
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let database = Arc::new(
-        libsql::Builder::new_local(state_db_path.display().to_string())
-            .build()
-            .await
-            .expect("build local libSQL state database"),
-    );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         runtime: Arc::new(
-            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+            ironclaw_libsql_runtime::LibSqlRuntime::open(state_db_path.display().to_string(), None)
+                .await
+                .expect("libSQL runtime"),
         ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
@@ -170,16 +162,12 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
 async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_authority() {
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
-    let database = Arc::new(
-        libsql::Builder::new_local(state_db_path.display().to_string())
-            .build()
-            .await
-            .expect("build local libSQL state database"),
-    );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         runtime: Arc::new(
-            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+            ironclaw_libsql_runtime::LibSqlRuntime::open(state_db_path.display().to_string(), None)
+                .await
+                .expect("libSQL runtime"),
         ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: false,
@@ -201,6 +189,47 @@ async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_au
         Err(RebornCompositionError::InvalidConfig { reason })
             if reason.contains("libSQL production FilesystemResourceGovernor uses process-local tallies")
     ));
+}
+
+#[tokio::test]
+async fn libsql_substrate_builder_rejects_unproven_runtime_target_claim() {
+    let dir = tempdir().expect("create temporary directory for claimed libSQL target");
+    let claimed_disk_path = dir.path().join("claimed-state.db");
+    let in_memory_database = Arc::new(
+        libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .expect("build in-memory libSQL database"),
+    );
+
+    let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
+        runtime: Arc::new(
+            ironclaw_libsql_runtime::LibSqlRuntime::new(in_memory_database)
+                .expect("libSQL runtime"),
+        ),
+        database_path_or_url: claimed_disk_path.display().to_string(),
+        process_local_resource_governor_singleton: true,
+        secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .expect("create production runtime policy with tenant sandbox process port"),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
+    })
+    .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(RebornCompositionError::InvalidConfig { reason })
+                if reason.contains("runtime target provenance")
+        ),
+        "production composition must reject a runtime that cannot prove it owns the claimed target"
+    );
 }
 
 #[test]
@@ -255,16 +284,12 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
     let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
     let unexpected_events_db_path = dir.path().join("events.db");
-    let database = Arc::new(
-        libsql::Builder::new_local(state_db_path.display().to_string())
-            .build()
-            .await
-            .expect("build local libSQL state database"),
-    );
 
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         runtime: Arc::new(
-            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+            ironclaw_libsql_runtime::LibSqlRuntime::open(state_db_path.display().to_string(), None)
+                .await
+                .expect("libSQL runtime"),
         ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,

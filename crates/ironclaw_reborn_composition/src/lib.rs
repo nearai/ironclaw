@@ -518,9 +518,12 @@ where
     TWake: TurnRunWakeNotifier + 'static,
 {
     pub runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
-    /// The target from which `runtime` was opened. Retained only for
-    /// production durability and transport-policy validation; it is never
-    /// reopened by the event store.
+    /// The exact target from which `runtime` was opened through
+    /// [`ironclaw_libsql_runtime::LibSqlRuntime::open`]. Caller-supplied
+    /// database handles do not carry this provenance and are rejected.
+    ///
+    /// Retained only for production durability and transport-policy
+    /// validation; it is never reopened by the event store.
     pub database_path_or_url: String,
     /// Set this only when deployment guarantees exactly one runtime process, or
     /// one elected runtime owner, is allowed to enforce resource quotas for this

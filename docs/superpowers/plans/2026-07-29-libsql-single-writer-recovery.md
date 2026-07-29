@@ -31,9 +31,10 @@
 - Modify: `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
 
 **Interfaces:**
-- Produces: `LibSqlRuntime::new(Arc<libsql::Database>) -> Self`
-- Produces: `LibSqlRuntime::read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError>`
-- Produces: `LibSqlRuntime::write(&self) -> Result<LibSqlWriteConnectionLease, LibSqlRuntimeError>`
+- Produces: `LibSqlRuntime::new(Arc<libsql::Database>) -> Result<Self, LibSqlRuntimeError>`
+- Produces: `async fn LibSqlRuntime::open(path_or_url, auth_token) -> Result<Self, LibSqlRuntimeError>`
+- Produces: `async fn LibSqlRuntime::read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError>`
+- Produces: `async fn LibSqlRuntime::write(&self) -> Result<LibSqlWriteConnectionLease, LibSqlRuntimeError>`
 - Produces: a query-only read lease whose pooled connections enforce
   `PRAGMA query_only = ON`
 - Produces: `LibSqlWriteConnectionLease: Deref<Target = libsql::Connection>`
@@ -517,9 +518,13 @@ git commit -m "fix(turns): recover journal after transient backend contention"
 Run:
 
 ```bash
-git diff --unified=0 origin/main...HEAD -- 'crates/**/*.rs' \
-  | rg '^\\+[^+]' \
-  | rg -n '\\.unwrap\\(|\\.expect\\(|/tmp|std::env::temp_dir|\\[[^]]+\\.\\.[^]]+\\]'
+git diff --unified=0 origin/main...HEAD -- \
+  'crates/**/*.rs' \
+  ':(exclude)crates/**/tests/**' \
+  ':(exclude)crates/**/*_test.rs' \
+  ':(exclude)crates/**/test_*.rs' \
+  | rg '^\+[^+]' \
+  | rg -n '\.unwrap\(|\.expect\(|/tmp|std::env::temp_dir|\[[^]]+\.\.[^]]+\]'
 ```
 
 Expected: no new production `.unwrap()`/`.expect()`, hardcoded temporary path,

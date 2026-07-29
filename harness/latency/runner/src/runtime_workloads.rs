@@ -192,13 +192,14 @@ async fn hosted_libsql_substrate_build(
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let state_db_path = dir.path().join(format!("state-{sample}.db"));
-    let database = Arc::new(
-        libsql::Builder::new_local(state_db_path.display().to_string())
-            .build()
-            .await?,
-    );
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)?),
+        runtime: Arc::new(
+            ironclaw_libsql_runtime::LibSqlRuntime::open(
+                state_db_path.display().to_string(),
+                None,
+            )
+            .await?,
+        ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(latency_secret_master_key()),

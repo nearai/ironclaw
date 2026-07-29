@@ -37,8 +37,10 @@ where
     /// point.
     pub async fn drain(&self) -> Result<(), TurnError> {
         let mut window = self.pending_write_behind.lock().await;
-        while let Some(ack) = window.pop_front() {
-            if let Err(error) = DeltaJournal::await_ack(Some(ack)).await {
+        while let Some(ack) = window.front_mut() {
+            let result = DeltaJournal::await_ack_ref(ack).await;
+            window.pop_front();
+            if let Err(error) = result {
                 drop(window);
                 self.clear_snapshot_cache().await;
                 return Err(error);

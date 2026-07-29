@@ -559,7 +559,6 @@ use ironclaw_turns::{
 use rust_decimal_macros::dec;
 
 use crate::RebornRuntimeProcessBinding;
-use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -2628,7 +2627,7 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-production-hooks-owner",
             db,
@@ -2690,7 +2689,7 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
     });
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-production-cutover-owner",
             db,
@@ -2763,7 +2762,7 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
     let observer = Arc::new(RecordingTrajectoryObserver::default());
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-observer-reject-owner",
             db,

@@ -81,6 +81,11 @@ impl fmt::Display for LibSqlCheckoutFailureReason {
 /// Redacted runtime failures safe to map at a storage-adapter boundary.
 #[derive(Debug, Error)]
 pub enum LibSqlRuntimeError {
+    #[error("libSQL database construction failed")]
+    DatabaseBuild {
+        #[source]
+        source: libsql::Error,
+    },
     #[error("libSQL connection failed during {operation}")]
     Connection {
         operation: &'static str,
@@ -151,6 +156,9 @@ pub struct LibSqlRuntime {
     read_pool: LibSqlPool,
     write_pool: LibSqlPool,
     writer_holder: Arc<Mutex<Option<tokio::task::Id>>>,
+    /// Exact connection target used when this runtime opened its own database.
+    /// Caller-supplied handles intentionally carry no target provenance.
+    opened_target: Option<Arc<str>>,
 }
 
 impl fmt::Debug for LibSqlRuntime {
@@ -163,12 +171,51 @@ impl fmt::Debug for LibSqlRuntime {
                 "writer_holder_present",
                 &recover_writer_holder_lock(&self.writer_holder).is_some(),
             )
+            .field("opened_target_present", &self.opened_target.is_some())
             .finish()
     }
 }
 
 impl LibSqlRuntime {
     pub fn new(db: Arc<libsql::Database>) -> Result<Self, LibSqlRuntimeError> {
+        Self::from_database(db, None)
+    }
+
+    /// Open one libSQL target and construct its shared admission pools.
+    ///
+    /// The retained target is private provenance. Production composition can
+    /// verify that the runtime and its durability claim came from the same
+    /// construction input instead of trusting a second caller-supplied string.
+    pub async fn open(
+        path_or_url: impl Into<String>,
+        auth_token: Option<String>,
+    ) -> Result<Self, LibSqlRuntimeError> {
+        let path_or_url = path_or_url.into();
+        let database = if is_remote_libsql_target(&path_or_url) {
+            libsql::Builder::new_remote(path_or_url.clone(), auth_token.unwrap_or_default())
+                .build()
+                .await
+        } else {
+            libsql::Builder::new_local(&path_or_url).build().await
+        }
+        .map_err(|source| LibSqlRuntimeError::DatabaseBuild { source })?;
+        Self::from_database(Arc::new(database), Some(Arc::from(path_or_url)))
+    }
+
+    /// Whether this runtime itself opened `path_or_url`.
+    ///
+    /// Runtimes built from caller-supplied database handles return false
+    /// because the handle carries no verifiable target identity.
+    pub fn target_matches(&self, path_or_url: &str) -> bool {
+        self.opened_target
+            .as_deref()
+            .is_some_and(|opened| opened == path_or_url)
+    }
+
+    fn from_database(
+        db: Arc<libsql::Database>,
+        opened_target: Option<Arc<str>>,
+    ) -> Result<Self, LibSqlRuntimeError> {
         Ok(Self {
             read_pool: build_pool(
                 Arc::clone(&db),
@@ -177,6 +224,7 @@ impl LibSqlRuntime {
             )?,
             write_pool: build_pool(db, LIBSQL_WRITER_POOL_MAX_CONNECTIONS, LibSqlLane::Write)?,
             writer_holder: Arc::new(Mutex::new(None)),
+            opened_target,
         })
     }
 
@@ -203,6 +251,15 @@ impl LibSqlRuntime {
             holder_task_id,
         })
     }
+}
+
+fn is_remote_libsql_target(path_or_url: &str) -> bool {
+    let Some((scheme, _)) = path_or_url.split_once("://") else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("libsql")
+        || scheme.eq_ignore_ascii_case("https")
+        || scheme.eq_ignore_ascii_case("http")
 }
 
 fn recover_writer_holder_lock(

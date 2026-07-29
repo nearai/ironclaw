@@ -329,7 +329,7 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             .expect("build libsql database"),
     );
     let services = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "production-google-oauth-owner",
             db,
@@ -383,7 +383,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             .expect("build libsql database"),
     );
     let services = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "production-auth-fanout-owner",
             db,

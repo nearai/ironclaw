@@ -12,7 +12,7 @@ use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::deployment::TrafficPolicy;
 use crate::input::{
-    LibsqlConnectionConfig, OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
+    OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
 };
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
@@ -2080,50 +2080,6 @@ fn open_postgres_pool_from_source(
     }
 }
 
-/// Open a libSQL database from a build-time [`LibsqlConnectionConfig`]
-/// (Phase B). Scheme detection mirrors
-/// `ironclaw_reborn_event_store`'s libsql backend: recognised remote schemes
-/// (`libsql://`, `https://`, `http://`, case-insensitive) route through
-/// `Builder::new_remote` with the auth token; everything else is a local file.
-async fn open_libsql_database_from_connection(
-    connection: &LibsqlConnectionConfig,
-) -> Result<Arc<libsql::Database>, RebornBuildError> {
-    use secrecy::ExposeSecret;
-
-    let path_or_url = connection.path_or_url.as_str();
-    let build_result = if is_remote_libsql_target(path_or_url) {
-        libsql::Builder::new_remote(
-            path_or_url.to_string(),
-            connection
-                .auth_token
-                .as_ref()
-                .map(|token| token.expose_secret().to_string())
-                .unwrap_or_default(),
-        )
-        .build()
-        .await
-    } else {
-        libsql::Builder::new_local(path_or_url).build().await
-    };
-    build_result
-        .map(Arc::new)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("libSQL database could not be opened: {error}"),
-        })
-}
-
-/// Detect a remote libSQL endpoint by recognised URL scheme, case-insensitively
-/// (mirrors `ironclaw_reborn_event_store::libsql_backed::is_remote_libsql`).
-fn is_remote_libsql_target(path_or_url: &str) -> bool {
-    let Some(scheme_end) = path_or_url.find("://") else {
-        return false;
-    };
-    let scheme = &path_or_url[..scheme_end];
-    scheme.eq_ignore_ascii_case("libsql")
-        || scheme.eq_ignore_ascii_case("https")
-        || scheme.eq_ignore_ascii_case("http")
-}
-
 // `pub(crate)` so the `test_support` accessor
 // (`build_default_local_dev_database_roots_for_test`) can call this
 // without duplicating the 4-step libSQL setup sequence (Builder →
@@ -3527,9 +3483,10 @@ async fn build_production_shaped(
             )
             .await
         }
+        #[cfg(any(test, feature = "test-support"))]
         RebornStorageInput::Libsql {
-            connection,
-            prebuilt_runtime,
+            database_path_or_url,
+            runtime,
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
@@ -3549,15 +3506,6 @@ async fn build_production_shaped(
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
-            // Phase B: prefer the test-supplied runtime; otherwise open the
-            // database from the declarative connection config and construct
-            // the sole runtime before handing it to any adapter.
-            let runtime = match prebuilt_runtime {
-                Some(runtime) => runtime,
-                None => Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(
-                    open_libsql_database_from_connection(&connection).await?,
-                )?),
-            };
             let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
@@ -3589,7 +3537,7 @@ async fn build_production_shaped(
             build_libsql_production(
                 context,
                 runtime,
-                connection.path_or_url,
+                database_path_or_url,
                 secret_master_key,
                 process_local_resource_governor_singleton,
             )
@@ -3997,6 +3945,11 @@ where
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    if !config.runtime.target_matches(&config.database_path_or_url) {
+        return Err(crate::RebornCompositionError::InvalidConfig {
+            reason: "libSQL production runtime target provenance does not match the configured durable target".to_string(),
+        });
+    }
     ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
     let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(config.runtime));
     filesystem.run_migrations().await?;
@@ -4032,6 +3985,7 @@ fn ensure_libsql_resource_governor_authority(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn ensure_libsql_resource_governor_authority_for_build(
     process_local_singleton: bool,
 ) -> Result<(), RebornBuildError> {
@@ -5686,6 +5640,7 @@ async fn finish_production_backend(
     build_backend_production(context, stores, trigger_repository, leader_lock).await
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn build_libsql_production(
     context: RebornProductionBuildContext,
     runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,

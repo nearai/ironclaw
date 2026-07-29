@@ -353,12 +353,17 @@ The current standalone durable backends are JSONL, PostgreSQL, and libSQL. Each 
 - `LocalDev` and `Test` may explicitly use in-memory stores.
 - `Production` rejects in-memory stores before returning a service graph.
 - `Production` may use JSONL only when the config explicitly accepts single-node durable storage.
-- PostgreSQL and libSQL adapters are available behind the crate's `postgres` and `libsql` features. Their schema files live in `crates/ironclaw_reborn_event_store/migrations/`, and the factory runs those migrations before returning the service graph.
+- PostgreSQL and libSQL adapters are available behind the crate's `postgres`
+  and `libsql` features. Their schema files live in
+  `crates/ironclaw_reborn_event_store/migrations/`. The standalone `Libsql`
+  configuration owns opening its target and running its migrations before
+  returning the service graph.
 - Production libSQL composition passes the already-migrated
-  `LibSqlRootFilesystem` into the event-store factory. Its production inputs do
-  not accept a second event-store target: state, trigger, event, and audit
-  writes for the instance all share the primary database's process-local
-  single-writer admission lane.
+  `LibSqlRootFilesystem` through `LibsqlFilesystem`. That configuration neither
+  reopens the target nor reruns filesystem migrations. Its production inputs do
+  not accept a second event-store target: state, trigger, event, and audit writes
+  for the instance all share the primary database's process-local single-writer
+  admission lane.
 - If the crate is compiled without a requested SQL backend feature, the factory fails closed with a redacted backend-unavailable error.
 
 ### Replay semantics

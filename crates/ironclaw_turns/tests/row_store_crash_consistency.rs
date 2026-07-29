@@ -4023,6 +4023,44 @@ async fn write_behind_cancelled_flush_preserves_pending_ack() {
     drop(stall);
 }
 
+/// A cancelled graceful-shutdown drain must retain the oldest pending
+/// acknowledgement just like a read-side flush. Otherwise a later drain can
+/// report success while the accepted write is still blocked and non-durable.
+#[tokio::test]
+async fn write_behind_cancelled_drain_preserves_pending_ack() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+    let store = open_row_store(Arc::clone(&scoped));
+
+    submit_one(&store, &scope, "idem-cancelled-drain").await;
+    let stall = backend.append_gate().lock_owned().await;
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope),
+        })
+        .await
+        .unwrap()
+        .expect("write-behind claim returns before its durable append");
+
+    let first = tokio::time::timeout(std::time::Duration::from_millis(200), store.drain()).await;
+    assert!(
+        first.is_err(),
+        "the first drain must block on the stalled pending acknowledgement"
+    );
+
+    let second = tokio::time::timeout(std::time::Duration::from_millis(200), store.drain()).await;
+    assert!(
+        second.is_err(),
+        "a cancelled drain must retain the pending acknowledgement for the next drain"
+    );
+
+    drop(stall);
+}
+
 /// #6263 Step 3 (IronLoop f2) — read-your-writes under write-behind. A
 /// non-critical submit returns `Ok` after updating the hot snapshot but before
 /// its durable append; an immediate same-store `get_run_state` must still see it
