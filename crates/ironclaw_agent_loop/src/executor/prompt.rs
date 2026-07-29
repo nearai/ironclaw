@@ -809,7 +809,6 @@ fn prompt_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
         kind: error.kind,
         safe_summary,
         reason_kind: error.reason_kind,
-        diagnostic_ref: error.diagnostic_ref,
         detail: error.detail.or(rejected_summary_detail),
     }
 }

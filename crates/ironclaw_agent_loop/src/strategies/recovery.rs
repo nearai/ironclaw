@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{FailureFate, FailureKind};
 use ironclaw_turns::{
-    LoopDiagnosticRef, LoopFailureKind, ModelInvalidOutputDetailReason,
+    LoopFailureKind, ModelInvalidOutputDetailReason,
     run_profile::{LoopSafeSummary, ModelVisibleToolObservation},
 };
 
@@ -106,7 +106,7 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 }
 
 /// Sanitized capability error — the unified [`FailureKind`] plus a safe
-/// summary string and an opaque diagnostic ref. Strategies never see raw
+/// summary string. Strategies never see raw
 /// provider errors, host paths, or secrets; sanitization happens at the host
 /// port boundary before recovery strategy code runs.
 ///
@@ -117,15 +117,13 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 pub(crate) struct CapabilityErrorSummary {
     pub(crate) kind: FailureKind,
     pub(crate) safe_summary: SanitizedStrategySummary,
-    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
-/// Sanitized model error — class + safe summary + opaque diagnostic ref.
+/// Sanitized model error — class + safe summary.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelErrorSummary {
     pub(crate) class: ModelErrorClass,
     pub(crate) safe_summary: SanitizedStrategySummary,
-    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
 /// Wire-stable model error classification.
@@ -840,7 +838,6 @@ mod tests {
         let summary = CapabilityErrorSummary {
             kind: FailureKind::Transient,
             safe_summary: SanitizedStrategySummary::new("upstream timed out").expect("valid"),
-            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:cap-1").expect("valid")),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -857,7 +854,6 @@ mod tests {
         let summary = ModelErrorSummary {
             class: ModelErrorClass::ContextOverflow,
             safe_summary: SanitizedStrategySummary::new("context window exceeded").expect("valid"),
-            diagnostic_ref: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -1131,7 +1127,6 @@ mod tests {
             CapabilityErrorSummary {
                 kind,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
-                diagnostic_ref: None,
             }
         }
 
@@ -1139,7 +1134,6 @@ mod tests {
             ModelErrorSummary {
                 class,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
-                diagnostic_ref: None,
             }
         }
 
@@ -1591,7 +1585,6 @@ mod tests {
                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                     ModelInvalidOutputDetailReason::OutsideCapabilitySurface.safe_summary(),
                 ),
-                diagnostic_ref: None,
             };
 
             let outcome = strategy

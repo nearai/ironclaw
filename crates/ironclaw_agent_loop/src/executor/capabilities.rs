@@ -125,7 +125,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                     "capability is not visible in the filtered surface",
                 ),
-                diagnostic_ref: None,
             };
             match Box::pin(self.handle_capability_error(
                 ctx,
@@ -303,7 +302,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     let summary = CapabilityErrorSummary {
                         kind: FailureKind::StaleSurface,
                         safe_summary: stale_summary.clone(),
-                        diagnostic_ref: None,
                     };
                     match Box::pin(self.handle_capability_error(
                         ctx,
@@ -536,7 +534,6 @@ fn capability_port_error_summary(
     CapabilityErrorSummary {
         kind,
         safe_summary: capability_failed_summary(kind, error.safe_summary.clone()),
-        diagnostic_ref: error.diagnostic_ref.clone(),
     }
 }
 
@@ -546,13 +543,13 @@ fn capability_port_error_summary(
 fn capability_port_error_observation(
     error: &ironclaw_turns::run_profile::AgentLoopHostError,
 ) -> ModelVisibleToolObservation {
+    let detail = error.detail.clone().unwrap_or_else(|| {
+        ironclaw_turns::run_profile::sanitize_model_visible_text(error.safe_summary.clone())
+    });
     let failure = CapabilityFailure {
         error_kind: error.kind.failure_kind(),
         safe_summary: error.safe_summary.clone(),
-        detail: error
-            .detail
-            .clone()
-            .map(|text| CapabilityFailureDetail::Diagnostic { text }),
+        detail: CapabilityFailureDetail::Diagnostic { text: detail },
     };
     model_visible_capability_failure_observation(&failure)
 }
@@ -704,11 +701,8 @@ impl CapabilityStage {
                     ref error_kind,
                     ref diagnostic,
                 } => {
-                    let failure = capability_failure_from_recoverable(
-                        error_kind,
-                        diagnostic.as_ref(),
-                        &outcome,
-                    );
+                    let failure =
+                        capability_failure_from_recoverable(error_kind, diagnostic, &outcome);
                     if failure.error_kind == FailureKind::Cancelled {
                         return self.cancelled_after_checkpoint(ctx, state).await;
                     }
@@ -723,7 +717,6 @@ impl CapabilityStage {
                             failure.error_kind,
                             failure.safe_summary,
                         ),
-                        diagnostic_ref: None,
                     };
                     Box::pin(self.handle_capability_error(
                         ctx,
@@ -751,7 +744,6 @@ impl CapabilityStage {
                 let summary = CapabilityErrorSummary {
                     kind: FailureKind::PolicyDenied,
                     safe_summary: capability_denied_summary(reason, safe_summary.clone()),
-                    diagnostic_ref: None,
                 };
                 // Denials used to pass `None` here, so nothing actionable
                 // reached the model: no recovery, no retry constraint, no
@@ -771,7 +763,7 @@ impl CapabilityStage {
                     summary: capability_denied_observation_summary(reason),
                     detail: ToolObservationDetail::GenericFailure {
                         failure_kind: FailureKind::PolicyDenied,
-                        detail: denial_detail_text(&safe_summary),
+                        detail: Some(denial_detail_text(reason, &safe_summary)),
                     },
                     artifacts: Vec::new(),
                     recovery: Some(ToolRecoveryObservation::new(same_call_retry, recovery_hint)),
@@ -1019,7 +1011,6 @@ impl CapabilityStage {
                         failure_kind,
                         Some(checked.checkpoint_id),
                         FailedExitDetails {
-                            diagnostic_ref: summary.diagnostic_ref.clone(),
                             safe_summary: Some(safe_failure),
                             explanation_message_ref,
                         },
@@ -1097,7 +1088,6 @@ impl CapabilityStage {
                                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                                     "capability surface changed before execution; re-issue the call",
                                 ),
-                                diagnostic_ref: None,
                             };
                             model_observation = None;
                             continue;
@@ -1125,9 +1115,7 @@ impl CapabilityStage {
                                     error_kind,
                                     diagnostic,
                                 } => capability_failure_from_recoverable(
-                                    error_kind,
-                                    diagnostic.as_ref(),
-                                    &outcome,
+                                    error_kind, diagnostic, &outcome,
                                 ),
                                 _ => unreachable!("guarded to RecoverableFailure"),
                             };
@@ -1142,7 +1130,6 @@ impl CapabilityStage {
                                     failure.error_kind,
                                     failure.safe_summary,
                                 ),
-                                diagnostic_ref: None,
                             };
                         }
                         promoted => {
@@ -1190,7 +1177,6 @@ impl CapabilityStage {
             failure_kind,
             Some(checked.checkpoint_id),
             FailedExitDetails {
-                diagnostic_ref: summary.diagnostic_ref.clone(),
                 safe_summary: Some(safe_failure),
                 explanation_message_ref,
             },
@@ -1223,7 +1209,6 @@ impl CapabilityStage {
             LoopFailureKind::CapabilityProtocolError,
             Some(checked.checkpoint_id),
             FailedExitDetails {
-                diagnostic_ref: None,
                 safe_summary: None,
                 explanation_message_ref,
             },
@@ -1312,11 +1297,10 @@ impl CapabilityStage {
                 .await;
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
                 error_kind: FailureKind::GateDeclined,
-                // Intentionally empty: model-visible text comes from
-                // `model_visible_capability_failure_observation` and the
-                // planner summary from `from_trusted_static` below.
-                safe_summary: String::new(),
-                detail: None,
+                safe_summary: "The user declined the capability request.".to_string(),
+                detail: CapabilityFailureDetail::Diagnostic {
+                    text: "The capability did not run because the user declined its approval request. Revise the approach or ask the user before trying again.".to_string(),
+                },
             };
             state
                 .recent_failure_kinds
@@ -1325,7 +1309,6 @@ impl CapabilityStage {
             let summary = CapabilityErrorSummary {
                 kind: failure.error_kind,
                 safe_summary: SanitizedStrategySummary::from_trusted_static(planner_summary),
-                diagnostic_ref: None,
             };
             match Box::pin(self.handle_capability_error(
                 ctx,
@@ -1577,14 +1560,14 @@ fn dependent_run_result_message(
 
 fn capability_failure_from_recoverable(
     error_kind: &FailureKind,
-    diagnostic: Option<&ModelFailureDiagnostic>,
+    diagnostic: &ModelFailureDiagnostic,
     outcome: &Outcome,
 ) -> CapabilityFailure {
     CapabilityFailure {
         // The verdict already carries the unified kind; no tag round-trip.
         error_kind: *error_kind,
         safe_summary: outcome.summary.as_str().to_string(),
-        detail: diagnostic.map(capability_failure_detail_from),
+        detail: capability_failure_detail_from(diagnostic),
     }
 }
 
@@ -1690,12 +1673,18 @@ fn capability_denied_observation_summary(reason_kind: &str) -> String {
     format!("The capability was denied ({reason_kind}).")
 }
 
-/// The denial's own text, when there is any, for the model-visible detail
-/// channel. Empty summaries degrade to `None` rather than an empty string,
-/// which the observation validator rejects.
-fn denial_detail_text(safe_summary: &str) -> Option<String> {
+/// The denial's own text for the model-visible detail channel. Empty summaries
+/// become an actionable host-authored sentence rather than a category-only
+/// observation.
+fn denial_detail_text(reason_kind: &str, safe_summary: &str) -> String {
     let trimmed = safe_summary.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    if trimmed.is_empty() {
+        format!(
+            "The host denied this capability with reason {reason_kind}; follow the recovery guidance before choosing the next action."
+        )
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn deny_reason_tag(reason: DenyReason) -> &'static str {

@@ -202,7 +202,7 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         }
     };
     let detail = error.detail.or(rejected_summary_detail);
-    if detail.is_none() && error.reason_kind.is_none() && error.diagnostic_ref.is_none() {
+    if detail.is_none() && error.reason_kind.is_none() {
         return AgentLoopExecutorError::HostUnavailable {
             stage: HostStage::Capability,
         };
@@ -212,7 +212,6 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         kind: error.kind,
         safe_summary,
         reason_kind: error.reason_kind,
-        diagnostic_ref: error.diagnostic_ref,
         detail,
     }
 }
