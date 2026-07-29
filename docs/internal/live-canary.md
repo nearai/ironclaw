@@ -172,6 +172,13 @@ LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
 
 Artifacts are written under `artifacts/live-canary/`.
 
+For the Reborn WebUI v2 lane, `results.json` records an `attempt_history` for
+each executed case. A successful retry is explicitly classified as a flake and
+is surfaced separately in `green-run-explanation.json`. Deterministic,
+security-sensitive, idempotency, routine, trigger, and delivery checks are
+no-retry cases; their typed retry policy is published in `case-manifest.json`.
+Do not enable retries for those cases to make a scheduled lane green.
+
 Before upload, the workflow runs `scripts/live-canary/scrub-artifacts.sh`.
 That script is a guardrail against uploading obvious token-shaped strings from
 logs or result files.

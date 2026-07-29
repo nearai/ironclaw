@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from journey_cases import ALL_JOURNEY_CASES
+from journey_types import ProviderJourneyCase
 from product_surface_coverage import (
     COVERAGE_AXES,
     build_capability_evidence,
@@ -77,10 +78,13 @@ def test_losing_required_contract_evidence_is_not_hidden_by_journey_evidence():
     ]
 
 
-def test_recorded_provenance_is_not_live_and_browser_requires_typed_evidence():
+def test_live_and_browser_axes_require_typed_executable_evidence():
     report = build_report()
 
-    assert report["summary"]["evidence_rows"]["live"] == 0
+    provider_journeys = [
+        case for case in ALL_JOURNEY_CASES if isinstance(case, ProviderJourneyCase)
+    ]
+    assert report["summary"]["evidence_rows"]["live"] >= len(provider_journeys)
     assert report["summary"]["evidence_rows"]["browser"] == 1
     browser_rows = [
         row
@@ -91,10 +95,29 @@ def test_recorded_provenance_is_not_live_and_browser_requires_typed_evidence():
     assert browser_rows[0]["evidence"]["browser"]["items"][0]["test"] == (
         "test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages"
     )
-    assert all(
-        row["evidence"]["live"]["status"] == "not_applicable"
+    live_journey_rows = [
+        row
         for row in report["surfaces"]
+        if row["kind"] == "journey" and row["evidence"]["live"]["status"] == "scheduled"
+    ]
+    assert {row["id"] for row in live_journey_rows} == {
+        case.case_id for case in provider_journeys
+    }
+    assert all(
+        item["source"] == ".github/workflows/live-canary.yml"
+        and item["test"] == "reborn-webui-v2-live-qa"
+        and item["artifact"] == "results.json"
+        for row in live_journey_rows
+        for item in row["evidence"]["live"]["items"]
     )
+    live_workflow = (ROOT / ".github/workflows/live-canary.yml").read_text(
+        encoding="utf-8"
+    )
+    for case in provider_journeys:
+        assert (
+            f"cases: {case.case_id}" in live_workflow
+            or f",{case.case_id}" in live_workflow
+        )
 
 
 def test_owned_gaps_and_live_only_rows_are_prominent_in_markdown():

@@ -544,3 +544,5 @@ classifications or a `tested` capability with no executable evidence fail the
 lane; owned gaps, waivers, and live-only rows remain prominent but do not
 silently become passing evidence. A harvested live-QA fixture is not current
 live evidence unless a stable live result artifact binds back to its typed row.
+Scheduled live cells name the exact workflow, job, case id, and result artifact
+and remain `scheduled` until a consumer inspects that result.

@@ -109,6 +109,16 @@ def build_capability_evidence() -> dict[str, dict[str, list[dict[str, str]]]]:
             capabilities = _trace_capabilities(case)
         for capability_id in capabilities:
             evidence["journey"][capability_id].append(reference)
+            if isinstance(case, ProviderJourneyCase):
+                evidence["live"][capability_id].append(
+                    _evidence(
+                        tier="scheduled_live",
+                        source=case.live_evidence.workflow,
+                        test=case.live_evidence.job,
+                        case_id=case.live_evidence.case_id,
+                        artifact=case.live_evidence.artifact,
+                    )
+                )
 
     return {
         axis: {
@@ -171,6 +181,19 @@ def _journey_row(case: ProviderJourneyCase | ProductJourneyCase) -> dict:
                     source=case.browser_evidence.source,
                     test=case.browser_evidence.test,
                     case_id=case.case_id,
+                )
+            ],
+        }
+    if isinstance(case, ProviderJourneyCase):
+        evidence["live"] = {
+            "status": "scheduled",
+            "items": [
+                _evidence(
+                    tier="scheduled_live",
+                    source=case.live_evidence.workflow,
+                    test=case.live_evidence.job,
+                    case_id=case.live_evidence.case_id,
+                    artifact=case.live_evidence.artifact,
                 )
             ],
         }
@@ -249,6 +272,8 @@ def build_report(
                 status = contract_status
             elif axis == "faults" and raw_evidence[axis]:
                 status = "representative"
+            elif axis == "live" and raw_evidence[axis]:
+                status = "scheduled"
             evidence[axis] = {"status": status, "items": raw_evidence[axis]}
         capability_rows.append(
             {

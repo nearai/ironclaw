@@ -48,6 +48,15 @@ roll-up **job names**, never individual matrix jobs):
 | `Reborn E2E` | `reborn-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
+The 2026-07-30 queue-cost audit found only one retained `merge_group` sample
+for each candidate: Reborn E2E took 594 seconds and failed; Platform & Compat
+took 364 seconds and passed. Pull-request history was healthier (Reborn E2E
+p50/p95 877/1124 seconds; Platform & Compat 415/492 seconds), but one real queue
+sample—especially a failing E2E sample—is not enough evidence to alter the
+repository ruleset. Both checks therefore remain candidates. Refresh the
+workflow-run sample before promotion; a workflow being present on
+`merge_group` is not itself proof that it is safe to require.
+
 Rules for a roll-up job that is (or may become) required:
 
 1. Trigger on `merge_group` and report on every run (`if: always()`), so the
@@ -98,13 +107,28 @@ pull-request workflows.
 
 The cargo-dist release and manual preflight both build the `ironclaw` package
 and binary without backend feature flags; database backends compile
-unconditionally. In the manual preflight, each matrix entry performs a final
-`cargo build --locked --profile dist` link and executes that exact native binary
-with `--version`, `--help`, and `profile list --json`. Its musl entries also use
-`readelf` to reject a program interpreter or dynamic-library dependency, which
-prevents an installed musl loader on the build runner from hiding a non-portable
-artifact. This is shallow CLI startup coverage; it does not validate `serve` or
-external services.
+unconditionally. The tag publisher extracts each target's completed cargo-dist
+archive and runs the shared release smoke before the artifact can enter the
+upload set. The manual preflight runs the same smoke against its exact
+dist-profile binary before uploading compile evidence. The smoke uses an
+isolated home to verify CLI identity/help, the supported profile contract,
+production-derived bundled-extension discovery through a real local runtime
+assembly (including first-party, MCP-server, and WASM-tool runtime kinds), the
+non-empty libSQL database created after its migrations complete, and the
+migration-dry-run profile selection. Its catalog denominator is the shipping
+binary itself, so adding or removing a bundled package does not require a second
+hand-maintained CI list. The musl entries also use `readelf` to reject a program
+interpreter or dynamic-library dependency, which prevents an installed musl
+loader on the build runner from hiding a non-portable artifact.
+
+The scheduled Postgres capacity lane complements that portable gate by building
+the same canonical binary with `--profile dist`, starting `serve`, applying the
+Postgres-backed runtime migrations, and driving its authenticated API against a
+mock provider. Weekly live provider jobs build the bundled WASM extensions and
+exercise the Anthropic and OpenAI-compatible provider paths. The portable
+archive smoke itself does not invoke every WASM/MCP/script runtime lane or
+execute the generated shell/PowerShell/MSI installers; those remain separately
+owned evidence and a green portable smoke must not be read as proof of them.
 
 ## Deep tier (nightly)
 
@@ -112,17 +136,33 @@ external services.
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
 `reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
 requests, the merge queue candidate check, and main. The standalone
-`reborn-playwright.yml` schedule owns the broader six-shard browser matrix; it
-is post-merge nightly coverage, not a required merge check. Failed nightly
+`reborn-playwright.yml` schedule owns the broader generated four-shard browser
+matrix. `ws12-suite-shards.toml` records the source run, duration weights,
+provider-world affinities, and owned waivers; its generator refuses missing
+files, affinity splits, stale entries, and retry-enabled deterministic shards.
+It is post-merge nightly coverage, not a required merge check. Failed nightly
 shards upload server logs, Playwright traces, screenshots, and videos, and the
 nightly watchdog owns alerting for that workflow.
+
+The same deep reuse raises all existing property-test generators from 256 to
+2,048 random cases, runs the bounded mutation frontier, and replays the complete
+hermetic journey/provider-fault inventory. `ironclaw-stress.yml` adds a
+15-minute libSQL user-session soak alongside its libSQL ramps and
+shipping-profile Postgres API capacity lane. `live-canary.yml` keeps the
+three-hour Reborn WebUI cadence and runs the broader credentialed provider
+matrix weekly. Workflow-contract sabotage tests fail if any of these schedules,
+guards, merge/main triggers, or release gates disappear.
 
 The Reborn E2E job also publishes `product-surface-coverage-<sha>`. Its JSON and
 Markdown files join the shipped capability denominator with typed contract,
 journey, and fault registries. The generator fails on unclassified or
 unevidenced tested capabilities and lists owned gaps, waivers, and live-only
 rows separately. Reporting imports the existing registries; it does not own a
-duplicate CI capability or journey list.
+duplicate CI capability or journey list. Provider journeys carry typed
+scheduled-live bindings to the exact `live-canary.yml` job, case id, and
+`results.json` artifact. The matrix reports those cells as `scheduled`, not
+`covered`: a recorded trace or declared cron is never presented as a passing
+live result.
 
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
