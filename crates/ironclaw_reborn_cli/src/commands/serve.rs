@@ -602,6 +602,28 @@ impl ServeCommand {
             {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }
+            // Public attested-signing review link (`GET /intent/{token}`): the
+            // token addresses an intent and authorizes nothing, so this route
+            // only redirects to the SPA, which then demands a session.
+            if let Some(intent_mount) = runtime.intent_store().map(|intents| {
+                ironclaw_webui::intent_review_mount(
+                    std::sync::Arc::clone(intents),
+                    &ironclaw_webui::intent_review_spa_base(),
+                )
+            }) {
+                serve_config = serve_config.with_public_route_mount(intent_mount);
+            }
+            // The authenticated read the review page makes once that redirect
+            // has landed. The link showed nothing; this is where the bound
+            // approver is checked.
+            if let Some(detail_mount) = runtime.intent_store().map(|intents| {
+                ironclaw_webui::intent_detail_mount(
+                    std::sync::Arc::clone(intents),
+                    std::sync::Arc::clone(runtime.clear_signing_descriptors()),
+                )
+            }) {
+                serve_config = serve_config.with_protected_route_mount(detail_mount);
+            }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);
             }

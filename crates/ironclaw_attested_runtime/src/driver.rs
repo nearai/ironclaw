@@ -46,6 +46,17 @@ use ironclaw_signing_provider::{
 };
 pub use rebuild::{EvmSignable, RebuildError};
 
+/// Rebuild the signable for the device-signature path.
+///
+/// The rebuild itself is driver-private on purpose — it must only ever be fed
+/// an authoritative binding. `device_signature` is the one other caller that
+/// holds one, so it gets a named door rather than the module going public.
+pub(crate) fn rebuild_evm_signable_for_device(
+    decoded: &ironclaw_attestation::DecodedTransaction,
+) -> Result<EvmSignable, RebuildError> {
+    rebuild::rebuild_evm_signable(decoded)
+}
+
 use crate::binding::{AttestedGateBinding, AttestedGateBindingStore};
 
 /// Registry mapping a [`ProviderId`] to the external-wallet

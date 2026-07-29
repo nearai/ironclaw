@@ -37,6 +37,8 @@ mod canonical;
 mod decoded_tx;
 mod error;
 mod fields;
+mod intent;
+mod intent_review;
 mod rendered;
 
 mod wire;
@@ -48,14 +50,26 @@ mod wire;
 // `ironclaw_attestation::ledger::contract` (the `#[macro_export]`ed
 // `*_contract_cases!` macros expand to `$crate::grant::contract::...` paths).
 #[cfg(not(feature = "contract-tests"))]
+mod agent_key;
+#[cfg(feature = "contract-tests")]
+pub mod agent_key;
+#[cfg(not(feature = "contract-tests"))]
 mod grant;
 #[cfg(feature = "contract-tests")]
 pub mod grant;
+#[cfg(not(feature = "contract-tests"))]
+mod intent_store;
+#[cfg(feature = "contract-tests")]
+pub mod intent_store;
 #[cfg(not(feature = "contract-tests"))]
 mod ledger;
 #[cfg(feature = "contract-tests")]
 pub mod ledger;
 
+pub use agent_key::{
+    AgentKeyError, AgentKeyState, AgentSigningKey, AgentSigningKeyStore, DEFAULT_INTENT_TTL_MS,
+    DEFAULT_ROTATION_OVERLAP_MS, InMemoryAgentSigningKeyStore, verification_admits,
+};
 pub use approved_tx_hash::approved_tx_hash_for;
 pub use canonical::canonical_signing_bytes;
 pub use decoded_tx::{
@@ -68,6 +82,18 @@ pub use error::AttestationError;
 pub use grant::{
     AttestedSigningGrant, ClaimedGrant, GrantError, GrantKey, GrantStatus,
     InMemorySealedGrantStore, SealedGrantStore,
+};
+pub use intent::{
+    AGENT_PUBLIC_KEY_LEN, AgentKeyId, INTENT_SIGNATURE_LEN, IntentError, IntentId, IntentSigner,
+    IntentSignerError, SignedIntent, UnsignedIntent,
+};
+pub use intent_review::{
+    ReviewCaller, ReviewRejection, TokenLanding, authorize_proof_submission, authorize_view,
+    resolve_token_landing,
+};
+pub use intent_store::{
+    InMemoryIntentStore, IntentRecord, IntentState, IntentStore, IntentStoreError,
+    REVIEW_TOKEN_HASH_LEN, ReviewTokenHash,
 };
 pub use ledger::{
     InMemorySigningLedger, LedgerError, LedgerKey, SigningLedger, SigningLedgerState,

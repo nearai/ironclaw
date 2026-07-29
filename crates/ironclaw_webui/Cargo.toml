@@ -20,6 +20,9 @@ layer = "products"
 test-support = []
 
 [dependencies]
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }

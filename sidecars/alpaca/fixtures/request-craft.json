@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "currencyId": "ethereum_sepolia",
+  "params": {
+    "type": "send-eip1559",
+    "recipient": "0x1111111111111111111111111111111111111111",
+    "amount": "1000000000000000"
+  }
+}

@@ -25,6 +25,11 @@ mod approval_test_support;
 mod attested;
 mod attested_config;
 mod attested_continuation;
+#[cfg(all(
+    feature = "attested-broadcast",
+    any(feature = "libsql", feature = "postgres")
+))]
+mod attested_durable;
 mod attested_raise;
 mod automation;
 mod blocked_auth_resume;
@@ -76,7 +81,19 @@ pub use attested_config::{
     WALLETCONNECT_PROJECT_ID_ENV, WalletConnectConfig,
 };
 pub use attested_continuation::RebornAttestedContinuation;
-pub use attested_raise::RebornAttestedRaiseHook;
+#[cfg(all(feature = "attested-broadcast", feature = "libsql"))]
+pub use attested_durable::assemble_libsql;
+#[cfg(all(feature = "attested-broadcast", feature = "postgres"))]
+pub use attested_durable::assemble_postgres;
+#[cfg(all(
+    feature = "attested-broadcast",
+    any(feature = "libsql", feature = "postgres")
+))]
+pub use attested_durable::{
+    DurableCustody, EVM_RPC_URL_ENV, NEAR_RPC_URL_ENV, SOLANA_RPC_URL_ENV,
+    chain_rpc_endpoints_from_env,
+};
+pub use attested_raise::{IntentMinting, RebornAttestedRaiseHook};
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;

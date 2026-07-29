@@ -1,0 +1,14 @@
+export declare function captureException(exception?: unknown): string;
+export declare function captureMessage(message?: string): string;
+export declare function captureEvent(event?: unknown): string;
+export declare function addBreadcrumb(breadcrumb?: unknown): void;
+export declare function configureScope(callback?: unknown): void;
+export declare function withScope(callback?: (scope: unknown) => void): void;
+export declare function setContext(name?: string, context?: unknown): void;
+export declare function setExtra(key?: string, extra?: unknown): void;
+export declare function setExtras(extras?: unknown): void;
+export declare function setTag(key?: string, value?: unknown): void;
+export declare function setTags(tags?: unknown): void;
+export declare function setUser(user?: unknown): void;
+export declare function startTransaction(context?: unknown): undefined;
+export declare function getCurrentHub(): unknown;

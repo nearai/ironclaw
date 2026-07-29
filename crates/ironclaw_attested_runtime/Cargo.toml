@@ -18,6 +18,12 @@ layer = "kernel"
 dist = false
 
 [features]
+# The upstream ERC-7730 descriptor fetcher. Optional because a deployment
+# without it simply blocks every Ledger ceremony (the fail-closed default), and
+# because it is the crate's only outbound-HTTP surface. rustls-only, no
+# default-tls, to keep the attested-signing substrate openssl-free (see the
+# architecture test `workspace_graph_is_openssl_free`).
+clear-signing-http = ["dep:reqwest"]
 # Opt-in escape hatch for the `AlwaysTrustNearAccessKeyVerifier` stub, which
 # bypasses the on-chain NEAR access-key check. Compiled out of production builds
 # by default so the privilege-escalation stub cannot be wired by accident; only
@@ -32,6 +38,17 @@ tracing = "0.1"
 # Serde derives so AttestedGateBinding persists as a single JSON column in the
 # durable binding stores (ironclaw_attested_store, PR12).
 serde = { version = "1", features = ["derive"] }
+# The Alpaca craft intent is chain-specific and passed through verbatim — Rust's
+# authority comes from DECODING the proposal, not from re-modelling the request,
+# so the params ride as an opaque `serde_json::Value`.
+serde_json = "1"
+# The sidecar client speaks HTTP/1.1 over a Unix socket directly (the sidecar
+# serves with Node's stdlib http and no framework; this is the symmetric
+# choice). `net` + `io-util` + `time` cover connect/read/write/timeout — no
+# hyper + UDS-connector dependency family for a protocol we own both ends of.
+# `process` + `sync` additionally cover the managed-sidecar supervisor: spawn
+# the child, hold its stdin as the parent-liveness link, and signal shutdown.
+tokio = { version = "1", features = ["net", "io-util", "time", "rt", "process", "sync"] }
 
 # Crypto-free turn-coordination contract (the AttestedResumePort trait lives here).
 ironclaw_turns = { path = "../ironclaw_turns" }
@@ -66,13 +83,31 @@ bs58 = "0.5"
 # is already in the dependency closure (ed25519-dalek / k256 via rand_core);
 # pinning it directly only surfaces the OS-entropy call we need.
 getrandom = "0.2"
+# ed25519 for signing intent pre-images (Phase B). Already vendored in-tree and
+# already this crate's dev-dependency; promoted to a real one because the
+# production `SecretsIntentSigner` needs it.
+ed25519-dalek = "2"
+# Seals each per-agent intent private key (AES-256-GCM under an AAD bound to
+# (tenant, agent, generation)). This crate is where the private half may live —
+# `ironclaw_attestation` is forbidden from depending on secrets, which is why
+# the signer implementation sits here rather than beside the intent type.
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+# Wipes the unsealed private key from the stack after use. Already vendored
+# in-tree (host_api, host_runtime, network); this crate denies `unsafe`, so the
+# crate's audited Drop-based wipe replaces a hand-rolled volatile write.
+zeroize = "1"
+# Hex-encodes key bytes before sealing: `SecretsCrypto` round-trips UTF-8
+# (`DecryptedSecret` wraps a String), so raw key bytes cannot pass through it.
+# Mirrors `ironclaw_chain_signing`'s custodial keystore.
+hex = "0.4"
+
+# rustls-only; see the `clear-signing-http` feature note.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-native-roots"] }
 
 [dev-dependencies]
 async-trait = "0.1"
 chrono = "0.4"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-hex = "0.4"
-ed25519-dalek = "2"
 # Already a normal dependency of `ironclaw_chain_signing` (in-tree); used here
 # only to derive the EVM address from a fixed test private key, mirroring the
 # `ironclaw_chain_signing` custodial tests. `evm::signing_key_from_bytes` became
@@ -81,6 +116,5 @@ ed25519-dalek = "2"
 # trust-registration tests (#4052).
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
-ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 secrecy = "0.10"

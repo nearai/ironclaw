@@ -696,6 +696,16 @@ pub struct RebornRuntime {
     /// wired — the gate ingress then has nothing to dispatch to and fails
     /// closed, rather than half-resolving a signature.
     pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
+    /// The intent store the raise hook mints into; the review routes read it.
+    pub(crate) intent_store: Option<Arc<dyn ironclaw_attestation::IntentStore>>,
+    /// Lazily-built clear-signing descriptor cache (see `clear_signing_source`).
+    clear_signing_descriptors: std::sync::OnceLock<
+        Arc<
+            ironclaw_attested_runtime::TtlDescriptorCache<
+                Arc<dyn ironclaw_attested_runtime::DescriptorSource>,
+            >,
+        >,
+    >,
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
@@ -1448,6 +1458,33 @@ impl RebornRuntime {
     /// signing continuation can be obtained.
     pub fn attested_signing(&self) -> Option<&Arc<crate::attested::InMemoryAttestedComposition>> {
         self.attested_signing.as_ref()
+    }
+
+    pub fn intent_store(&self) -> Option<&Arc<dyn ironclaw_attestation::IntentStore>> {
+        self.intent_store.as_ref()
+    }
+
+    /// The process-wide clear-signing descriptor cache (§D3).
+    ///
+    /// Built on first use over [`UnconfiguredDescriptorSource`], so a
+    /// deployment that has not wired a descriptor service blocks every Ledger
+    /// ceremony rather than falling through to blind signing. Wiring a real
+    /// (allowlisted, rustls) source replaces the inner source here and nothing
+    /// else — the TTL/fail-closed policy is already in the cache.
+    pub fn clear_signing_descriptors(
+        &self,
+    ) -> &Arc<
+        ironclaw_attested_runtime::TtlDescriptorCache<
+            Arc<dyn ironclaw_attested_runtime::DescriptorSource>,
+        >,
+    > {
+        self.clear_signing_descriptors.get_or_init(|| {
+            Arc::new(ironclaw_attested_runtime::TtlDescriptorCache::new(
+                clear_signing_source(),
+                DESCRIPTOR_HIT_TTL_MS,
+                DESCRIPTOR_MISS_TTL_MS,
+            ))
+        })
     }
 
     /// Build the canonical product surface over this runtime graph.
@@ -4725,6 +4762,8 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 
     let runtime = RebornRuntime {
         attested_signing: services.attested_signing.clone(),
+        intent_store: services.intent_store.clone(),
+        clear_signing_descriptors: std::sync::OnceLock::new(),
         host_runtime: services.host_runtime.clone(),
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
@@ -5373,3 +5412,40 @@ fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
 #[cfg(test)]
 #[path = "runtime/tests/core.rs"]
 mod tests;
+
+/// Choose the descriptor source for this deployment.
+///
+/// Unconfigured means every Ledger ceremony blocks, which is the correct
+/// default: clear signing is something a deployment turns ON. A configured but
+/// *invalid* upstream is loud — it is logged at error and still blocks, so an
+/// operator who meant to enable this is not left believing they did.
+#[cfg(feature = "clear-signing-http")]
+fn clear_signing_source() -> Arc<dyn ironclaw_attested_runtime::DescriptorSource> {
+    match ironclaw_attested_runtime::HttpDescriptorSource::from_env() {
+        Ok(Some(source)) => Arc::new(source),
+        Ok(None) => Arc::new(ironclaw_attested_runtime::UnconfiguredDescriptorSource),
+        Err(error) => {
+            tracing::error!(
+                target: "ironclaw::attested::clear_signing",
+                %error,
+                env = ironclaw_attested_runtime::CLEAR_SIGNING_UPSTREAM_ENV,
+                "clear-signing upstream is misconfigured; every Ledger ceremony will block"
+            );
+            Arc::new(ironclaw_attested_runtime::UnconfiguredDescriptorSource)
+        }
+    }
+}
+
+/// Without the fetcher compiled in there is nothing to configure.
+#[cfg(not(feature = "clear-signing-http"))]
+fn clear_signing_source() -> Arc<dyn ironclaw_attested_runtime::DescriptorSource> {
+    Arc::new(ironclaw_attested_runtime::UnconfiguredDescriptorSource)
+}
+
+/// Positive-descriptor TTL: descriptors change rarely, so an hour keeps the
+/// context service quiet without pinning a stale document for long.
+const DESCRIPTOR_HIT_TTL_MS: i64 = 60 * 60 * 1000;
+/// Negative TTL, deliberately much shorter: a transient outage must not pin
+/// "cannot be clear-signed" for an hour, but an un-cached miss would let a
+/// page reload hammer the upstream.
+const DESCRIPTOR_MISS_TTL_MS: i64 = 30 * 1000;

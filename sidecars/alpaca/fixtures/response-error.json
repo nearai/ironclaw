@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "ok": false,
+  "code": "unsupported_chain",
+  "message": "no chain api for that currency id"
+}

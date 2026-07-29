@@ -48,6 +48,11 @@ pub use ironclaw_host_ingress::{
 };
 pub use product_auth::{ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount};
 pub use webui_rate_limit::RateLimitConfigError;
+mod intent_detail_serve;
+mod intent_review_serve;
+pub use intent_detail_serve::intent_detail_mount;
+pub use intent_review_serve::{INTENT_REVIEW_PATH, intent_review_mount, intent_review_spa_base};
+
 pub use webui_serve::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
     WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,

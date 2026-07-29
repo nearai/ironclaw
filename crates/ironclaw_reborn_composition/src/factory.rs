@@ -1009,6 +1009,10 @@ pub(crate) struct RebornRuntimeStores {
     /// ingress once a turn reaches `AttestedResolved`. `None` on production
     /// profiles until the durable attested backends are wired.
     pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
+    /// The intent store the raise hook mints into, shared with the continuation
+    /// port so the lifecycle projection settles the very record the raise wrote.
+    /// `None` on production until the durable attested backends are wired.
+    pub(crate) intent_store: Option<Arc<dyn ironclaw_attestation::IntentStore>>,
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
@@ -5562,6 +5566,7 @@ async fn build_backend_production(
         // later group, and `None` means the gate ingress has nothing to
         // dispatch to and refuses, rather than half-resolving a signature.
         attested_signing: None,
+        intent_store: None,
         host_runtime,
         #[cfg(test)]
         turn_coordinator,

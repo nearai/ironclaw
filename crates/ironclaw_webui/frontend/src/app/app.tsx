@@ -7,6 +7,9 @@ import { LoginPage as LoginView } from "../pages/login/login-page";
 import { Button } from "../design-system/button";
 import { RouteLoadBoundary } from "./route-load-boundary";
 
+const ReviewPage = React.lazy(() =>
+  import("../pages/review/review-page").then(({ ReviewPage }) => ({ default: ReviewPage }))
+);
 const GatewayLayout = React.lazy(() =>
   import("../layout/gateway-layout").then(({ GatewayLayout }) => ({ default: GatewayLayout }))
 );
@@ -258,6 +261,35 @@ export function App() {
             path="admin/:tab"
             element={(<LazyRoute><AdminRoute auth={auth} /></LazyRoute>)}
           />
+          <Route path="welcome" element={(<OnboardingPage />)} />
+          <Route path="chat" element={(<ChatPage />)} />
+          <Route path="chat/:threadId" element={(<ChatPage />)} />
+          <Route path="workspace" element={(<WorkspacePage />)} />
+          <Route path="workspace/*" element={(<WorkspacePage />)} />
+          <Route path="projects" element={(<ProjectsPage />)} />
+          <Route path="projects/:projectId" element={(<ProjectsPage />)} />
+          <Route path="projects/:projectId/missions/:missionId" element={(<ProjectsPage />)} />
+          <Route path="projects/:projectId/threads/:threadId" element={(<ProjectsPage />)} />
+          <Route path="missions" element={(<MissionsPage />)} />
+          <Route path="missions/:missionId" element={(<MissionsPage />)} />
+          <Route path="jobs" element={(<JobsPage />)} />
+          <Route path="jobs/:jobId" element={(<JobsPage />)} />
+          <Route path="routines" element={(<RoutinesPage />)} />
+          <Route path="routines/:routineId" element={(<RoutinesPage />)} />
+          <Route path="automations" element={(<AutomationsPage />)} />
+          <Route path="extensions" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
+          <Route path="extensions/:tab" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
+          <Route path="logs" element={(<LogsPage />)} />
+          {/* Attested-signing review link target. Inside the authenticated
+              layout on purpose: the public /intent/{token} route reveals
+              nothing and only redirects here, and the page's read is
+              authorized against the session's bound approver. An
+              unauthenticated visitor is bounced to login and returned. */}
+          <Route path="review/:intentId" element={(<LazyRoute><ReviewPage /></LazyRoute>)} />
+          <Route path="settings" element={(<SettingsPage />)} />
+          <Route path="settings/:tab" element={(<SettingsPage />)} />
+          <Route path="admin" element={(<AdminRoute auth={auth} />)} />
+          <Route path="admin/:tab" element={(<AdminRoute auth={auth} />)} />
         </Route>
         <Route path="*" element={(<Navigate to={defaultRoute} replace />)} />
       </Routes>

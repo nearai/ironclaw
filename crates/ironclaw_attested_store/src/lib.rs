@@ -43,11 +43,13 @@
 #![warn(unreachable_pub)]
 #![forbid(unsafe_code)]
 
+mod agent_key;
 mod binding;
 #[cfg(feature = "broadcast-http")]
 mod broadcaster;
 mod error;
 mod grant;
+mod intent;
 mod ledger;
 
 pub use error::StoreError;
@@ -56,16 +58,24 @@ pub use error::StoreError;
 pub use broadcaster::{ChainRpcEndpoints, MultiChainBroadcaster};
 
 #[cfg(feature = "postgres")]
+pub use agent_key::PostgresAgentSigningKeyStore;
+#[cfg(feature = "postgres")]
 pub use binding::PostgresAttestedGateBindingStore;
 #[cfg(feature = "postgres")]
 pub use grant::PostgresSealedGrantStore;
 #[cfg(feature = "postgres")]
+pub use intent::PostgresIntentStore;
+#[cfg(feature = "postgres")]
 pub use ledger::PostgresSigningLedger;
 
+#[cfg(feature = "libsql")]
+pub use agent_key::LibSqlAgentSigningKeyStore;
 #[cfg(feature = "libsql")]
 pub use binding::LibSqlAttestedGateBindingStore;
 #[cfg(feature = "libsql")]
 pub use grant::LibSqlSealedGrantStore;
+#[cfg(feature = "libsql")]
+pub use intent::LibSqlIntentStore;
 #[cfg(feature = "libsql")]
 pub use ledger::LibSqlSigningLedger;
 

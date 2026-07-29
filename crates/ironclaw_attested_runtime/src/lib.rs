@@ -48,8 +48,16 @@
 #![warn(unreachable_pub)]
 #![forbid(unsafe_code)]
 
+mod alpaca;
+mod alpaca_supervisor;
+mod alpaca_uds;
 mod binding;
+mod clear_signing;
+#[cfg(feature = "clear-signing-http")]
+mod clear_signing_http;
+mod device_signature;
 mod driver;
+mod intent_signer;
 mod port;
 mod ship_gate;
 mod trust;
@@ -63,14 +71,36 @@ pub use trust::{
     VerifiedControl,
 };
 
+pub use alpaca::{
+    AlpacaError, AlpacaPort, BroadcastRequest, CombineRequest, CraftRequest, CurrencyId,
+    RecordingAlpacaPort, SharedAlpacaPort, UnconfiguredAlpacaPort,
+};
+pub use alpaca_supervisor::{
+    AlpacaConfigError, AlpacaDeployment, AlpacaSupervisor, RestartBackoff, SOCKET_PATH_MAX,
+    SidecarSpawnSpec, mint_sidecar_token, port_for,
+};
+pub use alpaca_uds::UdsAlpacaPort;
 pub use binding::{
     AttestedGateBinding, AttestedGateBindingStore, BindingError, BindingKey,
     InMemoryAttestedGateBindingStore, SyncBindingRead, validate_binding, validate_binding_key,
 };
+pub use clear_signing::{
+    DescriptorKey, DescriptorLookup, DescriptorSource, TtlDescriptorCache,
+    UnconfiguredDescriptorSource,
+};
+#[cfg(feature = "clear-signing-http")]
+pub use clear_signing_http::{
+    ALLOWED_UPSTREAM_HOSTS, CLEAR_SIGNING_UPSTREAM_ENV, HttpDescriptorSource, LEDGER_CAL_BASE_URL,
+    UpstreamConfigError, validate_upstream,
+};
+pub use device_signature::{DeviceSignatureError, signable_digest, verify_device_signature};
 pub use driver::{
     AttestedSignerContinuationDriver, BindingOwner, BroadcastDisposition, BroadcastOutcome,
     Broadcaster, ContinuationError, CustodialSignerLike, EvmSignable, ProviderRegistry,
     RebuildError, SignerContinuationOutcome, VerifiedContinuation,
+};
+pub use intent_signer::{
+    InMemorySealedAgentKeyStore, SealedAgentKey, SealedAgentKeyStore, SecretsIntentSigner,
 };
 pub use port::{
     InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort, approved_tx_hash_ref_hex,

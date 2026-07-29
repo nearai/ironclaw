@@ -3,3 +3,31 @@ packages:
 
 allowBuilds:
   esbuild: true
+
+# Overrides lift two advisories that arrive transitively under the Ledger
+# device-interaction packages (attested-signing Phase D):
+#
+#   ws   — `ethers@6.14.1` (pulled by @ledgerhq/device-signer-kit-ethereum)
+#          resolves ws@8.17.1, affected by GHSA-96hv-2xvq-fx4p (HIGH,
+#          memory-exhaustion DoS, patched 8.21.0) and GHSA-58qx-3vcg-4xpx
+#          (moderate, uninitialized memory disclosure, patched 8.20.1). DMK
+#          itself already resolves a clean 8.21.1; this pins the ethers subtree
+#          up to the same line.
+#   uuid — resolves 11.0.3, affected by GHSA-w5hq-g745-h8pq (moderate, missing
+#          buffer bounds check in v3/v5/v6 when `buf` is supplied; patched
+#          11.1.1).
+#
+# Both are same-major-line bumps for the affected packages. Revisit when the
+# upstream packages move their own pins; drop an override once it is a no-op.
+#   @sentry/minimal — `@ledgerhq/device-transport-kit-web-hid` calls
+#          `captureException` on every device error path, which in the real
+#          package delegates to whatever Sentry hub is current. That is a live
+#          route out of the process inside a transaction-signing bundle, armed
+#          the moment anything in the page initializes Sentry. Aliased to a
+#          local no-op so the route does not exist. Device errors are not lost:
+#          the ceremony surfaces each one as its own outcome. Revisit if Ledger
+#          drops the dependency or starts calling a member the stub lacks.
+overrides:
+  ws: ">=8.21.1"
+  uuid: ">=11.1.1"
+  "@sentry/minimal": "file:./vendor/sentry-minimal-noop"

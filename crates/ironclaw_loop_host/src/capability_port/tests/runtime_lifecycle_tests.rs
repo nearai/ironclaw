@@ -539,6 +539,7 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             capability_id: capability_id.clone(),
             expected_tx_hash: "deadbeef".to_string(),
             reason: RuntimeBlockedReason::AttestedSigningRequired,
+            review_url: None,
         }),
         RuntimeCapabilityOutcome::SpawnedProcess(RuntimeProcessHandle {
             process_id: ProcessId::new(),
@@ -1925,6 +1926,7 @@ async fn attested_gate_carries_its_binding_and_gate_ref_onto_the_loop_channel() 
                     capability_id: capability_id.clone(),
                     expected_tx_hash: "deadbeef".to_string(),
                     reason: RuntimeBlockedReason::AttestedSigningRequired,
+                    review_url: None,
                 },
             ))],
         )),

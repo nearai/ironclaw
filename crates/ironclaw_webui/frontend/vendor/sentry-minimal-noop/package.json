@@ -1,0 +1,17 @@
+{
+  "name": "sentry-minimal-noop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "No-op stand-in for @sentry/minimal, so no telemetry SDK sits in the transaction-signing bundle.",
+  "type": "module",
+  "main": "./index.cjs",
+  "module": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    }
+  }
+}

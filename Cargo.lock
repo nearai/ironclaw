@@ -4475,6 +4475,7 @@ name = "ironclaw_attestation"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ed25519-dalek",
  "ironclaw_attestation",
  "ironclaw_signing_provider",
  "serde",
@@ -4482,6 +4483,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "ulid",
 ]
 
 [[package]]
@@ -4505,13 +4507,16 @@ dependencies = [
  "ironclaw_turns",
  "ironclaw_wallet_external",
  "k256",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
+ "serde_json",
  "sha3 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -6126,6 +6131,8 @@ dependencies = [
  "hmac 0.13.0",
  "http 1.4.2",
  "http-body-util",
+ "ironclaw_attestation",
+ "ironclaw_attested_runtime",
  "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_host_api",
@@ -6134,6 +6141,7 @@ dependencies = [
  "ironclaw_product",
  "ironclaw_reborn_openai_compat",
  "ironclaw_secrets",
+ "ironclaw_signing_provider",
  "ironclaw_threads",
  "ironclaw_turns",
  "jsonwebtoken 10.4.0",

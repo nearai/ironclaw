@@ -54,7 +54,62 @@ use ironclaw_signing_provider::{
     ScopeId, SigningContext, TenantId as SigningTenantId, UserId as SigningUserId,
 };
 
+use ironclaw_attestation::{
+    AgentKeyId, IntentId, IntentRecord, IntentSigner, IntentStore, ReviewTokenHash, UnsignedIntent,
+};
+
 use crate::attested::RebornAttestedComposition;
+
+/// Everything the raise needs to mint, sign, and persist a [`SignedIntent`]
+/// alongside the gate (§B3).
+///
+/// Bundled rather than threaded as four separate `Option`s so the seam is
+/// all-or-nothing: a deployment either mints intents or does not, and there is
+/// no half-configured shape where a signer exists but the store to put its
+/// output in does not.
+#[derive(Clone)]
+pub struct IntentMinting {
+    signer: Arc<dyn IntentSigner>,
+    intents: Arc<dyn IntentStore>,
+    /// How long the intent — and therefore its review link — stays valid.
+    ttl_ms: i64,
+    /// Base for the review URL the agent relays to the approver; the minted
+    /// token is appended. Fixed server-side (no attacker-controllable
+    /// redirect target).
+    review_url_base: String,
+}
+
+impl IntentMinting {
+    /// The intent store this minting writes to.
+    ///
+    /// Exposed so the composition can hand the SAME instance to the
+    /// continuation port's lifecycle projection. Two separate stores would make
+    /// the projection silently never find the intent it just settled.
+    pub fn intents(&self) -> &Arc<dyn IntentStore> {
+        &self.intents
+    }
+
+    /// The server-fixed base the review link is built on (config, never a
+    /// request value).
+    pub fn review_url_base(&self) -> &str {
+        &self.review_url_base
+    }
+
+    /// Wire intent minting for the raise path.
+    pub fn new(
+        signer: Arc<dyn IntentSigner>,
+        intents: Arc<dyn IntentStore>,
+        ttl_ms: i64,
+        review_url_base: impl Into<String>,
+    ) -> Self {
+        Self {
+            signer,
+            intents,
+            ttl_ms,
+            review_url_base: review_url_base.into(),
+        }
+    }
+}
 
 /// Maximum byte length of the agent-supplied `signer_account` before it enters
 /// the hash domain. Chain-agnostic upper bound (no per-chain format knowledge):
@@ -106,6 +161,10 @@ where
     L: SigningLedger + 'static,
 {
     composition: Arc<RebornAttestedComposition<B, G, L>>,
+    // arch-exempt: optional_arc, intent minting is a Phase B capability a
+    // deployment either composes or does not; when absent the gate machinery is
+    // unchanged and simply carries no review link.
+    minting: Option<IntentMinting>,
 }
 
 impl<B, G, L> RebornAttestedRaiseHook<B, G, L>
@@ -116,7 +175,17 @@ where
 {
     /// Build the raise hook over the runtime's attested-signing composition.
     pub fn new(composition: Arc<RebornAttestedComposition<B, G, L>>) -> Self {
-        Self { composition }
+        Self {
+            composition,
+            minting: None,
+        }
+    }
+
+    /// Attach intent minting (§B3). With it wired, every raise also mints,
+    /// signs, and persists a `SignedIntent` and returns its review link.
+    pub fn with_intent_minting(mut self, minting: IntentMinting) -> Self {
+        self.minting = Some(minting);
+        self
     }
 }
 
@@ -269,6 +338,18 @@ where
             schema_version,
         };
 
+        // Mint + persist the intent BEFORE the gate exists (§B3). Ordering is
+        // deliberate: a minting failure here leaves nothing behind, whereas
+        // minting after registration could strand a raised gate whose approver
+        // never receives a review link and therefore can never resolve it.
+        let review_url = match self.minting.clone() {
+            Some(minting) => Some(
+                self.mint_intent(&minting, &request.context, &binding, now_unix_millis())
+                    .await?,
+            ),
+            None => None,
+        };
+
         // Persist the authoritative binding + seal the one-shot grant. If this
         // fails, surface Failed (fail-closed) — no gate is raised.
         self.composition
@@ -287,6 +368,7 @@ where
                 capability_id: request.capability_id.clone(),
                 expected_tx_hash,
                 reason: RuntimeBlockedReason::AttestedSigningRequired,
+                review_url,
             },
         ))
     }
@@ -307,6 +389,112 @@ fn now_unix_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+impl<B, G, L> RebornAttestedRaiseHook<B, G, L>
+where
+    B: Broadcaster + 'static,
+    G: SealedGrantStore + 'static,
+    L: SigningLedger + 'static,
+{
+    /// Mint, sign, and persist the intent for a raise; returns its review URL.
+    ///
+    /// The intent embeds the SAME `approved_tx_hash` the binding carries, so it
+    /// attests to exactly the transaction the device will clear-sign and the
+    /// resume path will verify — never a re-derived one.
+    async fn mint_intent(
+        &self,
+        minting: &IntentMinting,
+        context: &ExecutionContext,
+        binding: &AttestedGateBinding,
+        now_ms: i64,
+    ) -> Result<String, RaiseFailure> {
+        // Attribution is per (tenant, agent); an invocation with no agent id
+        // attributes to the user, matching how the signing context labels its
+        // scope and actor.
+        let agent = context
+            .agent_id
+            .as_ref()
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_else(|| context.user_id.as_str().to_string());
+        let tenant = binding.context.tenant.clone();
+
+        let key_id: AgentKeyId = minting
+            .signer
+            .active_key_id(&tenant, &agent, now_ms)
+            .await
+            .map_err(|error| {
+                RaiseFailure::new(
+                    FailureKind::Backend,
+                    format!("no usable agent signing key: {error}"),
+                )
+            })?;
+
+        let intent = UnsignedIntent {
+            intent_id: IntentId::new(),
+            tenant: tenant.clone(),
+            agent_key_id: key_id.clone(),
+            // The approver is the authenticated human this raise is for. Phase
+            // C authorizes viewing and signing against exactly this identity.
+            approver: binding.context.user.clone(),
+            chain_id: binding.context.chain_id.clone(),
+            approved_tx_hash: binding.approved_tx_hash,
+            decoded_tx: binding.decoded.clone(),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(minting.ttl_ms),
+            schema_version: binding.schema_version,
+        };
+        intent.validate().map_err(|error| {
+            RaiseFailure::new(
+                FailureKind::InputEncode,
+                format!("intent could not be constructed: {error}"),
+            )
+        })?;
+
+        let signature = minting
+            .signer
+            .sign_intent(&key_id, &intent.signing_preimage())
+            .map_err(|error| {
+                RaiseFailure::new(
+                    FailureKind::Backend,
+                    format!("intent could not be signed: {error}"),
+                )
+            })?;
+
+        // 256 bits of OS entropy, base64url, and only its hash is stored.
+        let token = mint_review_token()?;
+        let record = IntentRecord::pending(
+            intent.into_signed(signature),
+            binding.context.gate_ref.clone(),
+            ReviewTokenHash::of_token(&token),
+        );
+        minting.intents.put(record).await.map_err(|error| {
+            RaiseFailure::new(
+                FailureKind::Backend,
+                format!("intent could not be persisted: {error}"),
+            )
+        })?;
+
+        Ok(format!(
+            "{}/{token}",
+            minting.review_url_base.trim_end_matches('/')
+        ))
+    }
+}
+
+/// Mint a review token: 256 bits of OS entropy, base64url (no padding).
+///
+/// Unguessable is the whole security property of the token — it is an
+/// addressing convenience, never an authorization — so entropy failure is
+/// fail-closed rather than degraded to a weaker source.
+fn mint_review_token() -> Result<String, RaiseFailure> {
+    use base64::Engine as _;
+    use rand::RngExt as _;
+    // `rand::rng()` is the OS-seeded thread RNG, the same source this crate's
+    // channel-pairing code mint uses.
+    let mut rng = rand::rng();
+    let bytes: [u8; 32] = std::array::from_fn(|_| rng.random());
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Build the authoritative [`SigningContext`] from the already-authorized

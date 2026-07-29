@@ -238,6 +238,32 @@ pub(crate) const AAD_DOMAIN_CREDENTIAL_ACCOUNT: &[u8] = b"reborn/v1/credential_a
 pub(crate) const AAD_DOMAIN_CREDENTIAL_SESSION: &[u8] = b"reborn/v1/credential_session";
 pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_record";
 pub(crate) const AAD_DOMAIN_CHAIN_KEY: &[u8] = b"reborn/v1/chain_key";
+pub(crate) const AAD_DOMAIN_AGENT_INTENT_KEY: &[u8] = b"reborn/v1/agent_intent_key";
+
+/// AAD for a per-agent intent-signing key, binding ciphertext to
+/// `(tenant, agent, generation)`.
+///
+/// The attested-signing intent substrate (Phase B) seals each agent's ed25519
+/// private key under this AAD. Binding the full key identity in is the crypto
+/// half of the key-substitution defense: a key sealed for agent A generation 1
+/// authenticates only under that exact AAD, so an attacker who swaps one
+/// agent's ciphertext into another agent's row — or replays a retired
+/// generation's ciphertext into the active row — sees the AES-GCM tag check
+/// fail rather than silently signing intents under the wrong attribution.
+///
+/// The generation is part of the binding precisely so rotation is not
+/// reversible by moving bytes around: re-sealing an old generation's key as the
+/// new one requires the master key, not just table access.
+pub fn agent_intent_key_aad(tenant: &str, agent: &str, generation: u32) -> Vec<u8> {
+    build_aad(
+        AAD_DOMAIN_AGENT_INTENT_KEY,
+        &[
+            tenant.as_bytes(),
+            agent.as_bytes(),
+            &generation.to_be_bytes(),
+        ],
+    )
+}
 
 /// AAD for a custodial chain-signing key payload, binding ciphertext to
 /// `(owner scope, chain)`.

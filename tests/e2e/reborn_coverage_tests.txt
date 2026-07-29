@@ -35,3 +35,4 @@ tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_requires_au
 tests/e2e/scenarios/test_admin_api.py
 tests/e2e/scenarios/test_reborn_slack_channel_e2e.py
 tests/e2e/scenarios/test_reborn_private_tool_installs.py
+tests/e2e/scenarios/test_reborn_webui_v2_intent_review.py

@@ -447,6 +447,10 @@ pub struct RuntimeAttestedGate {
     pub capability_id: CapabilityId,
     pub expected_tx_hash: String,
     pub reason: RuntimeBlockedReason,
+    /// Where the approver reviews and signs this transaction, when the
+    /// deployment mints intents (attested-signing Phase B/C). The agent relays
+    /// it to the human; it addresses the intent and authorizes nothing.
+    pub review_url: Option<String>,
 }
 
 /// Spawned/background process summary.

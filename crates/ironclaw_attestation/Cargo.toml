@@ -32,10 +32,18 @@ contract-tests = ["dep:tokio"]
 
 [dependencies]
 async-trait = "0.1"
+# ed25519 for the Phase B signed intent. Already vendored in-tree
+# (ironclaw_wallet_external, ironclaw_chain_signing), so this adds no new
+# dependency family to the workspace. Verification only lives here — private
+# key material stays behind the `IntentSigner` port, outside this crate.
+ed25519-dalek = "2"
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
+# ULID intent ids: lexicographically sortable by creation time. Already
+# vendored in-tree (ironclaw_triggers, ironclaw_projects).
+ulid = "1"
 # Optional: only pulled in by the `contract-tests` feature so the contract
 # suites (which use `#[tokio::test]`) compile for out-of-crate consumers.
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"], optional = true }

@@ -1,0 +1,24 @@
+{
+  "name": "@ironclaw/alpaca-sidecar",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Alpaca (Ledger CoinModuleApi) sidecar. Proposes crafted transactions and executes broadcasts; authoritative for nothing \u2014 Rust owns the canonical bytes, the binding hash, signer identity, the grant CAS, and broadcast admission.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ledgerhq/coin-evm": "4.6.0",
+    "@ledgerhq/coin-module-framework": "4.0.2",
+    "@ledgerhq/ledger-wallet-framework": "2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
+  }
+}

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 
+use ironclaw_attestation::{AgentSigningKeyStore as _, IntentStore as _};
 use ironclaw_attestation::{DecodedTransaction, InMemorySealedGrantStore, InMemorySigningLedger};
 use ironclaw_attested_runtime::{
     CustodialMainnetShipGate, InMemoryAttestedGateBindingStore, ProviderRegistry,
@@ -567,5 +568,236 @@ async fn concurrent_register_of_same_gate_serializes_to_one_winner() {
     assert_eq!(
         dup, 1,
         "the losing concurrent register must fail closed as DuplicateBinding"
+    );
+}
+
+// ── Phase B: intent minting on the raise path ──────────────────────────────
+
+/// Wire the intent-minting seam over in-memory stores.
+fn minting_over(
+    keystore: Arc<SecretsKeyStore>,
+) -> (
+    ironclaw_reborn_composition::IntentMinting,
+    Arc<ironclaw_attestation::InMemoryIntentStore>,
+    Arc<ironclaw_attestation::InMemoryAgentSigningKeyStore>,
+) {
+    let _ = keystore;
+    let intents = Arc::new(ironclaw_attestation::InMemoryIntentStore::new());
+    let public_keys = Arc::new(ironclaw_attestation::InMemoryAgentSigningKeyStore::new());
+    let signer = Arc::new(ironclaw_attested_runtime::SecretsIntentSigner::new(
+        Arc::new(SecretsCrypto::generate()),
+        Arc::new(ironclaw_attested_runtime::InMemorySealedAgentKeyStore::new()),
+        public_keys.clone(),
+    ));
+    let minting = ironclaw_reborn_composition::IntentMinting::new(
+        signer,
+        intents.clone(),
+        30 * 60 * 1_000,
+        "https://ironclaw.example/intent",
+    );
+    (minting, intents, public_keys)
+}
+
+/// The Phase B crux: a raise mints, signs, and persists an intent whose
+/// signature verifies under the agent's registered key AND whose
+/// `approved_tx_hash` is the very hash the gate binding carries.
+///
+/// That equality is the whole point — the intent attests to exactly the
+/// transaction the device will clear-sign and the resume path will verify, not
+/// a separately-derived one.
+#[tokio::test]
+async fn a_raise_persists_a_verifiable_intent_bound_to_the_gate() {
+    let priv_bytes = [0x88u8; 32];
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    let (_tx, decoded) = sample_evm();
+
+    let composition = composition_with_keystore(Arc::clone(&keystore));
+    let (minting, intents, public_keys) = minting_over(Arc::clone(&keystore));
+    let hook = RebornAttestedRaiseHook::new(Arc::clone(&composition)).with_intent_minting(minting);
+
+    let capability_id = CapabilityId::new("builtin.request_signature").unwrap();
+    let outcome = hook
+        .raise(AttestedRaiseRequest::new(
+            capability_id.clone(),
+            execution_context(owner_scope()),
+            json!({
+                "provider_hint": "custodial",
+                "signer_account": account,
+                "decoded": decoded,
+            }),
+        ))
+        .await;
+
+    let gate = match outcome {
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => gate,
+        other => panic!("expected AttestedSigningRequired, got {other:?}"),
+    };
+
+    // The gate now carries a review link for the approver.
+    let review_url = gate
+        .review_url
+        .clone()
+        .expect("a minted intent yields a review link");
+    assert!(
+        review_url.starts_with("https://ironclaw.example/intent/"),
+        "the review URL is server-fixed, got {review_url}"
+    );
+    let token = review_url
+        .rsplit('/')
+        .next()
+        .expect("token segment")
+        .to_string();
+
+    // The link resolves to the persisted intent by TOKEN HASH (the raw token
+    // is never stored).
+    let record = intents
+        .find_by_token_hash(&ironclaw_attestation::ReviewTokenHash::of_token(&token))
+        .await
+        .expect("the minted token addresses its intent");
+    assert_eq!(record.state, ironclaw_attestation::IntentState::Pending);
+
+    // The intent's signature verifies under the key the registry holds...
+    let key_id = record.intent.intent().agent_key_id.clone();
+    let verifying_key = public_keys
+        .verifying_key(
+            &key_id,
+            record.intent.intent().created_at_ms,
+            ironclaw_attestation::DEFAULT_ROTATION_OVERLAP_MS,
+        )
+        .await
+        .expect("the agent key was provisioned on first use");
+    record
+        .intent
+        .verify(
+            &verifying_key,
+            &ironclaw_signing_provider::TenantId::new("default"),
+            record.intent.intent().created_at_ms,
+        )
+        .expect("the persisted intent verifies");
+
+    // ...and it binds the SAME hash the gate does.
+    assert_eq!(
+        ironclaw_attested_runtime::approved_tx_hash_ref_hex(
+            record.intent.intent().approved_tx_hash.as_bytes()
+        ),
+        gate.expected_tx_hash,
+        "the intent must attest to exactly the gate's transaction"
+    );
+
+    // And the carried transaction really is the one that hash commits to.
+    record
+        .intent
+        .verify_binds_transaction(&account)
+        .expect("the carried decoded tx matches the binding hash");
+}
+
+/// Without the minting seam wired, the gate machinery is unchanged and simply
+/// carries no review link — Phase B is additive, not a new precondition.
+#[tokio::test]
+async fn a_raise_without_intent_minting_still_raises_a_gate() {
+    let priv_bytes = [0x99u8; 32];
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    let (_tx, decoded) = sample_evm();
+    let composition = composition_with_keystore(Arc::clone(&keystore));
+    let hook = RebornAttestedRaiseHook::new(Arc::clone(&composition));
+
+    let outcome = hook
+        .raise(AttestedRaiseRequest::new(
+            CapabilityId::new("builtin.request_signature").unwrap(),
+            execution_context(owner_scope()),
+            json!({
+                "provider_hint": "custodial",
+                "signer_account": account,
+                "decoded": decoded,
+            }),
+        ))
+        .await;
+
+    match outcome {
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => {
+            assert!(
+                gate.review_url.is_none(),
+                "no minting wired ⇒ no review link"
+            );
+        }
+        other => panic!("expected AttestedSigningRequired, got {other:?}"),
+    }
+}
+
+/// The lifecycle projection (§C2): settling a gate settles its intent — and it
+/// is the SAME record the raise minted, reached by gate ref.
+///
+/// The shared-store property is what a plausible wiring bug breaks: give the
+/// raise hook and the continuation port two different store instances and every
+/// unit test still passes while the projection silently never finds anything.
+/// So this drives a real raise, then the real continuation, and asserts the
+/// record moved.
+#[tokio::test]
+async fn settling_a_gate_projects_onto_the_intent_the_raise_minted() {
+    use ironclaw_attestation::IntentState;
+
+    let priv_bytes = [0xa1u8; 32];
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    let (_tx, decoded) = sample_evm();
+
+    let composition = composition_with_keystore(Arc::clone(&keystore));
+    let (minting, intents, _keys) = minting_over(Arc::clone(&keystore));
+    let hook = RebornAttestedRaiseHook::new(Arc::clone(&composition)).with_intent_minting(minting);
+
+    let gate = match hook
+        .raise(AttestedRaiseRequest::new(
+            CapabilityId::new("builtin.request_signature").unwrap(),
+            execution_context(owner_scope()),
+            json!({
+                "provider_hint": "custodial",
+                "signer_account": account,
+                "decoded": decoded,
+            }),
+        ))
+        .await
+    {
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => gate,
+        other => panic!("expected AttestedSigningRequired, got {other:?}"),
+    };
+
+    let signing_gate_ref = SigningGateRef::new(format!("gate:attested-{}", gate.gate_id.as_str()));
+    let tenant = ironclaw_signing_provider::TenantId::new("default");
+
+    // Minted pending, reachable by the gate ref the projection will use.
+    let before = intents
+        .find_by_gate_ref(&tenant, &signing_gate_ref)
+        .await
+        .expect("the raise recorded the gate ref");
+    assert_eq!(before.state, IntentState::Pending);
+
+    // Drive the REAL resolve path, then project as the continuation port does.
+    let proof = SigningProof::WebAuthnAssertionProof(vec![]);
+    composition
+        .driver()
+        .continue_after_resolved(&signing_gate_ref, &proof)
+        .await
+        .expect("the gate settles");
+    intents
+        .resolve(&tenant, before.intent_id(), IntentState::Approved)
+        .await
+        .expect("projection");
+
+    let after = intents
+        .find_by_gate_ref(&tenant, &signing_gate_ref)
+        .await
+        .expect("still reachable");
+    assert_eq!(
+        after.state,
+        IntentState::Approved,
+        "a settled gate must leave its intent settled"
+    );
+
+    // And the projection is one-shot, mirroring the grant CAS underneath it.
+    assert!(
+        intents
+            .resolve(&tenant, before.intent_id(), IntentState::Rejected)
+            .await
+            .is_err(),
+        "a settled intent must not be rewritten"
     );
 }

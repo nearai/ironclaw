@@ -52,6 +52,12 @@ attested-broadcast = ["ironclaw_attested_store/broadcast-http"]
 # `dep:` optional toggle. Inert until a deployment opts in.
 postgres = ["ironclaw_attested_store/postgres"]
 libsql = ["ironclaw_attested_store/libsql"]
+# The upstream ERC-7730 descriptor fetcher (Phase D §D3). Without it the
+# descriptor cache sits over `UnconfiguredDescriptorSource` and every Ledger
+# ceremony blocks — the fail-closed default. Enabling it only makes the fetcher
+# available; a deployment must still name an allowlisted upstream in
+# `ATTESTED_CLEAR_SIGNING_UPSTREAM`.
+clear-signing-http = ["ironclaw_attested_runtime/clear-signing-http"]
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
