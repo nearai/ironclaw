@@ -104,7 +104,7 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
-pub use command_admission::DirectConversationCommandAdmission;
+pub use command_admission::{CommandActorRoleResolver, DirectConversationCommandAdmission};
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     RejectingProductCommandAdmissionService,

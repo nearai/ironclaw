@@ -54,6 +54,10 @@ use ironclaw_product::{
     ProtocolAuthEvidence, TrustedInboundContext,
 };
 use ironclaw_product::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
     ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
@@ -463,6 +467,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             },
         }),
         channel_pairing: None,
+        admin_users: Arc::new(FakeAdminUsers::default()),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
@@ -3426,6 +3431,131 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
             return Ok(false);
         }
         Ok(self.bindings.values().any(|bound| bound == user_id))
+    }
+}
+
+/// Harness admin-users directory (Task 4): the bundled test manifest only
+/// declares `status` (user-audience), so admin-audience role gating is not
+/// yet observable here — `get_user` exists so the assembly's admission
+/// construction has a real handle to build; list/create/update/delete are
+/// unreachable from these scenarios.
+#[derive(Default)]
+struct FakeAdminUsers {
+    roles: Mutex<std::collections::HashMap<String, AdminUserRole>>,
+}
+
+#[async_trait]
+impl AdminUserService for FakeAdminUsers {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        _status: Option<AdminUserStatus>,
+        _after: Option<&UserId>,
+        _limit: usize,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        let role = self
+            .roles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(user_id.as_str())
+            .copied()
+            .unwrap_or(AdminUserRole::Member);
+        Ok(Some(AdminUserRecord {
+            user_id: user_id.clone(),
+            email: None,
+            display_name: None,
+            status: AdminUserStatus::Active,
+            role,
+            created_at: String::new(),
+            updated_at: String::new(),
+            created_by: None,
+            last_login_at: None,
+            metadata: std::collections::BTreeMap::new(),
+        }))
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        _fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: ironclaw_host_api::SecretHandle,
+        _material: secrecy::SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: ironclaw_host_api::SecretHandle,
+    ) -> Result<bool, AdminUserError> {
+        Err(AdminUserError::Internal)
     }
 }
 

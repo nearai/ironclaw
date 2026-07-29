@@ -1255,6 +1255,31 @@ impl RebornRuntimeStores {
 
         let identity_lookup = Some(Arc::clone(&self.channel_identity_store)
             as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>);
+        // Channel-command admission's admin-audience gate (Task 4): the same
+        // identity-store substrate the WebUI admin routes read
+        // (`RebornAdminUserDirectory`, built in `product_surface.rs` from
+        // `runtime.reborn_user_directory()`/`reborn_admin_secret_provisioner()`),
+        // rebuilt here from this composition's own `scoped_filesystem` +
+        // `admin_secret_provisioner` because this assembly runs while the
+        // runtime is still being built — no `RebornRuntime`/product surface
+        // exists yet to share a handle from. Token minting is a WebUI-only
+        // capability (`create_user`); the channel-command role resolver only
+        // ever calls `get_user`, so a permanently-rejecting minter is a safe
+        // placeholder here.
+        let admin_directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
+            filesystem_reborn_identity_store(
+                Arc::clone(&self.scoped_filesystem),
+                identity.tenant_id.clone(),
+                identity.operator_user_id.clone(),
+                identity.agent_id.clone(),
+                identity.project_id.clone(),
+            );
+        let admin_users: Arc<dyn ironclaw_product::AdminUserService> =
+            Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+                admin_directory,
+                Arc::clone(&self.admin_secret_provisioner),
+                Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+            ));
         Some(
             ironclaw_extension_host::channel_host::GenericChannelHostAssembly::start(
                 GenericChannelHostDeps {
@@ -1271,6 +1296,7 @@ impl RebornRuntimeStores {
                     identity_lookup,
                     delivery,
                     channel_pairing: self.channel_pairing.clone(),
+                    admin_users,
                 },
             ),
         )

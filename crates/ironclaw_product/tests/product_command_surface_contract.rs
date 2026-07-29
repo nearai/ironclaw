@@ -6,16 +6,16 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceInvokeRequest,
-    ProductSurfaceInvokeResponse,
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceInvokeRequest, ProductSurfaceInvokeResponse,
 };
 use ironclaw_product::{
-    ActionDispatchKind, DefaultProductSurface, DirectConversationCommandAdmission,
-    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductCommandContext, ProductInboundAck, ProductRejectionKind,
-    ProductSurfaceFailure,
+    ActionDispatchKind, AdminUserRole, CommandActorRoleResolver, DefaultProductSurface,
+    DirectConversationCommandAdmission, FakeConversationBindingService, FakeIdempotencyLedger,
+    FakeInboundTurnService, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductInboundAck, ProductRejectionKind, ProductSurfaceFailure,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ConversationBindingService, ExternalActorRef,
@@ -109,6 +109,28 @@ impl ProductCommandAdmissionService for RecordingProductCommandAdmissionService 
             .expect("lock")
             .push((context.clone(), command.clone()));
         self.result.clone()
+    }
+}
+
+struct FakeRoleResolver {
+    role: Option<AdminUserRole>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl CommandActorRoleResolver for FakeRoleResolver {
+    async fn actor_role(
+        &self,
+        _context: &ProductCommandContext,
+    ) -> Result<Option<AdminUserRole>, ProductSurfaceError> {
+        if self.fail {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::Unavailable,
+                503,
+                true,
+            ));
+        }
+        Ok(self.role)
     }
 }
 
@@ -457,8 +479,14 @@ async fn manifest_command_admission_is_exact_and_blocks_sensitive_handlers() {
         let ledger = Arc::new(FakeIdempotencyLedger::new());
         let binding = Arc::new(FakeConversationBindingService::new());
         let admission = Arc::new(
-            DirectConversationCommandAdmission::new(["status"])
-                .expect("status is a registered command"),
+            DirectConversationCommandAdmission::new(
+                ["status"],
+                Arc::new(FakeRoleResolver {
+                    role: Some(AdminUserRole::Member),
+                    fail: false,
+                }),
+            )
+            .expect("status is a registered command"),
         );
         let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
         let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
@@ -496,8 +524,14 @@ async fn manifest_command_admission_is_fail_closed_when_empty() {
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
     let admission = Arc::new(
-        DirectConversationCommandAdmission::new(std::iter::empty::<&str>())
-            .expect("empty allowlist is valid"),
+        DirectConversationCommandAdmission::new(
+            std::iter::empty::<&str>(),
+            Arc::new(FakeRoleResolver {
+                role: Some(AdminUserRole::Member),
+                fail: false,
+            }),
+        )
+        .expect("empty allowlist is valid"),
     );
     let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
     let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
@@ -538,8 +572,14 @@ async fn manifest_command_admission_allows_status_only_in_direct_conversations()
         let ledger = Arc::new(FakeIdempotencyLedger::new());
         let binding = Arc::new(FakeConversationBindingService::new());
         let admission = Arc::new(
-            DirectConversationCommandAdmission::new(["status"])
-                .expect("status is a registered command"),
+            DirectConversationCommandAdmission::new(
+                ["status"],
+                Arc::new(FakeRoleResolver {
+                    role: Some(AdminUserRole::Member),
+                    fail: false,
+                }),
+            )
+            .expect("status is a registered command"),
         );
         let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
             "title": "Status"
@@ -574,6 +614,170 @@ async fn manifest_command_admission_allows_status_only_in_direct_conversations()
         assert_eq!(inbound.accepted_count(), 0);
         assert_eq!(ledger.settled_count(), 1);
     }
+}
+
+#[tokio::test]
+async fn member_admin_action_is_access_denied_without_execution() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission = Arc::new(
+        DirectConversationCommandAdmission::new(
+            ["model", "status"],
+            Arc::new(FakeRoleResolver {
+                role: Some(AdminUserRole::Member),
+                fail: false,
+            }),
+        )
+        .expect("model and status are registered commands"),
+    );
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission)
+        .with_product_command_surface(command_surface.clone());
+    let envelope = sample_command_envelope_with_trigger(
+        "member-admin-action",
+        "model",
+        "set gpt-x",
+        ProductTriggerReason::DirectChat,
+    );
+
+    let ack = workflow.submit_inbound(envelope).await.expect("settle");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ref rejection)
+            if rejection.kind == ProductRejectionKind::AccessDenied
+    ));
+    assert!(command_surface.invokes().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn member_user_action_executes() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission = Arc::new(
+        DirectConversationCommandAdmission::new(
+            ["model", "status"],
+            Arc::new(FakeRoleResolver {
+                role: Some(AdminUserRole::Member),
+                fail: false,
+            }),
+        )
+        .expect("model and status are registered commands"),
+    );
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+        "title": "Model"
+    })));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission)
+        .with_product_command_surface(command_surface.clone());
+    let envelope = sample_command_envelope_with_trigger(
+        "member-user-action",
+        "model",
+        "",
+        ProductTriggerReason::DirectChat,
+    );
+
+    let ack = workflow.submit_inbound(envelope).await.expect("settle");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandResult { ref command, .. } if command == "model"
+    ));
+    let invokes = command_surface.invokes();
+    assert_eq!(invokes.len(), 1);
+    assert_eq!(
+        invokes[0].request.operation_id.as_str(),
+        PRODUCT_MODEL_COMMAND_OPERATION_ID
+    );
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn admin_admin_action_executes() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission = Arc::new(
+        DirectConversationCommandAdmission::new(
+            ["model", "status"],
+            Arc::new(FakeRoleResolver {
+                role: Some(AdminUserRole::Owner),
+                fail: false,
+            }),
+        )
+        .expect("model and status are registered commands"),
+    );
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+        "title": "Model"
+    })));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission)
+        .with_product_command_surface(command_surface.clone());
+    let envelope = sample_command_envelope_with_trigger(
+        "admin-admin-action",
+        "model",
+        "set gpt-x",
+        ProductTriggerReason::DirectChat,
+    );
+
+    let ack = workflow.submit_inbound(envelope).await.expect("settle");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandResult { ref command, .. } if command == "model"
+    ));
+    let invokes = command_surface.invokes();
+    assert_eq!(invokes.len(), 1);
+    assert_eq!(
+        invokes[0].request.operation_id.as_str(),
+        PRODUCT_MODEL_COMMAND_OPERATION_ID
+    );
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn resolver_failure_is_a_retryable_error_not_silent_membership() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission = Arc::new(
+        DirectConversationCommandAdmission::new(
+            ["model", "status"],
+            Arc::new(FakeRoleResolver {
+                role: None,
+                fail: true,
+            }),
+        )
+        .expect("model and status are registered commands"),
+    );
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission)
+        .with_product_command_surface(command_surface.clone());
+    let envelope = sample_command_envelope_with_trigger(
+        "resolver-failure",
+        "model",
+        "set gpt-x",
+        ProductTriggerReason::DirectChat,
+    );
+
+    let err = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect_err("resolver failure must bubble as a retryable error, not a silent role");
+
+    assert!(err.is_retryable());
+    assert!(command_surface.invokes().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.released_count(), 1);
 }
 
 #[tokio::test]
