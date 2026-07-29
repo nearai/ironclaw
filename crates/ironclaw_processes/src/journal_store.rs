@@ -1,6 +1,5 @@
 // arch-exempt: large_file, bounded transaction retry handling stays with the row-native journal transaction owner, plan #6696
 use std::{
-    collections::VecDeque,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
@@ -11,8 +10,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, FileType, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem,
-    SeqNo,
+    CasExpectation, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem, SeqNo,
 };
 use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath};
 use serde::{Deserialize, Serialize};
@@ -47,7 +45,9 @@ mod rows;
 mod state;
 mod validation;
 use command::StoredProcessCommand;
-use migration::{import_deployed_legacy_authorities, legacy_turn_record_contains_data};
+use migration::{
+    import_deployed_legacy_authorities, legacy_run_state_records, legacy_turn_record_contains_data,
+};
 use observer::RegisteredProcessObserver;
 use state::ProcessJournalMaterializedState;
 use validation::{
@@ -253,51 +253,6 @@ where
             let sequence_path = self
                 .filesystem
                 .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
-            let mut first_cursor = None;
-            if reservation_count > 0 {
-                let mut cursor_txn = match self
-                    .filesystem
-                    .begin(&ResourceScope::system(), &prefix)
-                    .await
-                {
-                    Ok(txn) => txn,
-                    Err(error) if rows::retryable_transaction_error(&error) => {
-                        rows::retry_transaction(attempt).await;
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                for _ in 0..reservation_count {
-                    let reserved = match cursor_txn.reserve_sequence(&sequence_path).await {
-                        Ok(reserved) => reserved,
-                        Err(error) if rows::retryable_transaction_error(&error) => {
-                            cursor_txn.rollback().await;
-                            rows::retry_transaction(attempt).await;
-                            continue 'transaction;
-                        }
-                        Err(error) => {
-                            cursor_txn.rollback().await;
-                            return Err(error.into());
-                        }
-                    };
-                    first_cursor.get_or_insert(reserved.get());
-                }
-                match cursor_txn.commit().await {
-                    Ok(()) => {}
-                    Err(error) if rows::retryable_transaction_error(&error) => {
-                        rows::retry_transaction(attempt).await;
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            if let Some(first_cursor) = first_cursor {
-                state.next_cursor = first_cursor;
-            }
-            // Cursor reservation commits in its own short transaction. It may
-            // leave a contiguous range unused after a later CAS retry, but it
-            // does not hold the global sequence-row lock while materialized
-            // writes run and other writers queue behind it.
             let mut txn = match self
                 .filesystem
                 .begin(&ResourceScope::system(), &prefix)
@@ -310,6 +265,31 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
+            let mut first_cursor = None;
+            if reservation_count > 0 {
+                for _ in 0..reservation_count {
+                    let reserved = match txn.reserve_sequence(&sequence_path).await {
+                        Ok(reserved) => reserved,
+                        Err(error) if rows::retryable_transaction_error(&error) => {
+                            txn.rollback().await;
+                            rows::retry_transaction(attempt).await;
+                            continue 'transaction;
+                        }
+                        Err(error) => {
+                            txn.rollback().await;
+                            return Err(error.into());
+                        }
+                    };
+                    first_cursor.get_or_insert(reserved.get());
+                }
+            }
+            if let Some(first_cursor) = first_cursor {
+                state.next_cursor = first_cursor;
+            }
+            // Reserve cursors and persist their journal/materialized rows in
+            // one transaction. The sequence row therefore serializes commit
+            // order: an observer can never advance past a lower cursor that
+            // was reserved by a writer which has not committed yet.
             let outcome = match state.apply_command(command.clone()) {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -567,60 +547,9 @@ where
     }
 
     async fn deployed_run_state_records_present(&self) -> Result<bool, ProcessJournalStoreError> {
-        let root = ScopedPath::new("/run-state")
-            .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
-        if self
-            .filesystem
-            .resolve(&ResourceScope::system(), &root)
-            .is_err()
-        {
-            return Ok(false);
-        }
-
-        // Only populated scope-relative `runs` directories are legacy evidence;
-        // other current records can legitimately share this mount.
-        let mut pending = VecDeque::from([(root, 0_u8)]);
-        while let Some((path, depth)) = pending.pop_front() {
-            let entries = match self
-                .filesystem
-                .list_dir_bounded(&ResourceScope::system(), &path, Page::MAX_LIMIT as usize)
-                .await
-            {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            for entry in entries {
-                if entry.file_type != FileType::Directory {
-                    continue;
-                }
-                let child = ScopedPath::new(format!(
-                    "{}/{}",
-                    path.as_str().trim_end_matches('/'),
-                    entry.name
-                ))
-                .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
-                if entry.name == "runs" {
-                    if !self
-                        .filesystem
-                        .list_dir_bounded(&ResourceScope::system(), &child, 1)
-                        .await?
-                        .is_empty()
-                    {
-                        tracing::debug!(
-                            path = %child,
-                            "detected deployed legacy run-state rows"
-                        );
-                        return Ok(true);
-                    }
-                    continue;
-                }
-                if depth < 8 {
-                    pending.push_back((child, depth.saturating_add(1)));
-                }
-            }
-        }
-        Ok(false)
+        Ok(!legacy_run_state_records(self.filesystem.as_ref())
+            .await?
+            .is_empty())
     }
 
     async fn initialize_materialized(
@@ -1539,6 +1468,9 @@ impl ProcessJournalEntry {
         cursor: ProcessJournalCursor,
         kind: ProcessJournalKind,
     ) -> Self {
+        let failure = (kind == ProcessJournalKind::Failed)
+            .then_some(snapshot.failure.as_ref())
+            .flatten();
         Self {
             cursor,
             process_id: snapshot.process_id,
@@ -1549,9 +1481,9 @@ impl ProcessJournalEntry {
             status: snapshot.status,
             kind,
             suspension: snapshot.suspension.clone(),
-            sanitized_reason: None,
-            retryable: None,
-            detail: None,
+            sanitized_reason: failure.map(|failure| failure.category().to_string()),
+            retryable: failure.map(|_| snapshot.checkpoint_ref.is_some()),
+            detail: failure.and_then(|failure| failure.detail().map(str::to_string)),
             metadata: snapshot.metadata.clone(),
             committed_state: Some(Box::new(snapshot.clone())),
         }

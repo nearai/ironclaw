@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use ironclaw_filesystem::{CasExpectation, Entry, RootFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
@@ -15,6 +21,15 @@ pub(super) struct RegisteredProcessObserver {
     pub(super) id: String,
     pub(super) observer: Arc<dyn ProcessJournalCommitObserver>,
     pub(super) delivery: Arc<Mutex<()>>,
+    pub(super) replay_running: Arc<AtomicBool>,
+}
+
+struct ObserverReplayGuard(Arc<AtomicBool>);
+
+impl Drop for ObserverReplayGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl<F> ProcessJournalStore<F>
@@ -119,12 +134,16 @@ where
     where
         F: Send + Sync + 'static,
     {
+        if observer.replay_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let store = self.clone();
         tokio::spawn(async move {
+            let _replay_guard = ObserverReplayGuard(Arc::clone(&observer.replay_running));
             let mut delay = Duration::from_millis(250);
             loop {
                 match store.replay_durable_observer_once(&observer, None).await {
-                    Ok(()) => return,
+                    Ok(()) => break,
                     Err(error) => {
                         tracing::warn!(
                             observer_id = %observer.id,
@@ -156,6 +175,7 @@ where
             id: observer.process_observer_id().to_string(),
             observer,
             delivery: Arc::new(Mutex::new(())),
+            replay_running: Arc::new(AtomicBool::new(false)),
         };
         if observers
             .iter()

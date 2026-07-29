@@ -386,6 +386,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/authorization",
     "/outbound",
     "/run-state",
+    "/checkpoint-state",
     "/approvals",
     "/gate-records",
     "/replay-payloads",
@@ -495,6 +496,30 @@ where
     F: RootFilesystem,
 {
     Arc::new(ScopedFilesystem::new(root, invocation_mount_view))
+}
+
+/// Process-journal filesystem handle with read-only access to deployed
+/// per-user legacy authorities during the explicit one-time migration.
+///
+/// The extra alias exists only for the system sentinel and only on this
+/// process-store-specific handle. Ordinary consumers cannot enumerate another
+/// tenant's filesystem tree.
+pub(crate) fn wrap_process_journal_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(root, |scope| {
+        let mut view = invocation_mount_view(scope)?;
+        if scope.is_system() {
+            view.mounts.push(MountGrant::new(
+                MountAlias::new("/legacy-tenants")?,
+                VirtualPath::new("/tenants")?,
+                MountPermissions::read_only(),
+            ));
+            view.validate()?;
+        }
+        Ok(view)
+    }))
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
@@ -673,6 +698,32 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[tokio::test]
+    async fn process_journal_migration_mount_is_system_only_and_read_only() {
+        let root = Arc::new(InMemoryBackend::new());
+        let scoped = wrap_process_journal_scoped(root);
+        let legacy = ScopedPath::new("/legacy-tenants/tenant-a/users/user-a/run-state")
+            .expect("legacy path");
+        assert!(
+            scoped.resolve(&sample_scope(), &legacy).is_err(),
+            "ordinary user scopes must not enumerate other tenant roots"
+        );
+        assert_eq!(
+            scoped
+                .resolve(&ResourceScope::system(), &legacy)
+                .expect("system migration mount")
+                .as_str(),
+            "/tenants/tenant-a/users/user-a/run-state"
+        );
+        assert!(matches!(
+            scoped
+                .write_bytes(&ResourceScope::system(), &legacy, b"forbidden".to_vec())
+                .await
+                .expect_err("migration mount must not mutate legacy authorities"),
+            FilesystemError::PermissionDenied { .. }
+        ));
     }
 
     #[test]

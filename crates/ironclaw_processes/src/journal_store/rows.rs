@@ -840,6 +840,7 @@ where
 }
 
 const RECOVERY_BATCH_LIMIT: u32 = Page::MAX_LIMIT;
+const CLAIM_QUOTA_SKIP_ALLOWANCE: usize = 64;
 
 async fn query_claim_candidates<F>(
     filesystem: &ScopedFilesystem<F>,
@@ -874,7 +875,12 @@ where
         }
         (None, None) => index_name("process_queue_v4")?,
     };
-    ordered_process_query_all(filesystem, index, filters, "created_at").await
+    let candidate_limit = request
+        .max_processes
+        .saturating_add(CLAIM_QUOTA_SKIP_ALLOWANCE)
+        .min(Page::MAX_LIMIT as usize);
+    let candidate_limit = u32::try_from(candidate_limit).unwrap_or(Page::MAX_LIMIT);
+    ordered_process_query(filesystem, index, filters, "created_at", candidate_limit).await
 }
 
 async fn query_active_conflict<F>(
@@ -1045,63 +1051,6 @@ where
         .map_err(Into::into)
 }
 
-async fn ordered_process_query_all<F>(
-    filesystem: &ScopedFilesystem<F>,
-    index: IndexName,
-    filters: Vec<Filter>,
-    sort_key: &str,
-) -> Result<Vec<VersionedEntry>, ProcessJournalStoreError>
-where
-    F: RootFilesystem,
-{
-    let prefix = scoped_path(&format!("{MATERIALIZED_PREFIX}/process"))?;
-    let filter = if filters.len() == 1 {
-        filters.into_iter().next().ok_or_else(|| {
-            ProcessJournalStoreError::InvalidRequest(
-                "ordered process query lost its required filter".to_string(),
-            )
-        })?
-    } else {
-        Filter::And(filters)
-    };
-    let sort_key = index_key(sort_key)?;
-    let tie_breaker = index_key("process_id")?;
-    let mut cursor = None;
-    let mut records = Vec::new();
-    loop {
-        let mut page = ironclaw_filesystem::OrderedPage::new(
-            index.clone(),
-            sort_key.clone(),
-            tie_breaker.clone(),
-            SortDirection::Ascending,
-            Page::MAX_LIMIT,
-        );
-        if let Some(after) = cursor.take() {
-            page = page.after(after);
-        }
-        let batch = filesystem
-            .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
-            .await?;
-        let count = batch.len();
-        cursor = batch.last().and_then(|row| {
-            Some(ironclaw_filesystem::OrderedQueryCursor {
-                value: row.entry.indexed.get(&sort_key)?.clone(),
-                tie_breaker: row.entry.indexed.get(&tie_breaker)?.clone(),
-            })
-        });
-        records.extend(batch);
-        if count < Page::MAX_LIMIT as usize {
-            break;
-        }
-        if cursor.is_none() {
-            return Err(ProcessJournalStoreError::Deserialization(
-                "ordered process row omitted pagination keys".to_string(),
-            ));
-        }
-    }
-    Ok(records)
-}
-
 fn eq_text(key: &str, value: &str) -> Result<Filter, ProcessJournalStoreError> {
     eq_value(key, IndexValue::Text(value.to_string()))
 }
@@ -1155,15 +1104,15 @@ where
     };
     let sort_key = index_key(sort_key)?;
     let tie_breaker = index_key(tie_breaker)?;
-    let mut records = Vec::new();
     let mut cursor = None;
-    for page_limit in [Page::MAX_LIMIT, 1] {
+    let mut records = Vec::new();
+    loop {
         let mut page = ironclaw_filesystem::OrderedPage::new(
             index.clone(),
             sort_key.clone(),
             tie_breaker.clone(),
             SortDirection::Ascending,
-            page_limit,
+            Page::MAX_LIMIT,
         );
         if let Some(after) = cursor.take() {
             page = page.after(after);
@@ -1172,31 +1121,20 @@ where
             .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
             .await?;
         let count = batch.len();
-        cursor = batch
-            .last()
-            .map(|row| ironclaw_filesystem::OrderedQueryCursor {
-                value: row
-                    .entry
-                    .indexed
-                    .get(&sort_key)
-                    .cloned()
-                    .unwrap_or_else(|| IndexValue::Text(row.path.as_str().to_string())),
-                tie_breaker: row
-                    .entry
-                    .indexed
-                    .get(&tie_breaker)
-                    .cloned()
-                    .unwrap_or_else(|| IndexValue::Text(row.path.as_str().to_string())),
-            });
-        if page_limit == 1 && count > 0 {
-            return Err(ProcessJournalStoreError::InvalidRequest(
-                "process projection result exceeds the bounded request limit; use a paged journal query"
-                    .to_string(),
-            ));
-        }
+        cursor = batch.last().and_then(|row| {
+            Some(ironclaw_filesystem::OrderedQueryCursor {
+                value: row.entry.indexed.get(&sort_key)?.clone(),
+                tie_breaker: row.entry.indexed.get(&tie_breaker)?.clone(),
+            })
+        });
         records.extend(batch);
         if count < Page::MAX_LIMIT as usize {
             break;
+        }
+        if cursor.is_none() {
+            return Err(ProcessJournalStoreError::Deserialization(
+                "indexed collection row omitted pagination keys".to_string(),
+            ));
         }
     }
     Ok(records)

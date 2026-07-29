@@ -8,7 +8,7 @@ use ironclaw_turns::{TurnScope, run_profile::AgentLoopHostError};
 
 use super::{resolver::AwaitEdgeResolver, store::AwaitEdgeStore};
 
-async fn recover_scope<S>(
+pub(super) async fn recover_scope<S>(
     resolver: &AwaitEdgeResolver<S>,
     store: &AwaitEdgeStore,
     scope: &TurnScope,

@@ -4192,6 +4192,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "futures",
+ "hex",
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_filesystem",

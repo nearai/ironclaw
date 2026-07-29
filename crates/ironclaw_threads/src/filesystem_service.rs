@@ -726,12 +726,16 @@ where
                 if message.sequence > through_sequence {
                     return Ok(messages);
                 }
-                if message.sequence != expected_sequence {
+                if message.sequence < expected_sequence {
                     return Err(SessionThreadError::Backend(format!(
-                        "message sequence projection is incomplete at sequence {expected_sequence}; run the explicit transcript index migration"
+                        "message sequence projection is out of order at sequence {}",
+                        message.sequence
                     )));
                 }
-                expected_sequence = expected_sequence.saturating_add(1);
+                // Sequence allocation precedes the durable write. A crash or
+                // backend failure can therefore leave a legitimate gap, which
+                // must not make every subsequent transcript read fail.
+                expected_sequence = message.sequence.saturating_add(1);
                 cursor = OrderedQueryCursor {
                     value: IndexValue::I64(i64::try_from(message.sequence).unwrap_or(i64::MAX)),
                     tie_breaker: IndexValue::Text(message.message_id.to_string()),
@@ -790,6 +794,7 @@ where
         kind: &MessageKind,
         status: &MessageStatus,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         let root = messages_root(scope, thread_id)?;
         let index = message_kind_status_index_spec()?;
         let page = OrderedPage::new(

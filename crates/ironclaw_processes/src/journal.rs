@@ -244,6 +244,7 @@ pub struct ProcessConcurrencyLimits {
 pub enum ProcessKind {
     AgentTurn,
     CapabilityInvocation,
+    CapabilityInvocationState,
     Internal,
     External,
     ExtensionDefined(String),

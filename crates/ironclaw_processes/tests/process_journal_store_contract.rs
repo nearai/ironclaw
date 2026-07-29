@@ -15,20 +15,21 @@ use ironclaw_processes::{
     CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest,
     GetProcessCheckpointRequest, GetProcessInputRequest, GetProcessSnapshotRequest,
     JournaledProcessSnapshot, KillProcessRequest, MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES,
-    MAX_PROCESS_INPUT_PAYLOAD_BYTES, ProcessCheckpointId, ProcessCheckpointPayload,
-    ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
-    ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource,
-    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
-    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    MAX_PROCESS_INPUT_PAYLOAD_BYTES, OpenProcessDependencyRequest, ProcessCheckpointId,
+    ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass,
+    ProcessConcurrencyLimits, ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery,
+    ProcessDependencyState, ProcessDependencySubmission, ProcessGateOwnerMatch, ProcessGateQuery,
+    ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
+    ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
-    ProcessOperationId, ProcessStateTransitionRequest, ProcessSubmissionPort, ProcessSuspension,
-    ProcessSuspensionKind, ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort,
-    ProcessWorkerId, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
+    ProcessOperationId, ProcessSnapshotSource, ProcessStateTransitionRequest,
+    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTerminalEvidence,
+    ProcessTransitionPort, ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest,
+    RecordProcessCheckpointRequest, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
     ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
     SuspendProcessRequest,
 };
@@ -348,6 +349,14 @@ async fn process_journal_pages_database_rows_beyond_backend_page_limit() {
     assert_eq!(page.entries[0].cursor, ProcessJournalCursor(1_021));
     assert_eq!(page.next_cursor, ProcessJournalCursor(1_025));
     assert!(page.truncated);
+    assert_eq!(
+        store
+            .process_snapshots(&scope)
+            .await
+            .expect("scope query paginates beyond one backend page")
+            .len(),
+        1_030
+    );
 }
 
 #[tokio::test]
@@ -635,6 +644,16 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
             VirtualPath::new("/engine/run-state").expect("run-state target"),
             MountPermissions::read_write_list_delete(),
         ),
+        MountGrant::new(
+            MountAlias::new("/checkpoint-state").expect("checkpoint-state alias"),
+            VirtualPath::new("/engine/checkpoint-state").expect("checkpoint-state target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/legacy-tenants").expect("legacy tenants alias"),
+            VirtualPath::new("/tenants").expect("legacy tenants target"),
+            MountPermissions::read_write_list_delete(),
+        ),
     ])
     .expect("legacy migration mount view");
     let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
@@ -644,8 +663,10 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
     let run_id = TurnRunId::new();
     let turn_id = TurnId::new();
     let checkpoint_id = TurnCheckpointId::new();
+    let external_checkpoint_id = TurnCheckpointId::new();
     let root_run_id = TurnRunId::new();
     let capability_invocation_id = InvocationId::new();
+    let per_user_capability_invocation_id = InvocationId::new();
     let turn_scope = json!({
         "tenant_id": "tenant-process-test",
         "agent_id": "agent-process-test",
@@ -692,26 +713,49 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
             "spawn_tree_root_run_id": root_run_id,
             "product_context": null
         }],
-        "loop_checkpoints": [{
-            "checkpoint_id": checkpoint_id,
-            "scope": turn_scope,
-            "turn_id": turn_id,
-            "run_id": run_id,
-            "state_ref": "state:migration",
-            "payload": [114, 101, 115, 117, 109, 101],
-            "schema_id": "interactive_checkpoint_v1",
-            "schema_version": 1,
-            "kind": "Gate",
-            "gate_ref": "gate:migration-approval",
-            "created_at": "2026-01-01T00:00:01Z"
-        }],
-        "idempotency_records": [{
-            "scope": turn_scope,
-            "operation": "Submit",
-            "key": "migration-submit-key",
-            "run_id": run_id,
-            "created_at": "2026-01-01T00:00:00Z"
-        }],
+        "loop_checkpoints": [
+            {
+                "checkpoint_id": checkpoint_id,
+                "scope": turn_scope,
+                "turn_id": turn_id,
+                "run_id": run_id,
+                "state_ref": "state:migration",
+                "payload": [114, 101, 115, 117, 109, 101],
+                "schema_id": "interactive_checkpoint_v1",
+                "schema_version": 1,
+                "kind": "Gate",
+                "gate_ref": "gate:migration-approval",
+                "created_at": "2026-01-01T00:00:01Z"
+            },
+            {
+                "checkpoint_id": external_checkpoint_id,
+                "scope": turn_scope,
+                "turn_id": turn_id,
+                "run_id": run_id,
+                "state_ref": "state:external",
+                "schema_id": "interactive_checkpoint_v1",
+                "schema_version": 1,
+                "kind": "Gate",
+                "gate_ref": "gate:migration-approval",
+                "created_at": "2026-01-01T00:00:02Z"
+            }
+        ],
+        "idempotency_records": [
+            {
+                "scope": turn_scope,
+                "operation": "Submit",
+                "key": "migration-submit-key",
+                "run_id": run_id,
+                "created_at": "2026-01-01T00:00:00Z"
+            },
+            {
+                "scope": turn_scope,
+                "operation": "Cancel",
+                "key": "migration-cancel-key",
+                "run_id": run_id,
+                "created_at": "2026-01-01T00:00:00Z"
+            }
+        ],
         "spawn_tree_reservations": [{
             "scope": turn_scope,
             "root_run_id": root_run_id,
@@ -728,6 +772,31 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         )
         .await
         .expect("seed deployed turn blob");
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new(
+                "/legacy-tenants/tenant-process-test/users/user-process-test/checkpoint-state/threads/thread-process-test/states/state/external.json",
+            )
+            .expect("per-user legacy checkpoint-state path"),
+            Entry::bytes(
+                serde_json::to_vec(&json!({
+                    "state_ref": "state:external",
+                    "scope": turn_scope,
+                    "turn_id": turn_id,
+                    "run_id": run_id,
+                    "schema_id": "interactive_checkpoint_v1",
+                    "schema_version": 1,
+                    "kind": "Gate",
+                    "payload_hex": "65787465726e616c",
+                    "created_at": "2026-01-01T00:00:02Z"
+                }))
+                .expect("serialize checkpoint-state record"),
+            ),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed deployed per-user checkpoint-state");
     let capability_scope = scope();
     filesystem
         .put(
@@ -752,6 +821,29 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         )
         .await
         .expect("seed deployed capability run");
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new(format!(
+                "/legacy-tenants/tenant-process-test/users/user-process-test/run-state/agents/agent-process-test/runs/{per_user_capability_invocation_id}.json"
+            ))
+            .expect("per-user legacy capability path"),
+            Entry::bytes(
+                serde_json::to_vec(&json!({
+                    "invocation_id": per_user_capability_invocation_id,
+                    "capability_id": "builtin.per-user",
+                    "scope": capability_scope,
+                    "authenticated_actor_user_id": "user-process-test",
+                    "status": "Completed",
+                    "approval_request_id": null,
+                    "error_kind": null
+                }))
+                .expect("serialize per-user capability run"),
+            ),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed deployed per-user capability run");
 
     let store = ProcessJournalStore::new(Arc::clone(&filesystem));
     assert_eq!(
@@ -759,7 +851,7 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
             .migrate_legacy_journal()
             .await
             .expect("pre-start deployed migration"),
-        2
+        3
     );
     let imported_rows = filesystem
         .query(
@@ -770,7 +862,7 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         )
         .await
         .expect("query imported process rows");
-    assert_eq!(imported_rows.len(), 2, "all imported snapshots persist");
+    assert_eq!(imported_rows.len(), 3, "all imported snapshots persist");
     let turn_process_id = ProcessId::from_uuid(run_id.as_uuid());
     let mut imported_scope = ResourceScope::system();
     imported_scope.tenant_id = TenantId::new("tenant-process-test").expect("tenant");
@@ -804,12 +896,24 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         .expect("read imported checkpoint")
         .expect("checkpoint exists");
     assert_eq!(checkpoint.payload.as_bytes(), b"resume");
+    let external_checkpoint = store
+        .get_process_checkpoint(GetProcessCheckpointRequest {
+            checkpoint_id: ProcessCheckpointId::from_trusted(
+                external_checkpoint_id.as_uuid().to_string(),
+            ),
+            process_id: turn_process_id,
+            scope: imported_scope.clone(),
+        })
+        .await
+        .expect("read externally stored checkpoint")
+        .expect("external checkpoint exists");
+    assert_eq!(external_checkpoint.payload.as_bytes(), b"external");
 
     let replay = store
         .submit_process(SubmitProcessRequest {
             process_id: turn_process_id,
             process_kind: ProcessKind::AgentTurn,
-            scope: imported_scope,
+            scope: imported_scope.clone(),
             exclusive_within_scope: true,
             operation_id: Some(ProcessOperationId::from_trusted("migration-submit-key")),
             owner_user_id: Some(UserId::new("user-process-test").expect("owner")),
@@ -826,15 +930,39 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         .await
         .expect("legacy submit idempotency replays");
     assert_eq!(replay.status, ProcessLifecycleStatus::Suspended);
+    let cancel_replay = store
+        .request_cancel_process(CancelProcessRequest {
+            scope: imported_scope.clone(),
+            process_id: turn_process_id,
+            operation_id: Some(ProcessOperationId::from_trusted("migration-cancel-key")),
+            reason: Some("must not mutate an imported replay".to_string()),
+        })
+        .await
+        .expect("legacy cancel idempotency replays");
+    assert_eq!(
+        cancel_replay.state.status,
+        ProcessLifecycleStatus::Suspended
+    );
 
     let capability = store
         .get_process_snapshot(GetProcessSnapshotRequest {
-            scope: capability_scope,
+            scope: capability_scope.clone(),
             process_id: ProcessId::from_uuid(capability_invocation_id.as_uuid()),
         })
         .await
         .expect("read imported capability invocation");
     assert_eq!(capability.status, ProcessLifecycleStatus::Suspended);
+    let per_user_capability = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: capability_scope,
+            process_id: ProcessId::from_uuid(per_user_capability_invocation_id.as_uuid()),
+        })
+        .await
+        .expect("read imported per-user capability invocation");
+    assert_eq!(
+        per_user_capability.status,
+        ProcessLifecycleStatus::Completed
+    );
     assert_eq!(
         store
             .migrate_legacy_journal()
@@ -923,7 +1051,6 @@ async fn deployed_turn_row_layout_imports_materialized_run_rows() {
             .await
             .expect("seed legacy row");
     }
-
     let store = ProcessJournalStore::new(filesystem);
     let mut imported_scope = ResourceScope::system();
     imported_scope.tenant_id = TenantId::new("tenant-process-test").expect("tenant");
@@ -1309,6 +1436,12 @@ async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
     })
     .await
     .expect("observer retry succeeds");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        observer.attempts.load(Ordering::SeqCst),
+        2,
+        "overlapping replay tasks must not redeliver an acknowledged commit"
+    );
 
     let after_restart = Arc::new(FailOnceProcessObserver {
         attempts: AtomicUsize::new(0),
@@ -1471,7 +1604,7 @@ async fn process_claim_pages_past_a_quota_blocked_prefix() {
         .await
         .expect("claim quota holder");
 
-    for _ in 0..20 {
+    for _ in 0..64 {
         store
             .submit_process(submit(ProcessId::new(), blocked_owner.clone()))
             .await
@@ -1558,6 +1691,162 @@ async fn process_tree_submission_reserves_and_releases_capacity_atomically() {
         .submit_process(child_request(ProcessId::new(), "replacement-child"))
         .await
         .expect("released capacity admits replacement child");
+}
+
+#[tokio::test]
+async fn explicit_tree_reservation_release_and_prune_preserve_capacity_invariants() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let root_scope = scope();
+    let root_id = ProcessId::new();
+    submit_internal_process(&store, &root_scope, root_id).await;
+
+    let reserved = store
+        .reserve_process_tree(ReserveProcessTreeRequest {
+            scope: root_scope.clone(),
+            root_process_id: root_id,
+            delta: 2,
+            cap: 2,
+        })
+        .await
+        .expect("reserve tree capacity");
+    assert_eq!(reserved.descendant_count, 2);
+    assert!(reserved.released_processes.is_empty());
+
+    let capacity_error = store
+        .reserve_process_tree(ReserveProcessTreeRequest {
+            scope: root_scope.clone(),
+            root_process_id: root_id,
+            delta: 1,
+            cap: 2,
+        })
+        .await
+        .expect_err("reservation above cap must fail");
+    assert!(matches!(
+        capacity_error,
+        ProcessJournalStoreError::ProcessTreeCapacityExceeded { cap: 2 }
+    ));
+
+    let child_id = ProcessId::new();
+    let release = ReleaseProcessTreeRequest {
+        scope: root_scope.clone(),
+        root_process_id: root_id,
+        delta: 1,
+        idempotency_process_id: child_id,
+    };
+    store
+        .release_process_tree(release.clone())
+        .await
+        .expect("release reservation");
+    store
+        .release_process_tree(release.clone())
+        .await
+        .expect("release replay");
+    let refilled = store
+        .reserve_process_tree(ReserveProcessTreeRequest {
+            scope: root_scope.clone(),
+            root_process_id: root_id,
+            delta: 1,
+            cap: 2,
+        })
+        .await
+        .expect("refill released capacity");
+    assert_eq!(refilled.descendant_count, 2);
+    assert!(refilled.released_processes.contains(&child_id));
+
+    store
+        .prune_released_process(PruneReleasedProcessRequest {
+            scope: root_scope,
+            root_process_id: root_id,
+            process_id: child_id,
+        })
+        .await
+        .expect("prune released child marker");
+    store
+        .release_process_tree(release)
+        .await
+        .expect("a pruned marker permits a new release for the same process id");
+    let final_reservation = store
+        .reserve_process_tree(ReserveProcessTreeRequest {
+            scope: scope(),
+            root_process_id: root_id,
+            delta: 1,
+            cap: 2,
+        })
+        .await
+        .expect("capacity reflects post-prune release");
+    assert_eq!(final_reservation.descendant_count, 2);
+}
+
+#[tokio::test]
+async fn explicit_dependency_open_is_idempotent_scope_bound_and_abandonable() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let root_scope = scope();
+    let root_id = ProcessId::new();
+    submit_internal_process(&store, &root_scope, root_id).await;
+    let dependency_id = ProcessId::new();
+    let request = OpenProcessDependencyRequest {
+        dependent_process_id: root_id,
+        dependency_process_id: dependency_id,
+        root_process_id: root_id,
+        scope: root_scope.clone(),
+        group_ref: Some("gate:explicit-open".to_string()),
+        created_at: Utc::now(),
+        metadata: json!({"owner": "runner"}),
+    };
+
+    let opened = store
+        .open_process_dependency(request.clone())
+        .await
+        .expect("open dependency");
+    assert_eq!(opened.state, ProcessDependencyState::Open);
+    assert_eq!(opened.group_ref.as_deref(), Some("gate:explicit-open"));
+    assert_eq!(
+        store
+            .open_process_dependency(request)
+            .await
+            .expect("open replay"),
+        opened
+    );
+
+    let mut foreign_scope = root_scope.clone();
+    foreign_scope.user_id = UserId::new("foreign-dependency-user").expect("foreign user");
+    let error = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: root_id,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: root_id,
+            scope: foreign_scope,
+            group_ref: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect_err("foreign scope must not open dependency");
+    assert!(matches!(error, ProcessJournalStoreError::UnauthorizedScope));
+
+    let abandoned = store
+        .abandon_process_dependency(CloseProcessDependencyRequest {
+            dependent_process_id: root_id,
+            dependency_process_id: dependency_id,
+            scope: root_scope.clone(),
+            closed_at: Utc::now(),
+        })
+        .await
+        .expect("abandon dependency")
+        .expect("dependency exists");
+    assert_eq!(abandoned.state, ProcessDependencyState::Abandoned);
+    assert!(
+        store
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: root_scope,
+                dependent_process_id: Some(root_id),
+                group_ref: Some("gate:explicit-open".to_string()),
+                include_closed: false,
+            })
+            .await
+            .expect("query open dependencies")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

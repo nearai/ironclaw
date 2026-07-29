@@ -106,6 +106,8 @@ impl AgentTurnProcessStateMetadata {
     pub(super) fn from_claimed(claimed: &ClaimedTurnRun) -> Self {
         Self {
             resolved_run_profile: Some(claimed.resolved_run_profile.clone()),
+            subagent_depth: claimed.subagent_depth,
+            spawn_tree_descendant_cap: claimed.spawn_tree_descendant_cap,
             ..Self::from_state(&claimed.state)
         }
     }

@@ -780,6 +780,8 @@ mod tests {
     struct FaultRuntime {
         inner: Arc<crate::ProcessJournalStore<InMemoryBackend>>,
         heartbeat: HeartbeatFault,
+        claim_errors_remaining: AtomicUsize,
+        recover_errors_remaining: AtomicUsize,
         fail_errors_remaining: AtomicUsize,
         fail_attempts: AtomicUsize,
         relinquishes: AtomicUsize,
@@ -794,10 +796,22 @@ mod tests {
             Self {
                 inner,
                 heartbeat,
+                claim_errors_remaining: AtomicUsize::new(0),
+                recover_errors_remaining: AtomicUsize::new(0),
                 fail_errors_remaining: AtomicUsize::new(fail_errors),
                 fail_attempts: AtomicUsize::new(0),
                 relinquishes: AtomicUsize::new(0),
             }
+        }
+
+        fn with_claim_errors(mut self, errors: usize) -> Self {
+            self.claim_errors_remaining = AtomicUsize::new(errors);
+            self
+        }
+
+        fn with_recover_errors(mut self, errors: usize) -> Self {
+            self.recover_errors_remaining = AtomicUsize::new(errors);
+            self
         }
 
         fn injected_error() -> ProcessJournalStoreError {
@@ -818,6 +832,15 @@ mod tests {
             &self,
             request: ClaimProcessesRequest,
         ) -> Result<Vec<ClaimedProcess>, Self::Error> {
+            if self
+                .claim_errors_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(Self::injected_error());
+            }
             self.inner.claim_next_processes(request).await
         }
 
@@ -836,6 +859,15 @@ mod tests {
             &self,
             request: RecoverExpiredProcessLeasesRequest,
         ) -> Result<crate::RecoverExpiredProcessLeasesResponse, Self::Error> {
+            if self
+                .recover_errors_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(Self::injected_error());
+            }
             self.inner.recover_expired_process_leases(request).await
         }
 
@@ -932,6 +964,22 @@ mod tests {
             _claimed: ClaimedProcess,
         ) -> Result<(), ProcessExecutorFailure> {
             panic!("deterministic executor panic");
+        }
+    }
+
+    struct DoublePanickingExecutor;
+
+    #[async_trait]
+    impl JournalProcessExecutor for DoublePanickingExecutor {
+        async fn execute_claimed_process(
+            &self,
+            _claimed: ClaimedProcess,
+        ) -> Result<(), ProcessExecutorFailure> {
+            panic!("first deterministic panic");
+        }
+
+        fn panic_failure(&self) -> ProcessExecutorFailure {
+            panic!("second deterministic panic");
         }
     }
 
@@ -1128,6 +1176,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_handle_relinquishes_in_flight_process_without_explicit_shutdown() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
+        let started = Arc::new(Notify::new());
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(BlockingExecutor {
+                started: Arc::clone(&started),
+                executions: None,
+            }),
+            ProcessKind::Internal,
+            fast_config(),
+        )
+        .start();
+
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("executor starts");
+        drop(handle);
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = store
+                    .get_process_snapshot(GetProcessSnapshotRequest {
+                        scope: scope(),
+                        process_id,
+                    })
+                    .await
+                    .expect("load process");
+                if snapshot.status == ProcessLifecycleStatus::Queued && snapshot.lease.is_none() {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-triggered shutdown relinquishes process");
+
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Queued);
+        assert!(snapshot.lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_wakes_do_not_execute_the_same_process_twice() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(BlockingExecutor {
+                started: Arc::clone(&started),
+                executions: Some(Arc::clone(&executions)),
+            }),
+            ProcessKind::Internal,
+            fast_config(),
+        )
+        .start();
+        let notifier = handle.wake_notifier();
+
+        for _ in 0..16 {
+            let _ = notifier.notify_scope(scope());
+        }
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("executor starts");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "duplicate wakes must not duplicate a claimed process execution"
+        );
+
+        handle.shutdown().await;
+        let snapshot = store
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: scope(),
+                process_id,
+            })
+            .await
+            .expect("load process");
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Queued);
+    }
+
+    #[tokio::test]
     async fn blocked_executor_heartbeat_timeouts_fail_once_without_duplicate_execution() {
         let store = Arc::new(crate::ProcessJournalStore::new(
             in_memory_backed_processes_filesystem(),
@@ -1255,6 +1395,222 @@ mod tests {
         .expect("supervisor relinquishes after terminal-write exhaustion");
         assert!(faults.fail_attempts.load(Ordering::SeqCst) >= 2);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn config_failure_and_wake_surfaces_cover_clamping_and_closed_channels() {
+        let config = ProcessSupervisorConfig::default()
+            .with_max_concurrent_processes(0)
+            .with_poll_interval(Duration::ZERO)
+            .with_lease_recovery_interval(Duration::ZERO)
+            .with_heartbeat_interval(Duration::ZERO)
+            .with_max_consecutive_heartbeat_failures(0)
+            .with_terminal_failure_record_attempts(0)
+            .with_terminal_failure_record_backoff(Duration::ZERO)
+            .with_claim_error_backoff(Duration::ZERO)
+            .with_wake_channel_capacity(0);
+        assert_eq!(config.max_concurrent_processes(), 1);
+        assert_eq!(config.poll_interval(), Duration::from_millis(1));
+        assert_eq!(config.lease_recovery_interval(), Duration::from_millis(1));
+        assert_eq!(config.heartbeat_interval(), Duration::from_millis(1));
+        assert_eq!(config.max_consecutive_heartbeat_failures(), 1);
+        assert_eq!(config.terminal_failure_record_attempts(), 1);
+        assert_eq!(
+            config.terminal_failure_record_backoff(),
+            Duration::from_millis(1)
+        );
+        assert_eq!(config.claim_error_backoff(), Duration::from_millis(1));
+        assert_eq!(config.wake_channel_capacity(), 1);
+
+        let sanitized =
+            SanitizedFailure::new("explicit_failure").expect("valid sanitized failure category");
+        let failure = ProcessExecutorFailure::from_failure(sanitized);
+        assert_eq!(failure.failure_category(), "explicit_failure");
+        assert!(failure.failure().is_some());
+        assert_eq!(
+            failure.to_string(),
+            "process executor failed: explicit_failure"
+        );
+        let fallback = ProcessExecutorFailure::new("");
+        assert!(fallback.failure().is_none());
+        assert_eq!(fallback.failure_category(), "");
+
+        let (notifier, channel) = ProcessWakeNotifier::channel(1);
+        assert_eq!(format!("{notifier:?}"), "ProcessWakeNotifier");
+        notifier.notify_scope(scope()).expect("first wake fits");
+        assert_eq!(
+            notifier.notify_scope(scope()),
+            Err(ProcessWakeError::DeliveryUnavailable)
+        );
+        drop(channel);
+        assert_eq!(
+            notifier.notify_scope(scope()),
+            Err(ProcessWakeError::DeliveryUnavailable)
+        );
+
+        assert!(static_failure("").is_none());
+        assert!(retryable_store_error(&FaultRuntime::injected_error()));
+        assert!(!retryable_store_error(
+            &ProcessJournalStoreError::InvalidRequest("terminal".to_string())
+        ));
+    }
+
+    #[tokio::test]
+    async fn transient_claim_failure_schedules_one_retry_and_then_executes() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(
+            FaultRuntime::new(Arc::clone(&store), HeartbeatFault::None, 0).with_claim_errors(1),
+        );
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            faults.clone();
+        let handle = ProcessSupervisor::new(
+            Arc::clone(&runtime),
+            Arc::new(CompletingExecutor { runtime }),
+            ProcessKind::Internal,
+            fast_config().with_claim_error_backoff(Duration::from_millis(1)),
+        )
+        .start();
+
+        let snapshot = wait_for_status(&store, process_id, ProcessLifecycleStatus::Completed).await;
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Completed);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn successful_heartbeats_reset_failure_counter_before_completion() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
+        let executor = Arc::new(CountingExecutor {
+            runtime: Arc::clone(&runtime),
+            active: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+        });
+        let handle = ProcessSupervisor::new(
+            runtime,
+            executor,
+            ProcessKind::Internal,
+            fast_config()
+                .with_heartbeat_interval(Duration::from_millis(1))
+                .with_max_consecutive_heartbeat_failures(2),
+        )
+        .start();
+
+        wait_for_status(&store, process_id, ProcessLifecycleStatus::Completed).await;
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn executor_task_panic_after_panic_mapping_is_joined_and_relinquished_on_shutdown() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(DoublePanickingExecutor),
+            ProcessKind::Internal,
+            fast_config(),
+        )
+        .start();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = store
+                    .get_process_snapshot(GetProcessSnapshotRequest {
+                        scope: scope(),
+                        process_id,
+                    })
+                    .await
+                    .expect("load process");
+                if snapshot.status == ProcessLifecycleStatus::Running {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("process is claimed before the task panics");
+        assert!(!handle.is_stopped());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lease_recovery_and_relinquish_error_paths_are_non_fatal() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(
+            FaultRuntime::new(Arc::clone(&store), HeartbeatFault::None, 0).with_recover_errors(1),
+        );
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            faults.clone();
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let context = DrainContext {
+            command_tx,
+            runtime: Arc::clone(&runtime),
+            executor: Arc::new(FailingExecutor),
+            process_kind: ProcessKind::Internal,
+            config: fast_config(),
+            worker_id: ProcessWorkerId::from_trusted("recovery-worker"),
+            semaphore: Arc::new(Semaphore::new(1)),
+        };
+
+        recover_expired_leases(&context).await;
+        recover_expired_leases(&context).await;
+        relinquish(
+            &runtime,
+            &ClaimedIdentity {
+                process_id,
+                worker_id: ProcessWorkerId::from_trusted("wrong-worker"),
+                lease_token: ProcessLeaseToken::from_trusted("wrong-lease"),
+            },
+        )
+        .await;
+        assert_eq!(faults.relinquishes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn detached_handle_reports_stopped_and_shutdown_is_idempotent() {
+        let (notifier, _channel) = ProcessWakeNotifier::channel(1);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let handle = ProcessSupervisorHandle {
+            notifier,
+            supervisor: None,
+            shutdown_tx,
+        };
+        assert!(handle.is_stopped());
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn in_flight_heartbeat_abort_cancels_the_running_task() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            Arc::new(FaultRuntime::new(store, HeartbeatFault::Pending, 0));
+        let mut heartbeat = InFlightHeartbeat::default();
+        heartbeat.spawn(
+            runtime,
+            ProcessId::new(),
+            ProcessWorkerId::from_trusted("abort-worker"),
+            ProcessLeaseToken::from_trusted("abort-lease"),
+            Duration::from_secs(60),
+        );
+        assert!(heartbeat.is_running());
+        heartbeat.abort();
+        assert!(heartbeat.is_idle());
     }
 
     fn fast_config() -> ProcessSupervisorConfig {

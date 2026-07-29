@@ -180,6 +180,14 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "process lifecycle authority crate" \
+  "crates/ironclaw_processes/src/journal_store.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
   "shared classifier script" \
   "scripts/ci/classify-test-scope.sh" \
   "docs_only=false

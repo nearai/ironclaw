@@ -72,22 +72,44 @@ where
         required: bool,
     ) -> Result<(), SessionThreadError> {
         let scope_key = thread_index_cache_key(scope);
-        if self
+        let already_declared = self
             .ready_thread_index_scopes
             .lock()
             .map(|ready| ready.contains(&scope_key))
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if already_declared && !required {
             return Ok(());
         }
+        if already_declared {
+            let marker = thread_index_migration_marker_path(scope)?;
+            if self
+                .filesystem
+                .get(&scope.to_resource_scope(), &marker)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
         let _declaration_guard = self.thread_index_declaration_lock.lock().await;
-        if self
+        let already_declared = self
             .ready_thread_index_scopes
             .lock()
             .map(|ready| ready.contains(&scope_key))
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if already_declared && !required {
             return Ok(());
+        }
+        if already_declared {
+            let marker = thread_index_migration_marker_path(scope)?;
+            if self
+                .filesystem
+                .get(&scope.to_resource_scope(), &marker)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
         }
         let root = thread_index_root(scope)?;
         let spec = IndexSpec::new(

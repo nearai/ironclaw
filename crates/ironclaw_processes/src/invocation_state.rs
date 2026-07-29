@@ -247,7 +247,7 @@ impl ProcessInvocationStore {
                 worker_id: ProcessWorkerId::from_trusted(CAPABILITY_RUN_WORKER),
                 scope_filter: Some(scope),
                 process_id_filter: Some(Self::process_id(invocation_id)),
-                process_kind_filter: Some(ProcessKind::CapabilityInvocation),
+                process_kind_filter: Some(ProcessKind::CapabilityInvocationState),
                 max_processes: 1,
             })
             .await
@@ -325,7 +325,7 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         self.processes
             .submit_process(SubmitProcessRequest {
                 process_id: Self::process_id(invocation_id),
-                process_kind: ProcessKind::CapabilityInvocation,
+                process_kind: ProcessKind::CapabilityInvocationState,
                 scope: scope.clone(),
                 exclusive_within_scope: false,
                 operation_id: None,
@@ -474,7 +474,7 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
             .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
         let mut records = Vec::new();
         for snapshot in snapshots {
-            if snapshot.process_kind == ProcessKind::CapabilityInvocation
+            if snapshot.process_kind == ProcessKind::CapabilityInvocationState
                 && let Some(record) = Self::record(snapshot)?
             {
                 records.push(record);
@@ -572,9 +572,14 @@ mod tests {
             .unwrap();
         let kinds = page
             .entries
-            .into_iter()
+            .iter()
             .map(|entry| entry.kind)
             .collect::<Vec<_>>();
+        assert!(
+            page.entries
+                .iter()
+                .all(|entry| entry.process_kind == ProcessKind::CapabilityInvocationState)
+        );
         assert_eq!(
             kinds,
             vec![

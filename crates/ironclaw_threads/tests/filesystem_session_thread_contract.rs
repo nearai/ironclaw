@@ -2057,6 +2057,14 @@ async fn filesystem_list_threads_page_does_not_scan_scope_or_source_directory() 
             .await
             .unwrap();
     }
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: Some(10),
+            cursor: None,
+        })
+        .await
+        .expect("complete the required index migration before measuring steady-state reads");
     let query_count = backend.count(FilesystemOperation::Query);
     let list_count = backend.count(FilesystemOperation::ListDir);
 
@@ -2147,6 +2155,51 @@ async fn filesystem_explicit_migration_rebuilds_missing_thread_index_rows() {
         ids_again,
         ["legacy-002", "legacy-001"],
         "explicit migration should rebuild durable derived index rows"
+    );
+}
+
+#[tokio::test]
+async fn optional_index_write_cache_does_not_skip_required_migration_marker() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-required", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-required");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("required-marker-thread").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("optional index write");
+
+    let marker = thread_index_migration_marker_path_for_test(&scope);
+    assert!(
+        scoped
+            .get(&scope.to_resource_scope(), &marker)
+            .await
+            .expect("read marker before required query")
+            .is_none()
+    );
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("required index query");
+    assert!(
+        scoped
+            .get(&scope.to_resource_scope(), &marker)
+            .await
+            .expect("read marker after required query")
+            .is_some(),
+        "required query must durably finish migration despite the optional cache entry"
     );
 }
 
@@ -3039,6 +3092,24 @@ fn scope(label: &str) -> ThreadScope {
 fn thread_index_record_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
     ScopedPath::new(format!(
         "/threads/agents/{}/projects/{}/owners/{}/thread_index/{thread_id}.json",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/thread-index-v1.complete",
         scope.agent_id.as_str(),
         scope
             .project_id

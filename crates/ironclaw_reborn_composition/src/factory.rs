@@ -4088,7 +4088,9 @@ where
         surface_version,
     } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-    let process_journal_store = Arc::new(ProcessJournalStore::new(Arc::clone(&scoped_filesystem)));
+    let process_journal_store = Arc::new(ProcessJournalStore::new(
+        crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
+    ));
     let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
     let turn_state = Arc::new(processes.agent_turn_runtime());
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
@@ -4541,8 +4543,10 @@ async fn build_backend_production(
         ..
     } = build_budget_sinks();
     let process_journal_store = Arc::new(
-        ProcessJournalStore::new(Arc::clone(&stores.scoped_filesystem))
-            .with_concurrency_limits(process_concurrency_limits),
+        ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::clone(
+            &stores.filesystem,
+        )))
+        .with_concurrency_limits(process_concurrency_limits),
     );
     let processes =
         ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));

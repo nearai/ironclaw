@@ -78,7 +78,8 @@ pub use supervisor::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{
-    ProcessInvocationStateStore, in_memory_backed_process_invocation_state_store,
+    ProcessInvocationStateStore, StateTransitionCase, assert_async_state_transition_table,
+    assert_state_transition_table, in_memory_backed_process_invocation_state_store,
     in_memory_backed_process_result_store, in_memory_backed_process_services,
     in_memory_backed_process_store, in_memory_backed_processes_filesystem,
 };

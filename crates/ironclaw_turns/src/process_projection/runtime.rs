@@ -75,6 +75,12 @@ impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
         if commit.state.process_kind != ProcessKind::AgentTurn {
             return Ok(());
         }
+        let failure = (commit.kind == ProcessJournalKind::Failed)
+            .then_some(commit.state.failure.as_ref())
+            .flatten();
+        let failure_reason = failure.map(|failure| failure.category().to_string());
+        let failure_detail = failure.and_then(|failure| failure.detail().map(str::to_string));
+        let failure_retryable = failure.map(|_| commit.state.checkpoint_ref.is_some());
         let event = turn_lifecycle_event_from_process_journal_entry(ProcessJournalEntry {
             cursor: commit.state.journal_cursor,
             process_id: commit.state.process_id,
@@ -85,9 +91,9 @@ impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
             status: commit.state.status,
             kind: commit.kind,
             suspension: commit.state.suspension,
-            sanitized_reason: commit.sanitized_reason,
-            retryable: None,
-            detail: None,
+            sanitized_reason: commit.sanitized_reason.or(failure_reason),
+            retryable: failure_retryable,
+            detail: failure_detail,
             metadata: commit.state.metadata,
             committed_state: None,
         })
@@ -357,27 +363,42 @@ impl AgentTurnProcessRuntime {
         if state.actor.as_ref() != Some(&request.actor) {
             return Err(TurnError::Unauthorized);
         }
-        if snapshot.status == ProcessLifecycleStatus::Suspended {
-            let resumable = request.precondition.required_status().map_or_else(
-                || {
-                    matches!(
-                        state.status,
-                        TurnStatus::BlockedApproval
-                            | TurnStatus::BlockedAuth
-                            | TurnStatus::BlockedResource
-                    )
-                },
-                |required| state.status == required,
-            );
-            if !resumable {
+        match snapshot.status {
+            ProcessLifecycleStatus::Suspended => {
+                let resumable = request.precondition.required_status().map_or_else(
+                    || {
+                        matches!(
+                            state.status,
+                            TurnStatus::BlockedApproval
+                                | TurnStatus::BlockedAuth
+                                | TurnStatus::BlockedResource
+                        )
+                    },
+                    |required| state.status == required,
+                );
+                if !resumable {
+                    return Err(TurnError::InvalidTransition {
+                        from: state.status,
+                        to: TurnStatus::Queued,
+                    });
+                }
+                if state.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
+                    return Err(TurnError::InvalidRequest {
+                        reason: "gate resolution reference mismatch".to_string(),
+                    });
+                }
+            }
+            ProcessLifecycleStatus::Queued => {
+                return Ok(ResumeTurnResponse {
+                    run_id: state.run_id,
+                    status: state.status,
+                    event_cursor: state.event_cursor,
+                });
+            }
+            _ => {
                 return Err(TurnError::InvalidTransition {
                     from: state.status,
                     to: TurnStatus::Queued,
-                });
-            }
-            if state.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
-                return Err(TurnError::InvalidRequest {
-                    reason: "gate resolution reference mismatch".to_string(),
                 });
             }
         }
@@ -1111,6 +1132,8 @@ pub fn claimed_turn_run_from_process_claim(
     Ok(ClaimedTurnRun {
         state,
         resolved_run_profile,
+        subagent_depth: metadata.subagent_depth,
+        spawn_tree_descendant_cap: metadata.spawn_tree_descendant_cap,
         runner_id: turn_runner_id_from_worker(&claimed.worker_id)?,
         lease_token: turn_lease_token_from_process(&claimed.lease_token)?,
     })

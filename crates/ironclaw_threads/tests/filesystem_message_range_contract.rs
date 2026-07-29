@@ -102,17 +102,12 @@ async fn filesystem_finalized_message_row_and_projection_are_atomic() {
 }
 
 #[tokio::test]
-async fn filesystem_store_range_read_requires_migration_when_sequence_index_has_gap() {
+async fn filesystem_store_range_read_stays_available_until_a_gap_is_repaired() {
     let fixture = RangeFixture::new("fs-range-gap", "tenant-range-gap").await;
     fixture.seed_messages("gap-event", 4).await;
     fixture.delete_sequence_index(2).await;
 
-    let error = fixture.range_error(1, 3).await;
-    assert!(
-        error
-            .to_string()
-            .contains("explicit transcript index migration")
-    );
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![3]);
     assert_eq!(
         fixture
             .service
@@ -125,6 +120,16 @@ async fn filesystem_store_range_read_requires_migration_when_sequence_index_has_
 }
 
 #[tokio::test]
+async fn filesystem_store_range_read_tolerates_a_leaked_sequence_without_a_message() {
+    let fixture = RangeFixture::new("fs-range-leaked-gap", "tenant-range-leaked-gap").await;
+    let message_ids = fixture.seed_messages("leaked-gap-event", 4).await;
+    fixture.delete_sequence_index(2).await;
+    fixture.delete_message(message_ids[1]).await;
+
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![3]);
+}
+
+#[tokio::test]
 async fn filesystem_store_range_read_clamps_to_thread_sequence_ceiling() {
     let fixture = RangeFixture::new("fs-range-ceiling", "tenant-range-ceiling").await;
     fixture.seed_messages("ceiling-event", 4).await;
@@ -133,14 +138,12 @@ async fn filesystem_store_range_read_clamps_to_thread_sequence_ceiling() {
 }
 
 #[tokio::test]
-async fn filesystem_store_range_read_detects_missing_message_row() {
+async fn filesystem_store_range_read_tolerates_a_missing_message_row() {
     let fixture = RangeFixture::new("fs-range-missing", "tenant-range-missing").await;
     let message_ids = fixture.seed_messages("missing-event", 4).await;
     fixture.delete_message(message_ids[1]).await;
 
-    let err = fixture.range_error(1, 3).await;
-
-    assert!(err.to_string().contains("projection is incomplete"));
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![3]);
 }
 
 #[tokio::test]
@@ -176,11 +179,13 @@ async fn filesystem_store_summary_creation_requires_complete_sequence_projection
         })
         .await
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("explicit transcript index migration")
-    );
+    assert!(matches!(
+        error,
+        SessionThreadError::InvalidSummaryRange {
+            start_sequence: 2,
+            end_sequence: 3
+        }
+    ));
 }
 
 struct RangeFixture {
@@ -315,18 +320,6 @@ impl RangeFixture {
             .into_iter()
             .map(|message| message.content.unwrap_or_default())
             .collect()
-    }
-
-    async fn range_error(&self, after_sequence: u64, through_sequence: u64) -> SessionThreadError {
-        self.service
-            .list_thread_messages_range(ThreadMessageRangeRequest {
-                scope: self.scope.clone(),
-                thread_id: self.thread_id.clone(),
-                after_sequence,
-                through_sequence,
-            })
-            .await
-            .unwrap_err()
     }
 
     async fn create_compaction_summary(

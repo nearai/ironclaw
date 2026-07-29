@@ -40,6 +40,65 @@ use crate::{
     ProcessServices,
 };
 
+/// One named step in a sequential state-transition table.
+///
+/// Keeping the command and expected result together makes state-machine tests
+/// read like the transition contract instead of repeating arrange/act/assert
+/// plumbing. The state is deliberately supplied to the runner separately so
+/// every step observes the state left by the previous one.
+#[derive(Debug)]
+pub struct StateTransitionCase<Command, Output, Error> {
+    pub name: &'static str,
+    pub command: Command,
+    pub expected: Result<Output, Error>,
+}
+
+impl<Command, Output, Error> StateTransitionCase<Command, Output, Error> {
+    pub fn new(name: &'static str, command: Command, expected: Result<Output, Error>) -> Self {
+        Self {
+            name,
+            command,
+            expected,
+        }
+    }
+}
+
+/// Execute a sequential transition table and attach the case name to failures.
+///
+/// Pure materialized-state machines can call this directly. Use
+/// [`assert_async_state_transition_table`] for stores and service objects.
+pub fn assert_state_transition_table<State, Command, Output, Error>(
+    state: &mut State,
+    cases: impl IntoIterator<Item = StateTransitionCase<Command, Output, Error>>,
+    mut apply: impl FnMut(&mut State, Command) -> Result<Output, Error>,
+) where
+    Output: std::fmt::Debug + PartialEq,
+    Error: std::fmt::Debug + PartialEq,
+{
+    for case in cases {
+        let actual = apply(state, case.command);
+        assert_eq!(actual, case.expected, "transition case: {}", case.name);
+    }
+}
+
+/// Async counterpart to [`assert_state_transition_table`].
+pub async fn assert_async_state_transition_table<State, Command, Output, Error>(
+    state: &mut State,
+    cases: impl IntoIterator<Item = StateTransitionCase<Command, Output, Error>>,
+    mut apply: impl for<'state> FnMut(
+        &'state mut State,
+        Command,
+    ) -> futures::future::BoxFuture<'state, Result<Output, Error>>,
+) where
+    Output: std::fmt::Debug + PartialEq,
+    Error: std::fmt::Debug + PartialEq,
+{
+    for case in cases {
+        let actual = apply(state, case.command).await;
+        assert_eq!(actual, case.expected, "transition case: {}", case.name);
+    }
+}
+
 /// Pure, mutex-backed fake for caller-level invocation-state tests.
 ///
 /// Despite the historical generic name, this type does not exercise

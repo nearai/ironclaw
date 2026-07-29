@@ -1,14 +1,15 @@
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, ThreadId, UserId};
-use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage};
+use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage, ProcessSnapshotSource};
 use std::sync::Arc;
 
 use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
-    AcceptedMessageRef, CapabilityActivityId, EventCursor, GateRef, ReplyTargetBindingRef,
-    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile,
-    TurnScope, events::TurnEventProjectionSource,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor, GateRef,
+    IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileId,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile, TurnScope,
+    events::TurnEventProjectionSource,
 };
 
 fn scope() -> TurnScope {
@@ -63,6 +64,520 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         product_context: None,
         resume_disposition: None,
     }
+}
+
+fn agent_turn_metadata(
+    actor: TurnActor,
+    turn_id: TurnId,
+    subagent_depth: u32,
+) -> AgentTurnProcessStateMetadata {
+    let run_profile = profile();
+    AgentTurnProcessStateMetadata {
+        turn_id,
+        actor: Some(actor),
+        accepted_message_ref: AcceptedMessageRef::new("accepted-runtime-test")
+            .expect("accepted message"),
+        source_binding_ref: SourceBindingRef::new("source-runtime-test").expect("source binding"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-runtime-test")
+            .expect("reply binding"),
+        resolved_run_profile_id: run_profile.id,
+        resolved_run_profile_version: run_profile.version,
+        resolved_run_profile: None,
+        resolved_model_route: None,
+        model_usage: None,
+        subagent_depth,
+        spawn_tree_descendant_cap: None,
+        product_context: None,
+        resume_disposition: None,
+    }
+}
+
+fn child_request(
+    parent_scope: TurnScope,
+    parent_run_id: TurnRunId,
+    child_scope: TurnScope,
+    actor: TurnActor,
+    requested_run_id: TurnRunId,
+    idempotency_key: &str,
+) -> SubmitChildRunRequest {
+    SubmitChildRunRequest {
+        parent_scope,
+        parent_run_id,
+        child_scope,
+        actor,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-child").expect("accepted child"),
+        source_binding_ref: SourceBindingRef::new("source-child").expect("source child"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-child").expect("reply child"),
+        requested_run_profile: None,
+        idempotency_key: IdempotencyKey::new(idempotency_key).expect("idempotency key"),
+        received_at: Utc::now(),
+        requested_run_id: Some(requested_run_id),
+        spawn_tree_descendant_cap: 8,
+        process_dependency: None,
+        process_input: None,
+    }
+}
+
+async fn submit_agent_process<F>(
+    store: &ironclaw_processes::ProcessJournalStore<F>,
+    turn_scope: &TurnScope,
+    actor: &TurnActor,
+    run_id: TurnRunId,
+    turn_id: TurnId,
+    checkpoint_ref: Option<ironclaw_processes::ProcessCheckpointRef>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    use ironclaw_processes::{ProcessKind, ProcessSubmissionPort, SubmitProcessRequest};
+
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: process_id_from_turn_run_id(run_id),
+            process_kind: ProcessKind::AgentTurn,
+            scope: turn_scope.to_resource_scope(),
+            exclusive_within_scope: true,
+            operation_id: None,
+            owner_user_id: Some(actor.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::json!({
+                "agent_turn": agent_turn_metadata(actor.clone(), turn_id, 0)
+            }),
+        })
+        .await
+        .expect("submit agent process");
+}
+
+async fn fail_agent_process<F>(
+    store: &ironclaw_processes::ProcessJournalStore<F>,
+    turn_scope: &TurnScope,
+    run_id: TurnRunId,
+    checkpoint_ref: Option<ironclaw_processes::ProcessCheckpointRef>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    use ironclaw_host_api::SanitizedFailure;
+    use ironclaw_processes::{
+        ClaimProcessesRequest, FailProcessRequest, ProcessKind, ProcessTransitionPort,
+        ProcessWorkerId,
+    };
+
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("runtime-test-worker"),
+            scope_filter: Some(turn_scope.to_resource_scope()),
+            process_id_filter: Some(process_id_from_turn_run_id(run_id)),
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim agent process")
+        .pop()
+        .expect("claimed agent process");
+    store
+        .fail_process(FailProcessRequest {
+            process_id: process_id_from_turn_run_id(run_id),
+            worker_id: claim.worker_id,
+            lease_token: claim.lease_token,
+            failure: SanitizedFailure::new("runtime_test_failure").expect("failure"),
+            checkpoint_ref,
+            metadata: None,
+        })
+        .await
+        .expect("fail agent process");
+}
+
+#[tokio::test]
+async fn resume_rejects_a_running_claim_without_clearing_its_lease() {
+    use ironclaw_processes::{
+        ClaimProcessesRequest, ProcessKind, ProcessRuntimePort, ProcessTransitionPort,
+        ProcessWorkerId, in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let actor = TurnActor::new(UserId::new("running-resume-user").expect("user"));
+    let run_id = TurnRunId::new();
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        run_id,
+        TurnId::new(),
+        None,
+    )
+    .await;
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("running-resume-worker"),
+            scope_filter: Some(turn_scope.to_resource_scope()),
+            process_id_filter: Some(process_id_from_turn_run_id(run_id)),
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim running turn")
+        .pop()
+        .expect("running turn claim");
+
+    let error = runtime
+        .resume_turn(crate::ResumeTurnRequest {
+            scope: turn_scope.clone(),
+            actor,
+            run_id,
+            gate_resolution_ref: GateRef::new("gate:stale-resume").expect("gate"),
+            source_binding_ref: SourceBindingRef::new("source:stale-resume").expect("source"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:stale-resume")
+                .expect("reply"),
+            idempotency_key: IdempotencyKey::new("stale-resume").expect("idempotency"),
+            precondition: crate::ResumeTurnPrecondition::default(),
+            resume_disposition: None,
+        })
+        .await
+        .expect_err("a stale resume must not requeue running work");
+    assert!(matches!(
+        error,
+        crate::TurnError::InvalidTransition {
+            from: TurnStatus::Running,
+            to: TurnStatus::Queued
+        }
+    ));
+
+    let snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: turn_scope.to_resource_scope(),
+            process_id: process_id_from_turn_run_id(run_id),
+        })
+        .await
+        .expect("load running turn after stale resume");
+    assert_eq!(snapshot.status, ProcessLifecycleStatus::Running);
+    assert_eq!(
+        snapshot.lease.as_ref().map(|lease| &lease.lease_token),
+        Some(&claim.lease_token)
+    );
+}
+
+#[tokio::test]
+async fn child_submission_persists_computed_lineage_and_is_idempotent() {
+    use ironclaw_processes::{
+        ProcessJournalSource, ProcessKind, ProcessRuntimePort, ProcessSubmissionPort,
+        SubmitProcessRequest, in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let parent_scope = scope();
+    let child_scope = TurnScope::new(
+        parent_scope.tenant_id.clone(),
+        parent_scope.agent_id.clone(),
+        parent_scope.project_id.clone(),
+        ThreadId::new("thread-process-journal-child").expect("child thread"),
+    );
+    let actor = TurnActor::new(UserId::new("child-actor").expect("child actor"));
+    let parent_run_id = TurnRunId::new();
+    let parent_process_id = process_id_from_turn_run_id(parent_run_id);
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: parent_process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: parent_scope.to_resource_scope(),
+            exclusive_within_scope: true,
+            operation_id: None,
+            owner_user_id: Some(actor.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::json!({
+                "agent_turn": agent_turn_metadata(actor.clone(), TurnId::new(), 2)
+            }),
+        })
+        .await
+        .expect("submit parent");
+
+    let child_run_id = TurnRunId::new();
+    let request = child_request(
+        parent_scope,
+        parent_run_id,
+        child_scope.clone(),
+        actor.clone(),
+        child_run_id,
+        "child-submit-idempotency",
+    );
+    let resolver = InMemoryRunProfileResolver::default();
+    let first = runtime
+        .submit_child_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .expect("submit child");
+    let replay = runtime
+        .submit_child_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .expect("replay child");
+    assert_eq!(first, replay);
+
+    let snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: child_scope.to_resource_scope(),
+            process_id: process_id_from_turn_run_id(child_run_id),
+        })
+        .await
+        .expect("child snapshot");
+    assert_eq!(snapshot.parent_process_id, Some(parent_process_id));
+    assert_eq!(snapshot.root_process_id, Some(parent_process_id));
+    let metadata = agent_turn_metadata_from_process_snapshot(&snapshot).expect("child metadata");
+    assert_eq!(metadata.subagent_depth, 3);
+    assert_eq!(metadata.spawn_tree_descendant_cap, Some(8));
+    assert_eq!(metadata.actor, Some(actor));
+
+    let children = store
+        .process_snapshots(&child_scope.to_resource_scope())
+        .await
+        .expect("child snapshots");
+    assert_eq!(
+        children.len(),
+        1,
+        "idempotent replay must not duplicate child"
+    );
+}
+
+#[tokio::test]
+async fn child_submission_rejects_depth_overflow_without_persisting_a_child() {
+    use ironclaw_processes::{
+        ProcessKind, ProcessRuntimePort, ProcessSubmissionPort, SubmitProcessRequest,
+        in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let parent_scope = scope();
+    let child_scope = TurnScope::new(
+        parent_scope.tenant_id.clone(),
+        parent_scope.agent_id.clone(),
+        parent_scope.project_id.clone(),
+        ThreadId::new("thread-overflow-child").expect("child thread"),
+    );
+    let actor = TurnActor::new(UserId::new("overflow-actor").expect("overflow actor"));
+    let parent_run_id = TurnRunId::new();
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: process_id_from_turn_run_id(parent_run_id),
+            process_kind: ProcessKind::AgentTurn,
+            scope: parent_scope.to_resource_scope(),
+            exclusive_within_scope: true,
+            operation_id: None,
+            owner_user_id: Some(actor.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::json!({
+                "agent_turn": agent_turn_metadata(actor.clone(), TurnId::new(), u32::MAX)
+            }),
+        })
+        .await
+        .expect("submit parent");
+
+    let child_run_id = TurnRunId::new();
+    let error = runtime
+        .submit_child_turn(
+            child_request(
+                parent_scope,
+                parent_run_id,
+                child_scope.clone(),
+                actor,
+                child_run_id,
+                "child-depth-overflow",
+            ),
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .expect_err("overflow must reject child");
+    assert!(matches!(
+        error,
+        TurnError::InvalidRequest { reason } if reason.contains("depth would overflow")
+    ));
+    assert!(
+        store
+            .process_snapshots(&child_scope.to_resource_scope())
+            .await
+            .expect("child snapshots")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn retry_rejects_wrong_actor_and_non_terminal_runs_without_creating_processes() {
+    use ironclaw_processes::{
+        ProcessRuntimePort, ProcessSnapshotSource, in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let actor = TurnActor::new(UserId::new("retry-owner").expect("retry owner"));
+    let run_id = TurnRunId::new();
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        run_id,
+        TurnId::new(),
+        None,
+    )
+    .await;
+
+    let request = RetryTurnRequest {
+        scope: turn_scope.clone(),
+        actor: TurnActor::new(UserId::new("retry-intruder").expect("retry intruder")),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("retry-wrong-source").expect("source"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-wrong-reply").expect("reply"),
+        idempotency_key: IdempotencyKey::new("retry-wrong-actor").expect("idempotency"),
+    };
+    assert!(matches!(
+        runtime.retry_turn(request).await,
+        Err(TurnError::Unauthorized)
+    ));
+
+    let request = RetryTurnRequest {
+        scope: turn_scope.clone(),
+        actor,
+        run_id,
+        source_binding_ref: SourceBindingRef::new("retry-queued-source").expect("source"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-queued-reply").expect("reply"),
+        idempotency_key: IdempotencyKey::new("retry-queued").expect("idempotency"),
+    };
+    assert!(matches!(
+        runtime.retry_turn(request).await,
+        Err(TurnError::RunNotRetryable { run_id: rejected }) if rejected == run_id
+    ));
+    assert_eq!(
+        store
+            .process_snapshots(&turn_scope.to_resource_scope())
+            .await
+            .expect("snapshots")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn retry_rejects_superseded_runs_and_missing_checkpoint_payloads() {
+    use ironclaw_processes::{
+        ProcessCheckpointRef, ProcessRuntimePort, ProcessSnapshotSource,
+        in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let actor = TurnActor::new(UserId::new("retry-owner").expect("retry owner"));
+    let turn_id = TurnId::new();
+    let original_run_id = TurnRunId::new();
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        original_run_id,
+        turn_id,
+        None,
+    )
+    .await;
+    fail_agent_process(store.as_ref(), &turn_scope, original_run_id, None).await;
+
+    let newer_run_id = TurnRunId::new();
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        newer_run_id,
+        turn_id,
+        None,
+    )
+    .await;
+    let superseded = RetryTurnRequest {
+        scope: turn_scope.clone(),
+        actor: actor.clone(),
+        run_id: original_run_id,
+        source_binding_ref: SourceBindingRef::new("retry-superseded-source").expect("source"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-superseded-reply")
+            .expect("reply"),
+        idempotency_key: IdempotencyKey::new("retry-superseded").expect("idempotency"),
+    };
+    assert!(matches!(
+        runtime.retry_turn(superseded).await,
+        Err(TurnError::RunNotRetryable { run_id }) if run_id == original_run_id
+    ));
+
+    fail_agent_process(store.as_ref(), &turn_scope, newer_run_id, None).await;
+    let missing_checkpoint_run_id = TurnRunId::new();
+    let missing_checkpoint_ref =
+        ProcessCheckpointRef::from_trusted(TurnCheckpointId::new().as_uuid().to_string());
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        missing_checkpoint_run_id,
+        TurnId::new(),
+        Some(missing_checkpoint_ref.clone()),
+    )
+    .await;
+    fail_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        missing_checkpoint_run_id,
+        Some(missing_checkpoint_ref),
+    )
+    .await;
+    let missing_checkpoint = RetryTurnRequest {
+        scope: turn_scope.clone(),
+        actor,
+        run_id: missing_checkpoint_run_id,
+        source_binding_ref: SourceBindingRef::new("retry-missing-source").expect("source"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-missing-reply").expect("reply"),
+        idempotency_key: IdempotencyKey::new("retry-missing-checkpoint").expect("idempotency"),
+    };
+    let error = runtime
+        .retry_turn(missing_checkpoint)
+        .await
+        .expect_err("missing checkpoint payload must reject retry");
+    assert!(
+        matches!(
+            &error,
+            TurnError::RunNotRetryable { run_id } if *run_id == missing_checkpoint_run_id
+        ),
+        "unexpected retry error: {error:?}"
+    );
+    assert_eq!(
+        store
+            .process_snapshots(&turn_scope.to_resource_scope())
+            .await
+            .expect("snapshots")
+            .len(),
+        3,
+        "rejected retries must not create another process"
+    );
 }
 
 #[tokio::test]
@@ -380,6 +895,8 @@ fn claimed_turn_run_projects_to_process_claim() {
     let claimed = ClaimedTurnRun {
         state: state.clone(),
         resolved_run_profile: profile().resolved,
+        subagent_depth: 3,
+        spawn_tree_descendant_cap: Some(17),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
@@ -394,6 +911,14 @@ fn claimed_turn_run_projects_to_process_claim() {
     assert_eq!(
         process.state.metadata["agent_turn"]["turn_id"],
         json!(state.turn_id)
+    );
+    assert_eq!(
+        process.state.metadata["agent_turn"]["subagent_depth"],
+        json!(3)
+    );
+    assert_eq!(
+        process.state.metadata["agent_turn"]["spawn_tree_descendant_cap"],
+        json!(17)
     );
 }
 
@@ -427,6 +952,8 @@ fn claimed_process_round_trips_to_turn_executor_view() {
     let claimed = ClaimedTurnRun {
         state: state.clone(),
         resolved_run_profile: profile().resolved,
+        subagent_depth: 4,
+        spawn_tree_descendant_cap: Some(23),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
@@ -441,6 +968,8 @@ fn claimed_process_round_trips_to_turn_executor_view() {
         round_trip.resolved_run_profile,
         claimed.resolved_run_profile
     );
+    assert_eq!(round_trip.subagent_depth, 4);
+    assert_eq!(round_trip.spawn_tree_descendant_cap, Some(23));
 }
 
 #[tokio::test]

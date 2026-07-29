@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use chrono::Utc;
-use ironclaw_filesystem::{FileType, FilesystemError, Page, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     InvocationId, ProcessId, ResourceScope, ScopedPath, Timestamp, TurnActor, TurnRunId, TurnScope,
 };
@@ -75,12 +75,13 @@ where
         imported = imported.saturating_add(usize::from(!was_present));
     }
 
+    let checkpoint_states = legacy_checkpoint_state_records(filesystem).await?;
     for checkpoint in collections
         .get("loop_checkpoints")
         .map(Vec::as_slice)
         .unwrap_or(&[])
     {
-        if let Some(checkpoint) = legacy_loop_checkpoint(checkpoint)? {
+        if let Some(checkpoint) = legacy_loop_checkpoint(checkpoint, &checkpoint_states)? {
             state.import_deployed_checkpoint(checkpoint);
         }
     }
@@ -153,12 +154,12 @@ where
     {
         return Ok(Vec::new());
     }
+    // Legacy import is an explicit one-time migration. It must enumerate the
+    // complete deployed collection: the bounded directory API silently
+    // truncates at its limit and would make the initialization sentinel
+    // permanent after importing only a prefix.
     let entries = match filesystem
-        .list_dir_bounded(
-            &ResourceScope::system(),
-            &directory,
-            Page::MAX_LIMIT as usize,
-        )
+        .list_dir(&ResourceScope::system(), &directory)
         .await
     {
         Ok(entries) => entries,
@@ -390,20 +391,35 @@ fn legacy_turn_lease(
 
 fn legacy_loop_checkpoint(
     value: &Value,
+    checkpoint_states: &HashMap<String, Value>,
 ) -> Result<Option<ProcessCheckpointRecord>, ProcessJournalStoreError> {
-    let Some(payload) = value.get("payload").filter(|payload| !payload.is_null()) else {
-        return Ok(None);
+    let state_ref = required_string(value, "state_ref")?;
+    let payload = match value.get("payload").filter(|payload| !payload.is_null()) {
+        Some(payload) => serde_json::from_value(payload.clone()).map_err(deserialization)?,
+        None => {
+            let stored = checkpoint_states.get(&state_ref).ok_or_else(|| {
+                invalid_legacy(format!(
+                    "legacy loop checkpoint {state_ref} has no checkpoint-state payload"
+                ))
+            })?;
+            validate_checkpoint_state_metadata(value, stored)?;
+            let payload_hex = required_string(stored, "payload_hex")?;
+            hex::decode(payload_hex).map_err(|error| {
+                invalid_legacy(format!(
+                    "legacy checkpoint-state payload {state_ref} is not valid hex: {error}"
+                ))
+            })?
+        }
     };
     let run_id: TurnRunId = required(value, "run_id")?;
     let turn_scope: TurnScope = required(value, "scope")?;
     let mut scope = turn_scope.to_resource_scope();
     scope.invocation_id = InvocationId::from_uuid(run_id.as_uuid());
-    let payload: Vec<u8> = serde_json::from_value(payload.clone()).map_err(deserialization)?;
     Ok(Some(ProcessCheckpointRecord {
         checkpoint_id: ProcessCheckpointId::from_trusted(required_string(value, "checkpoint_id")?),
         process_id: ProcessId::from_uuid(run_id.as_uuid()),
         scope,
-        state_ref: ProcessCheckpointRef::from_trusted(required_string(value, "state_ref")?),
+        state_ref: ProcessCheckpointRef::from_trusted(state_ref),
         payload: ProcessCheckpointPayload::new(payload)
             .map_err(|error| invalid_legacy(error.to_string()))?,
         created_at: required(value, "created_at")?,
@@ -415,6 +431,28 @@ fn legacy_loop_checkpoint(
             "gate_ref": value.get("gate_ref").cloned().unwrap_or(Value::Null),
         }),
     }))
+}
+
+fn validate_checkpoint_state_metadata(
+    checkpoint: &Value,
+    stored: &Value,
+) -> Result<(), ProcessJournalStoreError> {
+    for field in [
+        "state_ref",
+        "scope",
+        "turn_id",
+        "run_id",
+        "schema_id",
+        "schema_version",
+        "kind",
+    ] {
+        if checkpoint.get(field) != stored.get(field) {
+            return Err(invalid_legacy(format!(
+                "legacy checkpoint-state metadata mismatch for {field}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn legacy_tree_reservation(
@@ -445,23 +483,57 @@ fn legacy_tree_reservation(
     }))
 }
 
-async fn legacy_run_state_records<F>(
+pub(super) async fn legacy_run_state_records<F>(
     filesystem: &ScopedFilesystem<F>,
 ) -> Result<Vec<Value>, ProcessJournalStoreError>
 where
     F: RootFilesystem,
 {
-    let root = scoped("/run-state")?;
-    if filesystem.resolve(&ResourceScope::system(), &root).is_err() {
-        return Ok(Vec::new());
-    }
-    let mut pending = VecDeque::from([(root, 0_u8, false)]);
-    let mut records = Vec::new();
-    while let Some((path, depth, in_runs)) = pending.pop_front() {
-        let entries = match filesystem
-            .list_dir_bounded(&ResourceScope::system(), &path, Page::MAX_LIMIT as usize)
-            .await
+    legacy_authority_records(filesystem, "run-state", |path| {
+        path.split('/').any(|segment| segment == "runs")
+    })
+    .await
+}
+
+async fn legacy_checkpoint_state_records<F>(
+    filesystem: &ScopedFilesystem<F>,
+) -> Result<HashMap<String, Value>, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    let records = legacy_authority_records(filesystem, "checkpoint-state", |_| true).await?;
+    let mut by_state_ref = HashMap::new();
+    for record in records {
+        let state_ref = required_string(&record, "state_ref")?;
+        if let Some(previous) = by_state_ref.insert(state_ref.clone(), record.clone())
+            && previous != record
         {
+            return Err(invalid_legacy(format!(
+                "conflicting legacy checkpoint-state record {state_ref}"
+            )));
+        }
+    }
+    Ok(by_state_ref)
+}
+
+async fn legacy_authority_records<F>(
+    filesystem: &ScopedFilesystem<F>,
+    authority: &str,
+    include_file: impl Fn(&str) -> bool,
+) -> Result<Vec<Value>, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    let mut pending = VecDeque::new();
+    for raw_root in [format!("/{authority}"), "/legacy-tenants".to_string()] {
+        let root = scoped(&raw_root)?;
+        if filesystem.resolve(&ResourceScope::system(), &root).is_ok() {
+            pending.push_back(root);
+        }
+    }
+    let mut records = Vec::new();
+    while let Some(path) = pending.pop_front() {
+        let entries = match filesystem.list_dir(&ResourceScope::system(), &path).await {
             Ok(entries) => entries,
             Err(FilesystemError::NotFound { .. }) => continue,
             Err(error) => return Err(error.into()),
@@ -473,10 +545,14 @@ where
                 entry.name
             ))?;
             match entry.file_type {
-                FileType::Directory if depth < 8 => {
-                    pending.push_back((child, depth.saturating_add(1), entry.name == "runs"));
-                }
-                FileType::File if in_runs => {
+                FileType::Directory => pending.push_back(child),
+                FileType::File
+                    if child
+                        .as_str()
+                        .split('/')
+                        .any(|segment| segment == authority)
+                        && include_file(child.as_str()) =>
+                {
                     if let Some(versioned) = get_optional(filesystem, &child).await? {
                         records.push(decode(&versioned.entry.body)?);
                     }
@@ -529,7 +605,7 @@ fn legacy_capability_snapshot(
     };
     Ok(JournaledProcessSnapshot {
         process_id,
-        process_kind: ProcessKind::CapabilityInvocation,
+        process_kind: ProcessKind::CapabilityInvocationState,
         scope: scope.clone(),
         status,
         suspension,
@@ -597,11 +673,7 @@ fn import_legacy_idempotency(
                 state.import_deployed_control_idempotency("resume", &operation_id, snapshot);
             }
             "Cancel" | "cancel" => {
-                state.import_deployed_control_idempotency(
-                    "request_cancel",
-                    &operation_id,
-                    snapshot,
-                );
+                state.import_deployed_control_idempotency("cancel", &operation_id, snapshot);
             }
             _ => {}
         }
@@ -735,4 +807,51 @@ fn deserialization(error: serde_json::Error) -> ProcessJournalStoreError {
 
 fn invalid_legacy(message: impl Into<String>) -> ProcessJournalStoreError {
     ProcessJournalStoreError::Deserialization(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_row_collection_imports_beyond_one_backend_page() {
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").expect("turns alias"),
+            VirtualPath::new("/engine/turns").expect("turns target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("migration mount view");
+        let filesystem = ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), view);
+        for index in 0..=ironclaw_filesystem::Page::MAX_LIMIT {
+            filesystem
+                .put(
+                    &ResourceScope::system(),
+                    &scoped(&format!("/turns/rows/v1/runs/{index:04}.json"))
+                        .expect("legacy row path"),
+                    Entry::bytes(
+                        serde_json::to_vec(&json!({
+                            "journal_seq": index + 1,
+                            "value": {"row": index}
+                        }))
+                        .expect("serialize legacy row"),
+                    ),
+                    CasExpectation::Absent,
+                )
+                .await
+                .expect("seed legacy row");
+        }
+
+        let rows = legacy_row_collection(&filesystem, "runs")
+            .await
+            .expect("enumerate complete legacy collection");
+        assert_eq!(
+            rows.len(),
+            ironclaw_filesystem::Page::MAX_LIMIT as usize + 1
+        );
+    }
 }
