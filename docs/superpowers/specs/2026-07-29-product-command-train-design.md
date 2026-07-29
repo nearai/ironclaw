@@ -62,7 +62,8 @@ metadata, `GET/POST` WebUI command routes, and the composer slash menu.
 | 4 | Visibility | **Role-filtered everywhere**: WebUI inventory filtered by caller role; Slack natively registers only user-facing commands; channel help text lists only what the actor may run. Admission denial is the backstop — hiding is never the control. |
 | 5 | Train order | **Gate → Palette → Slack** (PR-1 → PR-2 → PR-3, stacked). No window where the browser or a manifest exposes ungated tenant controls. |
 | 6 | WebUI results | **Ephemeral** system-notice bubble (Slack-like, #6678's shape). Explicitly ephemeral per the gateway-events rule; not a durable timeline event. Durable rendering is a future decision. |
-| 7 | Bundled manifests | Declare `["model", "status"]` (in PR-1, same PR as gating). Lifecycle commands stay undeclared on bundled channels; admins manage extensions from the WebUI. Third-party manifests may declare them; admission gates. The `progress` registry alias stays (typed path, Telegram) but is not Slack-registered and not declared. |
+| 7 | Bundled manifests | Declare `["model", "status"]` (in PR-1, same PR as gating). Lifecycle commands stay undeclared on bundled channels; admins manage extensions from the WebUI. Third-party manifests may declare them; admission gates. |
+| 8 | Aliases | **Deleted in PR-1.** `progress` is the registry's only alias and is inert everywhere (declarations are exact tokens; nothing declares it). The whole mechanism goes with it: `aliases` descriptor field, alias matching branches, the aliases-never-implicitly-enabled validation rule and its pins (removed deliberately with the rule they pin), and #6678's frontend alias matching. Resurrect from git if a real synonym need appears. |
 
 ## PR-1 — Role-gated command admission
 
@@ -77,6 +78,11 @@ metadata, `GET/POST` WebUI command routes, and the composer slash menu.
   **execution** audience, action-aware: `Model{Status}` → User,
   `Model{Set|SetProvider}` → Admin, `Status` → User, `Lifecycle{..}` → Admin.
   Lives beside the parse specs so one file owns both tables.
+- Alias mechanism deleted (Decision 8): the `progress` alias, the `aliases`
+  descriptor field, and every alias branch in name matching
+  (`command_spec_for_name`, `validate_declared_product_command`,
+  `ProductCommand::descriptor`) are removed, along with the
+  alias-non-enablement contract pins.
 
 ### Role resolution port
 
@@ -155,7 +161,8 @@ PR-1's `audience`), WebUI backend, frontend palette.
 ### Frontend (`crates/ironclaw_webui/frontend/src/pages/chat/`)
 
 Server-inventory-driven throughout (no hardcoded names): keep the PR's
-`chat-commands.ts` matcher/menu/renderer and `useChatCommands`. Composer menu
+`chat-commands.ts` matcher/menu/renderer and `useChatCommands`, simplified
+by Decision 8 (no alias matching). Composer menu
 upgraded to Slack quality: anchored popover above the input; rows render
 `/name` — title — description with the matched prefix highlighted; usage hint
 for the selected row; ↑/↓ + Enter/Tab complete + Esc dismiss; hover/click;
