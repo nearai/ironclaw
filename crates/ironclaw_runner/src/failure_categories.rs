@@ -13,6 +13,9 @@ pub const MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY: &str = "model_spend_budget_exha
 /// This must not be presented as a provider balance or configured-budget outcome.
 pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
 
+/// Failure category for assistant output that could not be durably committed.
+pub const TRANSCRIPT_WRITE_FAILED_CATEGORY: &str = "transcript_write_failed";
+
 /// Model-stage failures that are PERMANENT for an identical retry.
 ///
 /// These four kinds previously returned no category and fell through to

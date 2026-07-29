@@ -134,6 +134,25 @@ Rules:
 - approval-blocked turns persist enough fingerprint metadata to resume without raw input leakage;
 - cancellation requests propagate to running process/capability work when possible;
 - turn failures use stable, redacted error categories.
+- recovery text has two distinct channels: a model-visible observation may be
+  appended only when another model call is safe and possible, while a
+  user-visible terminal explanation is host-authored from a typed failure
+  category and must not imply that the failed model saw it;
+- model authorization failures do not blindly retry the same rejected route;
+  when no already-authorized fallback route exists, the run fails with a
+  durable credential/account remediation;
+- transcript finalization failure ends the run before another model call or
+  capability dispatch, and the terminal projection preserves only the bounded
+  host-authored cause and remediation, never raw unpersisted reply content or
+  backend diagnostics.
+
+These terminal recovery rules are pinned through the production caller chain by
+`tests/integration/cancel.rs` and `tests/integration/model_recovery.rs`:
+
+```bash
+cargo test --test reborn_integration_cancel
+cargo test --test reborn_integration_model_recovery
+```
 
 ---
 

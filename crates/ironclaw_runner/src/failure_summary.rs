@@ -1,6 +1,7 @@
 use crate::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
     MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 use ironclaw_turns::ModelInvalidOutputDetailReason;
 
@@ -110,9 +111,6 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         }
         "checkpoint_unavailable" => {
             "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable."
-        }
-        "transcript_write_failed" => {
-            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails."
         }
         "driver_bug" => {
             "The agent runtime reported an internal error. Retry the run, and contact support if it happens again."
@@ -249,6 +247,9 @@ pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static st
         BUDGET_ACCOUNTING_FAILED_CATEGORY => Some(
             "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
         ),
+        TRANSCRIPT_WRITE_FAILED_CATEGORY => Some(
+            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        ),
         _ => None,
     }
 }
@@ -260,7 +261,8 @@ fn unknown_failure_summary() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        reborn_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+        TRANSCRIPT_WRITE_FAILED_CATEGORY, reborn_failure_summary_for_category,
+        reborn_failure_summary_for_category_and_detail,
     };
     use ironclaw_turns::ModelInvalidOutputDetailReason;
 
@@ -368,7 +370,7 @@ mod tests {
             "invalid_model_output",
             "checkpoint_rejected",
             "checkpoint_unavailable",
-            "transcript_write_failed",
+            TRANSCRIPT_WRITE_FAILED_CATEGORY,
             "driver_bug",
             "policy_denied",
             "compaction_unavailable",

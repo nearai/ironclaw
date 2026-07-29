@@ -185,6 +185,8 @@ pub struct RebornIntegrationHarnessBuilder {
     lease_recovery_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_transcript_finalize: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -327,6 +329,17 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Record provider calls while otherwise delegating normal scripted
+    /// playback. Used by terminal-path tests that need to prove no second model
+    /// call happens after a non-model persistence boundary fails.
+    pub fn record_model_calls_for_test(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::InvalidOutput,
+            0,
+        ));
+        self
+    }
+
     /// Park this harness's tool/capability dispatch until released
     /// (tool-path analog of `park_model`, issue #5476 lease-wedge coverage).
     /// Only the `BuiltinHttpTools` backend wires this today. See
@@ -358,6 +371,13 @@ impl RebornIntegrationHarnessBuilder {
     /// this harness so terminal recovery can be reached without a long script.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject the runtime's final assistant transcript write while retaining
+    /// the real scheduler, loop host, turn store, and thread read path.
+    pub fn fail_transcript_finalize_for_test(mut self) -> Self {
+        self.fail_transcript_finalize = true;
         self
     }
 
@@ -660,6 +680,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
         }
+        if self.fail_transcript_finalize {
+            group_builder = group_builder.fail_transcript_finalize_for_test();
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -775,6 +798,7 @@ impl RebornIntegrationHarness {
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             planned_default_iteration_limit: None,
+            fail_transcript_finalize: false,
         }
     }
 

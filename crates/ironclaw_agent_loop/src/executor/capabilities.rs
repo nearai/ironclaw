@@ -967,6 +967,11 @@ impl CapabilityStage {
                         detail: "ModelErrorObservation on capability error",
                     });
                 }
+                RecoveryOutcome::UserVisibleTerminal { .. } => {
+                    return Err(AgentLoopExecutorError::PlannerContract {
+                        detail: "UserVisibleTerminal on capability error",
+                    });
+                }
                 RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
                     append_blocked_capability_error_result(

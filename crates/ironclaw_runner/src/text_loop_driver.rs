@@ -13,11 +13,14 @@ use ironclaw_turns::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
         AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopModelRequest,
-        LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
+        LoopPromptBundleRequest, LoopSafeSummary, ParentLoopOutput, PromptMode,
     },
 };
 
-use crate::model_failure_mapping::model_stage_failure_category;
+use crate::{
+    failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
+    model_failure_mapping::model_stage_failure_category,
+};
 
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
 /// Stage name for the model call site; matches the string used in `map_host_error` call sites.
@@ -173,12 +176,19 @@ fn context_limit_hint(context_limit: usize) -> u32 {
 }
 
 fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDriverError {
+    let safe_summary_for_log = if error.kind == AgentLoopHostErrorKind::TranscriptWriteFailed {
+        LoopSafeSummary::assistant_transcript_write_failed()
+            .as_str()
+            .to_string()
+    } else {
+        error.safe_summary.clone()
+    };
     tracing::warn!(
         stage,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
         diagnostic_ref = ?error.diagnostic_ref,
-        safe_summary = %error.safe_summary,
+        safe_summary = %safe_summary_for_log,
         "loop host port returned sanitized error"
     );
 
@@ -216,8 +226,12 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
             reason: format!("{stage}: unavailable"),
         },
         AgentLoopHostErrorKind::TranscriptWriteFailed => AgentLoopDriverError::Failed {
-            reason_kind: loop_failure_kind_name(LoopFailureKind::TranscriptWriteFailed).to_string(),
-            detail: error.detail.clone(),
+            reason_kind: TRANSCRIPT_WRITE_FAILED_CATEGORY.to_string(),
+            detail: Some(
+                LoopSafeSummary::assistant_transcript_write_failed()
+                    .as_str()
+                    .to_string(),
+            ),
         },
         AgentLoopHostErrorKind::BudgetExceeded
         | AgentLoopHostErrorKind::SpendBudgetExceeded
@@ -292,6 +306,26 @@ mod tests {
             }
         );
         assert_driver_error_hides_raw_payloads(&mapped);
+    }
+
+    #[test]
+    fn transcript_failure_drops_port_detail_and_uses_fixed_safe_cause() {
+        let mapped = map_host_error(
+            "transcript",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                "raw assistant transcript",
+            )
+            .with_detail("storage token sk-TRANSCRIPT0123456789SECRET"),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: TRANSCRIPT_WRITE_FAILED_CATEGORY.to_string(),
+                detail: Some("assistant transcript write failed".to_string()),
+            }
+        );
     }
 
     #[test]

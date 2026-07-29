@@ -114,7 +114,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // kind + reason_kind (`model_credits_exhausted` vs
         // `model_credentials_unavailable`); classifying here would lose the
         // reason_kind distinction. See
-        // `ironclaw_runner::model_failure_mapping::model_stage_failure_category`.
+        // `ironclaw_runner::model_failure_mapping::host_stage_failure_category`.
         AgentLoopHostErrorKind::CredentialUnavailable => None,
         // Model-fixable by rebuild: the request was built against a stale
         // surface or prompt bundle (surface refreshed mid-iteration, host
@@ -224,6 +224,27 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         reason_kind: error.reason_kind,
         diagnostic_ref: error.diagnostic_ref,
         detail,
+    }
+}
+
+/// Preserve the typed transcript-write cause without exposing backend detail.
+///
+/// Another model output would cross the same failed durability boundary, so
+/// remediation is derived from the terminal category rather than model
+/// inference.
+pub(super) fn transcript_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return AgentLoopExecutorError::Cancelled;
+    }
+    AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+        stage: HostStage::Transcript,
+        kind: error.kind,
+        safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+        reason_kind: error.reason_kind,
+        diagnostic_ref: error.diagnostic_ref,
+        // Fail closed even if a non-production host supplied detail: transcript
+        // diagnostics can contain raw assistant text or storage credentials.
+        detail: None,
     }
 }
 

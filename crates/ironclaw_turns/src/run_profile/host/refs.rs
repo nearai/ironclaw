@@ -203,6 +203,15 @@ impl LoopSafeSummary {
         Self("model gateway timed out".to_string())
     }
 
+    /// Fixed host-authored cause for a failed assistant transcript write.
+    ///
+    /// This carries no backend detail: transcript errors may contain raw reply
+    /// text or credentials and occur after the durability boundary needed for
+    /// another model call.
+    pub fn assistant_transcript_write_failed() -> Self {
+        Self("assistant transcript write failed".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

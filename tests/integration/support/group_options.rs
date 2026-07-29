@@ -179,6 +179,14 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Reject final assistant transcript writes at the runtime port while
+    /// leaving the real filesystem service in place for inbound messages and
+    /// read-back assertions.
+    pub fn fail_transcript_finalize_for_test(mut self) -> Self {
+        self.fail_transcript_finalize = true;
+        self
+    }
+
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's

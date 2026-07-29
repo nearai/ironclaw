@@ -26,7 +26,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::model_failure_mapping::model_stage_failure_category;
+use crate::model_failure_mapping::host_stage_failure_category;
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
@@ -326,9 +326,7 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
-            if let Some(category) =
-                model_stage_failure_category(stage == HostStage::Model, kind, reason_kind)
-            {
+            if let Some(category) = host_stage_failure_category(stage, kind, reason_kind) {
                 // Prefer the secret-scrubbed model-visible detail; fall back to
                 // the bounded safe summary so the explainer still gets the real
                 // cause rather than only the category. Fail-closed backstop:
@@ -588,6 +586,27 @@ mod tests {
                 reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
                 // No upstream detail: the bounded safe summary is the fallback.
                 detail: Some("model credentials are unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn executor_transcript_diagnostics_map_to_terminal_transcript_category() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Transcript,
+            kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+            safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
+                    .to_string(),
+                detail: Some("assistant transcript write failed".to_string()),
             }
         );
     }

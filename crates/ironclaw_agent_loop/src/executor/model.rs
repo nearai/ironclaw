@@ -256,7 +256,11 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 detail: "ToolErrorResult on model error",
                             });
                         }
-                        RecoveryOutcome::Abort {
+                        RecoveryOutcome::UserVisibleTerminal {
+                            recovery,
+                            failure_kind,
+                        }
+                        | RecoveryOutcome::Abort {
                             recovery,
                             failure_kind,
                         } => {

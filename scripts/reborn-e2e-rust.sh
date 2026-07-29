@@ -34,6 +34,11 @@ run_lib_test() {
 
 run_architecture() {
   run_test ironclaw_architecture reborn_dependency_boundaries
+  # Pins docs/reborn/contracts/turns-agent-loop.md: terminal model
+  # authorization and transcript persistence failures remain durable,
+  # actionable, redacted, and never issue duplicate model/tool side effects.
+  run_test ironclaw_reborn_integration_tests reborn_integration_cancel
+  run_test ironclaw_reborn_integration_tests reborn_integration_model_recovery
   # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
   # routes from re-entering the Reborn context.
   run_test ironclaw_architecture telegram_extension_gates

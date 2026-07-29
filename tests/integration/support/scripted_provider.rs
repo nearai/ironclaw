@@ -421,11 +421,19 @@ pub enum ErrLlmKind {
 /// non-retryable-error mapping through to `TurnStatus::Failed`.
 pub struct ErrLlm {
     kind: ErrLlmKind,
+    calls: ModelProviderCallProbe,
 }
 
 impl ErrLlm {
-    pub fn new(kind: ErrLlmKind) -> Self {
-        Self { kind }
+    pub fn new(kind: ErrLlmKind) -> (Self, ModelProviderCallProbe) {
+        let calls = ModelProviderCallProbe::default();
+        (
+            Self {
+                kind,
+                calls: calls.clone(),
+            },
+            calls,
+        )
     }
 
     fn make_error(&self) -> LlmError {
@@ -448,14 +456,16 @@ impl LlmProvider for ErrLlm {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
         Err(self.make_error())
     }
 
     async fn complete_with_tools(
         &self,
-        _request: ToolCompletionRequest,
+        request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
         Err(self.make_error())
     }
 }

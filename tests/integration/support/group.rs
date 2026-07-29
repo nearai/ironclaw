@@ -126,7 +126,7 @@ use super::scripted_provider::{
     ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
     SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
 };
-use super::session_thread::RebornThreadHarness;
+use super::session_thread::{FailingFinalizedAssistantThreadService, RebornThreadHarness};
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
 
@@ -450,6 +450,7 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             planned_default_iteration_limit: None,
+            fail_transcript_finalize: false,
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
@@ -745,6 +746,8 @@ pub struct RebornIntegrationGroupBuilder {
     lease_recovery_interval_override: Option<Duration>,
     /// Test-only override for the canonical loop's default iteration limit.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_transcript_finalize: bool,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -985,6 +988,14 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),
             );
+        let runtime_thread_service: Arc<dyn SessionThreadService> = if self.fail_transcript_finalize
+        {
+            Arc::new(FailingFinalizedAssistantThreadService::new(
+                group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+            ))
+        } else {
+            group_thread_harness.service.clone() as Arc<dyn SessionThreadService>
+        };
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the
@@ -1053,7 +1064,7 @@ impl RebornIntegrationGroupBuilder {
             };
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
-            thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+            thread_service: runtime_thread_service,
             thread_scope: group_thread_scope,
             model_gateway,
             checkpoint_state_store: checkpoint_state_store.clone(),
@@ -1405,7 +1416,10 @@ impl<'g> RebornThreadBuilder<'g> {
                 );
                 (Arc::new(provider), Some(probe))
             }
-            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
+            ThreadModelMode::Failing(kind) => {
+                let (provider, probe) = ErrLlm::new(kind);
+                (Arc::new(provider), Some(probe))
+            }
             ThreadModelMode::Normal => (scripted_llm.clone(), None),
         };
         let session = create_session_manager(SessionConfig {

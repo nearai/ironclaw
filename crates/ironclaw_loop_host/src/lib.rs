@@ -2258,13 +2258,14 @@ fn context_read_error(error: SessionThreadError) -> AgentLoopHostError {
     )
 }
 
-fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
-    raw_agent_loop_host_error(
-        "thread_transcript",
-        "write_transcript",
+fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
+    // Do not forward or log the backend error. This boundary may fail while
+    // handling assistant content, and backend diagnostics can contain that raw
+    // transcript or storage credentials. The typed kind plus fixed safe cause
+    // are sufficient for the terminal user projection.
+    AgentLoopHostError::new(
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "assistant transcript write failed",
-        error,
     )
 }
 
@@ -2378,6 +2379,22 @@ mod tests {
             content: content.to_string(),
             image_attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn transcript_write_error_exposes_only_the_fixed_safe_cause() {
+        let secret = concat!("sk-", "TRANSCRIPT0123456789SECRET");
+        let raw_reply = "raw assistant reply that was never persisted";
+        let mapped = transcript_write_error(SessionThreadError::Backend(format!(
+            "write rejected for {raw_reply:?} using {secret}"
+        )));
+
+        assert_eq!(mapped.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+        assert_eq!(mapped.safe_summary, "assistant transcript write failed");
+        assert_eq!(mapped.detail, None);
+        let rendered = format!("{mapped:?}");
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains(raw_reply));
     }
 
     /// CR review: `latest_user_message_text` returns the latest NON-BLANK user
