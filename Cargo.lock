@@ -3961,6 +3961,7 @@ dependencies = [
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_common",
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extensions",

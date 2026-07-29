@@ -68,18 +68,17 @@ pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
 pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> {
     // Parse through the single record entry point (the bundled assets are
     // manifest v3 documents since the first-party rewrite).
+    let root = VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
         None,
         &default_host_api_contract_registry()?,
+        Some(root.clone()),
     )?;
     let manifest = ExtensionManifest::try_from(record.manifest().clone())?;
-    Ok(ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?,
-    )?)
+    Ok(ExtensionPackage::from_manifest(manifest, root)?)
 }
 
 /// Filesystem location of the real production `web-access` extension assets

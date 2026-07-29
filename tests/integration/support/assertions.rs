@@ -452,6 +452,110 @@ impl RebornIntegrationHarness {
         Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
     }
 
+    /// Assert that at least one model request was captured and every captured
+    /// `tools` argument was empty. This is the positive boundary assertion for
+    /// an effective empty capability allow-set; unlike `assert_model_tools_excludes`,
+    /// an empty surface is the expected signal rather than a vacuous failure.
+    pub async fn assert_model_tools_empty(&self) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        if definitions.is_empty() {
+            return Err(
+                "no model requests captured; cannot prove the tool surface was empty".into(),
+            );
+        }
+        let seen: Vec<String> = definitions
+            .iter()
+            .flatten()
+            .map(|definition| definition.name.clone())
+            .collect();
+        if seen.is_empty() {
+            return Ok(());
+        }
+        Err(format!("expected an empty model tool surface; saw {seen:?}").into())
+    }
+
+    /// Assert the captured `tools` argument's definition named `name` has a
+    /// `description` field that does NOT contain `needle`, on every request
+    /// where that definition appears. Complements
+    /// [`assert_model_tools_contains`]/[`assert_model_tools_excludes`] (which
+    /// only ever check tool *names*): the bridge tool_search's own advertised
+    /// description doubles as an always-on catalog index of discoverable tool
+    /// names (see `catalog_index_tool_search_description`), so under a
+    /// narrowed capability allow-set that index text — not just tool_search's
+    /// RESULTS — must not leak a non-allowlisted tool's name.
+    ///
+    /// Errors if `name` is never found (nothing to assert the exclusion
+    /// against) — callers should pair this with `assert_model_tools_contains`.
+    pub async fn assert_model_tool_description_excludes(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let mut found = false;
+        for definition in definitions.iter().flatten() {
+            if definition.name != name {
+                continue;
+            }
+            found = true;
+            if definition.description.contains(needle) {
+                return Err(format!(
+                    "tool {name:?} description unexpectedly contains {needle:?}: {}",
+                    definition.description
+                )
+                .into());
+            }
+        }
+        if !found {
+            let seen: Vec<String> = definitions
+                .iter()
+                .flatten()
+                .map(|definition| definition.name.clone())
+                .collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`assert_model_tool_description_excludes`]: assert the
+    /// captured `tools` argument's definition named `name` has a
+    /// `description` field that DOES contain `needle`, on the last request
+    /// where that definition appears. Paired with the exclusion assertion so
+    /// a narrowed allow-set test proves the description index positively
+    /// includes the allowlisted tool — not merely that an empty/degenerate
+    /// index vacuously excludes the denied one.
+    ///
+    /// Errors if `name` is never found.
+    pub async fn assert_model_tool_description_contains(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let mut last_description: Option<String> = None;
+        for definition in definitions.iter().flatten() {
+            if definition.name != name {
+                continue;
+            }
+            last_description = Some(definition.description.clone());
+        }
+        match last_description {
+            Some(description) if description.contains(needle) => Ok(()),
+            Some(description) => Err(format!(
+                "tool {name:?} description does not contain {needle:?}: {description}"
+            )
+            .into()),
+            None => {
+                let seen: Vec<String> = definitions
+                    .iter()
+                    .flatten()
+                    .map(|definition| definition.name.clone())
+                    .collect();
+                Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
+            }
+        }
+    }
+
     /// Inverse of [`assert_model_tools_contains`]: assert NO captured `tools`
     /// argument contains a definition named `name`. Paired with the positive
     /// assertion to prove disclosure mode *replaces* the tool surface rather
@@ -480,70 +584,19 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
-    /// Harness-port-seam Change 4: assert the LATEST captured `tools` argument
-    /// carries a definition named `name` whose `description` contains
-    /// `needle` — pins `wrap_surface_disclosure`'s scoped-roots note
-    /// mutation (`HostSurfaceDisclosure::apply_to_surface_fields`), which
-    /// mutates `ProviderToolDefinition::description`/`parameters`, not tool
-    /// presence/absence.
-    pub async fn assert_model_tool_description_contains(
+    /// Collects the fully-decoded `ToolResultReferenceEnvelope` of every
+    /// `ToolResultReference` message on this thread's FULL history (not
+    /// baseline-sliced — safe only for single-turn harnesses today), in
+    /// thread order. Shared decoder for [`persisted_tool_error_summaries`]
+    /// and callers that need more than the summary text (e.g. comparing the
+    /// full envelope — `model_observation` included — across two calls, to
+    /// prove an "unknown target" outcome carries no existence-oracle signal
+    /// beyond a genuinely run-scoped id). Fail loud (never silently skip):
+    /// missing or undecodable `content` is an `Err`, not an omission that
+    /// would degrade into a misleading "not found" for the caller.
+    pub async fn persisted_tool_result_envelopes(
         &self,
-        name: &str,
-        needle: &str,
-    ) -> HarnessResult<()> {
-        let definitions = self.scripted_llm.captured_tool_definitions();
-        let Some(latest) = definitions.last() else {
-            return Err("no tool definitions captured for any request".into());
-        };
-        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
-            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
-            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
-        };
-        if !definition.description.contains(needle) {
-            return Err(format!(
-                "tool {name:?} description did not contain {needle:?}: {:?}",
-                definition.description
-            )
-            .into());
-        }
-        Ok(())
-    }
-
-    /// Inverse of [`assert_model_tool_description_contains`]: the definition
-    /// exists but its description does NOT contain `needle` — the negative
-    /// control proving the note is conditional on a confirmed host mount,
-    /// not always appended.
-    pub async fn assert_model_tool_description_excludes(
-        &self,
-        name: &str,
-        needle: &str,
-    ) -> HarnessResult<()> {
-        let definitions = self.scripted_llm.captured_tool_definitions();
-        let Some(latest) = definitions.last() else {
-            return Err("no tool definitions captured for any request".into());
-        };
-        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
-            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
-            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
-        };
-        if definition.description.contains(needle) {
-            return Err(format!(
-                "tool {name:?} description unexpectedly contained {needle:?}: {:?}",
-                definition.description
-            )
-            .into());
-        }
-        Ok(())
-    }
-
-    /// Collects the persisted `safe_summary` field of every `ToolResultReference`
-    /// message on this thread's FULL history (not baseline-sliced — safe only
-    /// for single-turn harnesses today). Shared collector for
-    /// [`assert_tool_error`], [`assert_no_tool_error`], and
-    /// [`assert_tool_error_summary_contains`]. Fail loud (never silently skip):
-    /// missing or undecodable `content` is an `Err`, not an omission that would
-    /// degrade into a misleading "not found" for the caller.
-    async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
+    ) -> HarnessResult<Vec<ironclaw_threads::ToolResultReferenceEnvelope>> {
         let history = self
             .thread_harness
             .history(self.binding.thread_id.clone())
@@ -558,7 +611,6 @@ impl RebornIntegrationHarness {
                     return Err("ToolResultReference message missing content".into());
                 };
                 serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
-                    .map(|envelope| envelope.safe_summary.as_str().to_string())
                     .map_err(|err| {
                         // Truncate the raw payload before interpolating it into
                         // the error: `content` can carry a `model_observation`
@@ -576,6 +628,19 @@ impl RebornIntegrationHarness {
                     })
             })
             .collect()
+    }
+
+    /// Collects the persisted `safe_summary` field of every `ToolResultReference`
+    /// message on this thread's FULL history. Shared collector for
+    /// [`assert_tool_error`], [`assert_no_tool_error`], and
+    /// [`assert_tool_error_summary_contains`].
+    async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
+        Ok(self
+            .persisted_tool_result_envelopes()
+            .await?
+            .into_iter()
+            .map(|envelope| envelope.safe_summary.as_str().to_string())
+            .collect())
     }
 
     /// Assert the in-memory `TurnEventSink` installed via `.with_turn_event_sink()`

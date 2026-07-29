@@ -669,7 +669,9 @@ mod tests {
         CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     };
-    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use ironclaw_trust::{
+        AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustPolicy, TrustProvenance,
+    };
     use std::{
         collections::{BTreeMap, BTreeSet},
         sync::Arc,
@@ -1633,6 +1635,107 @@ mod tests {
         assert!(
             calls.iter().all(|(_, authorized)| *authorized),
             "every discovery call must carry the staged credential; calls: {calls:?}"
+        );
+    }
+
+    /// Pins the ordering the test above assumes but never checks: activation
+    /// must run hosted-MCP discovery BEFORE `commit_activation` publishes,
+    /// because the published `AuthorityCeiling` (`extension_allowed_effects`
+    /// in `active_publication.rs`) is computed from whatever
+    /// `ExtensionPackage` publish() is handed — the DISCOVERED package if
+    /// discovery ran first, the pre-discovery SEED package if not. If
+    /// activation is ever reordered to publish before discovery (or a new
+    /// activation path publishes the seed package), an effect a live MCP
+    /// server only reveals at discovery time silently drops out of the
+    /// ceiling and every tool needing it gets denied at authorization with
+    /// no error at the publish site.
+    ///
+    /// `notion`'s bundled manifest already declares every effect
+    /// (`network`, `use_secret`, `external_write`) its discovered tools can
+    /// ever produce, so swapping seed for discovered there changes nothing
+    /// observable — it cannot discriminate this regression. `nearai` is the
+    /// only other bundled hosted-MCP package, and its static manifest
+    /// declares only `network` + `use_secret`: scripting a discovered tool
+    /// with a `destructiveHint` annotation (see
+    /// `discovered_tool_requires_external_write` in
+    /// `ironclaw_extensions::hosted_mcp_discovery`) makes the DISCOVERED
+    /// package carry `ExternalWrite` while the SEED package never does —
+    /// exactly the shape needed to fail if publish ever ran on the wrong
+    /// package.
+    #[tokio::test]
+    async fn local_dev_extension_activate_hosted_mcp_authority_ceiling_reflects_discovered_effects()
+    {
+        let discovery_script = std::sync::Arc::new(
+            crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("nearai-destructive-action")
+                .with_destructive_hint(),
+        );
+        let services = test_services(
+            "extension-tools-hosted-mcp-ceiling-owner",
+            Some(discovery_script.clone()),
+            false,
+        )
+        .await;
+
+        let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account(&services, &activate_context.resource_scope, "nearai").await;
+        // Real access-token material: discovery stages it from the secret
+        // store into the one-shot injection store for the live egress call.
+        let owner_scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &activate_context.resource_scope,
+            ironclaw_auth::AuthSurface::Api,
+        );
+        services
+            .secret_store()
+            .put(
+                owner_scope.resource.clone(),
+                SecretHandle::new("nearai-test-token").expect("handle"),
+                ironclaw_secrets::SecretMaterial::from("nearai-access-token"),
+                None,
+            )
+            .await
+            .expect("seed access-token material");
+
+        let activate = invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "nearai"}),
+        )
+        .await;
+        let activate = activate.expect("install-driven hosted MCP activation succeeds");
+        assert_eq!(activate["phase"], "active");
+
+        // Read back the published trust entry through the SAME seam
+        // authorization consumes (`ironclaw_authorization::effects_are_covered`
+        // reads `AuthorityCeiling::allowed_effects`), not an internal exposed
+        // solely for this test: `ActiveExtensionPublisher::publish` writes the
+        // ceiling through `HostTrustPolicy::mutate_with` /
+        // `AdminEntry::for_local_manifest`, and `TrustPolicy::evaluate` is the
+        // policy's own public read path back to that decision.
+        let extension_id = ExtensionId::new("nearai").expect("valid extension id");
+        let published_package = services
+            .extension_management
+            .active_extensions_for_test()
+            .snapshot()
+            .get_extension(&extension_id)
+            .cloned()
+            .expect("nearai package published after activation");
+        let trust_input = crate::extension_trust_policy_input(&published_package)
+            .expect("trust policy input derives from the published package");
+        let decision = services
+            .trust_policy
+            .evaluate(&trust_input)
+            .expect("trust policy evaluates the published package identity");
+
+        assert!(
+            decision
+                .authority_ceiling
+                .allowed_effects
+                .contains(&EffectKind::ExternalWrite),
+            "published authority ceiling must include the discovery-only ExternalWrite \
+             effect (destructiveHint tool absent from nearai's static manifest); got {:?}. \
+             Missing here means publish() ran on the pre-discovery seed package instead of \
+             the live-discovered one.",
+            decision.authority_ceiling.allowed_effects
         );
     }
 
