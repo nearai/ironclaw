@@ -494,13 +494,26 @@ impl CodexChatGptProvider {
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .map(crate::retry::parse_retry_after_value);
-        let body = tokio::time::timeout(
+        let body = match tokio::time::timeout(
             Duration::from_secs(5),
             crate::error::read_bounded_provider_error_body(response),
         )
         .await
-        .unwrap_or(Ok(Vec::new()))
-        .unwrap_or_default();
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => {
+                return LlmError::RequestFailed {
+                    provider: "codex_chatgpt".to_string(),
+                    reason: "failed to read provider error response".to_string(),
+                };
+            }
+            Err(_) => {
+                return LlmError::RequestFailed {
+                    provider: "codex_chatgpt".to_string(),
+                    reason: "timed out while reading provider error response".to_string(),
+                };
+            }
+        };
         let body = String::from_utf8_lossy(&body);
         crate::error::map_provider_http_error(crate::error::ProviderHttpError {
             adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
@@ -2216,6 +2229,61 @@ data: {"response":{"status":"incomplete","incomplete_details":{"reason":"max_out
             FinishReason::Length,
             "a truncated tool call must not be laundered into ToolUse",
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_http_error_body_fails_loud_through_provider_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = [0u8; 4096];
+                let bytes_read = socket.read(&mut request).await.expect("read request");
+                let request = String::from_utf8_lossy(&request[..bytes_read]);
+                if request.starts_with("GET /models") {
+                    let body = r#"{"models":[{"slug":"gpt-4o"}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write model response");
+                    continue;
+                }
+
+                assert!(request.starts_with("POST /responses"));
+                socket
+                    .write_all(
+                        b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: 128\r\nconnection: close\r\n\r\n{\"error\":",
+                    )
+                    .await
+                    .expect("write truncated error response");
+                break;
+            }
+        });
+
+        let provider =
+            CodexChatGptProvider::new(&format!("http://{address}"), "test-key", "gpt-4o");
+        let error = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect_err("truncated error body must fail the request");
+        server.await.expect("test server");
+
+        assert!(matches!(
+            error,
+            LlmError::RequestFailed { provider, reason }
+                if provider == "codex_chatgpt"
+                    && reason == "failed to read provider error response"
+        ));
     }
 
     mod responses_api_test_server {

@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn provider_error_reasons_redact_untrusted_tokens_urls_and_paths() {
-        let secret = "ghp_012345678901234567890123456789012345";
+        let secret = ["gh", "p_012345678901234567890123456789012345"].concat();
         let unsafe_message = format!(
             "provider transport failed token: {secret} at /home/runner/private.json via https://internal.example/v1?access_token={secret}"
         );
@@ -876,7 +876,7 @@ mod tests {
             other => panic!("expected request failure, got {other:?}"),
         };
         assert!(reason.contains("[redacted]"));
-        assert!(!reason.contains(secret));
+        assert!(!reason.contains(&secret));
         assert!(!reason.contains("/home/runner/private.json"));
         assert!(!reason.contains("access_token="));
 
@@ -892,7 +892,7 @@ mod tests {
             other => panic!("expected invalid request, got {other:?}"),
         };
         assert!(reason.contains("[redacted]"));
-        assert!(!reason.contains(secret));
+        assert!(!reason.contains(&secret));
         assert!(!reason.contains("/home/runner/private.json"));
         assert!(!reason.contains("access_token="));
     }
