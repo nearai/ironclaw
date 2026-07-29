@@ -5,9 +5,10 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation, ContentKind, DirEntry,
-    Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page, RecordVersion,
-    RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
+    AtomicSubtreeEntry, BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation,
+    ContentKind, DirEntry, Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page,
+    RecordVersion, RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
+    root::validate_atomic_subtree_entries,
 };
 
 /// Trusted catalog record for one virtual filesystem mount.
@@ -258,6 +259,24 @@ impl RootFilesystem for CompositeRootFilesystem {
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         self.matching_mount(path)?.backend.begin(path).await
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let mount = self.matching_mount(prefix)?;
+        for item in &entries {
+            let item_mount = self.matching_mount(&item.path)?;
+            if !std::ptr::eq(mount, item_mount) {
+                return Err(FilesystemError::PathOutsideMount {
+                    path: item.path.clone(),
+                });
+            }
+        }
+        mount.backend.create_subtree_atomic(prefix, entries).await
     }
 
     // ── Event plane ──

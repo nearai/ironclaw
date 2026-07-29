@@ -5,7 +5,25 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::index::IndexName;
-use crate::record::RecordVersion;
+use crate::record::{Entry, RecordVersion};
+
+/// One entry published by
+/// [`RootFilesystem::create_subtree_atomic`](crate::RootFilesystem::create_subtree_atomic).
+///
+/// The operation validates that every path is a strict descendant of its
+/// requested subtree prefix before any backend side effect.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicSubtreeEntry {
+    pub path: VirtualPath,
+    pub entry: Entry,
+}
+
+/// Scoped counterpart of [`AtomicSubtreeEntry`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopedAtomicSubtreeEntry {
+    pub path: ScopedPath,
+    pub entry: Entry,
+}
 
 /// Filesystem operation used for permission checks and audit/error reporting.
 ///
@@ -34,6 +52,8 @@ pub enum FilesystemOperation {
     Query,
     EnsureIndex,
     BeginTxn,
+    /// Atomically publish a previously absent directory subtree.
+    CreateSubtreeAtomic,
     Append,
     Tail,
     /// Event-plane O(1) head read: the `MAX(seq)` lookup that resolves the
@@ -61,6 +81,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::Query => "query",
             Self::EnsureIndex => "ensure_index",
             Self::BeginTxn => "begin_txn",
+            Self::CreateSubtreeAtomic => "create_subtree_atomic",
             Self::Append => "append",
             Self::Tail => "tail",
             Self::HeadSeq => "head_seq",

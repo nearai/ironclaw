@@ -13,10 +13,10 @@ use crate::db::{
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
-    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
-    VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry,
+    Entry, FileStat, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
+    VersionedEntry, root::validate_atomic_subtree_entries,
 };
 /// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct PostgresRootFilesystem {
@@ -246,6 +246,42 @@ impl RootFilesystem for PostgresRootFilesystem {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let client = self.client().await?;
         postgres_get_with_client(&client, path).await
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let client = self.client().await?;
+        client.batch_execute("BEGIN").await.map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+
+        let result = postgres_create_subtree_with_client(&client, prefix, entries).await;
+        match result {
+            Ok(versions) => match client.batch_execute("COMMIT").await {
+                Ok(()) => Ok(versions),
+                Err(error) => {
+                    let mapped = db_error(
+                        prefix.clone(),
+                        FilesystemOperation::CreateSubtreeAtomic,
+                        error,
+                    );
+                    let _ = client.batch_execute("ROLLBACK").await;
+                    Err(mapped)
+                }
+            },
+            Err(error) => {
+                let _ = client.batch_execute("ROLLBACK").await;
+                Err(error)
+            }
+        }
     }
 
     async fn ensure_index(
@@ -1214,6 +1250,58 @@ async fn cached_execute(
 ) -> Result<u64, tokio_postgres::Error> {
     let statement = client.prepare_cached(sql).await?;
     client.execute(&statement, params).await
+}
+
+async fn postgres_create_subtree_with_client(
+    client: &deadpool_postgres::Object,
+    prefix: &VirtualPath,
+    entries: Vec<AtomicSubtreeEntry>,
+) -> Result<Vec<RecordVersion>, FilesystemError> {
+    cached_query_one(
+        client,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&prefix.as_str()],
+    )
+    .await
+    .map_err(|error| {
+        db_error(
+            prefix.clone(),
+            FilesystemOperation::CreateSubtreeAtomic,
+            error,
+        )
+    })?;
+
+    let (lower, upper) = descendant_path_range(prefix);
+    if let Some(row) = cached_query_opt(
+        client,
+        "SELECT version FROM root_filesystem_entries \
+         WHERE path = $1 OR (path >= $2 AND path < $3) LIMIT 1",
+        &[&prefix.as_str(), &lower, &upper],
+    )
+    .await
+    .map_err(|error| {
+        db_error(
+            prefix.clone(),
+            FilesystemOperation::CreateSubtreeAtomic,
+            error,
+        )
+    })? {
+        let version_raw: i64 = row.get("version");
+        return Err(FilesystemError::VersionMismatch {
+            path: prefix.clone(),
+            expected: None,
+            found: Some(record_version_from_i64(prefix, version_raw)?),
+        });
+    }
+
+    let mut versions = Vec::with_capacity(entries.len());
+    for item in entries {
+        versions.push(
+            postgres_put_with_client(client, &item.path, item.entry, CasExpectation::Absent)
+                .await?,
+        );
+    }
+    Ok(versions)
 }
 
 /// `CasExpectation::Absent` put: insert iff `path` is not an implicit directory

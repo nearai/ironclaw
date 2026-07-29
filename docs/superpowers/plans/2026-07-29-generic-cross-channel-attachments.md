@@ -77,17 +77,17 @@ The contract is:
 
 ### Steps
 
-- [ ] Add backend-agnostic contract tests for empty batches, duplicate paths, out-of-prefix paths, existing-prefix conflicts, success ordering, and injected failure with zero visible entries.
-- [ ] Run `cargo test -p ironclaw_filesystem create_subtree_atomic --all-features` and confirm the tests fail because the API is missing.
-- [ ] Add `AtomicSubtreeEntry`, `FilesystemOperation::CreateSubtreeAtomic`, and the `RootFilesystem` method with a fail-closed default.
-- [ ] Implement validation once in the filesystem crate and call it before any backend side effect.
-- [ ] Implement `InMemoryFilesystem` by validating, taking one write lock, checking the prefix and all paths, then inserting the full batch before releasing the lock.
-- [ ] Implement `DiskFilesystem` by creating a sibling staging directory on the same filesystem, materializing every entry inside it, syncing files and the directory as supported, then atomically renaming the staging directory to the final prefix. Remove only the operation-owned staging directory after failure.
-- [ ] Implement LibSQL and PostgreSQL with one database transaction per batch. Map busy/conflict outcomes to errors that guarantee no partial commit.
-- [ ] Implement `CompositeRootFilesystem` by resolving the prefix and every entry to the same mount and forwarding only after the complete validation passes.
-- [ ] Implement `ScopedFilesystem::create_subtree_atomic` by checking write permission for the prefix and every scoped entry, resolving through the fixed mount view, and forwarding one root call.
-- [ ] Update `FaultInjectingFilesystem` so a configured `CreateSubtreeAtomic` failure occurs before the delegate call and therefore cannot partially write.
-- [ ] Run:
+- [x] Add backend-agnostic contract tests for empty batches, duplicate paths, out-of-prefix paths, existing-prefix conflicts, success ordering, and injected failure with zero visible entries.
+- [x] Run `cargo test -p ironclaw_filesystem create_subtree_atomic --all-features` and confirm the tests fail because the API is missing.
+- [x] Add `AtomicSubtreeEntry`, `FilesystemOperation::CreateSubtreeAtomic`, and the `RootFilesystem` method with a fail-closed default.
+- [x] Implement validation once in the filesystem crate and call it before any backend side effect.
+- [x] Implement `InMemoryFilesystem` by validating, taking one write lock, checking the prefix and all paths, then inserting the full batch before releasing the lock.
+- [x] Implement `DiskFilesystem` by creating a sibling staging directory on the same filesystem, materializing every entry inside it, syncing files and the directory as supported, then atomically renaming the staging directory to the final prefix. Remove only the operation-owned staging directory after failure.
+- [x] Implement LibSQL and PostgreSQL with one database transaction per batch. Map busy/conflict outcomes to errors that guarantee no partial commit.
+- [x] Implement `CompositeRootFilesystem` by resolving the prefix and every entry to the same mount and forwarding only after the complete validation passes.
+- [x] Implement `ScopedFilesystem::create_subtree_atomic` by checking write permission for the prefix and every scoped entry, resolving through the fixed mount view, and forwarding one root call.
+- [x] Update `FaultInjectingFilesystem` so a configured `CreateSubtreeAtomic` failure occurs before the delegate call and therefore cannot partially write.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_filesystem create_subtree_atomic --all-features
@@ -95,8 +95,8 @@ cargo test -p ironclaw_filesystem --test filesystem_contract --all-features
 cargo test -p ironclaw_filesystem --test db_root_filesystem_contract --all-features
 ```
 
-- [ ] Run `cargo clippy -p ironclaw_filesystem --all-targets --all-features -- -D warnings`.
-- [ ] Commit:
+- [x] Run `cargo clippy -p ironclaw_filesystem --all-targets --all-features -- -D warnings`.
+- [x] Commit:
 
 ```bash
 git add crates/ironclaw_filesystem

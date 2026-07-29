@@ -17,9 +17,10 @@ use crate::db::{
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
-    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry,
+    Entry, FileStat, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    root::validate_atomic_subtree_entries,
 };
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 #[derive(Debug)]
@@ -286,6 +287,100 @@ impl RootFilesystem for LibSqlRootFilesystem {
             entry,
             version: record_version_from_i64(path, version_raw)?,
         }))
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let conn = self
+            .write_connection(prefix, FilesystemOperation::CreateSubtreeAtomic)
+            .await?;
+        let transaction = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| {
+                libsql_db_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+
+        let (lower, upper) = descendant_path_range(prefix);
+        let mut existing = transaction
+            .query(
+                "SELECT path, version FROM root_filesystem_entries \
+                 WHERE path = ?1 OR (path >= ?2 AND path < ?3) LIMIT 1",
+                libsql::params![prefix.as_str(), lower, upper],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+        if let Some(row) = existing.next().await.map_err(|error| {
+            libsql_db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })? {
+            let version_raw: i64 = row.get(1).map_err(|error| {
+                libsql_db_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+            return Err(FilesystemError::VersionMismatch {
+                path: prefix.clone(),
+                expected: None,
+                found: Some(record_version_from_i64(prefix, version_raw)?),
+            });
+        }
+        drop(existing);
+
+        let mut versions = Vec::with_capacity(entries.len());
+        for item in entries {
+            let indexed_json = serde_json::to_string(&item.entry.indexed).map_err(|_| {
+                FilesystemError::SerializeIndexed {
+                    path: item.path.clone(),
+                    operation: FilesystemOperation::CreateSubtreeAtomic,
+                }
+            })?;
+            let kind = item
+                .entry
+                .kind
+                .as_ref()
+                .map(|value| value.as_str().to_string());
+            let content_type = item.entry.content_type.as_str().to_string();
+            versions.push(
+                put_libsql_inner(
+                    &transaction,
+                    &item.path,
+                    item.entry.body,
+                    content_type,
+                    kind,
+                    indexed_json,
+                    CasExpectation::Absent,
+                )
+                .await?,
+            );
+        }
+        transaction.commit().await.map_err(|error| {
+            libsql_db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        Ok(versions)
     }
 
     async fn ensure_index(

@@ -44,9 +44,9 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo,
-    VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat,
+    FilesystemError, FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem,
+    SeqNo, VersionedEntry,
 };
 
 /// Which [`FilesystemError`] a matched [`Fault`] returns. Constructed with the
@@ -353,6 +353,15 @@ where
         self.inner.begin(path).await
     }
 
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        self.gate(FilesystemOperation::CreateSubtreeAtomic, prefix)?;
+        self.inner.create_subtree_atomic(prefix, entries).await
+    }
+
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         self.gate(FilesystemOperation::Append, path)?;
         self.inner.append(path, payload).await
@@ -420,6 +429,37 @@ mod tests {
 
     fn path(p: &str) -> VirtualPath {
         VirtualPath::new(p).unwrap()
+    }
+
+    #[tokio::test]
+    async fn atomic_subtree_fault_fires_before_the_inner_backend_can_write() {
+        let fs = FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::CreateSubtreeAtomic).backend("batch failed"),
+        );
+        let prefix = path("/projects/attachments/message-1");
+        let file = path("/projects/attachments/message-1/0-alpha.txt");
+
+        let error = fs
+            .create_subtree_atomic(
+                &prefix,
+                vec![crate::AtomicSubtreeEntry {
+                    path: file.clone(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                }],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FilesystemError::Backend {
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+                ref reason,
+                ..
+            } if reason == "batch failed"
+        ));
+        assert!(fs.get(&file).await.unwrap().is_none());
+        assert_eq!(fs.count(FilesystemOperation::CreateSubtreeAtomic), 1);
     }
 
     #[tokio::test]

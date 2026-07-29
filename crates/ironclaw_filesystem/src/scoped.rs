@@ -7,8 +7,9 @@ use ironclaw_observability::live_latency_started_at;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
+    AtomicSubtreeEntry, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+    FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem,
+    ScopedAtomicSubtreeEntry, SeqNo, VersionedEntry, path_prefix_matches,
 };
 
 /// Resolver from a per-invocation [`ResourceScope`] to the [`MountView`] that
@@ -353,6 +354,47 @@ where
             permissions,
             mount_prefix: virtual_path,
         }))
+    }
+
+    /// Atomically publish a complete, previously absent directory subtree.
+    pub async fn create_subtree_atomic(
+        &self,
+        scope: &ResourceScope,
+        prefix: &ScopedPath,
+        entries: Vec<ScopedAtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let bytes = entries
+            .iter()
+            .map(|item| item.entry.body.len())
+            .sum::<usize>();
+        let view = self.mount_view(scope)?;
+        let virtual_prefix =
+            resolve_with_permission_view(&view, prefix, FilesystemOperation::CreateSubtreeAtomic)?;
+        let mut virtual_entries = Vec::with_capacity(entries.len());
+        for item in entries {
+            let path = resolve_with_permission_view(
+                &view,
+                &item.path,
+                FilesystemOperation::CreateSubtreeAtomic,
+            )?;
+            virtual_entries.push(AtomicSubtreeEntry {
+                path,
+                entry: item.entry,
+            });
+        }
+        let result = self
+            .root
+            .create_subtree_atomic(&virtual_prefix, virtual_entries)
+            .await;
+        trace_fs_latency(
+            "create_subtree_atomic",
+            prefix,
+            started_at,
+            &result,
+            Some(bytes),
+        );
+        result
     }
 
     // ─── Event/tail plane ─────────────────────────────────────────────────
@@ -706,6 +748,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::WriteFile
         | FilesystemOperation::AppendFile
         | FilesystemOperation::CreateDirAll
+        | FilesystemOperation::CreateSubtreeAtomic
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
         | FilesystemOperation::Append

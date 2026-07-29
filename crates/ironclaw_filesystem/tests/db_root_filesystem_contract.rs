@@ -1,11 +1,43 @@
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{
-    Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
-    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
-    SeqNo,
+    AtomicSubtreeEntry, Capability, CasExpectation, Entry, FileType, FilesystemError,
+    FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
+    LibSqlRootFilesystem, Page, RecordKind, SeqNo,
 };
 use ironclaw_host_api::VirtualPath;
+
+#[tokio::test]
+async fn libsql_create_subtree_atomic_publishes_the_complete_batch() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-1").unwrap();
+    let first =
+        VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-1/0-alpha.txt").unwrap();
+    let second =
+        VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-1/1-beta.txt").unwrap();
+
+    let versions = filesystem
+        .create_subtree_atomic(
+            &prefix,
+            vec![
+                AtomicSubtreeEntry {
+                    path: first.clone(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                AtomicSubtreeEntry {
+                    path: second.clone(),
+                    entry: Entry::bytes(b"beta".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(versions.len(), 2);
+    assert_eq!(filesystem.read_file(&first).await.unwrap(), b"alpha");
+    assert_eq!(filesystem.read_file(&second).await.unwrap(), b"beta");
+}
+
 #[tokio::test]
 async fn libsql_root_filesystem_reads_writes_and_stats_files() {
     let filesystem = libsql_root().await;
@@ -1515,9 +1547,9 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{
-        Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
-        IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem,
-        RecordKind, SeqNo, TxnCapability,
+        AtomicSubtreeEntry, Capability, CasExpectation, Entry, FileType, FilesystemError,
+        FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
+        PostgresRootFilesystem, RecordKind, SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1556,6 +1588,37 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_create_subtree_atomic_publishes_the_complete_batch() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let batch_prefix = vpath(&prefix, "attachments/message-1");
+        let first = vpath(&prefix, "attachments/message-1/0-alpha.txt");
+        let second = vpath(&prefix, "attachments/message-1/1-beta.txt");
+
+        let versions = fs
+            .create_subtree_atomic(
+                &batch_prefix,
+                vec![
+                    AtomicSubtreeEntry {
+                        path: first.clone(),
+                        entry: Entry::bytes(b"alpha".to_vec()),
+                    },
+                    AtomicSubtreeEntry {
+                        path: second.clone(),
+                        entry: Entry::bytes(b"beta".to_vec()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(versions.len(), 2);
+        assert_eq!(fs.read_file(&first).await.unwrap(), b"alpha");
+        assert_eq!(fs.read_file(&second).await.unwrap(), b"beta");
     }
 
     #[tokio::test]
