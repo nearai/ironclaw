@@ -28,16 +28,6 @@ Rules of the road:
   the few built-in fallbacks (modal close, confirm cancel) resolve through
   `UiTextProvider`.
 
-## Extras
-
-`src/extras/` holds a second, quarantined component kit: pre-built,
-token-faithful components (shadcn/ui gap coverage — Tabs, Tooltip, Switch,
-Combobox, DatePicker, Toast, …) that aren't used by any product surface yet.
-They're exported only via the `@ironclaw/ui/extras` subpath, never from the
-main barrel, so they cost nothing until adopted. See
-[`src/extras/README.md`](./src/extras/README.md) for the inventory and the
-promotion path into the core set.
-
 ## Usage
 
 ```tsx
