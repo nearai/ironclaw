@@ -793,6 +793,7 @@ async fn progress_port_routes_compaction_progress_milestones() {
     let started_task = SystemInferenceTaskId::new();
     let completed_task = SystemInferenceTaskId::new();
     let failed_task = SystemInferenceTaskId::new();
+    let leak_task = SystemInferenceTaskId::new();
 
     host_dyn
         .emit_loop_progress(LoopProgressEvent::CompactionStarted {
@@ -812,6 +813,14 @@ async fn progress_port_routes_compaction_progress_milestones() {
         .emit_loop_progress(LoopProgressEvent::CompactionFailed {
             task_id: failed_task,
             reason_kind: LoopSafeSummary::new("security rejected").unwrap(),
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CompactionLeakDetected {
+            task_id: leak_task,
+            reason_kind: LoopSafeSummary::new("leak redacted").unwrap(),
+            redacted_leak_count: 2,
         })
         .await
         .unwrap();
@@ -837,6 +846,14 @@ async fn progress_port_routes_compaction_progress_milestones() {
             task_id,
             reason_kind,
         } if *task_id == failed_task && reason_kind.as_str() == "security rejected"
+    ));
+    assert!(matches!(
+        &milestones[3].kind,
+        LoopHostMilestoneKind::CompactionLeakDetected {
+            task_id,
+            reason_kind,
+            redacted_leak_count: 2,
+        } if *task_id == leak_task && reason_kind.as_str() == "leak redacted"
     ));
     assert!(milestones.iter().all(|milestone| {
         milestone.scope == fixture.context.scope

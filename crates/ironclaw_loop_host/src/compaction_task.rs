@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::ThreadId;
-use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
+use ironclaw_safety::{
+    CrossBoundaryLeakDisposition, InjectionScanner, LeakDetector, LeakScanner, Sanitizer,
+};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
     SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
@@ -489,13 +491,9 @@ where
             if location.end <= origin_body.end {
                 continue;
             }
-            if is_unterminated_private_key_boundary_match(
-                &text,
-                &leak_match.pattern_name,
-                location.start,
-                location.end,
-                origin_body.end,
-            ) {
+            if leak_match.cross_boundary_disposition(&text, origin_body.end)
+                == CrossBoundaryLeakDisposition::RedactUnterminatedPrivateKey
+            {
                 for (index, body) in body_ranges.iter().enumerate().skip(candidate + 1) {
                     if body.start >= location.end {
                         break;
@@ -920,73 +918,6 @@ fn escape_xml(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PrivateKeyLabel {
-    Generic,
-    Rsa,
-    OpenSsh,
-    Ec,
-    Dsa,
-}
-
-fn is_unterminated_private_key_boundary_match(
-    content: &str,
-    pattern_name: &str,
-    match_start: usize,
-    match_end: usize,
-    origin_body_end: usize,
-) -> bool {
-    if !matches!(pattern_name, "pem_private_key" | "ssh_private_key") {
-        return false;
-    }
-    let Some(matched) = content.get(match_start..match_end) else {
-        return false;
-    };
-    let Some((begin_label, begin_marker_end)) = parse_private_key_label(matched, "-----BEGIN")
-    else {
-        return false;
-    };
-    let Some(boundary_offset) = origin_body_end.checked_sub(match_start) else {
-        return false;
-    };
-    if begin_marker_end > boundary_offset {
-        return false;
-    }
-
-    !matched.match_indices("-----END").any(|(offset, _)| {
-        parse_private_key_label(&matched[offset..], "-----END").is_some_and(
-            |(end_label, end_marker_end)| {
-                end_label == begin_label
-                    && offset
-                        .checked_add(end_marker_end)
-                        .is_some_and(|end| end > boundary_offset)
-            },
-        )
-    })
-}
-
-fn parse_private_key_label(content: &str, marker: &str) -> Option<(PrivateKeyLabel, usize)> {
-    let remainder = content.strip_prefix(marker)?;
-    if !remainder.chars().next()?.is_whitespace() {
-        return None;
-    }
-    let delimiter_end = remainder.find("-----")?;
-    let mut words = remainder[..delimiter_end].split_whitespace();
-    let label = match (words.next(), words.next(), words.next(), words.next()) {
-        (Some("PRIVATE"), Some("KEY"), None, None) => PrivateKeyLabel::Generic,
-        (Some("RSA"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::Rsa,
-        (Some("OPENSSH"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::OpenSsh,
-        (Some("EC"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::Ec,
-        (Some("DSA"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::Dsa,
-        _ => return None,
-    };
-    let marker_end = marker
-        .len()
-        .checked_add(delimiter_end)?
-        .checked_add("-----".len())?;
-    Some((label, marker_end))
 }
 
 fn map_inference_error(error: SystemInferenceError) -> CompactionError {

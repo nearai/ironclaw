@@ -213,6 +213,49 @@ async fn compaction_port_redacts_registry_secret_output_before_persistence() {
 }
 
 #[tokio::test]
+async fn compaction_port_redacts_complete_token68_values_on_input_and_output() {
+    let fixture = CompactionFixture::new().await;
+    let input_token = "AAAAAAAAAAAAAAAAAAAA~+/==";
+    fixture
+        .append_user(&format!("input Bearer {input_token} retained"))
+        .await;
+    let inference = Arc::new(CapturingInference::new(
+        "output Bearer BBBBBBBBBBBBBBBBBBBB~+/== retained",
+    ));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("complete token68 values should be redacted");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+
+    assert_eq!(response.redacted_leak_count, 2);
+    let input = inference.last_input();
+    assert!(input.contains("input [REDACTED] retained"));
+    assert!(!input.contains("~+/=="));
+
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let summary = history.summary_artifacts.first().expect("summary exists");
+    assert!(summary.content.contains("output [REDACTED] retained"));
+    assert!(!summary.content.contains("~+/=="));
+}
+
+#[tokio::test]
 async fn compaction_port_redacts_complete_private_keys_on_input_and_output() {
     let fixture = CompactionFixture::new().await;
     fixture
@@ -580,6 +623,40 @@ async fn compaction_port_rejects_serialized_cross_boundary_matches() {
         inference.last_input().is_empty(),
         "cross-boundary serialized content must not reach inference"
     );
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_generic_leaks_split_across_message_boundaries() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("SPLIT").await;
+    fixture.append_user("SECRET").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(SplitBoundaryLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect_err("generic leak matches spanning messages must fail closed");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(inference.last_input().is_empty());
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
 }
 
 #[tokio::test]
@@ -2088,6 +2165,31 @@ impl LeakScanner for CrossBoundaryLeakScanner {
                     severity: LeakSeverity::Critical,
                     action: LeakAction::Block,
                     location: 0..body_start.saturating_add(2).min(content.len()),
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: true,
+                redacted_content: None,
+            };
+        }
+        LeakScanResult {
+            matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
+struct SplitBoundaryLeakScanner;
+
+impl LeakScanner for SplitBoundaryLeakScanner {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        if let Some(start) = content.find("SPLIT\nSECRET") {
+            return LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "split_boundary".to_string(),
+                    severity: LeakSeverity::Critical,
+                    action: LeakAction::Block,
+                    location: start..start + "SPLIT\nSECRET".len(),
                     masked_preview: "[masked]".to_string(),
                 }],
                 should_block: true,
