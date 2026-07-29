@@ -763,7 +763,6 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
                 reason_kind: LoopFailureKind::DriverBug,
                 checkpoint_id: None,
                 model_usage: None,
-                diagnostic_ref: None,
                 explanation_message_refs: Vec::new(),
                 safe_summary: None,
                 exit_id: LoopExitId::new("exit:test-applier-path").expect("valid exit id"),

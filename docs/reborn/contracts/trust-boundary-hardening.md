@@ -183,7 +183,7 @@ Names can vary if semantics stay explicit.
 - missing durable store, missing configured policy sink, missing required runtime adapter -> `Misconfigured`.
 - authorization denial, stale surface, scope mismatch, output/resource limit, prompt policy refusal -> `PolicyDenied`.
 
-Existing `AgentLoopHostErrorKind` can remain the specific kind surface, but it should map to a shared class for runner/operator decisions. Raw backend/provider details stay behind diagnostic refs.
+Existing `AgentLoopHostErrorKind` can remain the specific kind surface, but it should map to a shared class for runner/operator decisions. Recovery-relevant causes cross only through the bounded, secret-scrubbed inline diagnostic channel; raw backend/provider details stay behind host adapters.
 
 ---
 

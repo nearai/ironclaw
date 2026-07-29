@@ -238,7 +238,6 @@ fn checkpoint_host_error(
             kind: error.kind,
             safe_summary,
             reason_kind: error.reason_kind,
-            diagnostic_ref: error.diagnostic_ref,
             detail,
         };
     }

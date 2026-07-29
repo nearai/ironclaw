@@ -866,7 +866,6 @@ where
         {
             tracing::debug!(
                 kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
                 "loop assistant_reply_finalized milestone failed after finalized transcript write"
             );
             return Ok(());
@@ -1317,7 +1316,6 @@ where
             if let Err(error) = milestones.model_started(requested_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_started milestone failed before model request"
                 );
             }
@@ -1331,7 +1329,6 @@ where
             if let Err(error) = milestones.model_completed(effective_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_completed milestone failed after successful model response"
                 );
             }
@@ -1345,7 +1342,6 @@ where
             if let Err(error) = milestones.model_failed(reason_kind).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_failed milestone failed after model error"
                 );
             }

@@ -8,7 +8,6 @@ use ironclaw_turns::run_profile::{AgentLoopHostError, LoopModelGatewayError, Loo
 pub(crate) fn host_error_to_model_gateway_error(
     error: AgentLoopHostError,
 ) -> LoopModelGatewayError {
-    let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
     let gate_ref = error.gate_ref;
     let existing_detail = error
@@ -29,7 +28,6 @@ pub(crate) fn host_error_to_model_gateway_error(
                         safe_summary: LoopSafeSummary::model_gateway_failed(),
                         reason_kind: None,
                         gate_ref: None,
-                        diagnostic_ref: None,
                         detail: None,
                     },
                     Some(ironclaw_loop_host::scrub_model_visible_detail(raw_summary)),
@@ -44,9 +42,6 @@ pub(crate) fn host_error_to_model_gateway_error(
     }
     if let Some(gate_ref) = gate_ref {
         converted = converted.with_gate_ref(gate_ref);
-    }
-    if let Some(diagnostic_ref) = diagnostic_ref {
-        converted = converted.with_diagnostic_ref(diagnostic_ref);
     }
     converted
 }

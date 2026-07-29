@@ -26,7 +26,12 @@ AgentLoopDriver
   -> TurnStateStore transition
 ```
 
-`LoopExit` contains references only. It must not carry raw prompts, assistant text, tool inputs, approval payloads, secrets, host paths, provider errors, stack traces, or raw runtime output. Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`, `result:`, `gate:`, `usage:`, `diag:`) to avoid accepting free-form payload text as evidence.
+`LoopExit` contains references only. It must not carry raw prompts, assistant text, tool inputs, approval payloads, secrets, host paths, provider errors, stack traces, or raw runtime output. Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`, `result:`, `gate:`, `usage:`) to avoid accepting free-form payload text as evidence.
+
+For rolling compatibility, `LoopFailed` still accepts and ignores the retired
+`diagnostic_ref` JSON field (including the historical `null` form), but never
+serializes it. Older readers treated that field as optional, so exits written
+without it remain readable during rollback; no store migration is required.
 
 ---
 
@@ -83,7 +88,7 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 `ironclaw_turns` currently provides contract types, a crate-private validator policy, and a trusted runner-side applicator:
 
 - `LoopExit`, `LoopCompleted`, `LoopBlocked`, `LoopCancelled`, `LoopFailed`;
-- bounded durable reference types for loop exit/message/result/usage/diagnostic refs;
+- bounded durable reference types for loop exit/message/result/usage refs;
 - `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
 - crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
 - one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; valid failed outcomes may carry verified explanation refs and a retry checkpoint id; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);

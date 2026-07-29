@@ -463,20 +463,29 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
 }
 
 #[test]
-fn loop_failed_legacy_payload_deserializes_and_empty_new_fields_serialize_to_legacy_shape() {
-    let legacy = json!({
-        "reason_kind": "iteration_limit",
-        "checkpoint_id": null,
-        "diagnostic_ref": null,
-        "exit_id": "exit:legacy-failed"
-    });
+fn loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it() {
+    for retired_value in [json!("diag:legacy-unused"), serde_json::Value::Null] {
+        let legacy = json!({
+            "reason_kind": "iteration_limit",
+            "checkpoint_id": null,
+            "diagnostic_ref": retired_value,
+            "exit_id": "exit:legacy-failed"
+        });
 
-    let failed = serde_json::from_value::<LoopFailed>(legacy.clone()).unwrap();
+        let failed = serde_json::from_value::<LoopFailed>(legacy).unwrap();
 
-    assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
-    assert!(failed.explanation_message_refs.is_empty());
-    assert_eq!(failed.safe_summary, None);
-    assert_eq!(serde_json::to_value(&failed).unwrap(), legacy);
+        assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
+        assert!(failed.explanation_message_refs.is_empty());
+        assert_eq!(failed.safe_summary, None);
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            json!({
+                "reason_kind": "iteration_limit",
+                "checkpoint_id": null,
+                "exit_id": "exit:legacy-failed"
+            })
+        );
+    }
 }
 
 #[test]
@@ -488,7 +497,6 @@ fn verified_failed_exit_carries_safe_summary() {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(final_checkpoint_id),
         model_usage: None,
-        diagnostic_ref: None,
         exit_id: exit_id("exit:verified-failed"),
         explanation_message_refs: vec![explanation_ref.clone()],
         safe_summary: Some(safe_summary.clone()),
@@ -512,7 +520,6 @@ fn verified_failed_exit_does_not_reuse_final_checkpoint_as_resume_checkpoint() {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(final_checkpoint_id),
         model_usage: None,
-        diagnostic_ref: None,
         exit_id: exit_id("exit:final-only-failed"),
         explanation_message_refs: Vec::new(),
         safe_summary: None,
@@ -535,7 +542,6 @@ fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_be
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(TurnCheckpointId::new()),
         model_usage: None,
-        diagnostic_ref: None,
         exit_id: exit_id("exit:unverified-failed"),
         explanation_message_refs: vec![message_ref("msg:unverified-explanation")],
         safe_summary: Some(SanitizedFailure::new("model_credits_exhausted").unwrap()),
@@ -564,7 +570,6 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(checkpoint_id),
         model_usage: None,
-        diagnostic_ref: None,
         exit_id: exit_id("exit:strict-failed-checkpoint"),
         explanation_message_refs: Vec::new(),
         safe_summary: None,

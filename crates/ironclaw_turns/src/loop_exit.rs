@@ -5,9 +5,9 @@ use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopDiagnosticRef, LoopExitId,
-    LoopGateRef, LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure,
-    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopExitId, LoopGateRef,
+    LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
+    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, ClaimedTurnRun, TurnRunTransitionPort, TurnRunnerOutcome,
@@ -331,7 +331,6 @@ impl LoopExit {
             reason_kind,
             checkpoint_id: None,
             model_usage: None,
-            diagnostic_ref: None,
             exit_id,
             explanation_message_refs: Vec::new(),
             safe_summary: None,
@@ -446,8 +445,7 @@ pub enum LoopCancelledReasonKind {
     HostInterrupt,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LoopFailed {
     pub reason_kind: LoopFailureKind,
     pub checkpoint_id: Option<TurnCheckpointId>,
@@ -455,7 +453,6 @@ pub struct LoopFailed {
     /// See [`LoopCompleted::model_usage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<crate::run_profile::LoopModelUsage>,
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
     pub exit_id: LoopExitId,
     #[serde(
         default,
@@ -465,6 +462,43 @@ pub struct LoopFailed {
     pub explanation_message_refs: Vec<LoopMessageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safe_summary: Option<SanitizedFailure>,
+}
+
+impl<'de> Deserialize<'de> for LoopFailed {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LoopFailedWire {
+            reason_kind: LoopFailureKind,
+            checkpoint_id: Option<TurnCheckpointId>,
+            #[serde(default)]
+            model_usage: Option<crate::run_profile::LoopModelUsage>,
+            /// Read-only compatibility for exits written before the dead
+            /// diagnostic-reference field was retired. No production code
+            /// minted a usable value and no diagnostic store ever existed.
+            #[serde(default, rename = "diagnostic_ref")]
+            retired_diagnostic_ref: Option<de::IgnoredAny>,
+            exit_id: LoopExitId,
+            #[serde(default, deserialize_with = "deserialize_bounded_unique_refs")]
+            explanation_message_refs: Vec<LoopMessageRef>,
+            #[serde(default)]
+            safe_summary: Option<SanitizedFailure>,
+        }
+
+        let wire = LoopFailedWire::deserialize(deserializer)?;
+        let _ = wire.retired_diagnostic_ref;
+        Ok(Self {
+            reason_kind: wire.reason_kind,
+            checkpoint_id: wire.checkpoint_id,
+            model_usage: wire.model_usage,
+            exit_id: wire.exit_id,
+            explanation_message_refs: wire.explanation_message_refs,
+            safe_summary: wire.safe_summary,
+        })
+    }
 }
 
 #[non_exhaustive]
