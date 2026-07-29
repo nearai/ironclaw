@@ -71,6 +71,16 @@ tools/             developer diagnostics & excluded helpers
 
 **[`app/`](families/app.md).** Assembly and enforcement: composition selects deployments and wires owners, the binary supplies the concrete binding tables, config owns the boot contract, and the architecture tests keep all of the above mechanical. Nothing else in the workspace may contain wiring, and app may contain nothing but wiring — no domain behavior, no policy content, no prompts, no vendor flows.
 
+### Three that sound alike
+
+`domains/`, `loop/`, and `lanes/` are the easiest to confuse, and the difference is the whole model:
+
+- **`domains/` is what the system *knows*** — passive, typed owners of records (transcripts, triggers, memory, projects, delivery state). They store and serve; they never run agent logic, never execute anything, never decide permissions.
+- **`loop/` is what the agent *decides*** — assemble the prompt, call the model, pick a tool, retry, checkpoint. Deliberately untrusted: it can only *request* effects through typed ports; it cannot touch storage, network, or secrets itself.
+- **`lanes/` is how an approved action *physically runs*** — the WASM sandbox, the MCP client, the container sandbox. A lane doesn't think and doesn't decide; it executes an already-authorized invocation in isolation and returns a normalized result.
+
+One request stitches them together: a message arrives → the **loop** decides to call `github.search` → the **kernel** checks and authorizes it → a **lane** executes it in a sandbox → the outcome lands in **domains** (the transcript) and **events** (the record of what happened). *Loop chooses, kernel permits, lane runs, domains remember.*
+
 ## The five decisions reviewers should weigh
 
 1. **Three new contracts crates** — the load-bearing change. They exist because the dependency graph *proves* the need: `loop_contracts` (six crates consume the loop-port tier through the turn kernel today), `extension_contracts` (lanes/hosts consume adapter+manifest vocabulary through the registry or product today), `product_contracts` (ports defined in product force extension_host/operator/telegram *above* product today). Each is thin, allowlisted, and mass-ratcheted.
