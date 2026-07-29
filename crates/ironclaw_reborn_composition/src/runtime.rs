@@ -724,8 +724,7 @@ pub struct RebornRuntime {
         Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>>,
     pub(crate) process_lifecycle_lookup_source:
         Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
-    pub(crate) process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
+    pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
@@ -4646,7 +4645,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,
         _channel_host_assembly: channel_host_assembly,
-        process_gate_query_source,
+        _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,
         thread_scope,

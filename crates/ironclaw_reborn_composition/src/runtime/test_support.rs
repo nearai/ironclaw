@@ -67,7 +67,7 @@ impl RebornRuntime {
         build_approval_interaction_service_with_parts(
             parts,
             turn_coordinator,
-            Arc::clone(&self.process_gate_query_source),
+            Arc::clone(&self._process_gate_query_source),
         )
         .map(Some)
     }
@@ -82,7 +82,7 @@ impl RebornRuntime {
     ) -> Option<Arc<dyn AuthInteractionService>> {
         Some(build_webui_auth_interaction_service_with_turn_run_source(
             self.product_auth.as_ref(),
-            Arc::clone(&self.process_gate_query_source),
+            Arc::clone(&self._process_gate_query_source),
             turn_coordinator,
         ))
     }
