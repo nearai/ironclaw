@@ -31,7 +31,7 @@
 
 use ironclaw_host_api::{CapabilityId, DispatchError, FailureFate, FailureKind};
 
-use super::{wasm_guest_dispatch_error, wasm_guest_error_kind};
+use super::wasm_guest_dispatch_error;
 
 /// The e2e fault-profile catalogue, as source text.
 const FAULT_PROFILE_CATALOGUE: &str = include_str!("../../../../tests/e2e/provider_fault_proxy.py");
