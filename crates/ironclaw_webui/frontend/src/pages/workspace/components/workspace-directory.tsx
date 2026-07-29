@@ -41,8 +41,12 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
   } else if (!rows.length) {
     body = (<div className="px-4 py-10 text-center text-sm text-[var(--v2-text-muted)]">{t("workspace.noMatches")}</div>);
   } else {
+    // The row rules keep main's `white/[0.06]` rather than the panel-border
+    // token: on the light card that value is near-invisible, and the token
+    // hairline reads as an extra line the page never had. This extraction is
+    // meant to be visually inert, so parity wins over tidiness here.
     body = (
-      <div className="divide-y divide-[var(--v2-panel-border)]">
+      <div className="divide-y divide-white/[0.06]">
         {rows.map((entry) => (
           <button
             key={entry.path}
