@@ -21,7 +21,7 @@ The intended flow is:
 CapabilityHost
   -> Authorization returns RequireApproval
   -> ApprovalRequestStore saves Pending request under tenant/user/agent scope
-  -> RunStateStore marks invocation BlockedApproval
+  -> ProcessJournalStore suspends the invocation on an approval gate
 
 ApprovalResolver
   -> reads Pending ApprovalRecord under the same tenant/user/agent scope

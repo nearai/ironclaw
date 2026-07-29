@@ -4091,6 +4091,12 @@ where
     let process_journal_store = Arc::new(ProcessJournalStore::new(
         crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
     ));
+    process_journal_store
+        .migrate_legacy_journal()
+        .await
+        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+            reason: format!("process journal startup migration failed: {error}"),
+        })?;
     let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
     let turn_state = Arc::new(processes.agent_turn_runtime());
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
@@ -4548,6 +4554,12 @@ async fn build_backend_production(
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
+    process_journal_store
+        .migrate_legacy_journal()
+        .await
+        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+            reason: format!("process journal startup migration failed: {error}"),
+        })?;
     let processes =
         ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));
     let process_lifecycle_lookup_source = processes.lifecycle();

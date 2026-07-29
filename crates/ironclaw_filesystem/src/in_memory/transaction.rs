@@ -162,6 +162,25 @@ impl StorageTxn for InMemoryStorageTxn {
         Ok(state_reserve_sequence(self.state()?, path))
     }
 
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        let path_key = path.as_str().to_string();
+        let original = self.state()?.sequences.get(&path_key).copied();
+        self.undo.push(UndoAction::Sequence {
+            path: path_key,
+            original,
+        });
+        let mut last = SeqNo::ZERO;
+        for _ in 0..count {
+            last = state_reserve_sequence(self.state()?, path);
+        }
+        Ok(last)
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
         self.undo.clear();
         self.state = None;

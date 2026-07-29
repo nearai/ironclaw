@@ -366,7 +366,6 @@ jobs:
         run: |
           cargo test -p ironclaw_host_runtime \
             --test reborn_durable_restart_integration \
-            approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once \
             -- --nocapture
       - name: Test Reborn architecture boundaries
         run: cargo test -p ironclaw_architecture reborn

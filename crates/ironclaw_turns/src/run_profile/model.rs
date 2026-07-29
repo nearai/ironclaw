@@ -657,6 +657,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn primary_model_call_idle_timeout_is_below_runner_lease() {
+        assert!(
+            PRIMARY_MODEL_CALL_IDLE_TIMEOUT < ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION
+        );
+    }
+
+    #[test]
     fn fallback_model_text_delta_emission_is_throttled_and_final() {
         let emitted = (1..=32)
             .filter(|chunk_index| should_emit_fallback_text_delta(*chunk_index, 32))

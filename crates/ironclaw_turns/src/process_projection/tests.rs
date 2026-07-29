@@ -266,6 +266,113 @@ async fn resume_rejects_a_running_claim_without_clearing_its_lease() {
 }
 
 #[tokio::test]
+async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
+    use ironclaw_processes::{
+        ClaimProcessesRequest, ProcessKind, ProcessRuntimePort, ProcessSuspension,
+        ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId, SuspendProcessRequest,
+        in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let owner = TurnActor::new(UserId::new("foreign-test-owner").expect("owner"));
+    let intruder = TurnActor::new(UserId::new("foreign-test-intruder").expect("intruder"));
+    let run_id = TurnRunId::new();
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &owner,
+        run_id,
+        TurnId::new(),
+        None,
+    )
+    .await;
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("foreign-test-worker"),
+            scope_filter: Some(turn_scope.to_resource_scope()),
+            process_id_filter: Some(process_id_from_turn_run_id(run_id)),
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim")
+        .pop()
+        .expect("claimed");
+    let gate_ref = GateRef::new("gate:foreign-test").expect("gate");
+    store
+        .suspend_process(SuspendProcessRequest {
+            process_id: claim.state.process_id,
+            worker_id: claim.worker_id,
+            lease_token: claim.lease_token,
+            checkpoint_ref: ProcessCheckpointRef::from_trusted(
+                TurnCheckpointId::new().as_uuid().to_string(),
+            ),
+            suspension: ProcessSuspension {
+                kind: ProcessSuspensionKind::Approval,
+                gate_ref: Some(
+                    ironclaw_host_api::TurnGateRef::new(gate_ref.as_str()).expect("turn gate"),
+                ),
+                activity_id: None,
+                credential_requirements: Vec::new(),
+                detail: None,
+            },
+            metadata: None,
+        })
+        .await
+        .expect("suspend");
+    let before = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: turn_scope.to_resource_scope(),
+            process_id: process_id_from_turn_run_id(run_id),
+        })
+        .await
+        .expect("snapshot before denials");
+
+    let resume = runtime
+        .resume_turn(crate::ResumeTurnRequest {
+            scope: turn_scope.clone(),
+            actor: intruder.clone(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("foreign-source").expect("source"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("foreign-reply").expect("reply"),
+            idempotency_key: IdempotencyKey::new("foreign-resume").expect("idempotency"),
+            precondition: crate::ResumeTurnPrecondition::default(),
+            resume_disposition: None,
+        })
+        .await;
+    assert!(
+        matches!(resume, Err(TurnError::Unauthorized)),
+        "unexpected foreign resume result: {resume:?}"
+    );
+    let cancel = runtime
+        .cancel_run(crate::CancelRunRequest {
+            scope: turn_scope.clone(),
+            actor: intruder,
+            run_id,
+            idempotency_key: IdempotencyKey::new("foreign-cancel").expect("idempotency"),
+            reason: crate::SanitizedCancelReason::UserRequested,
+        })
+        .await;
+    assert!(
+        matches!(cancel, Err(TurnError::Unauthorized)),
+        "unexpected foreign cancel result: {cancel:?}"
+    );
+
+    let after = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: turn_scope.to_resource_scope(),
+            process_id: process_id_from_turn_run_id(run_id),
+        })
+        .await
+        .expect("snapshot after denials");
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
 async fn child_submission_persists_computed_lineage_and_is_idempotent() {
     use ironclaw_processes::{
         ProcessJournalSource, ProcessKind, ProcessRuntimePort, ProcessSubmissionPort,
@@ -581,6 +688,73 @@ async fn retry_rejects_superseded_runs_and_missing_checkpoint_payloads() {
 }
 
 #[tokio::test]
+async fn retry_rejects_final_checkpoint_without_creating_a_process() {
+    use ironclaw_processes::{
+        ProcessCheckpointId, ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRef,
+        ProcessRuntimePort, ProcessSnapshotSource, RecordProcessCheckpointRequest,
+        in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let actor = TurnActor::new(UserId::new("retry-final-owner").expect("owner"));
+    let run_id = TurnRunId::new();
+    let checkpoint_id =
+        ProcessCheckpointId::from_trusted(TurnCheckpointId::new().as_uuid().to_string());
+    let checkpoint_ref = ProcessCheckpointRef::from_trusted(checkpoint_id.as_str());
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        run_id,
+        TurnId::new(),
+        Some(checkpoint_ref.clone()),
+    )
+    .await;
+    store
+        .record_process_checkpoint(RecordProcessCheckpointRequest {
+            checkpoint_id,
+            process_id: process_id_from_turn_run_id(run_id),
+            scope: turn_scope.to_resource_scope(),
+            state_ref: ProcessCheckpointRef::from_trusted("retry-final-state"),
+            payload: ProcessCheckpointPayload::new(b"final checkpoint".to_vec()).expect("payload"),
+            created_at: Utc::now(),
+            metadata: serde_json::json!({
+                "kind": crate::run_profile::LoopCheckpointKind::Final,
+            }),
+        })
+        .await
+        .expect("record final checkpoint");
+    fail_agent_process(store.as_ref(), &turn_scope, run_id, Some(checkpoint_ref)).await;
+
+    let result = runtime
+        .retry_turn(RetryTurnRequest {
+            scope: turn_scope.clone(),
+            actor,
+            run_id,
+            source_binding_ref: SourceBindingRef::new("retry-final-source").expect("source"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("retry-final-reply")
+                .expect("reply"),
+            idempotency_key: IdempotencyKey::new("retry-final").expect("idempotency"),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(TurnError::RunNotRetryable { run_id: rejected }) if rejected == run_id
+    ));
+    assert_eq!(
+        store
+            .process_snapshots(&turn_scope.to_resource_scope())
+            .await
+            .expect("snapshots")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn retry_rebinds_checkpoint_through_the_real_process_store() {
     use ironclaw_host_api::SanitizedFailure;
     use ironclaw_processes::{
@@ -650,7 +824,10 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             payload: ProcessCheckpointPayload::new(b"checkpoint payload".to_vec())
                 .expect("checkpoint payload"),
             created_at: Utc::now(),
-            metadata: serde_json::json!({"source": "retry-test"}),
+            metadata: serde_json::json!({
+                "source": "retry-test",
+                "kind": crate::run_profile::LoopCheckpointKind::BeforeSideEffect,
+            }),
         })
         .await
         .expect("record source checkpoint");

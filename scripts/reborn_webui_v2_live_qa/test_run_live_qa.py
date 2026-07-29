@@ -2877,10 +2877,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     (json.dumps(event), timestamp),
                 )
                 run_state = {
+                    "row_type": "process",
+                    "process_id": invocation_id,
                     "invocation_id": invocation_id,
                     "capability_id": capability_id,
                     "scope": {"thread_id": thread_id},
                     "status": "completed",
+                    "metadata": {
+                        "invocation_id": invocation_id,
+                        "capability_id": capability_id,
+                    },
                 }
                 db.execute(
                     """
@@ -2890,7 +2896,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     ) VALUES (?, ?, 0, ?, ?, 'application/json', 'run_state_record')
                     """,
                     (
-                        f"/run-state/threads/{thread_id}/runs/{invocation_id}.json",
+                        f"/processes/materialized/process/{invocation_id}",
                         json.dumps(run_state),
                         timestamp,
                         timestamp,

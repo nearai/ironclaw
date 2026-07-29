@@ -66,7 +66,7 @@ where
         collections.entry(name).or_default().extend(rows);
     }
 
-    let actors = legacy_turn_actors(collections.get("turns").map(Vec::as_slice).unwrap_or(&[]));
+    let actors = legacy_turn_actors(collections.get("turns").map(Vec::as_slice).unwrap_or(&[]))?;
     let mut imported = 0usize;
     for run in collections.get("runs").map(Vec::as_slice).unwrap_or(&[]) {
         let snapshot = legacy_turn_snapshot(run, &actors)?;
@@ -190,15 +190,24 @@ where
     Ok(values)
 }
 
-fn legacy_turn_actors(turns: &[Value]) -> HashMap<String, TurnActor> {
-    turns
-        .iter()
-        .filter_map(|turn| {
-            let turn_id = turn.get("turn_id")?.as_str()?.to_string();
-            let actor = serde_json::from_value(turn.get("actor")?.clone()).ok()?;
-            Some((turn_id, actor))
-        })
-        .collect()
+fn legacy_turn_actors(
+    turns: &[Value],
+) -> Result<HashMap<String, TurnActor>, ProcessJournalStoreError> {
+    let mut actors = HashMap::new();
+    for turn in turns {
+        let Some(turn_id) = turn.get("turn_id") else {
+            continue;
+        };
+        let turn_id = turn_id
+            .as_str()
+            .ok_or_else(|| invalid_legacy("legacy turn_id is not a string"))?;
+        let Some(actor) = turn.get("actor") else {
+            continue;
+        };
+        let actor = serde_json::from_value(actor.clone()).map_err(deserialization)?;
+        actors.insert(turn_id.to_string(), actor);
+    }
+    Ok(actors)
 }
 
 fn legacy_turn_snapshot(

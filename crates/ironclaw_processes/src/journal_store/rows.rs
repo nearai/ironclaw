@@ -36,6 +36,10 @@ pub(super) enum MaterializedRow {
         submission_order: VecDeque<String>,
         legacy_imported: bool,
     },
+    IdempotencyOrder {
+        control_order: VecDeque<String>,
+        submission_order: VecDeque<String>,
+    },
     Process(JournaledProcessSnapshot),
     Input(ProcessInputRecord),
     Tree {
@@ -277,20 +281,38 @@ where
         .await?
         .into_iter()
         .collect::<Vec<_>>();
+    let order_path = scoped_path(&format!("{MATERIALIZED_PREFIX}/idempotency-order"))?;
+    push_if_present(filesystem, &mut records, &order_path).await?;
     let (oldest_control_key, oldest_submission_key) = records
-        .first()
+        .iter()
         .map(decode)
-        .transpose()?
-        .and_then(|row| match row {
-            MaterializedRow::Metadata {
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find_map(|row| match row {
+            MaterializedRow::IdempotencyOrder {
                 control_order,
                 submission_order,
-                ..
             } => Some((
                 control_order.front().cloned(),
                 submission_order.front().cloned(),
             )),
             _ => None,
+        })
+        .or_else(|| {
+            records
+                .first()
+                .and_then(|row| decode(row).ok())
+                .and_then(|row| match row {
+                    MaterializedRow::Metadata {
+                        control_order,
+                        submission_order,
+                        ..
+                    } => Some((
+                        control_order.front().cloned(),
+                        submission_order.front().cloned(),
+                    )),
+                    _ => None,
+                })
         })
         .unwrap_or_default();
     for (collection, key) in [
@@ -402,6 +424,7 @@ where
                 state.submission_idempotency_order = submission_order.clone();
                 state.legacy_imported = *legacy_imported;
             }
+            MaterializedRow::IdempotencyOrder { .. } => {}
             MaterializedRow::Process(snapshot) => {
                 state
                     .processes
@@ -445,6 +468,16 @@ where
             MaterializedRow::Journal(_) => {}
             MaterializedRow::Tombstone => {}
         }
+    }
+    if let Some(MaterializedRow::IdempotencyOrder {
+        control_order,
+        submission_order,
+    }) = rows_by_path
+        .values()
+        .find(|row| matches!(row, MaterializedRow::IdempotencyOrder { .. }))
+    {
+        state.control_idempotency_order = control_order.clone();
+        state.submission_idempotency_order = submission_order.clone();
     }
     Ok(LoadedRows {
         state,
@@ -1154,6 +1187,15 @@ fn rows_for_state(
             control_order: state.control_idempotency_order.clone(),
             submission_order: state.submission_idempotency_order.clone(),
             legacy_imported: state.legacy_imported,
+        },
+    )?;
+    insert_scoped(
+        &mut rows,
+        filesystem,
+        &format!("{MATERIALIZED_PREFIX}/idempotency-order"),
+        MaterializedRow::IdempotencyOrder {
+            control_order: state.control_idempotency_order.clone(),
+            submission_order: state.submission_idempotency_order.clone(),
         },
     )?;
     for snapshot in state.processes.values() {

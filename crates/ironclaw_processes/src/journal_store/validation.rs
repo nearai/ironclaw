@@ -132,7 +132,7 @@ pub(super) fn process_claim_within_limits(
 }
 
 pub(super) fn process_scope_visible(stored: &ResourceScope, requested: &ResourceScope) -> bool {
-    *requested == ResourceScope::system() || crate::types::same_scope_owner(stored, requested)
+    crate::types::same_scope_owner(stored, requested)
 }
 
 pub(super) fn same_lineage_scope(left: &ResourceScope, right: &ResourceScope) -> bool {

@@ -544,11 +544,22 @@ impl ProcessJournalMaterializedState {
     fn apply_leased_transition(
         &mut self,
         request: crate::ProcessLeaseRequest,
-        mutation: super::ProcessTransitionMutation,
+        mut mutation: super::ProcessTransitionMutation,
     ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
         let cursor = self.next_cursor();
         let snapshot = self.process_mut(request.process_id)?;
         ensure_lease(snapshot, &request.worker_id, &request.lease_token)?;
+        // Cancellation wins a concurrent runner failure. The runner claimed the
+        // process while it was Running, but a control request may have moved it
+        // to CancelRequested before the loop exit was recorded. Converge that
+        // race to Cancelled instead of stranding the lease until expiry.
+        if snapshot.status == ProcessLifecycleStatus::CancelRequested
+            && mutation.status == ProcessLifecycleStatus::Failed
+        {
+            mutation.status = ProcessLifecycleStatus::Cancelled;
+            mutation.kind = ProcessJournalKind::Cancelled;
+            mutation.failure = None;
+        }
         ensure_transition(snapshot, mutation.status)?;
         snapshot.status = mutation.status;
         snapshot.suspension = mutation.suspension;
@@ -569,6 +580,9 @@ impl ProcessJournalMaterializedState {
             cursor,
             mutation.kind,
         ));
+        if snapshot.status.is_terminal() {
+            self.inputs.remove(&snapshot.process_id);
+        }
         Ok(StoredCommandOutcome::Transitioned(snapshot))
     }
 
@@ -664,6 +678,9 @@ impl ProcessJournalMaterializedState {
         let mut entry = ProcessJournalEntry::from_snapshot(&snapshot, cursor, kind);
         entry.sanitized_reason = mutation.reason;
         self.push_entry(entry);
+        if snapshot.status.is_terminal() {
+            self.inputs.remove(&snapshot.process_id);
+        }
         let result = ProcessControlResult {
             state: snapshot,
             changed: true,

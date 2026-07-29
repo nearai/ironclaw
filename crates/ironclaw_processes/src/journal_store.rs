@@ -57,7 +57,7 @@ use validation::{
 
 const LEGACY_COMMAND_LOG_PATH: &str = "/processes/journal/records";
 const LEGACY_JOURNAL_STATE_PATH: &str = "/processes/journal/state.json";
-const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(90);
+pub const DEFAULT_PROCESS_LEASE_DURATION: Duration = Duration::from_secs(90);
 const JOURNAL_READ_BATCH: usize = 1024;
 const MAX_TRANSACTION_RETRIES: usize = 64;
 
@@ -196,7 +196,7 @@ where
             migration: Arc::new(Mutex::new(())),
             materialized_ready: Arc::new(AtomicBool::new(false)),
             observers: Arc::new(StdMutex::new(Vec::new())),
-            lease_duration: DEFAULT_LEASE_DURATION,
+            lease_duration: DEFAULT_PROCESS_LEASE_DURATION,
             concurrency_limits: ProcessConcurrencyLimits::default(),
         }
     }
@@ -408,10 +408,10 @@ where
         Ok(())
     }
 
-    /// Explicit offline migration for the legacy command log/blob.
+    /// Initialize the row-native journal and import any legacy authority.
     ///
-    /// Normal construction and request handling never invoke this method. It
-    /// must run before any request initializes the row-native journal.
+    /// Production composition invokes this during startup so migration failure
+    /// fails startup closed instead of surfacing inside the first user request.
     pub async fn migrate_legacy_journal(&self) -> Result<usize, ProcessJournalStoreError> {
         let _guard = self.migration.lock().await;
         rows::ensure_indexes(self.filesystem.as_ref()).await?;
@@ -636,14 +636,14 @@ where
                     let sequence_path = self
                         .filesystem
                         .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
-                    for _ in 1..state.next_cursor {
-                        match txn.reserve_sequence(&sequence_path).await {
-                            Ok(_) => {}
-                            Err(error) if rows::retryable_transaction_error(&error) => {
-                                return Err(ProcessJournalStoreError::Filesystem(error));
-                            }
-                            Err(error) => return Err(error.into()),
+                    if let Err(error) = txn
+                        .reserve_sequence_range(&sequence_path, state.next_cursor.saturating_sub(1))
+                        .await
+                    {
+                        if rows::retryable_transaction_error(&error) {
+                            return Err(ProcessJournalStoreError::Filesystem(error));
                         }
+                        return Err(error.into());
                     }
                 }
                 rows::persist(self.filesystem.as_ref(), txn.as_mut(), &loaded, &state).await?;

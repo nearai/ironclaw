@@ -1292,6 +1292,15 @@ impl StorageTxn for PostgresStorageTxn {
         postgres_reserve_sequence_with_client(self.client()?, path).await
     }
 
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        postgres_reserve_sequence_range_with_client(self.client()?, path, count).await
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
         let client = self.client.take().ok_or_else(|| FilesystemError::Backend {
             path: self.prefix.clone(),
@@ -1336,6 +1345,39 @@ async fn postgres_reserve_sequence_with_client(
             RETURNING next_seq - 1 AS reserved
             "#,
         &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let reserved: i64 = row.get("reserved");
+    seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+}
+
+async fn postgres_reserve_sequence_range_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    count: u64,
+) -> Result<SeqNo, FilesystemError> {
+    if count == 0 {
+        return Ok(SeqNo::ZERO);
+    }
+    let count = i64::try_from(count).map_err(|_| {
+        backend_error(
+            path.clone(),
+            FilesystemOperation::ReserveSeq,
+            "sequence reservation range exceeds i64",
+        )
+    })?;
+    let row = cached_query_one(
+        client,
+        r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES ($1, $2 + 1, NOW())
+            ON CONFLICT (path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + $2,
+                updated_at = NOW()
+            RETURNING next_seq - 1 AS reserved
+            "#,
+        &[&path.as_str(), &count],
     )
     .await
     .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;

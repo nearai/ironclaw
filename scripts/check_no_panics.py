@@ -206,6 +206,51 @@ def line_test_contexts(lines: list[str]) -> list[bool]:
     return contexts
 
 
+def has_cfg_test_module_declaration(
+    path: str, repository_root: pathlib.Path = pathlib.Path(".")
+) -> bool:
+    """Return whether ``path`` is included by an exact ``#[cfg(test)] mod``.
+
+    Filename suffixes are only a convention. Some ``*_tests.rs`` modules are
+    also compiled by ``feature = "test-support"``, so exempting them by name
+    alone can hide panics from non-test builds.
+    """
+    posix_path = pathlib.PurePosixPath(path)
+    module_name = posix_path.stem
+    parent = pathlib.Path(*posix_path.parent.parts)
+    candidates = [
+        repository_root / parent / "mod.rs",
+        repository_root / parent.with_suffix(".rs"),
+    ]
+    source_parent = repository_root / parent
+    if source_parent.is_dir():
+        candidates.extend(source_parent.glob("*.rs"))
+    if posix_path.parent.name == "src":
+        candidates.extend(
+            [
+                repository_root / parent / "lib.rs",
+                repository_root / parent / "main.rs",
+            ]
+        )
+    declaration = re.compile(
+        rf"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
+        rf"(?:pub(?:\([^)]*\))?\s+)?mod\s+{re.escape(module_name)}\s*;"
+    )
+    path_declaration = re.compile(
+        rf"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
+        rf"#\s*\[\s*path\s*=\s*[\"']{re.escape(posix_path.name)}[\"']\s*\]\s*"
+        r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
+    )
+    for candidate in candidates:
+        try:
+            source = candidate.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError, UnicodeError):
+            continue
+        if declaration.search(source) or path_declaration.search(source):
+            return True
+    return False
+
+
 def is_test_only_path(path: str) -> bool:
     """Return True for files that live in Rust test-only locations.
 
@@ -239,9 +284,14 @@ def is_test_only_path(path: str) -> bool:
     parts = posix_path.parts
     if (
         "tests" in parts
-        or posix_path.name == "tests.rs"
-        or posix_path.name.endswith("_test.rs")
-        or posix_path.name.endswith("_tests.rs")
+        or (
+            (
+                posix_path.name == "tests.rs"
+                or posix_path.name.endswith("_test.rs")
+                or posix_path.name.endswith("_tests.rs")
+            )
+            and has_cfg_test_module_declaration(path)
+        )
     ):
         return True
     # Exempt only the canonical feature-gated module root: `.../src/test_support.rs`
@@ -417,10 +467,15 @@ class CheckNoPanicsTests(unittest.TestCase):
     def test_test_only_path_detection(self) -> None:
         self.assertTrue(is_test_only_path("src/channels/web/tests/multi_tenant.rs"))
         self.assertTrue(is_test_only_path("crates/foo/src/tests/helpers.rs"))
-        self.assertTrue(is_test_only_path("crates/foo/src/tests.rs"))
-        self.assertTrue(is_test_only_path("crates/foo/src/nested/tests.rs"))
-        self.assertTrue(is_test_only_path("crates/foo/src/auth_test.rs"))
-        self.assertTrue(is_test_only_path("crates/foo/src/auth_tests.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/tests.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/nested/tests.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/auth_test.rs"))
+        self.assertFalse(is_test_only_path("crates/foo/src/auth_tests.rs"))
+        self.assertTrue(
+            is_test_only_path(
+                "crates/ironclaw_processes/src/journal_store/state_tests.rs"
+            )
+        )
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))
@@ -445,6 +500,9 @@ class CheckNoPanicsTests(unittest.TestCase):
         # A nested test_support.rs (not the canonical `src/test_support.rs` root)
         # is not the blessed feature-gated module either.
         self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
+        self.assertFalse(
+            is_test_only_path("crates/ironclaw_memory_native/src/contract_tests.rs")
+        )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.

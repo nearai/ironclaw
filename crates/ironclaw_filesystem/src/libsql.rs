@@ -1269,6 +1269,15 @@ impl StorageTxn for LibSqlStorageTxn {
         reserve_sequence_libsql_inner(self.conn()?, path).await
     }
 
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        reserve_sequence_range_libsql_inner(self.conn()?, path, count).await
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
         let conn = self.conn.take().ok_or_else(|| FilesystemError::Backend {
             path: self.prefix.clone(),
@@ -1456,6 +1465,48 @@ async fn reserve_sequence_libsql_inner(
             path: path.clone(),
             operation: FilesystemOperation::ReserveSeq,
             reason: "sequence reservation returned no row".to_string(),
+        })?;
+    let seq: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    seq_no_from_i64(path, seq, FilesystemOperation::ReserveSeq)
+}
+
+async fn reserve_sequence_range_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    count: u64,
+) -> Result<SeqNo, FilesystemError> {
+    if count == 0 {
+        return Ok(SeqNo::ZERO);
+    }
+    let count = i64::try_from(count).map_err(|_| FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::ReserveSeq,
+        reason: "sequence reservation range exceeds i64".to_string(),
+    })?;
+    let mut rows = conn
+        .query(
+            r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES (?1, ?2 + 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            RETURNING next_seq - 1
+            "#,
+            libsql::params![path.as_str(), count],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?
+        .ok_or_else(|| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReserveSeq,
+            reason: "sequence range reservation returned no row".to_string(),
         })?;
     let seq: i64 = row
         .get(0)

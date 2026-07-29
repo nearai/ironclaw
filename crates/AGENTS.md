@@ -45,7 +45,7 @@ Keep lower layers neutral. Product and runtime composition flows downward throug
 ```text
 common / host_api / prompt_envelope
   -> filesystem / memory / events / event_projections / event_streams / extensions / trust / resources
-  -> secrets / network / outbound / channel_host / channel_delivery / run_state / authorization / approvals / runtime_policy / hooks
+  -> secrets / network / outbound / channel_host / channel_delivery / processes / authorization / approvals / runtime_policy / hooks
   -> host_runtime / processes / dispatcher / runtime lanes (scripts, mcp, wasm, wasm_limiter)
   -> turns / threads / agent_loop / loop_host / capabilities
   -> reborn composition / product adapters / product orchestration / CLI

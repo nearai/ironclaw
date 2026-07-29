@@ -231,7 +231,7 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
         .expect_err("resuming a cancelled run must fail, not silently replay");
     let resume_err = resume_err.to_string();
     assert!(
-        resume_err.contains("invalid process journal transition")
+        resume_err.contains("invalid turn transition")
             && resume_err.contains("Cancelled")
             && resume_err.contains("Queued"),
         "expected the cancelled/terminal run to be rejected, got: {resume_err}"

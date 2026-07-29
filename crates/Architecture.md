@@ -228,7 +228,7 @@ still passes through `CapabilityHost` and obligation handling before dispatch.
 Substrates are reusable service and storage primitives. They are deliberately
 less product-aware than the runtime service and less behavior-aware than loops.
 Examples include event logs, projection stores, filesystem roots, memory
-services, approval/run-state stores, resource governors, thread services, and
+services, approval/process-journal stores, resource governors, thread services, and
 runtime lanes.
 
 Substrates should expose typed capabilities and durable records, not product UX
@@ -357,7 +357,7 @@ composition. Lower layers should not import product/runtime orchestration.
 ```text
 host_api / common / prompt_envelope
   -> filesystem / memory / events / projections / streams / resources / trust
-  -> auth / authorization / approvals / run_state / runtime_policy / secrets / network
+  -> auth / authorization / approvals / processes / runtime_policy / secrets / network
   -> host_runtime / dispatcher / processes / runtime lanes
   -> turns / threads / loop_host / agent_loop / capabilities
   -> reborn / reborn_composition / product workflow / adapters
@@ -554,7 +554,7 @@ semaphore with per-user and per-inbound-type caps.
 ```mermaid
 stateDiagram-v2
     [*] --> Queued: submit_turn
-    Queued --> Running: claim_next_run
+    Queued --> Running: claim_next_processes
     Running --> Running: heartbeat
     Running --> BlockedApproval: LoopExit::Blocked(approval)
     Running --> BlockedAuth: LoopExit::Blocked(auth)
@@ -574,7 +574,7 @@ stateDiagram-v2
 Important invariants:
 
 - `submit_turn` creates queued work, but no model/tool side effect runs before
-  `claim_next_run` succeeds.
+  the process claim succeeds.
 - Heartbeats require the matching runner id and lease token.
 - Expired running leases move to terminal `Failed` (sanitized
   `lease_expired`); expired cancel-requested leases move to `Cancelled`.

@@ -819,6 +819,16 @@ impl StorageTxn for ScopedStorageTxn {
         self.inner.reserve_sequence(path).await
     }
 
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check(FilesystemOperation::ReserveSeq)?;
+        self.check_path(path)?;
+        self.inner.reserve_sequence_range(path, count).await
+    }
+
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
         self.inner.commit().await
     }

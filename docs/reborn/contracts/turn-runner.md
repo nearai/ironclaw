@@ -17,7 +17,7 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 ## 2. Claim and lease rules
 
 - `submit_turn` creates a queued `TurnRunId` and active-thread lock, but no model/tool side effects may run before a runner claim succeeds.
-- `claim_next_run` atomically moves one matching `Queued` run to `Running`.
+- `claim_next_processes` atomically moves matching queued agent-turn processes to `Running`.
 - A successful claim stores `runner_id`, `lease_token`, `last_heartbeat_at`, `lease_expires_at`, increments `claim_count`, updates the active lock, and emits `RunnerClaimed`.
 - `heartbeat` requires the matching `runner_id` and `lease_token`, only refreshes actively `Running` work, and rejects leases whose `lease_expires_at` has already passed. Once cancellation is requested, heartbeats no longer extend the lease; the runner must complete cancellation before the existing lease expires or the reconciler moves the run to recovery. On success, heartbeat refreshes durable `last_heartbeat_at` and extends durable `lease_expires_at`; adapters may touch active-lock freshness and emit/coalesce `RunnerHeartbeat` lifecycle events, but consumers must use lease metadata as the liveness source of truth.
 - Pull-based claims are authoritative. Wake notifications are optimization hints only.
@@ -29,7 +29,7 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 
 - A reconciler scans runner-owned `Running` and `CancelRequested` leases using durable `lease_expires_at` metadata.
 - Expired `Running` or `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted `RecoveryRequired` event with reason `lease_expired`, and keep the same canonical-thread active lock.
-- `RecoveryRequired` runs are not returned by the normal `claim_next_run` path. The system must not auto-retry uncertain side-effecting work.
+- `RecoveryRequired` runs are not returned by the normal process-claim path. The system must not auto-retry uncertain side-effecting work.
 - A duplicate/new submit for the same canonical thread remains `ThreadBusy` while recovery is required.
 - Explicit cancellation of `RecoveryRequired` is terminal `Cancelled` and releases the active lock so a new turn can be submitted.
 

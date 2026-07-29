@@ -50,6 +50,21 @@ pub trait StorageTxn: Send {
         })
     }
 
+    /// Atomically reserve `count` consecutive sequence values, returning the
+    /// final reserved value. Backends override this to avoid one statement per
+    /// historical record during migrations.
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        let mut last = SeqNo::ZERO;
+        for _ in 0..count {
+            last = self.reserve_sequence(path).await?;
+        }
+        Ok(last)
+    }
+
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError>;
 
     async fn rollback(self: Box<Self>);

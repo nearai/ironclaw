@@ -42,7 +42,7 @@ use crate::{
     events::{EventCursor, TurnBlockedGateKind},
     request::{CancelRunRequest, ResumeTurnRequest, RetryTurnRequest, SubmitTurnRequest},
     response::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse},
-    run_profile::LoopModelRouteSnapshot,
+    run_profile::{LoopCheckpointKind, LoopModelRouteSnapshot},
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
 };
 
@@ -524,6 +524,19 @@ impl AgentTurnProcessRuntime {
                 .ok_or(TurnError::RunNotRetryable {
                     run_id: request.run_id,
                 })?;
+            let checkpoint_kind = source
+                .metadata
+                .get("kind")
+                .cloned()
+                .and_then(|kind| serde_json::from_value::<LoopCheckpointKind>(kind).ok())
+                .ok_or(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                })?;
+            if checkpoint_kind == LoopCheckpointKind::Final {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            }
             let checkpoint_id = TurnCheckpointId::new();
             let checkpoint_ref = process_checkpoint_ref(checkpoint_id);
             Some((

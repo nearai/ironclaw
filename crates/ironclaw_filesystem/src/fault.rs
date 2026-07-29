@@ -323,6 +323,15 @@ impl StorageTxn for FaultInjectingTxn {
         self.inner.reserve_sequence(path).await
     }
 
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        gate_state(&self.state, FilesystemOperation::ReserveSeq, path)?;
+        self.inner.reserve_sequence_range(path, count).await
+    }
+
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
         self.inner.commit().await
     }

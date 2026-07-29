@@ -21,8 +21,8 @@
 //! serialized checkpoint.
 //!
 //! This lives in `ironclaw_capabilities` (not `ironclaw_approvals`) because the
-//! `ironclaw_approvals` charter forbids persisting raw replay input in run-state
-//! records (`CLAUDE.md` line 7), and the `ironclaw_turns` charter forbids
+//! raw replay input does not belong in process-journal lifecycle rows, and the
+//! `ironclaw_turns` charter explicitly forbids
 //! persisting raw tool input in turn state or events — whereas
 //! `ironclaw_capabilities` owns the caller-facing invoke/resume/spawn workflow
 //! this payload exists to serve, and has no such prohibition. The record embeds

@@ -74,6 +74,7 @@ run_runtimes() {
   run_test ironclaw_mcp mcp_dispatch_integration
   run_test ironclaw_processes process_host_contract
   run_test ironclaw_processes process_journal_store_contract
+  run_test ironclaw_processes legacy_migration_backend_contract
   run_test ironclaw_processes process_services_contract
 }
 
@@ -90,6 +91,7 @@ run_substrates() {
   run_test ironclaw_secrets boundary_contract
   run_test ironclaw_secrets secret_store_contract
   run_test ironclaw_resources resource_governor_contract
+  run_test ironclaw_approvals approval_store_contract
   run_test ironclaw_approvals approval_resolution_contract
   run_test ironclaw_approvals boundary_contract
   run_test ironclaw_authorization boundary_contract

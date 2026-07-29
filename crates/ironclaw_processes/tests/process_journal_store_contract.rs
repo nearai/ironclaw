@@ -8,11 +8,11 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     AgentId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, TurnCheckpointId,
-    TurnGateRef, TurnId, TurnRunId, UserId, VirtualPath,
+    ProcessId, ProjectId, ResourceScope, SanitizedFailure, ScopedPath, TenantId, ThreadId,
+    TurnCheckpointId, TurnGateRef, TurnId, TurnRunId, UserId, VirtualPath,
 };
 use ironclaw_processes::{
-    CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest,
+    CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest, FailProcessRequest,
     GetProcessCheckpointRequest, GetProcessInputRequest, GetProcessSnapshotRequest,
     JournaledProcessSnapshot, KillProcessRequest, MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES,
     MAX_PROCESS_INPUT_PAYLOAD_BYTES, OpenProcessDependencyRequest, ProcessCheckpointId,
@@ -2630,6 +2630,45 @@ async fn process_control_is_scoped_atomic_and_process_kind_neutral() {
         .await
         .expect("complete cancellation");
     assert_eq!(cancelled.status, ProcessLifecycleStatus::Cancelled);
+
+    let failed_during_cancel_id = ProcessId::new();
+    submit_internal_process(&store, &scope, failed_during_cancel_id).await;
+    let failed_during_cancel_claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("cancel-failure-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(failed_during_cancel_id),
+            process_kind_filter: None,
+            max_processes: 1,
+        })
+        .await
+        .expect("claim cancellation-race process")
+        .pop()
+        .expect("cancellation-race claim");
+    store
+        .request_cancel_process(CancelProcessRequest {
+            scope: scope.clone(),
+            process_id: failed_during_cancel_id,
+            operation_id: None,
+            reason: Some("operator request".to_string()),
+        })
+        .await
+        .expect("request cancellation before runner failure");
+    let converged = store
+        .fail_process(FailProcessRequest {
+            process_id: failed_during_cancel_id,
+            worker_id: failed_during_cancel_claim.worker_id,
+            lease_token: failed_during_cancel_claim.lease_token,
+            failure: SanitizedFailure::new("runner_failed_during_cancel")
+                .expect("sanitized failure"),
+            checkpoint_ref: None,
+            metadata: None,
+        })
+        .await
+        .expect("runner failure must converge cancellation");
+    assert_eq!(converged.status, ProcessLifecycleStatus::Cancelled);
+    assert!(converged.lease.is_none());
+    assert!(converged.failure.is_none());
 
     let stopped_id = ProcessId::new();
     submit_internal_process(&store, &scope, stopped_id).await;

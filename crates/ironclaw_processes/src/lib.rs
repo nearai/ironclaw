@@ -12,9 +12,13 @@
 //! - [`cancellation`] — cooperative cancellation tokens + per-process registry
 //! - [`host`] — read/poll/await/cancel surface ([`ProcessHost`],
 //!   [`ProcessSubscription`])
+//! - `journal` / `journal_store` — canonical lifecycle vocabulary and durable
+//!   materialization
+//! - `capability_process` / `invocation_state` — capability-facing projections
 //! - [`result_store`] — externalized process result metadata and output bodies
 //! - [`services`] — composition root ([`ProcessServices`]) and the
 //!   production [`BackgroundProcessManager`]
+//! - `supervisor` — wake-assisted claim, lease recovery, and execution loop
 
 mod cancellation;
 mod capability_process;
@@ -66,7 +70,9 @@ pub use journal::{
     SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
     SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
-pub use journal_store::{ProcessJournalStore, ProcessJournalStoreError};
+pub use journal_store::{
+    DEFAULT_PROCESS_LEASE_DURATION, ProcessJournalStore, ProcessJournalStoreError,
+};
 pub use result_store::ProcessResultStore;
 pub use services::{
     BackgroundErrorHandler, BackgroundFailure, BackgroundFailureStage, BackgroundProcessManager,
