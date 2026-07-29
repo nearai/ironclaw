@@ -43,6 +43,8 @@ use std::ops::Range;
 use aho_corasick::AhoCorasick;
 use regex::Regex;
 
+const MAX_BARE_JWT_CANDIDATE_LEN: usize = 64 * 1024;
+
 /// Action to take when a leak is detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeakAction {
@@ -465,6 +467,13 @@ fn extract_literal_prefix(pattern: &str) -> Option<String> {
 }
 
 fn has_json_web_token_header(candidate: &str) -> bool {
+    // Keep the regex unbounded so it consumes the complete base64url run and
+    // redaction cannot leave a secret tail. Oversized three-segment candidates
+    // fail closed as sensitive without allocating a decode buffer or parsing
+    // attacker-controlled JSON.
+    if candidate.len() > MAX_BARE_JWT_CANDIDATE_LEN {
+        return true;
+    }
     let mut segments = candidate.split('.');
     let (Some(header), Some(_payload), Some(_signature), None) = (
         segments.next(),
@@ -707,7 +716,7 @@ fn default_patterns() -> Vec<LeakPattern> {
 
 #[cfg(test)]
 mod tests {
-    use crate::leak_detector::{LeakDetector, LeakSeverity};
+    use crate::leak_detector::{LeakDetector, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN};
 
     #[test]
     fn test_detect_openai_key() {
@@ -978,6 +987,20 @@ mod tests {
         let token = "12345678901:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsa-";
 
         let (redacted, changed) = detector.redact_all_secrets(token);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn oversized_bare_jwt_candidate_fails_closed_without_decoding() {
+        let detector = LeakDetector::new();
+        let candidate = format!(
+            "{}.payload12.signature12-",
+            "A".repeat(MAX_BARE_JWT_CANDIDATE_LEN + 1)
+        );
+
+        let (redacted, changed) = detector.redact_all_secrets(&candidate);
 
         assert!(changed);
         assert_eq!(redacted, "[REDACTED]");
