@@ -97,8 +97,6 @@ async fn users_install_and_remove_the_same_extension_independently() {
     // Installation is the only user action for an extension without personal
     // setup requirements. Runtime publication/readiness is an internal
     // checkpoint and must complete before the install response returns.
-    fixture.assert_user_present(fixture.alice()).await;
-    fixture.assert_user_present(fixture.bob()).await;
     fixture.assert_user_phase(fixture.alice(), "active").await;
     fixture.assert_user_phase(fixture.bob(), "active").await;
 
@@ -151,6 +149,12 @@ async fn normalized_user_memberships_survive_runtime_restart_and_soft_removal() 
         .await;
         assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
     }
+    // Neither user's next assertion is a phase check (Alice is about to be
+    // removed, and Bob isn't touched again until after restart), so presence
+    // here is the thing actually under test, not an implied side effect of a
+    // following `assert_user_phase` call.
+    fixture.assert_user_present(fixture.alice()).await;
+    fixture.assert_user_present(fixture.bob()).await;
 
     let (status, body) = post_json(
         fixture.member_router(fixture.alice()),

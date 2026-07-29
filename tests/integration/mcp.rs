@@ -409,10 +409,11 @@ async fn mcp_tool_call_output_too_large_surfaces_failed() {
 ///
 /// This test intentionally asserts the CURRENT (buggy) page-1-only result,
 /// not the spec-correct full catalog — it exists to make the truncation
-/// provable and regressable, not to bless it. Fixing the client to follow
-/// `nextCursor` is a separate, later workstream (see brief); when that ships,
-/// this assertion should flip to expect all 5 tools, and this comment should
-/// say so.
+/// provable and regressable, not to bless it. Adding a client-side pagination
+/// loop that follows `nextCursor` is owned by the MCP-registration work in
+/// progress. When that lands, flip this test to assert the FULL tool set
+/// across all pages, and that `nextCursor` is followed until exhausted
+/// (bounded by `max_tools`).
 #[tokio::test]
 async fn hosted_mcp_discovery_reads_only_first_page_of_paginated_tools_list() {
     let tool_names = ["alpha", "bravo", "charlie", "delta", "echo"];

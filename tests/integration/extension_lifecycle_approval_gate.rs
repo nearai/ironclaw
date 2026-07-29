@@ -5,6 +5,15 @@
 //! and, for discrimination, the SAME operation on the ordinary
 //! `extension_lifecycle()` group (auto-approve ON) must complete without
 //! ever raising a gate at all.
+//!
+//! This scenario keeps its own `[[test]]` target rather than folding into
+//! `group_extensions/`: `tests/integration/CLAUDE.md` treats one binary per
+//! scenario file as the norm, and this is a single-thread submit+assert
+//! scenario, not a multi-thread group scenario. It is also the designated
+//! home for auto-approve-OFF gate coverage, which will grow as more gates
+//! land here (safety-scan rejection, the register gate) — folding it into an
+//! unrelated tool-dispatch file would be the wrong seam. The alternative flat
+//! files are already ~883 lines.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
