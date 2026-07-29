@@ -30,6 +30,13 @@ DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
 DEFAULT_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
+_ARTIFACT_PENDING_SENTINEL = ".pytest-outcome-pending"
+_ARTIFACT_FAILED_SENTINEL = ".pytest-outcome-failed"
+_ARTIFACT_BUNDLES_BY_NODE: dict[
+    str,
+    list[tuple[Path, Path, int]],
+] = {}
+_ARTIFACT_FAILED_NODES: set[str] = set()
 
 # Shared tenant secret for the test-tools/market-data fixture (test-tools/README.md).
 # `IRONCLAW_REBORN_DEV_SECRET__<handle>` is read once at `serve` boot, so it must
@@ -46,12 +53,35 @@ def _directory_size(path: Path) -> int:
     )
 
 
+def _mark_artifact_bundle_outcome(
+    artifact_dir: Path,
+    outcome: str,
+) -> None:
+    pending = artifact_dir / _ARTIFACT_PENDING_SENTINEL
+    failed = artifact_dir / _ARTIFACT_FAILED_SENTINEL
+    pending.unlink(missing_ok=True)
+    failed.unlink(missing_ok=True)
+    if outcome == "pending":
+        pending.touch()
+    elif outcome == "failed":
+        failed.touch()
+    elif outcome != "passed":
+        raise ValueError(f"unsupported artifact outcome: {outcome}")
+
+
+def _artifact_bundle_is_protected(artifact_dir: Path) -> bool:
+    return (
+        (artifact_dir / _ARTIFACT_PENDING_SENTINEL).exists()
+        or (artifact_dir / _ARTIFACT_FAILED_SENTINEL).exists()
+    )
+
+
 def _enforce_artifact_budget(
     browser_artifact_root: Path,
     max_bytes: int,
     current_artifact_dir: Path,
 ) -> None:
-    """Keep browser artifacts within a deterministic per-shard disk budget."""
+    """Prune successful artifacts while preserving pending and failed bundles."""
     bundles = [
         path
         for path in browser_artifact_root.iterdir()
@@ -63,7 +93,12 @@ def _enforce_artifact_budget(
         return
 
     oldest_first = sorted(
-        (path for path in bundles if path != current_artifact_dir),
+        (
+            path
+            for path in bundles
+            if path != current_artifact_dir
+            and not _artifact_bundle_is_protected(path)
+        ),
         key=lambda path: path.stat().st_mtime_ns,
     )
     for path in oldest_first:
@@ -72,7 +107,11 @@ def _enforce_artifact_budget(
         total_bytes -= bundle_sizes[path]
         shutil.rmtree(path)
 
-    if total_bytes <= max_bytes or not current_artifact_dir.exists():
+    if (
+        total_bytes <= max_bytes
+        or not current_artifact_dir.exists()
+        or _artifact_bundle_is_protected(current_artifact_dir)
+    ):
         return
 
     largest_first = sorted(
@@ -90,6 +129,48 @@ def _enforce_artifact_budget(
         file_size = path.stat().st_size
         path.unlink()
         total_bytes -= file_size
+
+
+def _register_artifact_bundle(
+    node_id: str,
+    browser_artifact_root: Path,
+    artifact_dir: Path,
+    max_bytes: int,
+) -> None:
+    _ARTIFACT_BUNDLES_BY_NODE.setdefault(node_id, []).append(
+        (browser_artifact_root, artifact_dir, max_bytes)
+    )
+    outcome = "failed" if node_id in _ARTIFACT_FAILED_NODES else "pending"
+    _mark_artifact_bundle_outcome(artifact_dir, outcome)
+
+
+def _mark_registered_artifact_bundles_failed(node_id: str) -> None:
+    _ARTIFACT_FAILED_NODES.add(node_id)
+    for _, artifact_dir, _ in _ARTIFACT_BUNDLES_BY_NODE.get(node_id, []):
+        if artifact_dir.exists():
+            _mark_artifact_bundle_outcome(artifact_dir, "failed")
+
+
+def _finalize_registered_artifact_bundles(node_id: str) -> None:
+    failed = node_id in _ARTIFACT_FAILED_NODES
+    bundles = _ARTIFACT_BUNDLES_BY_NODE.pop(node_id, [])
+    _ARTIFACT_FAILED_NODES.discard(node_id)
+    for _, artifact_dir, _ in bundles:
+        if artifact_dir.exists():
+            _mark_artifact_bundle_outcome(
+                artifact_dir,
+                "failed" if failed else "passed",
+            )
+
+    roots: dict[tuple[Path, int], Path] = {}
+    for browser_artifact_root, artifact_dir, max_bytes in bundles:
+        roots[(browser_artifact_root, max_bytes)] = artifact_dir
+    for (browser_artifact_root, max_bytes), current_artifact_dir in roots.items():
+        _enforce_artifact_budget(
+            browser_artifact_root,
+            max_bytes,
+            current_artifact_dir,
+        )
 
 
 def _artifact_max_bytes() -> int:
@@ -182,6 +263,12 @@ class _ArtifactBrowser:
         context_name = f"{readable_name}-{uuid.uuid4().hex[:8]}"
         artifact_dir = self._browser_artifact_root / context_name
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        _register_artifact_bundle(
+            node_id,
+            self._browser_artifact_root,
+            artifact_dir,
+            self._artifact_max_bytes,
+        )
         kwargs.setdefault("record_video_dir", str(artifact_dir / "videos"))
         kwargs.setdefault("record_video_size", {"width": 960, "height": 540})
         context = await self._browser.new_context(*args, **kwargs)
