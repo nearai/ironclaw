@@ -83,13 +83,13 @@ export function StatCard({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div
-            className="font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]"
+            className="font-mono text-[0.6875rem] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]"
           >
             {label}
           </div>
           <div
             className={cn(
-              "mt-2 truncate font-medium tracking-[-0.05em] text-[var(--v2-text-strong)]",
+              "mt-2 truncate font-medium tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)]",
               valueClassName
             )}
           >
@@ -152,7 +152,7 @@ export function EmptyPanel({ title, description, children = null, boxed = true }
   const body = (
     <div className="max-w-xl">
       <h2
-        className="text-[1.35rem] font-medium tracking-[-0.03em] text-[var(--v2-text-strong)] md:text-[1.6rem]"
+        className="text-[1.35rem] font-medium tracking-[var(--v2-tracking-tight)] text-[var(--v2-text-strong)] md:text-[1.6rem]"
       >
         {title}
       </h2>
@@ -173,13 +173,13 @@ export function EmptyPanel({ title, description, children = null, boxed = true }
 /* ── SectionHeader ─────────────────────────────────────────────────── */
 /**
  * Top heading card (hidden on mobile, visible md+) matching reference:
- *   h1 text-[1.9rem] md:text-[2.2rem] font-medium tracking-[-0.04em]
+ *   h1 text-[1.9rem] md:text-[2.2rem] font-medium tracking-[var(--v2-tracking-display)]
  */
 export function SectionHeader({ title, subtitle }) {
   return (
     <Card padding="lg" className="hidden md:block">
       <h1
-        className="text-[1.9rem] font-medium tracking-[-0.04em] text-[var(--v2-text-strong)] md:text-[2.2rem]"
+        className="text-[1.9rem] font-medium tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)] md:text-[2.2rem]"
       >
         {title}
       </h1>

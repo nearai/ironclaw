@@ -1,6 +1,6 @@
 import { NavLink } from "react-router";
 import React from "react";
-import { Icon } from "@ironclaw/design-system";
+import { Button, Icon, Input } from "@ironclaw/design-system";
 import { ConfirmDialog } from "./confirm-dialog-lazy";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
@@ -207,7 +207,7 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   if (items.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
-      <span className="px-3 pt-1 text-[10px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]">
+      <span className="px-3 pt-1 text-[10px] font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
         {label}
       </span>
       {items.map(
@@ -292,7 +292,7 @@ export function SidebarThreads({
         className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 hover:bg-[var(--v2-surface-muted)]"
       >
         <span
-          className="flex-1 text-left text-[11px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]"
+          className="flex-1 text-left text-[11px] font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]"
         >
           {t("chat.conversations")}
         </span>
@@ -314,12 +314,13 @@ export function SidebarThreads({
           <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--v2-text-faint)]">
             <Icon name="search" className="h-3.5 w-3.5" />
           </span>
-          <input
+          <Input
             type="text"
+            size="sm"
             value={query}
             onInput={(event) => setQuery(event.currentTarget.value)}
             placeholder={t("common.searchChats")}
-            className="h-8 w-full rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-8 pr-2 text-[12px] text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+            className="pl-8 pr-2"
           />
         </div>)}
         {rebornProjectsEnabled &&
@@ -378,16 +379,18 @@ export function SidebarThreads({
             onDelete={onDelete}
           />
           {hasMore &&
-          (<button
+          (<Button
             type="button"
+            variant="secondary"
+            size="sm"
             data-testid="thread-load-more"
             disabled={isLoadingMore}
             aria-busy={isLoadingMore || undefined}
             onClick={onLoadMore}
-            className="mx-1 rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-2 text-[12px] font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-wait disabled:opacity-60"
+            className="mx-1 disabled:cursor-wait"
           >
             {isLoadingMore ? t("common.loading") : t("common.loadMore")}
-          </button>)}
+          </Button>)}
           {loadMoreError &&
           (<div
             role="alert"

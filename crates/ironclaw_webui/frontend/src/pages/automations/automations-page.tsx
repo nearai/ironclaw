@@ -98,7 +98,7 @@ export function AutomationsPage() {
                           (index) =>
                             (<div
                               key={index}
-                              className="v2-skeleton h-28 rounded-[18px]"
+                              className="v2-skeleton h-28 rounded-[var(--v2-radius-bubble)]"
                             />)
                         )}
                       </div>

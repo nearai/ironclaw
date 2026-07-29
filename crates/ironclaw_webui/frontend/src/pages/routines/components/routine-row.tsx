@@ -1,5 +1,5 @@
 import { Button } from "@ironclaw/design-system";
-import { StatusPill } from "@ironclaw/design-system";
+import { StatusPill, Text } from "@ironclaw/design-system";
 import {
   formatRoutineDate,
   routineStatusTone,
@@ -19,7 +19,7 @@ export function RoutineRow({
   return (
     <article
       className={[
-        "group flex flex-col gap-4 rounded-[18px] border p-5",
+        "group flex flex-col gap-4 rounded-[var(--v2-radius-bubble)] border p-5",
         selected
           ? "border-[var(--v2-accent)]/35 bg-[var(--v2-accent-soft)]"
           : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] hover:border-[var(--v2-accent)]/30 hover:bg-[var(--v2-surface-muted)]",
@@ -41,12 +41,12 @@ export function RoutineRow({
           <p className="mt-2 line-clamp-2 text-sm leading-6 text-[var(--v2-text-muted)]">
             {routine.description || routine.trigger_summary || "No description"}
           </p>
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+          <Text variant="eyebrow" tone="muted" as="div" className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
             <span>{routine.trigger_type}</span>
             <span>{routine.action_type}</span>
             <span>runs {routine.run_count || 0}</span>
             <span>next {formatRoutineDate(routine.next_fire_at)}</span>
-          </div>
+          </Text>
         </button>
 
         <div className="flex shrink-0 flex-wrap gap-2">

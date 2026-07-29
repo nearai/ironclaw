@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 
 function attentionTone(item) {
   return item?.type === "failure" ? "danger" : "warning";
@@ -16,7 +16,7 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
   return (
     <Panel className="overflow-hidden border-[color-mix(in_srgb,var(--v2-warning-text)_10%,var(--v2-panel-border))] p-0">
       <div className="border-b border-[color-mix(in_srgb,var(--v2-warning-text)_10%,var(--v2-panel-border))] px-5 py-4 sm:px-6">
-        <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--v2-warning-text)]">{t("projects.attention.title")}</div>
+        <Text variant="eyebrow" tone="warning" as="div">{t("projects.attention.title")}</Text>
         <p className="mt-2 max-w-[70ch] text-sm leading-6 text-[var(--v2-text)]">
           {t("projects.attention.desc")}
         </p>
@@ -31,16 +31,16 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-medium text-[var(--v2-text-strong)]">{item.project_name}</div>
-                <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+                <Text variant="eyebrow" tone="muted" as="div" className="mt-1">
                   {item.thread_id
                     ? t("projects.attention.threadLabel", { id: String(item.thread_id).slice(0, 8) })
                     : t("projects.attention.projectLabel")}
-                </div>
+                </Text>
               </div>
               <StatusPill tone={attentionTone(item)} label={attentionLabel(item, t)} />
             </div>
             <p className="mt-3 text-sm leading-6 text-[var(--v2-text)]">{item.message}</p>
-            <div className="mt-4 text-xs uppercase tracking-[0.16em] text-[var(--v2-accent-text)] group-hover:text-[var(--v2-text-strong)]">
+            <div className="mt-4 text-xs uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)] group-hover:text-[var(--v2-text-strong)]">
               {t("projects.attention.openProject")}
             </div>
           </button>

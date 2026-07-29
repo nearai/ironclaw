@@ -5,6 +5,7 @@ import { Panel } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Input } from "@ironclaw/design-system";
 import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useAdminUserSecrets } from "../hooks/useAdminUsers";
 
 export function UserSecretsPanel({ userId }) {
@@ -84,12 +85,12 @@ export function UserSecretsPanelView({
   return (
     <Panel className="p-5 sm:p-6" data-testid="admin-user-secrets-panel">
       <div className="mb-4">
-        <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+        <Text as="h3" variant="eyebrow" tone="accent">
           {t("admin.user.secrets.title")}
-        </h3>
-        <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+        </Text>
+        <Text variant="body" tone="muted" className="mt-2">
           {t("admin.user.secrets.description")}
-        </p>
+        </Text>
       </div>
 
       {query.isLoading ? (

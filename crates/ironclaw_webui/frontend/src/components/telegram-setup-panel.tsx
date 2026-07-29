@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@ironclaw/design-system";
+import { Button, Input, Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
 import {
@@ -105,9 +105,9 @@ export function TelegramSetupPanel({ action, setupQuery }) {
     <div className="mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <h4 className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
+          <Text variant="eyebrow" tone="accent" as="h4">
             {copy.title}
-          </h4>
+          </Text>
           <p className="mt-2 text-xs leading-5 text-[var(--v2-text-muted)]">
             {copy.instructions}
           </p>
@@ -220,12 +220,13 @@ function textInput(label, value, onChange, placeholder = "", help = null, t = nu
   return (
     <label className="min-w-0">
       <span className="mb-1 block text-[11px] text-[var(--v2-text-muted)]">{label}</span>
-      <input
+      <Input
         type="text"
+        size="lg"
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="h-9 w-full min-w-0 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+        className="min-w-0 font-mono"
       />
       <FieldHint help={help} t={t} />
     </label>
@@ -236,15 +237,16 @@ function secretInput(label, value, onChange, configured, help = null, t = null) 
   return (
     <label className="min-w-0">
       <span className="mb-1 block text-[11px] text-[var(--v2-text-muted)]">{label}</span>
-      <input
+      <Input
         type="password"
+        size="lg"
         autoComplete="off"
         autoCapitalize="none"
         spellCheck={false}
         value={value}
         onChange={onChange}
         placeholder={configured ? translateOptional(t, "telegramSetup.placeholder.keepSecret", "") : ""}
-        className="h-9 w-full min-w-0 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+        className="min-w-0"
       />
       <FieldHint help={help} t={t} />
     </label>

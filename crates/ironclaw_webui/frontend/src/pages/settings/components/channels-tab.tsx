@@ -1,5 +1,6 @@
 import { Badge } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useChannels } from "../hooks/useChannels";
 import { matchesSearch } from "../lib/settings-search";
@@ -20,7 +21,7 @@ function BuiltinChannelCard({ name, description, enabled, detail = "" }) {
             size="sm"
           />
         </div>
-        <div className="mt-1 text-xs text-[var(--v2-text-muted)]">{description}</div>
+        <Text as="div" variant="caption" tone="muted" className="mt-1">{description}</Text>
         {detail &&
         (<div className="mt-1 font-mono text-[11px] text-[var(--v2-text-faint)]">
           {detail}
@@ -74,7 +75,7 @@ function ExtensionChannelCard({ channel = null, registryEntry }) {
                 size="sm"
               />)}
         </div>
-        <div className="mt-1 text-xs text-[var(--v2-text-muted)]">{desc}</div>
+        <Text as="div" variant="caption" tone="muted" className="mt-1">{desc}</Text>
       </div>
     </div>
   );
@@ -175,15 +176,15 @@ export function ChannelsTab({ searchQuery = "" }) {
     return (
       <div className="space-y-5">
         <Card padding="md">
-          <div className="mb-4 h-3 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <div className="v2-skeleton mb-4 h-3 w-28 rounded" />
           {[1, 2, 3].map(
             (i) => (
               <div
                 key={i}
                 className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0"
               >
-                <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="h-6 w-16 animate-pulse rounded-full bg-[var(--v2-surface-muted)]" />
+                <div className="v2-skeleton h-4 w-32 rounded" />
+                <div className="v2-skeleton h-6 w-16 rounded-full" />
               </div>
             )
           )}
@@ -217,11 +218,9 @@ export function ChannelsTab({ searchQuery = "" }) {
       {builtInChannels.length > 0 &&
       (
       <Card padding="md">
-        <h3
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-        >
+        <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
           {t("channels.builtIn")}
-        </h3>
+        </Text>
         {builtInChannels.map(
           (channel) => (
             <BuiltinChannelCard
@@ -239,11 +238,9 @@ export function ChannelsTab({ searchQuery = "" }) {
       {(visibleChannels.length > 0 || availableRegistry.length > 0) &&
       (
         <Card padding="md">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-          >
+          <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
             {t("channels.messaging")}
-          </h3>
+          </Text>
           {visibleChannels.map(
             (ch) => (
               <ExtensionChannelCard

@@ -26,6 +26,7 @@ function renderTab(overrides = {}) {
   const context = {
     ExtensionCard() {},
     RegistryCard() {},
+    Text() {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,

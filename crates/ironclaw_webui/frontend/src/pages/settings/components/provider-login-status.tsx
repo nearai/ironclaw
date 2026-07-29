@@ -1,3 +1,4 @@
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 
 // Shared status surface for the NEAR AI / Codex login flows driven by
@@ -11,20 +12,20 @@ export function ProviderLoginStatus({ login }) {
   return (
     <>
     {nearaiBusy &&
-    (<div className="text-center text-xs text-[var(--v2-text-muted)]">
+    (<Text as="div" variant="caption" tone="muted" className="text-center">
       {t("onboarding.nearaiWaiting")}
-    </div>)}
+    </Text>)}
     {nearaiError &&
-    (<div className="text-center text-xs text-[var(--v2-danger-text)]">{nearaiError}</div>)}
+    (<Text as="div" variant="caption" tone="danger" className="text-center">{nearaiError}</Text>)}
 
     {codexCode &&
     (<div
       className="mx-auto max-w-md rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-4 text-center"
     >
-      <div className="text-xs text-[var(--v2-text-muted)]">
+      <Text as="div" variant="caption" tone="muted">
         {t("onboarding.codexEnterCode")}
-      </div>
-      <div className="mt-2 font-mono text-2xl font-medium tracking-[0.3em] text-[var(--v2-text-strong)]">
+      </Text>
+      <div className="mt-2 font-mono text-2xl font-medium tracking-[var(--v2-tracking-code)] text-[var(--v2-text-strong)]">
         {codexCode.userCode}
       </div>
       <a
@@ -37,11 +38,11 @@ export function ProviderLoginStatus({ login }) {
       </a>
     </div>)}
     {codexBusy &&
-    (<div className="text-center text-xs text-[var(--v2-text-muted)]">
+    (<Text as="div" variant="caption" tone="muted" className="text-center">
       {t("onboarding.codexWaiting")}
-    </div>)}
+    </Text>)}
     {codexError &&
-    (<div className="text-center text-xs text-[var(--v2-danger-text)]">{codexError}</div>)}
+    (<Text as="div" variant="caption" tone="danger" className="text-center">{codexError}</Text>)}
     </>
   );
 }

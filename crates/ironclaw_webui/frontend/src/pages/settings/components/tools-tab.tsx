@@ -2,6 +2,8 @@ import { Icon } from "@ironclaw/design-system";
 import { Badge } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
 import { SelectMenu } from "@ironclaw/design-system";
+import { Switch } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";
@@ -24,35 +26,6 @@ function SavedIndicator({ visible }) {
   );
 }
 
-function Switch({ checked, disabled = false, label, onChange }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => !disabled && onChange(!checked)}
-      className={[
-        "relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition",
-        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
-        checked
-          ? "border-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--v2-accent)_22%,transparent)]"
-          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full transition",
-          checked
-            ? "translate-x-5 bg-[var(--v2-accent-text)]"
-            : "translate-x-1 bg-[var(--v2-text-muted)]",
-        ].join(" ")}
-      />
-    </button>
-  );
-}
-
 function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
   const t = useT();
   const label = t("settings.field.autoApproveEligibleTools");
@@ -66,17 +39,17 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
         <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">
           {label}
         </h3>
-        <p className="mt-1 text-sm text-[var(--v2-text-muted)]">
+        <Text variant="body" tone="muted" className="mt-1">
           {t("settings.field.autoApproveEligibleToolsDesc")}
-        </p>
+        </Text>
       </div>
       <div className="flex shrink-0 items-center gap-3">
         <SavedIndicator visible={savedKeys?.[AUTO_APPROVE_KEY]} />
         <Switch
           checked={checked}
           disabled={isLoading}
-          label={label}
-          onChange={(value) => onSave(AUTO_APPROVE_KEY, value)}
+          aria-label={label}
+          onCheckedChange={(value) => onSave(AUTO_APPROVE_KEY, value)}
         />
       </div>
     </Card>
@@ -141,9 +114,9 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
           </div>
           {description &&
           (
-            <div className="mt-0.5 truncate text-xs text-[var(--v2-text-muted)]">
+            <Text as="div" variant="caption" tone="muted" className="mt-0.5 truncate">
               {description}
-            </div>
+            </Text>
           )}
         </div>
       </div>
@@ -200,15 +173,15 @@ export function ToolsTab({
           isLoading={isLoading}
         />
         <Card padding="md">
-          <div className="mb-4 h-3 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <div className="v2-skeleton mb-4 h-3 w-28 rounded" />
           {[1, 2, 3, 4, 5].map(
             (i) => (
               <div
                 key={i}
                 className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0"
               >
-                <div className="h-4 w-36 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="h-8 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                <div className="v2-skeleton h-4 w-36 rounded" />
+                <div className="v2-skeleton h-8 w-28 rounded" />
               </div>
             )
           )}
@@ -227,9 +200,9 @@ export function ToolsTab({
           isLoading={isLoading}
         />
         <Card padding="md">
-          <p className="text-sm text-[var(--v2-danger-text)]">
+          <Text variant="body" tone="danger">
             {t("tools.failedLoad", { message: query.error.message })}
-          </p>
+          </Text>
         </Card>
       </div>
     );
@@ -277,15 +250,13 @@ export function ToolsTab({
       )}
 
       <Card padding="md">
-        <h3
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-        >
+        <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
           {t("tools.permissions")}
-        </h3>
+        </Text>
         {filtered.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">
+          ? (<Text variant="body" tone="muted" className="py-4">
               {t("tools.noMatch")}
-            </p>)
+            </Text>)
           : filtered.map(
               (tool) =>
                 (

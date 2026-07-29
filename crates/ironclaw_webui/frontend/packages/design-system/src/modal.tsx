@@ -177,7 +177,7 @@ export function ModalHeader({
       )}
     >
       <Dialog.Title asChild>
-        <h2 className="text-[1.1rem] font-medium tracking-[-0.02em] text-[var(--v2-text-strong)] md:text-[1.2rem]">
+        <h2 className="text-[1.1rem] font-medium tracking-[var(--v2-tracking-tight)] text-[var(--v2-text-strong)] md:text-[1.2rem]">
           {children}
         </h2>
       </Dialog.Title>

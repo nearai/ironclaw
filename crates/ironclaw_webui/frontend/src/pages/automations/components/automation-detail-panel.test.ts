@@ -139,6 +139,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   function RunDots() {}
   function RunHistorySummary() {}
   function StatusPill() {}
+  function Text() {}
 
   const React = {
     useEffect(effect, deps) {
@@ -182,6 +183,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     RunDots,
     RunHistorySummary,
     StatusPill,
+    Text,
     TextEncoder,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,

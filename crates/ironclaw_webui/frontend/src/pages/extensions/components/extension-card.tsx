@@ -3,6 +3,7 @@ import { useT } from "../../../lib/i18n";
 import { Badge } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import {
   RUNTIME_LABELS,
   STATE_TONES,
@@ -28,7 +29,8 @@ const CARD =
   "flex self-start flex-col rounded-[14px] border border-[var(--v2-panel-border)] " +
   "bg-[var(--v2-surface-soft)] p-4";
 const META = "mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] text-[var(--v2-text-faint)]";
-const DESC = "mt-2 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-[var(--v2-text-muted)]";
+/* Layout-only classes — the type/tone comes from <Text variant="caption" tone="muted">. */
+const DESC = "mt-2 line-clamp-2 min-h-[2.5rem]";
 const FOOTER = "mt-3 flex items-center gap-2 border-t border-[var(--v2-panel-border)] pt-3";
 const DISCLOSURE =
   "v2-button inline-flex items-center gap-1.5 border-0 bg-transparent p-0 " +
@@ -251,7 +253,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
         {ext.version && (<span>· v{ext.version}</span>)}
       </div>
 
-      {ext.description && (<p className={DESC}>{ext.description}</p>)}
+      {ext.description && (<Text as="p" variant="caption" tone="muted" className={DESC}>{ext.description}</Text>)}
 
       {/* Internal startup failures remain attached to the public
           `setup_needed` state as redacted remediation context. */}
@@ -358,7 +360,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
         {entry.version && (<span>· v{entry.version}</span>)}
       </div>
 
-      {entry.description && (<p className={DESC}>{entry.description}</p>)}
+      {entry.description && (<Text as="p" variant="caption" tone="muted" className={DESC}>{entry.description}</Text>)}
 
       <div className={FOOTER}>
         {keywords.length > 0

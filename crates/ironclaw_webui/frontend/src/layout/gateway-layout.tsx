@@ -119,7 +119,7 @@ export function GatewayLayout({
         type="button"
         aria-label={t("nav.close")}
         onClick={sidebar.close}
-        className="fixed inset-0 z-40 bg-black/40 md:hidden"
+        className="fixed inset-0 z-40 bg-[var(--v2-scrim)] md:hidden"
       />)}
 
       <div

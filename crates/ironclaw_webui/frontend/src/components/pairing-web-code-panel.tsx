@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
-import { Button } from "@ironclaw/design-system";
+import { Button, Text } from "@ironclaw/design-system";
 import QRCode from "qrcode";
 import React from "react";
 import { useT } from "../lib/i18n";
@@ -291,9 +291,9 @@ export function PairingWebCodePanel({
     return (
       <div data-testid="pairing-web-code-panel" className={containerClass}>
         {!compact &&
-        (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
+        (<Text variant="eyebrow" tone="accent" as="h4" className="mb-2">
           {t("pairing.web.title", { name: displayName || extensionId })}
-        </h4>)}
+        </Text>)}
         <p data-testid="pairing-expired" className="text-xs leading-5 text-[var(--v2-text-muted)]">
           {t("pairing.web.expired")}
         </p>
@@ -316,9 +316,9 @@ export function PairingWebCodePanel({
   return (
     <div data-testid="pairing-web-code-panel" className={containerClass}>
       {!compact &&
-      (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
+      (<Text variant="eyebrow" tone="accent" as="h4" className="mb-2">
         {t("pairing.web.title", { name: displayName || extensionId })}
-      </h4>)}
+      </Text>)}
       <p className="mb-3 text-xs leading-5 text-[var(--v2-text-muted)]">{instructions ||
         (deepLink
           ? t("pairing.web.instructions", { name: displayName || extensionId })
@@ -337,7 +337,7 @@ export function PairingWebCodePanel({
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid="pairing-code"
-              className="font-mono text-xl tracking-[0.18em] text-[var(--v2-text-strong)]"
+              className="font-mono text-xl tracking-[var(--v2-tracking-code)] text-[var(--v2-text-strong)]"
             >
               {pending.code}
             </span>

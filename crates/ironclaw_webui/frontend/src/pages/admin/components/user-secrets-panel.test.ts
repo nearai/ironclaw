@@ -68,6 +68,7 @@ function createHarness(overrides = {}) {
       ModalBody: function ModalBody() {},
       ModalFooter: function ModalFooter() {},
       Panel: function Panel() {},
+      Text: function Text() {},
       React,
       useT: () => translate,
     },

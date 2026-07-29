@@ -14,7 +14,7 @@ import { AuthOauthCard } from "./components/auth-oauth-card";
 import { AuthTokenCard } from "./components/auth-token-card";
 import { ChatInput } from "./components/chat-input";
 import { EmptyState } from "./components/empty-state";
-import { KeyboardShortcuts } from "./components/keyboard-shortcuts";
+import { KeyboardShortcuts } from "./components/keyboard-shortcuts-lazy";
 import { MessageList } from "./components/message-list";
 import { OnboardingPairingCard } from "./components/onboarding-pairing-card";
 import { RecoveryNotice } from "./components/recovery-notice";

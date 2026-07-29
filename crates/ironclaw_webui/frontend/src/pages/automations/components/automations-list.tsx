@@ -1,6 +1,6 @@
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
-import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { cn } from "@ironclaw/design-system";
 import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters";
@@ -38,9 +38,9 @@ export function AutomationsList({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
+            <Text variant="eyebrow" tone="muted" as="div">
               {t("automations.eyebrow")}
-            </div>
+            </Text>
             <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">
               {t("automations.title")}
             </h2>
@@ -107,19 +107,19 @@ export function AutomationsList({
                   <table className="w-full min-w-[900px] border-collapse">
                     <thead>
                       <tr className="border-b border-[var(--v2-panel-border)] text-left">
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
                           {t("automations.table.name")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
                           {t("automations.table.schedule")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
                           {t("automations.table.nextRun")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
                           {t("automations.table.recentRuns")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
                           {t("automations.table.status")}
                         </th>
                       </tr>
@@ -150,9 +150,9 @@ export function AutomationsList({
                                 <div className="truncate text-sm font-medium text-[var(--v2-text-strong)]">
                                   {automation.display_name}
                                 </div>
-                                <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
+                                <Text variant="eyebrow" tone="faint" as="div" className="mt-1 truncate">
                                   {automation.automation_id}
-                                </div>
+                                </Text>
                               </button>
                             </td>
                             <td className="px-5 py-4 align-top text-sm text-[var(--v2-text)]">

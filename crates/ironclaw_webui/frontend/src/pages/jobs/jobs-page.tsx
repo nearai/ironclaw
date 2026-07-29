@@ -121,7 +121,7 @@ export function JobsPage() {
         <div className="space-y-4">
           {[1, 2, 3].map(
             (i) =>
-              (<div key={i} className="v2-skeleton h-32 rounded-[18px]" />)
+              (<div key={i} className="v2-skeleton h-32 rounded-[var(--v2-radius-bubble)]" />)
           )}
         </div>
       );
@@ -185,7 +185,7 @@ export function JobsPage() {
               (i) =>
                 (<div
                   key={i}
-                  className="v2-skeleton h-28 rounded-[18px]"
+                  className="v2-skeleton h-28 rounded-[var(--v2-radius-bubble)]"
                 />)
             )}
           </div>

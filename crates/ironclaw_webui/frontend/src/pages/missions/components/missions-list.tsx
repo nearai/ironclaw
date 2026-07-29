@@ -1,6 +1,6 @@
 import { useT } from "../../../lib/i18n";
 import { Button, Input, Select } from "@ironclaw/design-system";
-import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
 
 function buildStatusOptions(t) {
@@ -50,17 +50,17 @@ function MissionRow({ mission, selectedMissionId, onSelectMission, onOpenProject
             </div>
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-[var(--v2-text-muted)]">{mission.goal || t("missions.noGoal")}</p>
           </div>
-          <div className="shrink-0 text-right font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+          <Text variant="eyebrow" tone="faint" as="div" className="shrink-0 text-right">
             <div>{mission.cadence_description || mission.cadence_type || "manual"}</div>
             <div className="mt-1">{t("missions.threadCount", { count: mission.thread_count || 0 })}</div>
-          </div>
+          </Text>
         </div>
       </button>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--v2-panel-border)] pt-3">
-        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+        <Text variant="eyebrow" tone="faint">
           {t("missions.updated", { value: formatMissionDate(mission.updated_at) })}
-        </span>
+        </Text>
         <Button
           variant="ghost"
           onClick={(event) => {
@@ -95,7 +95,7 @@ export function MissionsList({
     <Panel className="p-4 sm:p-5">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.title")}</div>
+          <Text variant="eyebrow" tone="muted" as="div">{t("missions.title")}</Text>
           <h1 className="mt-2 text-3xl font-medium tracking-tight text-[var(--v2-text-strong)]">{t("missions.subtitle")}</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--v2-text-muted)]">
             {t("missions.summary", { missions: totalMissions, projects: projectOptions.length })}

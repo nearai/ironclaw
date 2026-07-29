@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Button, Input } from "@ironclaw/design-system";
+import { Badge, Button, Input, Text } from "@ironclaw/design-system";
 import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import {
   formatCurrency,
@@ -31,7 +31,7 @@ function ProjectCard({ project, onOpen, t }) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="truncate font-serif text-2xl font-medium tracking-[-0.03em] text-[var(--v2-text-strong)]">{project.name}</h3>
+          <h3 className="truncate font-serif text-2xl font-medium tracking-[var(--v2-tracking-tight)] text-[var(--v2-text-strong)]">{project.name}</h3>
           <p className="mt-2 line-clamp-3 text-sm leading-6 text-[var(--v2-text-muted)]">
             {project.description || t("projects.noDescription")}
           </p>
@@ -43,9 +43,7 @@ function ProjectCard({ project, onOpen, t }) {
         ? (
             <div className="mt-4 flex flex-wrap gap-2">
               {project.goals.slice(0, 3).map((goal, index) => (
-                <span key={index} className="rounded-full border border-[var(--v2-panel-border)] px-3 py-1 text-xs text-[var(--v2-text)]">
-                  {goal}
-                </span>
+                <Badge key={index} tone="muted" dot={false} size="md" label={goal} />
               ))}
             </div>
           )
@@ -53,13 +51,13 @@ function ProjectCard({ project, onOpen, t }) {
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/55 p-3">
-          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.card.runtime")}</div>
+          <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{t("projects.card.runtime")}</div>
           <div className="mt-2 text-sm text-[var(--v2-text-strong)]">
             {t("projects.card.threadsToday", { count: project.threads_today || 0 })}
           </div>
         </div>
         <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/55 p-3">
-          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.card.risk")}</div>
+          <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{t("projects.card.risk")}</div>
           <div className="mt-2 text-sm text-[var(--v2-text-strong)]">{t("projects.card.pendingGates", { count: project.pending_gates || 0 })}</div>
           <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
             {t("projects.card.failures24h", { count: project.failures_24h || 0 })}
@@ -70,7 +68,7 @@ function ProjectCard({ project, onOpen, t }) {
       <div className="mt-5 flex items-center justify-between gap-3">
         <div className="text-sm text-[var(--v2-text-muted)]">
           <div>{t("projects.card.spendToday", { value: formatCurrency(project.cost_today_usd || 0) })}</div>
-          <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{formatProjectRelativeTime(project.last_activity, t)}</div>
+          <div className="mt-1 text-xs uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{formatProjectRelativeTime(project.last_activity, t)}</div>
         </div>
         <Button
           data-testid="project-open-workspace"
@@ -108,8 +106,8 @@ function GeneralProjectCard({ project, onOpen, t }) {
     >
       <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-3xl">
-          <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--v2-accent-text)]">{t("projects.general.label")}</div>
-          <h2 className="mt-3 font-serif text-4xl font-medium tracking-[-0.04em] text-[var(--v2-text-strong)]">{t("projects.general.title")}</h2>
+          <Text variant="eyebrow" tone="accent" as="div">{t("projects.general.label")}</Text>
+          <h2 className="mt-3 font-serif text-4xl font-medium tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)]">{t("projects.general.title")}</h2>
           <p className="mt-3 text-sm leading-6 text-[var(--v2-text)]">
             {t("projects.general.desc")}
           </p>
@@ -163,8 +161,8 @@ export function ProjectsGrid({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.explorer")}</div>
-            <h2 className="mt-2 font-serif text-3xl font-medium tracking-[-0.04em] text-[var(--v2-text-strong)]">{t("projects.scoped.title")}</h2>
+            <Text variant="eyebrow" tone="muted" as="div">{t("projects.explorer")}</Text>
+            <h2 className="mt-2 font-serif text-3xl font-medium tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)]">{t("projects.scoped.title")}</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--v2-text-muted)]">
               {t("projects.scoped.desc")}
             </p>

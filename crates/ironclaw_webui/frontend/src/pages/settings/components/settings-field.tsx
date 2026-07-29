@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Card, Switch } from "@ironclaw/design-system";
+import { Card, Input, Select, Switch, Text } from "@ironclaw/design-system";
 
 function SavedIndicator({ visible }) {
   const t = useT();
@@ -59,7 +59,7 @@ export function SettingsField({ field, value, onSave, isSaved }) {
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-[var(--v2-text)]">{label}</div>
         {description &&
-        (<div className="mt-1 text-xs leading-5 text-[var(--v2-text-muted)]">{description}</div>)}
+        (<Text as="div" variant="caption" tone="muted" className="mt-1">{description}</Text>)}
       </div>
 
       <div className="flex shrink-0 items-center gap-3">
@@ -73,23 +73,26 @@ export function SettingsField({ field, value, onSave, isSaved }) {
             )
           : field.type === "select"
           ? (
-              <select
-                value={localValue}
-                onChange={(e) => {
-                  setLocalValue(e.currentTarget.value);
-                  handleCommit(e.currentTarget.value);
-                }}
-                aria-label={label}
-                className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
-              >
-                <option value="">{t("tools.default")}</option>
-                {field.options.map(
-                  (opt) => (<option key={opt} value={opt}>{opt}</option>)
-                )}
-              </select>
+              <div className="w-40">
+                <Select
+                  size="lg"
+                  value={localValue}
+                  onChange={(e) => {
+                    setLocalValue(e.currentTarget.value);
+                    handleCommit(e.currentTarget.value);
+                  }}
+                  aria-label={label}
+                >
+                  <option value="">{t("tools.default")}</option>
+                  {field.options.map(
+                    (opt) => (<option key={opt} value={opt}>{opt}</option>)
+                  )}
+                </Select>
+              </div>
             )
           : (
-              <input
+              <Input
+                size="lg"
                 type={field.type === "float" || field.type === "number" ? "number" : "text"}
                 value={localValue}
                 onChange={(e) => setLocalValue(e.currentTarget.value)}
@@ -100,7 +103,7 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                 max={field.max !== undefined ? String(field.max) : undefined}
                 placeholder={t("tools.default")}
                 aria-label={label}
-                className="h-9 w-36 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-right font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+                className="w-36 text-right font-mono"
               />
             )}
         <SavedIndicator visible={isSaved} />
@@ -114,7 +117,7 @@ export function SettingsGroup({ group = "", groupKey, fields, settings, onSave, 
   const groupLabel = groupKey ? t(groupKey) : group || "";
   return (
     <Card className="p-4 sm:p-6">
-      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{groupLabel}</h3>
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">{groupLabel}</Text>
       <div>
         {fields.map(
           (field) =>

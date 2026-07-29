@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard } from "@ironclaw/design-system";
+import { Button, Panel, StatCard, Text } from "@ironclaw/design-system";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
   formatCost,
@@ -56,29 +56,30 @@ export function UsageTab({ onSelectUser }) {
     <div className="space-y-5">
       <Panel className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.usage.overview")}</h3>
+          <Text as="h3" variant="eyebrow" tone="accent">{t("admin.usage.overview")}</Text>
           <div className="flex gap-1">
             {PERIODS.map(
               (p) => (
-                <button
+                <Button
                   key={p.value}
+                  variant="ghost"
+                  size="sm"
                   onClick={() => setPeriod(p.value)}
-                  className={[
-                    "rounded-md px-3 py-1.5 text-[11px] font-medium",
+                  className={
                     period === p.value
-                      ? "border border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
-                      : "border border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
-                  ].join(" ")}
+                      ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                      : undefined
+                  }
                 >
                   {p.label}
-                </button>
+                </Button>
               )
             )}
           </div>
         </div>
 
         {entries.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">{t("admin.usage.noData")}</p>)
+          ? (<Text variant="body" tone="muted" className="py-4">{t("admin.usage.noData")}</Text>)
           : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <StatCard label={t("admin.usage.totalCalls")} value={totals.calls.toLocaleString()} tone="muted" />
@@ -91,17 +92,17 @@ export function UsageTab({ onSelectUser }) {
 
       {byUser.length > 0 && (
         <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.usage.perUser")}</h3>
+          <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">{t("admin.usage.perUser")}</Text>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[var(--v2-panel-border)] text-left">
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.user")}</th>
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.calls")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.input")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.output")}</th>
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.cost")}</th>
-                  <th className="hidden pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] md:table-cell" />
+                  <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.usage.user")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.usage.calls")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="hidden pb-3 pr-4 sm:table-cell">{t("admin.usage.input")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="hidden pb-3 pr-4 sm:table-cell">{t("admin.usage.output")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.usage.cost")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="hidden pb-3 md:table-cell" />
                 </tr>
               </thead>
               <tbody>
@@ -116,10 +117,10 @@ export function UsageTab({ onSelectUser }) {
                           {truncateId(u.user_id)}
                         </button>
                       </td>
-                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)]">{u.calls.toLocaleString()}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(u.input_tokens)}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(u.output_tokens)}</td>
-                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-strong)]">{formatCost(u.cost.toFixed(2))}</td>
+                      <Text as="td" variant="mono" tone="muted" className="py-3 pr-4">{u.calls.toLocaleString()}</Text>
+                      <Text as="td" variant="mono" tone="muted" className="hidden py-3 pr-4 sm:table-cell">{formatTokenCount(u.input_tokens)}</Text>
+                      <Text as="td" variant="mono" tone="muted" className="hidden py-3 pr-4 sm:table-cell">{formatTokenCount(u.output_tokens)}</Text>
+                      <Text as="td" variant="mono" tone="strong" className="py-3 pr-4">{formatCost(u.cost.toFixed(2))}</Text>
                       <td className="hidden py-3 md:table-cell">
                         <UsageBar value={u.cost} max={maxCost} />
                       </td>
@@ -134,27 +135,27 @@ export function UsageTab({ onSelectUser }) {
 
       {byModel.length > 0 && (
         <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.usage.perModel")}</h3>
+          <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">{t("admin.usage.perModel")}</Text>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[var(--v2-panel-border)] text-left">
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.model")}</th>
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.calls")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.input")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.output")}</th>
-                  <th className="pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.cost")}</th>
+                  <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.usage.model")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.usage.calls")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="hidden pb-3 pr-4 sm:table-cell">{t("admin.usage.input")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="hidden pb-3 pr-4 sm:table-cell">{t("admin.usage.output")}</Text>
+                  <Text as="th" variant="eyebrow" tone="muted" className="pb-3">{t("admin.usage.cost")}</Text>
                 </tr>
               </thead>
               <tbody>
                 {byModel.map(
                   (m) => (
                     <tr key={m.model} className="border-b border-[var(--v2-panel-border)] last:border-0">
-                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-strong)]">{m.model}</td>
-                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)]">{m.calls.toLocaleString()}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(m.input_tokens)}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(m.output_tokens)}</td>
-                      <td className="py-3 font-mono text-xs text-[var(--v2-text-strong)]">{formatCost(m.cost.toFixed(2))}</td>
+                      <Text as="td" variant="mono" tone="strong" className="py-3 pr-4">{m.model}</Text>
+                      <Text as="td" variant="mono" tone="muted" className="py-3 pr-4">{m.calls.toLocaleString()}</Text>
+                      <Text as="td" variant="mono" tone="muted" className="hidden py-3 pr-4 sm:table-cell">{formatTokenCount(m.input_tokens)}</Text>
+                      <Text as="td" variant="mono" tone="muted" className="hidden py-3 pr-4 sm:table-cell">{formatTokenCount(m.output_tokens)}</Text>
+                      <Text as="td" variant="mono" tone="strong" className="py-3">{formatCost(m.cost.toFixed(2))}</Text>
                     </tr>
                   )
                 )}

@@ -89,6 +89,7 @@ function createConfigurationGroupHarness(initialGroup, stateOverrides = {}) {
       Button: "button",
       Input: "input",
       Panel: "section",
+      Text: "span",
       clientActionId: () => "configuration-test-action",
       useAdminConfiguration: () => {},
     },

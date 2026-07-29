@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router";
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
-import { Panel } from "@ironclaw/design-system";
+import { Panel, Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { cn } from "@ironclaw/design-system";
@@ -46,19 +46,20 @@ function ExamplePrompt({ promptKey }) {
       className="flex items-center gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3"
     >
       <span className="min-w-0 flex-1 text-sm leading-6 text-[var(--v2-text)]">{text}</span>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         onClick={onCopy}
         aria-label={copied ? t("automations.empty.copied") : t("automations.empty.copyPrompt")}
         title={copied ? t("automations.empty.copied") : t("automations.empty.copyPrompt")}
         className={cn(
-          "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)] hover:border-[color-mix(in_srgb,var(--v2-text-strong)_20%,var(--v2-panel-border))]",
-          "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
-          copied && "text-[var(--v2-positive-text)]"
+          "shrink-0",
+          copied && "text-[var(--v2-positive-text)] hover:text-[var(--v2-positive-text)]"
         )}
       >
         <Icon name={copied ? "check" : "copy"} className="h-4 w-4" />
-      </button>
+      </Button>
     </li>
   );
 }
@@ -82,9 +83,9 @@ export function AutomationsEmptyState() {
         </p>
 
         <div className="mt-6">
-          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
+          <Text variant="eyebrow" tone="faint" as="div">
             {t("automations.empty.examplesTitle")}
-          </div>
+          </Text>
           <ul className="mt-3 space-y-2">
             {EXAMPLE_PROMPT_KEYS.map(
               (key) => (<ExamplePrompt key={key} promptKey={key} />)

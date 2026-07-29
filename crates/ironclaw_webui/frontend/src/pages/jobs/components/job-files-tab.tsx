@@ -1,4 +1,4 @@
-import { EmptyPanel, Panel } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, Text } from "@ironclaw/design-system";
 
 function TreeNodes({ nodes, depth = 0, selectedPath, expandingPath, onToggleDirectory, onSelectPath }) {
   return (
@@ -60,7 +60,7 @@ export function JobFilesTab({
     <div className="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
       <Panel className="min-h-[440px] p-4">
         <div className="border-b border-[var(--v2-panel-border)] px-2 pb-3">
-          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">Workspace tree</div>
+          <Text variant="eyebrow" tone="muted" as="div">Workspace tree</Text>
           <p className="mt-2 text-sm leading-6 text-[var(--v2-text-muted)]">Browse the sandbox output and inspect generated files inline.</p>
         </div>
 
@@ -84,7 +84,7 @@ export function JobFilesTab({
 
       <Panel className="min-h-[440px] p-5 sm:p-6">
         <div className="border-b border-[var(--v2-panel-border)] pb-3">
-          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">File preview</div>
+          <Text variant="eyebrow" tone="muted" as="div">File preview</Text>
           <p className="mt-2 break-all text-sm leading-6 text-[var(--v2-text-muted)]">{selectedFile?.path || selectedPath || "Select a file from the tree to inspect its contents."}</p>
         </div>
 
@@ -93,7 +93,7 @@ export function JobFilesTab({
           : isLoadingFile
           ? (<div className="mt-5 space-y-3">{[1, 2, 3, 4, 5].map((i) => (<div key={i} className="v2-skeleton h-4 rounded" />))}</div>)
           : selectedFile
-            ? (<pre className="mt-5 max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-code-bg)] p-4 font-mono text-xs leading-6 text-[var(--v2-text-strong)]">{selectedFile.content}</pre>)
+            ? (<pre className="mt-5 max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-[var(--v2-radius-bubble)] border border-[var(--v2-panel-border)] bg-[var(--v2-code-bg)] p-4 font-mono text-xs leading-6 text-[var(--v2-text-strong)]">{selectedFile.content}</pre>)
             : (
                 <EmptyPanel
                   title="No file selected"

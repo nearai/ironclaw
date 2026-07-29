@@ -2,6 +2,7 @@
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useGatewayRestart } from "../hooks/useGatewayRestart";
 
@@ -21,20 +22,20 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
         <div className="flex min-w-0 flex-1 items-start gap-3">
           <Icon name="bolt" className="mt-0.5 h-4 w-4 shrink-0 text-[var(--v2-warning-text)]" />
           <div className="min-w-0">
-            <p className="text-sm text-[var(--v2-warning-text)]">
+            <Text variant="body" tone="warning">
               {t("settings.restartRequired")}
-            </p>
+            </Text>
             {!restart.restartEnabled &&
             (
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+              <Text as="p" variant="caption" tone="muted" className="mt-1">
                 {restart.unavailableReason}
-              </p>
+              </Text>
             )}
             {restart.isRestarting &&
             (
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+              <Text as="p" variant="caption" tone="muted" className="mt-1">
                 {restart.progressLabel}
-              </p>
+              </Text>
             )}
           </div>
         </div>
@@ -75,9 +76,9 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
       size="sm"
     >
       <ModalBody className="space-y-3">
-        <p className="text-sm text-[var(--v2-text)]">
+        <Text variant="body">
           {t("restart.description")}
-        </p>
+        </Text>
         <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-warning-text)_25%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
           {t("restart.warning")}
         </div>
@@ -116,12 +117,12 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
           <div className="mx-auto grid h-12 w-12 place-items-center rounded-full border border-[color-mix(in_srgb,var(--v2-warning-text)_30%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]">
             <Icon name="pulse" className="h-5 w-5 animate-pulse" />
           </div>
-          <p className="mt-4 text-base font-medium text-[var(--v2-text-strong)]">
+          <Text variant="body-lg" tone="strong" weight="medium" className="mt-4">
             {t("restart.progressTitle")}
-          </p>
-          <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+          </Text>
+          <Text variant="body" tone="muted" className="mt-2">
             {restart.progressLabel}
-          </p>
+          </Text>
         </div>
       </div>
     )}

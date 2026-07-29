@@ -59,6 +59,8 @@ function renderExtensionsPage(tab, extensionState = {}) {
   };
   const context = {
     ActionToast() {},
+    Button() {},
+    Text() {},
     ChannelsTab() {},
     ConfirmDialog,
     ConfigureModal,

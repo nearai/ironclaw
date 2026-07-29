@@ -1,5 +1,5 @@
 import { Button } from "@ironclaw/design-system";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import {
   formatProjectHealth,
@@ -19,7 +19,7 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
       <Panel className="p-4 sm:p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.snapshot.label")}</div>
+            <Text variant="eyebrow" tone="muted" as="div">{t("projects.snapshot.label")}</Text>
             <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{project.name}</h2>
           </div>
           <StatusPill
@@ -42,7 +42,7 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
       {project.goals?.length
         ? (
             <Panel className="p-4 sm:p-5">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.snapshot.goals")}</div>
+              <Text variant="eyebrow" tone="muted" as="div">{t("projects.snapshot.goals")}</Text>
               <div className="mt-4 space-y-2 text-sm leading-6 text-[var(--v2-text)]">
                 {project.goals.map((goal, index) => (<div key={index} className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 px-3 py-2">{goal}</div>))}
               </div>
@@ -53,14 +53,14 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
       {project.metrics?.length
         ? (
             <Panel className="p-4 sm:p-5">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.snapshot.metrics")}</div>
+              <Text variant="eyebrow" tone="muted" as="div">{t("projects.snapshot.metrics")}</Text>
               <div className="mt-4 space-y-3">
                 {project.metrics.map((metric, index) => (
                   <div key={index} className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-3">
                     <div className="text-sm font-medium text-[var(--v2-text-strong)]">{metric.name}</div>
                     <div className="mt-2 text-sm text-[var(--v2-text)]">{formatMetricValue(metric, t)}</div>
                     {metric.updated_at && (
-                      <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-faint)]">
+                      <div className="mt-2 font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
                         {t("projects.snapshot.updated", { date: formatProjectDate(metric.updated_at, t) })}
                       </div>
                     )}
@@ -94,7 +94,7 @@ export function ProjectInspectorRail({
   return (
     <aside className="space-y-4">
       <div className="flex items-center justify-between gap-2">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.inspector.label")}</div>
+        <Text variant="eyebrow" tone="muted" as="div">{t("projects.inspector.label")}</Text>
         {inspector?.type && (<Button variant="ghost" size="sm" onClick={onClear}>{t("projects.inspector.clearFocus")}</Button>)}
       </div>
 

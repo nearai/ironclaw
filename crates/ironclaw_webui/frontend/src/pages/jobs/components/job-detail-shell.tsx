@@ -1,5 +1,5 @@
 import { Button } from "@ironclaw/design-system";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 import {
   JOB_DETAIL_TABS,
   canShowCancel,
@@ -31,11 +31,11 @@ export function JobDetailShell({
               <h2 className="text-3xl font-medium tracking-tight text-[var(--v2-text-strong)]">{job.title || "Untitled job"}</h2>
               <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
             </div>
-            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
+            <Text variant="eyebrow" tone="muted" as="div" className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
               <span>{truncateJobId(job.id)}</span>
               <span>created {formatJobDate(job.created_at)}</span>
               {jobSecondaryMeta(job) && (<span>{jobSecondaryMeta(job)}</span>)}
-            </div>
+            </Text>
           </div>
 
           <div className="flex flex-wrap gap-2">

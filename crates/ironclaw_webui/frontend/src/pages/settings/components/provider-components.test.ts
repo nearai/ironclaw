@@ -143,6 +143,7 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     Button: "Button",
     Card: "Card",
     Icon: "Icon",
+    Text: "Text",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
     ProviderLoginStatus: "ProviderLoginStatus",

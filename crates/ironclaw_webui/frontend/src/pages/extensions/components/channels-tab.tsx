@@ -1,3 +1,4 @@
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
@@ -34,12 +35,10 @@ export function ChannelsTab({
     <div className="space-y-5">
       {installedChannels.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
-          >
+        <div className="v2-panel rounded-[var(--v2-radius-bubble)] p-5 sm:p-6">
+          <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
             {t("channels.messaging")}
-          </h3>
+          </Text>
           <div className="grid grid-cols-1 gap-4">
             {installedChannels.map(
               (ch) => (
@@ -57,12 +56,10 @@ export function ChannelsTab({
       )}
       {channelRegistry.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
-          >
+        <div className="v2-panel rounded-[var(--v2-radius-bubble)] p-5 sm:p-6">
+          <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
             {t("channels.availableChannels")}
-          </h3>
+          </Text>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
             {channelRegistry.map(
               (entry) => (

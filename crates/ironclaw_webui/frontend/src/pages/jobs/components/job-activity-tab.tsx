@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button } from "@ironclaw/design-system";
+import { Button, Checkbox, Input, Select, Text } from "@ironclaw/design-system";
 import { EmptyPanel, Panel } from "@ironclaw/design-system";
 import { formatJobDate } from "../lib/jobs-presenters";
 
@@ -39,7 +39,7 @@ function EventCard({ event }) {
   if (type === "message") {
     return (
       <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
-        <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{data.role || "assistant"}</div>
+        <Text variant="eyebrow" tone="muted" as="div">{data.role || "assistant"}</Text>
         <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{data.content || ""}</div>
       </div>
     );
@@ -47,7 +47,7 @@ function EventCard({ event }) {
 
   return (
     <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
-      <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{type.replace(/_/g, " ")}</div>
+      <Text variant="eyebrow" tone="muted" as="div">{type.replace(/_/g, " ")}</Text>
       <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{data.message || data.status || prettyJson(data)}</div>
     </div>
   );
@@ -89,30 +89,32 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
     <Panel className="p-5 sm:p-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">Event stream</div>
+          <Text variant="eyebrow" tone="muted" as="div">Event stream</Text>
           <h3 className="mt-2 text-xl font-medium text-[var(--v2-text-strong)]">Job activity</h3>
           <p className="mt-2 text-sm leading-6 text-[var(--v2-text-muted)]">Persisted events are refreshed automatically so operators can follow tool calls, prompts, and worker output.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <select
-            value={filter}
-            onChange={(event) => setFilter(event.currentTarget.value)}
-            className="v2-select h-10 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
-          >
-            {FILTERS.map((option) => (<option key={option.value} value={option.value}>{option.label}</option>))}
-          </select>
+          <div className="min-w-[10rem]">
+            <Select
+              size="lg"
+              value={filter}
+              onChange={(event) => setFilter(event.currentTarget.value)}
+            >
+              {FILTERS.map((option) => (<option key={option.value} value={option.value}>{option.label}</option>))}
+            </Select>
+          </div>
           <label className="flex items-center gap-2 text-sm text-[var(--v2-text-muted)]">
-            <input type="checkbox" checked={autoScroll} onChange={(event) => setAutoScroll(event.target.checked)} />
+            <Checkbox checked={autoScroll} onCheckedChange={(checked) => setAutoScroll(checked === true)} />
             Auto-scroll
           </label>
         </div>
       </div>
 
-      <div ref={terminalRef} className="mt-5 max-h-[56vh] space-y-3 overflow-y-auto rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/78 p-4">
+      <div ref={terminalRef} className="mt-5 max-h-[56vh] space-y-3 overflow-y-auto rounded-[var(--v2-radius-bubble)] border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/78 p-4">
         {filteredEvents.length
           ? filteredEvents.map((event) => (
               <div key={event.id || `${event.event_type}-${event.created_at}`}>
-                <div className="mb-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{formatJobDate(event.created_at)}</div>
+                <Text variant="eyebrow" tone="muted" as="div" className="mb-2">{formatJobDate(event.created_at)}</Text>
                 <EventCard event={event} />
               </div>
             ))
@@ -126,7 +128,8 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
 
       {job.can_prompt && (
         <div className="mt-5 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto]">
-          <input
+          <Input
+            size="lg"
             value={content}
             onInput={(event) => setContent(event.currentTarget.value)}
             onKeyDown={(event) => {
@@ -136,7 +139,6 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
               }
             }}
             placeholder={t("job.followupPlaceholder")}
-            className="h-11 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
           />
           <Button variant="secondary" disabled={isSendingPrompt} onClick={() => handleSend(true)}>{t("common.done")}</Button>
           <Button variant="primary" disabled={isSendingPrompt} onClick={() => handleSend(false)}>{t("common.send")}</Button>

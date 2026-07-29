@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 import {
   formatMissionCadence,
   formatMissionStatus,
@@ -16,10 +16,10 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
     <Panel className="p-4 sm:p-5">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.missions.label")}</div>
+          <Text variant="eyebrow" tone="muted" as="div">{t("projects.missions.label")}</Text>
           <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{t("projects.missions.title")}</h2>
         </div>
-        <div className="text-right text-xs uppercase tracking-[0.16em] text-[var(--v2-text-faint)]">
+        <div className="text-right text-xs uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
           <div>{t("projects.missions.activePaused", { active: counts.active, paused: counts.paused })}</div>
           <div className="mt-1">{t("projects.missions.completedFailed", { completed: counts.completed, failed: counts.failed })}</div>
         </div>
@@ -45,11 +45,11 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
                   </div>
                   <StatusPill tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />
                 </div>
-                <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+                <Text variant="eyebrow" tone="faint" as="div" className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
                   <span>{formatMissionCadence(mission, t)}</span>
                   <span>{t("projects.missions.threadCount", { count: mission.thread_count || 0 })}</span>
                   <span>{t("projects.missions.updated", { date: formatProjectDate(mission.updated_at, t) })}</span>
-                </div>
+                </Text>
               </button>
             ))
           : (

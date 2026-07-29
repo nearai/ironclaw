@@ -1,6 +1,6 @@
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
-import { Badge, Panel } from "@ironclaw/design-system";
+import { Badge, Panel, RadioGroup, RadioGroupItem, Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { cn } from "@ironclaw/design-system";
@@ -143,10 +143,10 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
 
         {/* ── Header ──────────────────────────────────────────────── */}
         <div className="flex flex-col gap-1">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
+          <Text variant="eyebrow" tone="muted" as="div">
             {t("automations.delivery.eyebrow")}
-          </div>
-          <h2 className="mt-1 text-xl font-medium tracking-[-0.02em] text-[var(--v2-text-strong)]">
+          </Text>
+          <h2 className="mt-1 text-xl font-medium tracking-[var(--v2-tracking-tight)] text-[var(--v2-text-strong)]">
             {t("automations.delivery.title")}
           </h2>
           <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
@@ -160,9 +160,9 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
         {hasCurrentTarget &&
         (
           <div>
-            <span className="mb-1.5 block font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+            <Text variant="eyebrow" tone="faint" className="mb-1.5 block">
               {t("automations.delivery.currentDefault")}
-            </span>
+            </Text>
             <div
               className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-[var(--v2-positive-soft)] border-[color-mix(in_srgb,var(--v2-positive-text)_25%,var(--v2-panel-border))]"
             >
@@ -176,12 +176,14 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
 
         {/* ── Radio option rows ────────────────────────────────────── */}
         <div>
-          <span className="mb-1.5 block font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+          <Text variant="eyebrow" tone="faint" className="mb-1.5 block">
             {radioSectionLabel}
-          </span>
-          <div
+          </Text>
+          <RadioGroup
             className="flex flex-col gap-3"
-            role="radiogroup"
+            name="delivery-target"
+            value={draftTargetId}
+            onValueChange={setDraftTargetId}
             aria-label={t("automations.delivery.title")}
           >
 
@@ -198,21 +200,17 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                   key={tid}
                   className={cn(
                     "flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer",
-                    "transition-colors duration-100",
+                    "transition-colors duration-[var(--v2-duration-instant)]",
                     "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
                     "hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
                     isSelected &&
                       "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
                   )}
                 >
-                  <input
-                    type="radio"
-                    name="delivery-target"
+                  <RadioGroupItem
                     value={tid}
-                    checked={isSelected}
                     disabled={isBusy}
-                    onChange={() => setDraftTargetId(tid)}
-                    className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
+                    className="mt-0.5 shrink-0"
                   />
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-[var(--v2-text-strong)] leading-snug">
@@ -262,7 +260,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
             <label
               className={cn(
                 "flex items-start gap-3.5 rounded-xl border px-4 py-3.5",
-                "transition-colors duration-100",
+                "transition-colors duration-[var(--v2-duration-instant)]",
                 "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
                 hasTargets
                   ? "cursor-pointer hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]"
@@ -271,14 +269,10 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                   "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
               )}
             >
-              <input
-                type="radio"
-                name="delivery-target"
+              <RadioGroupItem
                 value=""
-                checked={draftTargetId === ""}
                 disabled={isBusy || !hasTargets}
-                onChange={() => setDraftTargetId("")}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
+                className="mt-0.5 shrink-0"
               />
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium text-[var(--v2-text-strong)] leading-snug">
@@ -295,7 +289,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               />
             </label>
 
-          </div>
+          </RadioGroup>
         </div>
 
         {/* ── Save row ─────────────────────────────────────────────── */}

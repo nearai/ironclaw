@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
   formatMessageRole,
@@ -15,7 +15,7 @@ import {
 function MetaCard({ label, value }) {
   return (
     <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{label}</div>
+      <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{label}</div>
       <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{value}</div>
     </div>
   );
@@ -30,7 +30,7 @@ export function ProjectThreadInspector({ thread }) {
       <Panel className="p-4 sm:p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{presentation.subtitle}</div>
+            <Text variant="eyebrow" tone="muted" as="div">{presentation.subtitle}</Text>
             <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{presentation.title}</h2>
           </div>
           <StatusPill tone={threadTone(thread.state)} label={formatThreadState(thread.state, t)} />
@@ -39,7 +39,7 @@ export function ProjectThreadInspector({ thread }) {
         {presentation.brief
           ? (
               <div className="mt-4 rounded-2xl border border-[color-mix(in_srgb,var(--v2-positive-text)_15%,transparent)] bg-[var(--v2-positive-soft)] p-4">
-                <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-positive-text)]">{t("projects.thread.brief")}</div>
+                <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-positive-text)]">{t("projects.thread.brief")}</div>
                 <div className="mt-3 text-sm leading-6 text-[var(--v2-text-strong)]">
                   <MarkdownRenderer content={presentation.brief} />
                 </div>
@@ -58,12 +58,12 @@ export function ProjectThreadInspector({ thread }) {
       </Panel>
 
       <Panel className="p-4 sm:p-5">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.thread.timeline")}</div>
+        <Text variant="eyebrow" tone="muted" as="div">{t("projects.thread.timeline")}</Text>
         <div className="mt-4 space-y-3">
           {thread.messages?.length
             ? thread.messages.map((message, index) => (
                 <article key={index} className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-4">
-                  <div className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-faint)]">{formatMessageRole(message.role, t)}</div>
+                  <div className="text-xs uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">{formatMessageRole(message.role, t)}</div>
                   <div className="mt-3 text-sm leading-6 text-[var(--v2-text-strong)]">
                     <MarkdownRenderer content={messageContent(message)} />
                   </div>

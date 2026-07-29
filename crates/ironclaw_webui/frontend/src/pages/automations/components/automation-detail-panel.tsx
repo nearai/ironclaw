@@ -3,7 +3,7 @@ import { Button } from "@ironclaw/design-system";
 import { ConfirmDialog } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import { Input } from "@ironclaw/design-system";
-import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { cn } from "@ironclaw/design-system";
 import {
@@ -18,7 +18,7 @@ const AUTOMATION_NAME_MAX_BYTES = 256;
 function MetaItem({ label, value, tone = "muted" }) {
   return (
     <div className="min-w-0 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+      <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
         {label}
       </div>
       <div
@@ -199,9 +199,9 @@ export function AutomationDetailPanel({
                     )}
                   </div>
                 )}
-            <div className="mt-2 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
+            <Text variant="eyebrow" tone="faint" as="div" className="mt-2 truncate">
               {automation.automation_id}
-            </div>
+            </Text>
             {automation.hold_meta_label && (
               <div
                 data-testid="automation-hold-meta"

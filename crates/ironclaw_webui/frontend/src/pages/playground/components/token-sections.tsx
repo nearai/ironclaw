@@ -28,7 +28,7 @@ export function Section({ title, hint = null, children }) {
   return (
     <section className="mb-5 overflow-hidden rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]">
       <div className="flex items-baseline justify-between gap-4 border-b border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-5 py-2.5">
-        <h3 className="font-mono text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+        <h3 className="font-mono text-[0.6875rem] font-medium uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
           {title}
         </h3>
         {hint && (

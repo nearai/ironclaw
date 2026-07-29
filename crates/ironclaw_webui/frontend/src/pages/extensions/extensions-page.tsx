@@ -1,6 +1,6 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
-import { ConfirmDialog } from "@ironclaw/design-system";
+import { Button, ConfirmDialog, Text } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
@@ -35,16 +35,18 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
       className={`rounded-lg border px-4 py-4 ${toneClass}`}
       role="alert"
     >
-      <p className="text-sm font-medium">{t(titleKey)}</p>
-      <p className="mt-1 text-sm">{t(descriptionKey)}</p>
-      <button
+      <Text variant="body" tone="inherit" weight="medium">{t(titleKey)}</Text>
+      <Text variant="body" tone="inherit" className="mt-1">{t(descriptionKey)}</Text>
+      <Button
         type="button"
-        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+        variant="ghost"
+        size="sm"
+        className="mt-4 border-current font-medium text-current hover:bg-transparent hover:text-current hover:opacity-80"
         onClick={onRetry}
         disabled={isRefetching}
       >
         {isRefetching ? t("ext.catalog.retrying") : t("ext.catalog.retry")}
-      </button>
+      </Button>
     </div>
   );
 }

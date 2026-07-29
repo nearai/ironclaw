@@ -46,11 +46,11 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
         className="w-full max-w-md p-6 shadow-none sm:p-8"
       >
         <div className="mb-8">
-          <p className="mb-3 font-mono text-xs uppercase tracking-[0.2em] text-[var(--v2-accent-text)]">
+          <p className="mb-3 font-mono text-xs uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
             {t("login.tagline")}
           </p>
           <h1
-            className="text-5xl font-medium leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
+            className="text-5xl font-medium leading-none tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)]"
           >
             {t("login.console")}
           </h1>

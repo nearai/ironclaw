@@ -2,6 +2,7 @@
 import React from "react";
 import { Card } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useSkills } from "../hooks/useSkills";
 import { matchesSearch } from "../lib/settings-search";
@@ -103,14 +104,14 @@ export function SkillsTab({ searchQuery = "" }) {
   if (query.isLoading) {
     body = (
       <Card padding="md">
-          <div className="mb-4 h-3 w-24 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <div className="v2-skeleton mb-4 h-3 w-24 rounded" />
           {[1, 2, 3].map((i) => (
             <div key={i} className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0">
               <div>
-                <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="mt-1 h-3 w-48 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                <div className="v2-skeleton h-4 w-32 rounded" />
+                <div className="v2-skeleton mt-1 h-3 w-48 rounded" />
               </div>
-              <div className="h-6 w-20 animate-pulse rounded-full bg-[var(--v2-surface-muted)]" />
+              <div className="v2-skeleton h-6 w-20 rounded-full" />
             </div>
           ))}
         </Card>
@@ -118,7 +119,7 @@ export function SkillsTab({ searchQuery = "" }) {
   } else if (query.error) {
     body = (
       <Card padding="md">
-          <p className="text-sm text-[var(--v2-danger-text)]">{t("skills.failedLoad", { message: query.error.message })}</p>
+          <Text variant="body" tone="danger">{t("skills.failedLoad", { message: query.error.message })}</Text>
         </Card>
     );
   } else {
@@ -140,9 +141,9 @@ export function SkillsTab({ searchQuery = "" }) {
       body = (
         <Card padding="lg">
           <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">{t("skills.noInstalled")}</h3>
-          <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
+          <Text variant="body" tone="muted" className="mt-2 max-w-md">
             {t("skills.noInstalledDesc")}
-          </p>
+          </Text>
         </Card>
       );
     } else if (filteredSkills.length === 0) {
@@ -205,11 +206,11 @@ function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
               ? t("skills.defaultAutoActivationEnabled")
               : t("skills.defaultAutoActivationDisabled")}
           </div>
-          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
+          <Text as="div" variant="caption" tone="muted" className="mt-1">
             {enabled
               ? t("skills.defaultAutoActivationOnDesc")
               : t("skills.defaultAutoActivationOffDesc")}
-          </div>
+          </Text>
         </div>
         <div className="shrink-0">
           <Button
@@ -243,9 +244,9 @@ function SkillGroup({
   if (skills.length === 0) return null;
   return (
     <Card padding="md">
-      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
         {title}
-      </h3>
+      </Text>
       {skills.map(
         (skill) => (
           <SkillCard

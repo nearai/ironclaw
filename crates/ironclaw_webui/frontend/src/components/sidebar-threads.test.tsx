@@ -111,6 +111,8 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
     React: createReactStub(),
     NavLink: "NavLink",
     Icon: "Icon",
+    Button: "button",
+    Input: "input",
     THREAD_STATE: {
       FAILED: "failed",
       NEEDS_ATTENTION: "needs_attention",

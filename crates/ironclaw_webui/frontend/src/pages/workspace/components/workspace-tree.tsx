@@ -131,7 +131,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
           className={[
             "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
             selectedPath === entry.path
-              ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
+              ? // Inset-rail selection indicator drawn with currentColor (not a color literal).
+                "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
               : "text-[var(--v2-text)]",
           ].join(" ")}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
@@ -192,7 +193,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
       className={[
         "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/70 focus-visible:ring-inset",
         selectedPath === entry.path
-          ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
+          ? // Inset-rail selection indicator drawn with currentColor (not a color literal).
+            "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
           : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
       ].join(" ")}
       style={{ paddingLeft: `${24 + depth * 16}px` }}

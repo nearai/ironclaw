@@ -1,6 +1,7 @@
 import { Badge } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { Textarea } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -75,7 +76,7 @@ export function SkillCard({
           </div>
 
           {skill.description &&
-          (<div className="mt-1 text-xs text-[var(--v2-text-muted)]">{skill.description}</div>)}
+          (<Text as="div" variant="caption" tone="muted" className="mt-1">{skill.description}</Text>)}
 
           {isEditing
             ? (
@@ -169,7 +170,7 @@ export function SkillCard({
         </div>
       </div>
       {editError &&
-      (<p className="mt-2 text-xs text-[var(--v2-danger-text)]">{editError}</p>)}
+      (<Text as="p" variant="caption" tone="danger" className="mt-2">{editError}</Text>)}
     </div>
   );
 }
@@ -187,9 +188,9 @@ function SkillMetadata({ skill }) {
       </div>
     )}
     {skill.usage_hint &&
-    (<div className="mt-2 text-xs text-[var(--v2-text-muted)]">{skill.usage_hint}</div>)}
+    (<Text as="div" variant="caption" tone="muted" className="mt-2">{skill.usage_hint}</Text>)}
     {skill.setup_hint &&
-    (<div className="mt-2 text-xs text-[var(--v2-warning-text)]">{skill.setup_hint}</div>)}
+    (<Text as="div" variant="caption" tone="warning" className="mt-2">{skill.setup_hint}</Text>)}
     {(skill.has_requirements || skill.has_scripts || skill.install_source_url) &&
     (
       <div className="mt-2 flex flex-wrap gap-1.5">

@@ -2,7 +2,8 @@ import { Button } from "@ironclaw/design-system";
 import { Badge } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
-import { Input, FormField, Label } from "@ironclaw/design-system";
+import { Input, FormField, Label, Select } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { useUsers } from "../hooks/useUsers";
@@ -41,11 +42,9 @@ function CreateUserForm({ onCreate, isCreating, error }) {
 
   return (
     <Card padding="md">
-      <h3
-        className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-      >
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
         {t("users.newUser")}
-      </h3>
+      </Text>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <FormField label={t("users.displayName")} htmlFor="user-name">
@@ -67,18 +66,18 @@ function CreateUserForm({ onCreate, isCreating, error }) {
           </FormField>
         </div>
         <FormField label={t("users.role")} htmlFor="user-role">
-          <select
+          <Select
             id="user-role"
+            size="lg"
             value={role}
             onChange={(e) => setRole(e.currentTarget.value)}
-            className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
           >
             <option value="member">{t("users.member")}</option>
             <option value="admin">{t("users.admin")}</option>
-          </select>
+          </Select>
         </FormField>
         {error &&
-        ( <p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p> )}
+        ( <Text variant="body" tone="danger">{error.message}</Text> )}
         <div className="flex gap-2">
           <Button type="submit" disabled={isCreating}>
             {isCreating ? t("users.creating") : t("users.createUser")}
@@ -119,9 +118,9 @@ function UserRow({ user }) {
         </div>
         {user.email &&
         (
-          <div className="mt-0.5 font-mono text-xs text-[var(--v2-text-muted)]">
+          <Text as="div" variant="mono" tone="muted" className="mt-0.5">
             {user.email}
-          </div>
+          </Text>
         )}
       </div>
       <div
@@ -142,15 +141,15 @@ export function UsersTab({ searchQuery = "" }) {
   if (query.isLoading) {
     return (
       <Card padding="md">
-        <div className="mb-4 h-3 w-24 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+        <div className="v2-skeleton mb-4 h-3 w-24 rounded" />
         {[1, 2, 3].map(
           (i) => (
             <div
               key={i}
               className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0"
             >
-              <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-              <div className="h-6 w-20 animate-pulse rounded-full bg-[var(--v2-surface-muted)]" />
+              <div className="v2-skeleton h-4 w-32 rounded" />
+              <div className="v2-skeleton h-6 w-20 rounded-full" />
             </div>
           )
         )}
@@ -167,9 +166,9 @@ export function UsersTab({ searchQuery = "" }) {
             {t("users.adminRequired")}
           </h3>
         </div>
-        <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
+        <Text variant="body" tone="muted" className="mt-2 max-w-md">
           {t("users.adminRequiredDesc")}
-        </p>
+        </Text>
       </Card>
     );
   }
@@ -177,9 +176,9 @@ export function UsersTab({ searchQuery = "" }) {
   if (query.error) {
     return (
       <Card padding="md">
-        <p className="text-sm text-[var(--v2-danger-text)]">
+        <Text variant="body" tone="danger">
           {t("users.failedLoad", { message: query.error.message })}
-        </p>
+        </Text>
       </Card>
     );
   }
@@ -204,19 +203,17 @@ export function UsersTab({ searchQuery = "" }) {
       />
 
       <Card padding="md">
-        <h3
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-        >
+        <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">
           {t("users.title", { count: filteredUsers.length })}
-        </h3>
+        </Text>
         {users.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">
+          ? (<Text variant="body" tone="muted" className="py-4">
               {t("users.noUsers")}
-            </p>)
+            </Text>)
           : filteredUsers.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">
+          ? (<Text variant="body" tone="muted" className="py-4">
               {t("settings.noMatchingSettings", { query: searchQuery })}
-            </p>)
+            </Text>)
           : filteredUsers.map(
               (user) => (<UserRow key={user.id} user={user} />)
             )}

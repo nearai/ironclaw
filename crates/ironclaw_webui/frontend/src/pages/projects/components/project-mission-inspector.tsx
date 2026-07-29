@@ -1,5 +1,5 @@
 import { Button } from "@ironclaw/design-system";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
@@ -12,7 +12,7 @@ import {
 function MetaCard({ label, value }) {
   return (
     <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{label}</div>
+      <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{label}</div>
       <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{value}</div>
     </div>
   );
@@ -43,7 +43,7 @@ export function ProjectMissionInspector({
       <Panel className="p-4 sm:p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.mission.dossier")}</div>
+            <Text variant="eyebrow" tone="muted" as="div">{t("projects.mission.dossier")}</Text>
             <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{mission.name}</h2>
           </div>
           <StatusPill tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />
@@ -60,7 +60,7 @@ export function ProjectMissionInspector({
       </Panel>
 
       <Panel className="p-4 sm:p-5">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.mission.brief")}</div>
+        <Text variant="eyebrow" tone="muted" as="div">{t("projects.mission.brief")}</Text>
         <div className="mt-4 text-sm leading-6 text-[var(--v2-text)]">
           <MarkdownRenderer content={mission.goal || t("projects.mission.noGoal")} />
         </div>
@@ -69,7 +69,7 @@ export function ProjectMissionInspector({
       {mission.current_focus
         ? (
             <Panel className="p-4 sm:p-5">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.mission.currentFocus")}</div>
+              <Text variant="eyebrow" tone="muted" as="div">{t("projects.mission.currentFocus")}</Text>
               <div className="mt-4 text-sm leading-6 text-[var(--v2-text)]">
                 <MarkdownRenderer content={mission.current_focus} />
               </div>
@@ -80,7 +80,7 @@ export function ProjectMissionInspector({
       {mission.success_criteria
         ? (
             <Panel className="p-4 sm:p-5">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.mission.successCriteria")}</div>
+              <Text variant="eyebrow" tone="muted" as="div">{t("projects.mission.successCriteria")}</Text>
               <div className="mt-4 text-sm leading-6 text-[var(--v2-text)]">
                 <MarkdownRenderer content={mission.success_criteria} />
               </div>
@@ -91,11 +91,11 @@ export function ProjectMissionInspector({
       {mission.approach_history?.length
         ? (
             <Panel className="p-4 sm:p-5">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.mission.approachHistory")}</div>
+              <Text variant="eyebrow" tone="muted" as="div">{t("projects.mission.approachHistory")}</Text>
               <div className="mt-4 space-y-3">
                 {mission.approach_history.map((entry, index) => (
                   <div key={index} className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-4">
-                    <div className="mb-3 text-xs uppercase tracking-[0.16em] text-[var(--v2-text-faint)]">{t("projects.mission.runLabel", { number: index + 1 })}</div>
+                    <div className="mb-3 text-xs uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">{t("projects.mission.runLabel", { number: index + 1 })}</div>
                     <MarkdownRenderer content={entry} />
                   </div>
                 ))}
@@ -107,7 +107,7 @@ export function ProjectMissionInspector({
       {mission.threads?.length
         ? (
             <Panel className="p-4 sm:p-5">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.mission.spawnedThreads")}</div>
+              <Text variant="eyebrow" tone="muted" as="div">{t("projects.mission.spawnedThreads")}</Text>
               <div className="mt-4 space-y-3">
                 {mission.threads.map((thread) => {
                   const status = thread.state === "Running" ? "Active" : thread.state === "Failed" ? "Failed" : "Completed";

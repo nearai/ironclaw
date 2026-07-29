@@ -70,7 +70,7 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
         <Icon
           name="chevron"
           className={cn(
-            "h-3.5 w-3.5 shrink-0 transition-transform duration-150",
+            "h-3.5 w-3.5 shrink-0 transition-transform duration-[var(--v2-duration-fast)]",
             isExpanded && "rotate-180"
           )}
         />

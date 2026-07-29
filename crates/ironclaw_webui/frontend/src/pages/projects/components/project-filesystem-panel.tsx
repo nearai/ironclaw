@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
-import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatusPill, Text } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
@@ -87,9 +87,9 @@ export function ProjectFilesystemPanel({ threadId }) {
   const header = (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
+        <Text variant="eyebrow" tone="muted" as="div">
           {t("projects.files.label")}
-        </div>
+        </Text>
         <StatusPill tone="muted" label={t("workspace.readOnly")} />
       </div>
       <Button

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard, StatusPill } from "@ironclaw/design-system";
+import { Panel, StatCard, StatusPill, Text } from "@ironclaw/design-system";
 import { useUsageSummary } from "../hooks/useAdminUsage";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
@@ -26,7 +26,7 @@ function RecentUsersTable({ users, onSelectUser }) {
     .slice(0, 8);
 
   if (!recent.length) {
-    return (<p className="py-4 text-sm text-[var(--v2-text-muted)]">{t("admin.dashboard.noUsers")}</p>);
+    return (<Text variant="body" tone="muted" className="py-4">{t("admin.dashboard.noUsers")}</Text>);
   }
 
   return (
@@ -34,11 +34,11 @@ function RecentUsersTable({ users, onSelectUser }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-[var(--v2-panel-border)] text-left">
-            <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.dashboard.name")}</th>
-            <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.dashboard.role")}</th>
-            <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.dashboard.status")}</th>
-            <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.dashboard.jobs")}</th>
-            <th className="pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.dashboard.lastActive")}</th>
+            <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.dashboard.name")}</Text>
+            <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.dashboard.role")}</Text>
+            <Text as="th" variant="eyebrow" tone="muted" className="pb-3 pr-4">{t("admin.dashboard.status")}</Text>
+            <Text as="th" variant="eyebrow" tone="muted" className="hidden pb-3 pr-4 sm:table-cell">{t("admin.dashboard.jobs")}</Text>
+            <Text as="th" variant="eyebrow" tone="muted" className="pb-3">{t("admin.dashboard.lastActive")}</Text>
           </tr>
         </thead>
         <tbody>
@@ -55,8 +55,8 @@ function RecentUsersTable({ users, onSelectUser }) {
                 </td>
                 <td className="py-3 pr-4"><StatusPill tone={roleTone(u.role)} label={formatUserRole(u.role, t)} /></td>
                 <td className="py-3 pr-4"><StatusPill tone={statusTone(u.status)} label={formatUserStatus(u.status, t)} /></td>
-                <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{u.job_count ?? 0}</td>
-                <td className="py-3 text-xs text-[var(--v2-text-muted)]">{formatRelativeTime(u.last_active_at, t)}</td>
+                <Text as="td" variant="mono" tone="muted" className="hidden py-3 pr-4 sm:table-cell">{u.job_count ?? 0}</Text>
+                <Text as="td" variant="caption" tone="muted" className="py-3">{formatRelativeTime(u.last_active_at, t)}</Text>
               </tr>
             )
           )}
@@ -94,9 +94,9 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
     <div className="space-y-5">
       <Panel className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.dashboard.systemOverview")}</h3>
+          <Text as="h3" variant="eyebrow" tone="accent">{t("admin.dashboard.systemOverview")}</Text>
           {summary.uptime_seconds != null && (
-            <span className="font-mono text-xs text-[var(--v2-text-muted)]">{t("admin.dashboard.uptime", { value: formatUptime(summary.uptime_seconds) })}</span>
+            <Text variant="mono" tone="muted">{t("admin.dashboard.uptime", { value: formatUptime(summary.uptime_seconds) })}</Text>
           )}
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -124,7 +124,7 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
       </Panel>
 
       <Panel className="p-5 sm:p-6">
-        <h3 className="mb-5 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.dashboard.usage30d")}</h3>
+        <Text as="h3" variant="eyebrow" tone="accent" className="mb-5">{t("admin.dashboard.usage30d")}</Text>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             label={t("admin.dashboard.totalJobs")}
@@ -151,7 +151,7 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
 
       <Panel className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.dashboard.recentUsers")}</h3>
+          <Text as="h3" variant="eyebrow" tone="accent">{t("admin.dashboard.recentUsers")}</Text>
           <button
             onClick={() => onNavigateTab("users")}
             className="text-xs text-[var(--v2-accent-text)] hover:underline"

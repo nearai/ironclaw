@@ -270,6 +270,7 @@
   --v2-tracking-tag:  0.08em;   /* pixel-face tags/badges */
   --v2-tracking-caps: 0.14em;   /* uppercase mono labels */
   --v2-tracking-wide: 0.22em;   /* card eyebrow labels */
+  --v2-tracking-code: 0.18em;   /* pairing/verification code displays */
   --v2-tracking-tight: -0.02em; /* headings (nux --heading-tracking) */
   --v2-tracking-display: -0.04em; /* oversized display headings */
 

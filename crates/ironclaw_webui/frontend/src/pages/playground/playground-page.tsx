@@ -241,7 +241,7 @@ export function PlaygroundPage() {
       <main className="min-w-0 flex-1 overflow-y-auto px-6 pb-16 pt-7 lg:px-10">
         <header className="mb-7 flex items-start justify-between gap-6">
           <div>
-            <h1 className="text-xl font-medium tracking-[-0.02em] text-[var(--v2-text-strong)]">
+            <h1 className="text-xl font-medium tracking-[var(--v2-tracking-tight)] text-[var(--v2-text-strong)]">
               {item.name}
             </h1>
             <p className="mt-1 max-w-[60ch] text-[0.8125rem] leading-relaxed text-[var(--v2-text-muted)]">

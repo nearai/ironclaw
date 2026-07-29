@@ -1,4 +1,5 @@
 import { Card } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { AVAILABLE_LANGUAGES, useI18n, useT } from "../../../lib/i18n";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
@@ -22,18 +23,18 @@ export function LanguageTab({ searchQuery = "" }) {
 
   return (
     <Card padding="md">
-      <h3 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-2">
         {t("lang.title")}
-      </h3>
-      <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+      </Text>
+      <Text variant="body" tone="muted">
         {t("lang.description")}
-      </p>
+      </Text>
 
       <div className="mt-5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
-        <div className="text-xs text-[var(--v2-text-muted)]">{t("lang.current")}</div>
+        <Text as="div" variant="caption" tone="muted">{t("lang.current")}</Text>
         <div className="mt-1 flex items-baseline gap-2">
           <span className="text-lg font-medium text-[var(--v2-text-strong)]">{current.native}</span>
-          <span className="font-mono text-xs text-[var(--v2-text-faint)]">{current.name}</span>
+          <Text variant="mono" tone="faint">{current.name}</Text>
         </div>
       </div>
 

@@ -1,16 +1,12 @@
 import { Card } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
+import { Switch } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import type { InterfaceTheme } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useInterfacePreferences } from "../../../lib/interface-preferences";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
-
-type SwitchProps = {
-  checked: boolean;
-  label: string;
-  onChange: (checked: boolean) => void;
-};
 
 type ThemeOptionProps = {
   checked: boolean;
@@ -25,33 +21,6 @@ type AppearanceTabProps = {
   theme: InterfaceTheme;
   onThemeChange: (theme: InterfaceTheme) => void;
 };
-
-function Switch({ checked, label, onChange }: SwitchProps) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={[
-        "relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition",
-        checked
-          ? "border-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--v2-accent)_22%,transparent)]"
-          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full transition",
-          checked
-            ? "translate-x-5 bg-[var(--v2-accent-text)]"
-            : "translate-x-1 bg-[var(--v2-text-muted)]",
-        ].join(" ")}
-      />
-    </button>
-  );
-}
 
 export function ThemeOption({
   checked,
@@ -126,12 +95,15 @@ export function AppearanceTab({
   return (
     <div className="space-y-5">
       <Card padding="md">
-        <h2
+        <Text
+          as="h2"
+          variant="eyebrow"
+          tone="accent"
           id="appearance-theme-title"
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
+          className="mb-4"
         >
           {title}
-        </h2>
+        </Text>
         <div
           className="grid gap-3 sm:grid-cols-2"
           role="radiogroup"
@@ -164,15 +136,15 @@ export function AppearanceTab({
               <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">
                 {label}
               </h3>
-              <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
+              <Text variant="body" tone="muted" className="mt-1">
                 {description}
-              </p>
+              </Text>
             </div>
           </div>
           <Switch
             checked={showChatLogsShortcut}
-            label={label}
-            onChange={setShowChatLogsShortcut}
+            aria-label={label}
+            onCheckedChange={setShowChatLogsShortcut}
           />
         </div>
       </Card>

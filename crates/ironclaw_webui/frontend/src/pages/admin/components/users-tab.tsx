@@ -3,6 +3,7 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill, EmptyPanel } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import { SelectMenu } from "@ironclaw/design-system";
 import { Input, FormField } from "@ironclaw/design-system";
@@ -46,8 +47,8 @@ function TokenBanner({ token, onDismiss }) {
     <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)] bg-[var(--v2-accent-soft)] p-4 sm:p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-[var(--v2-text-strong)]">{t("admin.users.tokenCreated")}</p>
-          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">{t("admin.users.tokenCreatedDesc")}</p>
+          <Text variant="body" tone="strong" weight="medium">{t("admin.users.tokenCreated")}</Text>
+          <Text as="p" variant="caption" tone="muted" className="mt-1">{t("admin.users.tokenCreatedDesc")}</Text>
           <div className="mt-3 flex items-center gap-2">
             <code className="min-w-0 flex-1 truncate rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-code-bg)] px-3 py-2 font-mono text-xs text-[var(--v2-text-strong)]">
               {token}
@@ -98,7 +99,7 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 
   return (
     <Panel className="p-5 sm:p-6">
-      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.users.createUser")}</h3>
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">{t("admin.users.createUser")}</Text>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
           <FormField label={t("admin.users.displayName")}>
@@ -129,7 +130,7 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
             />
           </FormField>
         </div>
-        {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
+        {error && (<Text variant="body" tone="danger">{error.message}</Text>)}
         <div className="flex gap-2">
           <Button type="submit" disabled={isCreating}>
             {isCreating ? t("admin.users.creating") : t("admin.users.createUser")}
@@ -153,11 +154,11 @@ export function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel
       onClose={onCancel}
     >
       <ModalBody>
-        <p className="text-sm leading-6 text-[var(--v2-text-muted)]">{message}</p>
+        <Text variant="body" tone="muted">{message}</Text>
         {error && (
-          <p className="mt-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-confirm-error">
+          <Text variant="body" tone="danger" className="mt-4" role="alert" data-testid="admin-user-confirm-error">
             {adminUserActionErrorMessage(error, t)}
-          </p>
+          </Text>
         )}
       </ModalBody>
       <ModalFooter>
@@ -203,31 +204,56 @@ export function UserRow({
           <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
-          {user.email && (<span className="font-mono text-xs text-[var(--v2-text-muted)]">{user.email}</span>)}
-          <span className="font-mono text-xs text-[var(--v2-text-faint)]">{truncateId(user.id)}</span>
+          {user.email && (<Text variant="mono" tone="muted">{user.email}</Text>)}
+          <Text variant="mono" tone="faint">{truncateId(user.id)}</Text>
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <span className="hidden font-mono text-xs text-[var(--v2-text-muted)] sm:inline">
+        <Text variant="mono" tone="muted" className="hidden sm:inline">
           {user.job_count != null ? t("admin.users.jobsCount", { count: user.job_count }) : ""}
           {user.total_cost != null ? ` · ${formatCost(user.total_cost)}` : ""}
-        </span>
-        <span className="hidden text-xs text-[var(--v2-text-faint)] lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
+        </Text>
+        <Text variant="caption" tone="faint" className="hidden lg:inline">{formatRelativeTime(user.last_active_at, t)}</Text>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
-            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
-          <button
+            ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="admin-user-suspend"
+                  disabled={isActionPending}
+                  aria-busy={isSuspending || undefined}
+                  onClick={() => onSuspend(user.id)}
+                  className="hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)]"
+                >
+                  {isSuspending ? t("common.loading") : t("admin.users.suspend")}
+                </Button>
+              )
+            : (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="admin-user-activate"
+                  disabled={isActionPending}
+                  aria-busy={isActivating || undefined}
+                  onClick={() => onActivate(user.id)}
+                  className="hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] hover:text-[var(--v2-accent-text)]"
+                >
+                  {isActivating ? t("common.loading") : t("admin.users.activate")}
+                </Button>
+              )}
+          <Button
+            variant="secondary"
+            size="sm"
             data-testid="admin-user-role"
             disabled={isActionPending}
             aria-busy={isUpdating || undefined}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
-            className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[var(--v2-panel-border)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isUpdating
               ? t("common.saving")
               : user.role === "admin" ? t("admin.users.demote") : t("admin.users.promote")}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -335,9 +361,9 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
           <Icon name="lock" className="h-5 w-5 text-[var(--v2-text-faint)]" />
           <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">{t("users.adminRequired")}</h3>
         </div>
-        <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
+        <Text variant="body" tone="muted" className="mt-2 max-w-md">
           {t("users.adminRequiredDesc")}
-        </p>
+        </Text>
       </Panel>
     );
   }
@@ -360,9 +386,9 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
 
       <Panel className="p-5 sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+          <Text as="h3" variant="eyebrow" tone="accent">
             {t("admin.users.title", { count: filtered.length, total: users.length })}
-          </h3>
+          </Text>
           <div className="flex items-center gap-2">
             <div className="w-48">
               <Input
@@ -376,18 +402,19 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
             <div className="flex gap-1">
               {FILTERS.map(
                 (f) => (
-                  <button
+                  <Button
                     key={f.value}
+                    variant="ghost"
+                    size="sm"
                     onClick={() => setFilter(f.value)}
-                    className={[
-                      "rounded-md px-2.5 py-1.5 text-[11px] font-medium",
+                    className={
                       filter === f.value
-                        ? "border border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
-                        : "border border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
-                    ].join(" ")}
+                        ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                        : undefined
+                    }
                   >
                     {f.label}
-                  </button>
+                  </Button>
                 )
               )}
             </div>
@@ -395,13 +422,13 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
         </div>
 
         {actionError && (
-          <p className="mb-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-action-error">
+          <Text variant="body" tone="danger" className="mb-4" role="alert" data-testid="admin-user-action-error">
             {adminUserActionErrorMessage(actionError, t)}
-          </p>
+          </Text>
         )}
 
         {filtered.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">{t("admin.users.noMatch")}</p>)
+          ? (<Text variant="body" tone="muted" className="py-4">{t("admin.users.noMatch")}</Text>)
           : filtered.map(
               (user) => (
                 <UserRow

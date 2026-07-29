@@ -1,6 +1,7 @@
 import { Button } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { ProviderCard } from "./provider-card";
@@ -20,7 +21,7 @@ function GroupHeader({ label, count, dotClass }) {
   return (
     <div className="mb-2 mt-1 flex items-center gap-2 px-1">
       <span className={"h-1.5 w-1.5 rounded-full " + dotClass} />
-      <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+      <span className="font-mono text-[10.5px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
         {label}
       </span>
       <span className="font-mono text-[10.5px] text-[var(--v2-text-faint)]">·</span>
@@ -53,10 +54,10 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
     <Card className="p-4 sm:p-6">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+          <Text as="h3" variant="eyebrow" tone="accent">
             {t("llm.providers")}
-          </h3>
-          <p className="mt-1 text-sm text-[var(--v2-text-muted)]">{t("llm.providersDesc")}</p>
+          </Text>
+          <Text variant="body" tone="muted" className="mt-1">{t("llm.providersDesc")}</Text>
         </div>
         <Button type="button" variant="secondary" size="sm" className="gap-2" onClick={() => actions.openDialog(null)}>
           <Icon name="plus" className="h-3.5 w-3.5" />

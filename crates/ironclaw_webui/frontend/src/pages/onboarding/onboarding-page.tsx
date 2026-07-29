@@ -7,6 +7,7 @@ import { Badge } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
+import { Heading, Text } from "@ironclaw/design-system";
 import { ProviderDialog } from "../settings/components/provider-dialog";
 import { ProviderLoginStatus } from "../settings/components/provider-login-status";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions";
@@ -157,7 +158,7 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
             {configured &&
             (<Badge tone="positive" label={t("onboarding.ready")} size="sm" />)}
           </div>
-          <div className="mt-0.5 truncate text-xs text-[var(--v2-text-muted)]">{t(entry.descKey)}</div>
+          <Text as="div" variant="caption" tone="muted" className="mt-0.5 truncate">{t(entry.descKey)}</Text>
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">{actions}</div>
@@ -228,9 +229,9 @@ function OperatorOnboardingPage() {
 
   if (state.isLoading) {
     return (
-      <div className="grid h-full place-items-center text-sm text-[var(--v2-text-muted)]">
+      <Text as="div" variant="body" tone="muted" className="grid h-full place-items-center">
         {t("common.loading")}
-      </div>
+      </Text>
     );
   }
 
@@ -238,10 +239,10 @@ function OperatorOnboardingPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex min-h-full max-w-2xl flex-col justify-center gap-6 p-6">
         <div className="text-center">
-          <h1 className="text-2xl font-medium text-[var(--v2-text-strong)]">
+          <Heading level={1} variant="heading">
             {t("onboarding.title")}
-          </h1>
-          <p className="mt-2 text-sm text-[var(--v2-text-muted)]">{t("onboarding.subtitle")}</p>
+          </Heading>
+          <Text variant="body" tone="muted" className="mt-2">{t("onboarding.subtitle")}</Text>
         </div>
 
         <div className="flex flex-col gap-3">
@@ -266,13 +267,15 @@ function OperatorOnboardingPage() {
 
         <div className="text-center text-xs text-[var(--v2-text-muted)]">
           {t("onboarding.moreInSettings")}{" "}
-          <button
+          <Button
             type="button"
-            className="underline hover:text-[var(--v2-text-strong)]"
+            variant="ghost"
+            size="sm"
+            className="h-auto px-1 py-0 align-baseline text-xs underline hover:bg-transparent hover:underline"
             onClick={() => navigate("/settings/inference")}
           >
             {t("nav.settings")}
-          </button>
+          </Button>
         </div>
       </div>
 

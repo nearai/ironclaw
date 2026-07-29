@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
+import { Button, Checkbox, Input, Select } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -103,15 +104,17 @@ function LogEntry({ entry }) {
 
 function ToolbarSelect({ value, onChange, options, labelKey, t }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.currentTarget.value)}
-      className="v2-select h-8 min-w-0 rounded-[8px] px-2.5 py-0 text-xs"
-    >
-      {options.map(
-        (opt) => (<option key={opt} value={opt}>{t(labelKey(opt))}</option>)
-      )}
-    </select>
+    <div className="min-w-[8rem]">
+      <Select
+        size="sm"
+        value={value}
+        onChange={(e) => onChange(e.currentTarget.value)}
+      >
+        {options.map(
+          (opt) => (<option key={opt} value={opt}>{t(labelKey(opt))}</option>)
+        )}
+      </Select>
+    </div>
   );
 }
 
@@ -123,7 +126,7 @@ function ScopeChip({ label, value, scopeKey }) {
       className="inline-flex max-w-full items-center gap-1 rounded-[6px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-2 py-1 font-mono text-[11px] text-[var(--v2-text-muted)]"
       title={`${label}: ${value}`}
     >
-      <span className="uppercase tracking-[0.08em]">{label}</span>
+      <span className="uppercase tracking-[var(--v2-tracking-tag)]">{label}</span>
       <span className="max-w-[18rem] truncate text-[var(--v2-text)]">{value}</span>
     </span>
   );
@@ -187,12 +190,13 @@ export function LogsPage() {
         />
 
         {/* Target filter */}
-        <input
+        <Input
           type="text"
+          size="sm"
           value={targetFilter}
           onInput={(e) => setTargetFilter(e.currentTarget.value)}
           placeholder={t("logs.filterTarget")}
-          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
+          className="min-w-[10rem] flex-1"
         />
 
         <div className="flex items-center gap-2 ml-auto">
@@ -202,37 +206,38 @@ export function LogsPage() {
 
           {/* Auto-scroll toggle */}
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={autoScroll}
-              onChange={(e) => setAutoScroll(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
+              onCheckedChange={(checked) => setAutoScroll(checked === true)}
+              className="h-3.5 w-3.5"
             />
             {t("logs.autoScroll")}
           </label>
 
           {/* Pause/Resume */}
-          <button
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={togglePause}
-            className={[
-              "h-8 rounded-[8px] px-3 text-xs font-medium",
+            className={
               paused
-                ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
-                : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-            ].join(" ")}
+                ? "border-transparent bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
+                : ""
+            }
           >
             {paused ? t("logs.resume") : t("logs.pause")}
-          </button>
+          </Button>
 
           {/* Clear */}
-          <button
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => {
               if (confirm(t("logs.confirmClear"))) clearEntries();
             }}
-            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           >
             {t("logs.clear")}
-          </button>
+          </Button>
         </div>
 
         {activeScope.length > 0 &&

@@ -13,7 +13,7 @@ import { RoutineRecentRuns } from "./routine-recent-runs";
 function MetaItem({ label, value }) {
   return (
     <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/50 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+      <div className="font-mono text-[10px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
         {label}
       </div>
       <div className="mt-2 min-w-0 break-words text-sm text-[var(--v2-text-strong)]">

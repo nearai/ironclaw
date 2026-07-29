@@ -26,6 +26,10 @@ function renderRegistryTab(props, filter = "") {
   const context = {
     ExtensionCard() {},
     RegistryCard() {},
+    Button() {},
+    Icon() {},
+    Input() {},
+    Text() {},
     React: {
       useState: () => [filter, () => {}],
     },

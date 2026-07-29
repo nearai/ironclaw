@@ -1,4 +1,4 @@
-import { EmptyPanel, Input, Panel, Select } from "@ironclaw/design-system";
+import { EmptyPanel, Input, Panel, Select, Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { RoutineRow } from "./routine-row";
 
@@ -43,9 +43,9 @@ export function RoutinesList({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
+            <Text variant="eyebrow" tone="muted" as="div">
               {t("routines.explorer")}
-            </div>
+            </Text>
             <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">
               {t("routines.title")}
             </h2>
@@ -53,11 +53,11 @@ export function RoutinesList({
               {t("routines.description")}
             </p>
           </div>
-          <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+          <Text variant="eyebrow" tone="muted" as="div" className="flex items-center gap-2">
             <span>{routines.length} visible</span>
             <span>/</span>
             <span>{isRefreshing ? "refreshing" : "live"}</span>
-          </div>
+          </Text>
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">

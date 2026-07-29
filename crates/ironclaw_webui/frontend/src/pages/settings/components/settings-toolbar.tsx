@@ -1,6 +1,8 @@
 // @ts-nocheck
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
+import { Input } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";
@@ -124,12 +126,13 @@ export function SettingsToolbar({
               name="search"
               className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--v2-text-faint)]"
             />
-            <input
+            <Input
+              size="lg"
               type="search"
               value={searchQuery}
               onChange={(event) => onSearchChange(event.currentTarget.value)}
               placeholder={t("settings.searchPlaceholder")}
-              className="h-9 w-full rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-9 pr-9 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+              className="pl-9 pr-9"
             />
             {searchQuery &&
             (
@@ -179,18 +182,18 @@ export function SettingsToolbar({
       </div>
 
       <div className="mt-2 min-w-0">
-        <div className="text-xs font-medium text-[var(--v2-text-faint)]">{t("settings.manageJson")}</div>
+        <Text as="div" variant="caption" tone="faint" weight="medium">{t("settings.manageJson")}</Text>
         {message &&
         (
-          <div
+          <Text
+            as="div"
             role="status"
-            className={[
-              "mt-1 text-xs",
-              message.tone === "error" ? "text-[var(--v2-danger-text)]" : "text-[var(--v2-positive-text)]",
-            ].join(" ")}
+            variant="caption"
+            tone={message.tone === "error" ? "danger" : "positive"}
+            className="mt-1"
           >
             {message.text}
-          </div>
+          </Text>
         )}
       </div>
     </div>

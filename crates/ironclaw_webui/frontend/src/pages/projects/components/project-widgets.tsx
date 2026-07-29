@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel } from "@ironclaw/design-system";
+import { Panel, Text } from "@ironclaw/design-system";
 
 declare global {
   interface Window {
@@ -47,7 +47,7 @@ function ProjectWidgetMount({ widget, projectId }) {
   return (
     <div className="rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
       <div className="mb-3">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{widget.manifest?.slot || t("projects.widgets.fallbackSlot")}</div>
+        <Text variant="eyebrow" tone="muted" as="div">{widget.manifest?.slot || t("projects.widgets.fallbackSlot")}</Text>
         <div className="mt-1 text-lg font-medium tracking-tight text-[var(--v2-text-strong)]">{widget.manifest?.name || widget.manifest?.id}</div>
       </div>
       {errorName !== undefined
@@ -65,7 +65,7 @@ export function ProjectWidgets({ widgets, projectId }) {
   return (
     <Panel className="p-4 sm:p-5">
       <div className="mb-4">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.widgets.title")}</div>
+        <Text variant="eyebrow" tone="muted" as="div">{t("projects.widgets.title")}</Text>
         <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{t("projects.widgets.instrumentation")}</h2>
       </div>
       <div className="grid gap-4 xl:grid-cols-2">

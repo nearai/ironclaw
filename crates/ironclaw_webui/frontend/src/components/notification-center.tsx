@@ -111,7 +111,7 @@ export function NotificationCenter({ state }) {
             aria-label={t("notifications.close")}
             onClick={close}
             tabIndex={-1}
-            className="fixed inset-0 z-[9998] bg-black/35 lg:bg-transparent"
+            className="fixed inset-0 z-[var(--v2-z-overlay)] bg-[var(--v2-scrim)] lg:bg-transparent"
           />
           <section
             role="dialog"
@@ -120,7 +120,7 @@ export function NotificationCenter({ state }) {
             ref={panelRef}
             tabIndex={-1}
             className={cn(
-              "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
+              "fixed inset-x-0 bottom-0 z-[var(--v2-z-modal)] max-h-[78dvh] overflow-hidden",
               "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-menu)]",
               "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:max-h-[min(70vh,32rem)] lg:rounded-[12px]"
             )}
@@ -176,16 +176,19 @@ export function NotificationCenter({ state }) {
 
   return (
     <div className="relative">
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         onClick={toggleOpen}
         data-testid="notification-bell"
-        ref={triggerRef}
+        // React 19 forwards `ref` through props; Button's typing (ComponentPropsWithoutRef)
+        // omits it, so it rides in via an untyped spread.
+        {...({ ref: triggerRef } as object)}
         aria-label={t("notifications.open")}
         aria-expanded={open ? "true" : "false"}
         className={cn(
-          "relative grid h-8 w-8 place-items-center rounded-[8px]",
-          "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+          "relative hover:bg-[var(--v2-surface-muted)]",
           open && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
         )}
         title={t("notifications.open")}
@@ -198,7 +201,7 @@ export function NotificationCenter({ state }) {
             className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--v2-canvas-strong)] bg-[var(--v2-danger-text)]"
           />
         )}
-      </button>
+      </Button>
 
       {overlay && typeof document !== "undefined"
         ? createPortal(overlay, document.body)
