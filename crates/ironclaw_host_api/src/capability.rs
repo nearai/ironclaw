@@ -321,6 +321,52 @@ pub struct GrantConstraints {
 }
 
 #[cfg(test)]
+mod capability_descriptor_runtime_kind_tests {
+    use super::{CapabilityDescriptor, PermissionMode};
+    use crate::{CapabilityId, ExtensionId, RuntimeKind, TrustClass};
+
+    fn descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id: CapabilityId::new("cap.example").expect("valid capability id"),
+            provider: ExtensionId::new("acme").expect("valid extension id"),
+            runtime: RuntimeKind::Wasm,
+            trust_ceiling: TrustClass::Sandbox,
+            description: "test".to_string(),
+            parameters_schema: serde_json::json!({}),
+            effects: vec![],
+            default_permission: PermissionMode::Ask,
+            runtime_credentials: vec![],
+            network_targets: vec![],
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+        }
+    }
+
+    // This is the actual reachable attack path the module docs on
+    // `RuntimeKind` (runtime.rs) warn about: a third-party manifest is parsed
+    // into a `CapabilityDescriptor` with plain (untrusted) `Deserialize`, so a
+    // manifest declaring `"runtime": "first_party" | "system" | "sandbox"`
+    // must fail to parse rather than silently minting a privileged capability.
+    #[test]
+    fn manifest_deserialize_rejects_every_privileged_runtime_kind() {
+        for privileged in ["first_party", "system", "sandbox"] {
+            let mut wire = serde_json::to_value(descriptor()).expect("descriptor serializes");
+            wire["runtime"] = serde_json::Value::String(privileged.to_string());
+            assert!(
+                serde_json::from_value::<CapabilityDescriptor>(wire).is_err(),
+                "untrusted manifest must not be able to declare runtime = {privileged}"
+            );
+        }
+
+        // Sanity: non-privileged runtime kinds are unaffected.
+        let mut wire = serde_json::to_value(descriptor()).expect("descriptor serializes");
+        wire["runtime"] = serde_json::Value::String("mcp".to_string());
+        assert!(serde_json::from_value::<CapabilityDescriptor>(wire).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod credential_setup_wire_tests {
     use super::RuntimeCredentialAccountSetup;
 

@@ -23,6 +23,7 @@ const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,
     RuntimeKind::Mcp,
     RuntimeKind::Script,
+    RuntimeKind::Sandbox,
     RuntimeKind::FirstParty,
     RuntimeKind::System,
 ];
@@ -530,6 +531,7 @@ fn runtime_kind_token(runtime: RuntimeKind) -> &'static str {
         RuntimeKind::Wasm => "wasm",
         RuntimeKind::Mcp => "mcp",
         RuntimeKind::Script => "script",
+        RuntimeKind::Sandbox => "sandbox",
         RuntimeKind::FirstParty => "first_party",
         RuntimeKind::System => "system",
     }
@@ -593,6 +595,18 @@ mod tests {
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::LocalMinimal,
         }
+    }
+
+    /// Pins the wire token for the sandboxed-shell lane. `runtime_kind_token`
+    /// is duplicated in `ironclaw_loop_host::capability_info::runtime_kind_label`
+    /// (see the mirrored test there) — the two copies can drift.
+    #[test]
+    fn runtime_kind_token_maps_sandbox_to_stable_wire_string() {
+        assert_eq!(runtime_kind_token(RuntimeKind::Sandbox), "sandbox");
+        assert_eq!(
+            canonical_runtime_kinds(&[RuntimeKind::Sandbox]),
+            vec!["sandbox"]
+        );
     }
 
     #[tokio::test]

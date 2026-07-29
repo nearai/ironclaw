@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
+use crate::commands::{CommandResultView, declared_command_help_text, render_command_result_text};
 use crate::{
     AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
@@ -140,6 +141,7 @@ pub struct RunDeliveryObserver {
     services: RunDeliveryServices,
     settings: RunDeliverySettings,
     connection_notices: ChannelConnectionNoticePolicy,
+    command_help_text: String,
     delivery_permits: Arc<Semaphore>,
     /// Per-observer, per-conversation connect-nudge reservations. Reserving
     /// before delivery prevents concurrent unbound events from racing.
@@ -182,11 +184,21 @@ impl RunDeliveryObserver {
             services,
             settings,
             connection_notices,
+            command_help_text: declared_command_help_text(std::iter::empty::<&str>()),
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             connect_nudge_reservations: Mutex::new(HashMap::new()),
             hint_seen: Mutex::new((std::collections::VecDeque::new(), HashSet::new())),
             delivery_runs: Mutex::new(DeliveryRunLedger::default()),
         }
+    }
+
+    pub fn with_enabled_commands<I, S>(mut self, commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.command_help_text = declared_command_help_text(commands);
+        self
     }
 
     pub async fn post_connection_status_notice(
@@ -211,6 +223,11 @@ impl RunDeliveryObserver {
     /// entry point the composition's post-admission observer seam calls.
     pub async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
         self.close_connect_nudge_epoch_after_accepted_user_message(&envelope, &ack);
+        // Product commands settle synchronously; their result or
+        // user-correctable rejection is the only reply this event will see.
+        if self.post_command_feedback(&envelope, &ack).await {
+            return;
+        }
         // Rejected approval/auth feedback is a single best-effort post, not
         // a long-running delivery — handle before taking the semaphore.
         if self
@@ -866,6 +883,48 @@ impl RunDeliveryObserver {
         true
     }
 
+    async fn post_command_feedback(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) -> bool {
+        if !matches!(envelope.payload(), ProductInboundPayload::Command(_)) {
+            return false;
+        }
+        let text = match ack {
+            ProductInboundAck::CommandResult { command, payload } => {
+                render_command_result(command, payload)
+            }
+            ProductInboundAck::Rejected(rejection) => match rejection.kind {
+                ProductRejectionKind::InvalidRequest => self.command_help_text.clone(),
+                ProductRejectionKind::PolicyDenied => {
+                    "Commands can only be used in a direct conversation with Ironclaw.".to_string()
+                }
+                // The connect-nudge path owns first-contact feedback.
+                ProductRejectionKind::BindingRequired => return false,
+                // Remaining terminal families intentionally settle without
+                // exposing internal rejection details.
+                _ => return true,
+            },
+            _ => return true,
+        };
+        // Results use the bound conversation scope. Admission rejections may
+        // happen before a shared-route binding exists; their fixed host text
+        // falls back to the channel notice scope and leaks no user data.
+        let scope = self.notice_scope(envelope).await;
+        self.services
+            .post_notice(
+                DeliveryIntent::CommandFeedback,
+                scope,
+                None,
+                envelope.external_conversation_ref(),
+                &text,
+                format!("command-feedback:{}", envelope.external_event_id().as_str()),
+            )
+            .await;
+        true
+    }
+
     /// A first-contact DM from a user with no identity binding is rejected
     /// with `BindingRequired`. Instead of silently dropping it, greet them
     /// with a connect nudge — but ONLY in a 1:1 direct chat: the nudge is
@@ -1198,6 +1257,30 @@ pub(crate) fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         | ProductInboundAck::CommandResult { .. }
         | ProductInboundAck::NoOp => None,
     }
+}
+
+fn render_command_result(command: &str, payload: &crate::ProductCommandResultPayload) -> String {
+    if let Ok(view) = serde_json::from_value::<CommandResultView>(payload.as_value().clone()) {
+        return render_command_result_text(&view);
+    }
+    let heading = format!("Command `/{command}` completed.");
+    let rendered = match serde_json::to_string_pretty(payload.as_value()) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::run_delivery",
+                %error,
+                "could not render product command result payload"
+            );
+            return heading;
+        }
+    };
+    let indented = rendered
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{heading}\n\n{indented}")
 }
 
 fn submitted_run_id_for_feedback(_error: &RunDeliveryError) -> Option<TurnRunId> {

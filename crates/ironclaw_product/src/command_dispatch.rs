@@ -22,6 +22,8 @@ use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
 pub struct ProductCommandContext {
     pub action_id: ProductActionId,
     pub fingerprint: ActionFingerprintKey,
+    /// Exact normalized inbound token before aliases are canonicalized.
+    pub requested_command: String,
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,
     pub external_actor_ref: ExternalActorRef,
@@ -47,6 +49,7 @@ impl ProductCommandContext {
         Ok(Self {
             action_id,
             fingerprint,
+            requested_command: command.command.clone(),
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
