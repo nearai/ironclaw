@@ -32,21 +32,86 @@ Nothing about the security model changes: the same checks run, in the same order
 
 ## The family map
 
-Ten families under `crates/`. The map stays at this altitude on purpose — the crates inside each family are defined in that family's spec file, linked from the table below.
+Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below.
 
 ```text
 crates/
-├── contracts/     neutral vocabulary & ports — the leaf tier every family may see
-├── substrate/     privileged mechanism substrates the kernel mediates
-├── events/        durable evidence → derived read models → transport streams
-├── domains/       typed record/service domains behind the kernel
-├── kernel/        the authority perimeter — every stage of the mediated effect pipeline
-├── lanes/         execution mechanisms for already-authorized work
-├── loop/          loop userland and its hosting adapters
-├── extensions/    everything "installable package" — registry, host, manager, packages/
-├── product/       first-party userland above the kernel
-└── app/           assembly & enforcement — composition, the binary, config, architecture tests
-tools/             developer diagnostics & excluded helpers
+├── contracts/                         neutral vocabulary & ports — the leaf tier
+│   ├── ironclaw_host_api              authority vocabulary & sealed witnesses
+│   ├── ironclaw_common                cross-domain primitives
+│   ├── ironclaw_prompt_envelope       untrusted-snippet envelope
+│   ├── ironclaw_loop_contracts        the loop ↔ kernel port set            NEW
+│   ├── ironclaw_extension_contracts   extension surfaces, adapters, recipes NEW
+│   └── ironclaw_product_contracts     ProductSurface, DTOs & product ports  NEW
+├── substrate/                         privileged mechanisms the kernel mediates
+│   ├── ironclaw_filesystem            storage fabric: mounts, containment, CAS
+│   ├── ironclaw_secrets               secret custody & one-shot leases
+│   ├── ironclaw_network               egress policy & hardened transport
+│   ├── ironclaw_safety                scanning & redaction primitives
+│   └── ironclaw_observability         latency-trace macros
+├── events/                            evidence → derived views → streams
+│   ├── ironclaw_events                evidence vocabulary & log traits
+│   ├── ironclaw_event_store           durable backends, fail-closed profiles
+│   ├── ironclaw_event_projections     replay-derived read models
+│   └── ironclaw_event_streams         admission-checked stream delivery
+├── domains/                           typed record & service owners
+│   ├── ironclaw_threads               canonical transcripts
+│   ├── ironclaw_conversations         external↔canonical binding, idempotency
+│   ├── ironclaw_triggers              schedules & trusted-fire minting
+│   ├── ironclaw_memory                provider-neutral memory contract
+│   ├── ironclaw_memory_native         native memory provider
+│   ├── ironclaw_memory_mem0           mem0 memory provider
+│   ├── ironclaw_skills                skill parsing, selection, learning
+│   ├── ironclaw_auth                  product auth & the recipe engine
+│   ├── ironclaw_attachments           attachment landing & its ports
+│   ├── ironclaw_extractors            pure bytes → text extraction
+│   ├── ironclaw_projects              project entity & membership ACL
+│   ├── ironclaw_identity              external identity → stable UserId
+│   ├── ironclaw_llm                   provider contract & reliability stack
+│   ├── ironclaw_traces                Trace Commons client & redaction
+│   └── ironclaw_outbound              outbound authority: sealed grants
+├── kernel/                            the authority perimeter — one crate per stage
+│   ├── ironclaw_trust                 requested → effective trust ceilings
+│   ├── ironclaw_authorization         default-deny grants & leases
+│   ├── ironclaw_approvals             exact-invocation consent
+│   ├── ironclaw_resources             reservation & quota accounting
+│   ├── ironclaw_runtime_policy        pure policy resolution & lane planning
+│   ├── ironclaw_capabilities          the CapabilityHost membrane
+│   ├── ironclaw_processes             lifecycle journal & supervisor
+│   ├── ironclaw_turns                 turn admission & exit validation
+│   └── ironclaw_host_runtime          mediated services & the lane executor
+├── lanes/                             execution for already-authorized work
+│   ├── wit/                           component-model interface definitions
+│   ├── ironclaw_wasm                  WASM component sandbox
+│   ├── ironclaw_wasm_limiter          shared wasmtime resource limiter
+│   ├── ironclaw_mcp                   MCP over host-mediated HTTP
+│   └── ironclaw_sandbox               container process lane               NEW
+├── loop/                              agent behavior & its hosting
+│   ├── ironclaw_agent_loop            the canonical loop, sealed strategies
+│   ├── ironclaw_loop_host             port adapters over kernel services
+│   ├── ironclaw_runner                drivers & the agent-turn executor
+│   └── ironclaw_hooks                 trust-tiered hook middleware
+├── extensions/                        everything "installable package"
+│   ├── ironclaw_extensions            manifests, registry, install records
+│   ├── ironclaw_extension_host        generic host: verify, bind, deliver
+│   ├── ironclaw_extension_manager     product-side management              NEW
+│   └── packages/                      one self-contained dir per package
+│       ├── first_party/               inventory, native executors, assets
+│       ├── slack/                     channel package (protocol only)
+│       ├── telegram/                  channel package (protocol only)
+│       └── …                          every other package: assets + manifest
+├── product/                           first-party userland
+│   ├── ironclaw_product               ProductSurface impl & delivery
+│   ├── ironclaw_operator              deployment-operator control plane
+│   ├── ironclaw_openai_compat         OpenAI-compatible ingress adapter
+│   ├── ironclaw_webui                 web host: routes, auth, gateway, SPA
+│   └── ironclaw_host_ingress          route-mount carriers
+└── app/                               assembly & enforcement
+    ├── ironclaw_composition           the assembly root: selection & wiring
+    ├── ironclaw_cli                   the binary `ironclaw`
+    ├── ironclaw_config                boot contract & config.toml schema
+    └── ironclaw_architecture          mechanical enforcement tests
+tools/                                 developer diagnostics & excluded helpers
 ```
 
 ## The ten families
