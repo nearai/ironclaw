@@ -177,8 +177,11 @@ pub(crate) enum RecoveryOutcome {
     ToolErrorResult {
         recovery: RecoveryStrategyState,
     },
-    /// Retry once with a typed, host-authored model-error observation after
-    /// the ordinary per-class retry budget has been exhausted.
+    /// Retry once with a typed, host-authored model-error observation.
+    ///
+    /// Most errors reach this after exhausting their per-class retry budget;
+    /// `OutsideCapabilitySurface` uses it immediately so the model can repair
+    /// its capability choice without blind retries.
     ModelErrorObservation {
         recovery: RecoveryStrategyState,
         scope: RetryScope,
@@ -217,8 +220,10 @@ pub(crate) enum RetryScope {
 /// - Retries capability transient, unavailable, and internal errors up to
 ///   [`Self::max_attempts_per_class`] times with `Backoff`, then returns a
 ///   model-visible tool error result.
-/// - Retries model invalid-output errors up to the same budget, then gives the
-///   model one typed observation-assisted repair attempt before aborting.
+/// - Gives `OutsideCapabilitySurface` invalid output one immediate typed
+///   observation-assisted repair attempt. Other invalid-output errors first
+///   retry up to the same per-class budget, then get one typed observation
+///   before aborting.
 /// - Retries model transient, unavailable, and internal errors on the much
 ///   deeper [`Self::max_model_availability_attempts`] budget with a
 ///   longer-capped backoff schedule, then aborts the run. Provider outages

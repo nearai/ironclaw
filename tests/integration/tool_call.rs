@@ -494,12 +494,9 @@ async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     .await
     .expect("the retry tells the model precisely why its tool call was rejected");
 
-    assert!(
-        h.assert_tool_invoked("builtin.spawn_subagent")
-            .await
-            .is_err(),
-        "the rejected capability must never be dispatched or recorded as successful"
-    );
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("the rejected capability must never be dispatched");
     h.assert_capability_result_count("builtin.spawn_subagent", 0)
         .await
         .expect("the rejected call must not produce a successful capability result");
