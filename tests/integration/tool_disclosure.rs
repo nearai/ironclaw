@@ -240,7 +240,8 @@ async fn empty_allow_set_advertises_no_tools() {
 }
 
 /// #5647 trust boundary: the bridge-id exemption must not widen access to
-/// UNDERLYING tools. A deferred call resolves to the real capability id
+/// UNDERLYING tools. Even a malformed deferred call that would otherwise take
+/// the describe-first recovery path resolves to the real capability id
 /// (`github.list_issues`), which the narrowed allow-set still denies at the
 /// profile filter's scope check — the exempt set admits only `ironclaw.*`.
 #[tokio::test]
@@ -251,7 +252,7 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
         .script([RebornScriptedReply::tool_call(
             "github.list_issues",
-            serde_json::json!({"owner": "octo", "repo": "demo"}),
+            serde_json::json!({}),
         )])
         .build()
         .await
