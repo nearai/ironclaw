@@ -58,6 +58,54 @@ const FLAT_GITHUB_TOOL_NAME: &str = "github__get_repo";
 /// Flat first-party tool (wire form) for the below-caps threshold control.
 const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
 
+fn deferred_bridge_script() -> [RebornScriptedReply; 4] {
+    [
+        RebornScriptedReply::tool_call(
+            TOOL_SEARCH_NAME,
+            serde_json::json!({"query": "get repository", "limit": 5}),
+        ),
+        RebornScriptedReply::tool_call(
+            TOOL_DESCRIBE_NAME,
+            serde_json::json!({"name": FLAT_GITHUB_TOOL_NAME}),
+        ),
+        RebornScriptedReply::tool_call(
+            TOOL_CALL_NAME,
+            serde_json::json!({
+                "name": FLAT_GITHUB_TOOL_NAME,
+                "arguments": r#"{"owner":"nearai","repo":"ironclaw"}"#
+            }),
+        ),
+        RebornScriptedReply::text("done"),
+    ]
+}
+
+async fn assert_deferred_bridge_flow(harness: &RebornIntegrationHarness) {
+    harness
+        .assert_model_message_content_contains("tool_search returned catalog matches")
+        .await
+        .expect("tool_search completion reaches the next production model request");
+    harness
+        .assert_model_message_content_contains("tool_describe returned schema")
+        .await
+        .expect("tool_describe completion reaches the next production model request");
+    harness
+        .assert_tool_invoked("github.get_repo")
+        .await
+        .expect("tool_call dispatches the selected target through the inner capability port");
+    harness
+        .assert_network_egress_header_contains(
+            "api.github.com/repos/nearai/ironclaw",
+            "authorization",
+            "Bearer ghp_fake_fixture_token",
+        )
+        .await
+        .expect("tool_call target reaches mediated GitHub egress with injected credentials");
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn completes after the deferred capability result");
+}
+
 /// Bridged mode + a catalog over `DisclosureCaps::default().max_tools` (48
 /// github capabilities > 32): `select_active_set` defers, so the model sees
 /// the complete advertised `tool_search` → `tool_describe` → `tool_call`
@@ -193,58 +241,13 @@ async fn deferred_search_describe_call_flow_uses_production_capability_chain() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .script([
-            RebornScriptedReply::tool_call(
-                TOOL_SEARCH_NAME,
-                serde_json::json!({"query": "get repository", "limit": 5}),
-            ),
-            RebornScriptedReply::tool_call(
-                TOOL_DESCRIBE_NAME,
-                serde_json::json!({"name": FLAT_GITHUB_TOOL_NAME}),
-            ),
-            RebornScriptedReply::tool_call(
-                TOOL_CALL_NAME,
-                serde_json::json!({
-                    "name": FLAT_GITHUB_TOOL_NAME,
-                    "arguments": {"owner": "nearai", "repo": "ironclaw"}
-                }),
-            ),
-            RebornScriptedReply::text("done"),
-        ])
+        .script(deferred_bridge_script())
         .build()
         .await
         .expect("bridged-disclosure harness builds");
-
     harness
         .submit_turn("find and inspect the ironclaw repository")
         .await
         .expect("search, describe, and call complete");
-
-    // Bridges terminate inside the disclosure decorator rather than reaching
-    // the inner capability recorder. Their model-visible results prove that
-    // search and describe both completed before the final dispatch.
-    harness
-        .assert_model_message_content_contains("tool_search returned catalog matches")
-        .await
-        .expect("tool_search completion reaches the next production model request");
-    harness
-        .assert_model_message_content_contains("tool_describe returned schema")
-        .await
-        .expect("tool_describe completion reaches the next production model request");
-    harness
-        .assert_tool_invoked("github.get_repo")
-        .await
-        .expect("tool_call dispatches the selected target through the inner capability port");
-    harness
-        .assert_network_egress_header_contains(
-            "api.github.com/repos/nearai/ironclaw",
-            "authorization",
-            "Bearer ghp_fake_fixture_token",
-        )
-        .await
-        .expect("tool_call target reaches mediated GitHub egress with injected credentials");
-    harness
-        .assert_reply_contains("done")
-        .await
-        .expect("turn completes after the deferred capability result");
+    assert_deferred_bridge_flow(&harness).await;
 }

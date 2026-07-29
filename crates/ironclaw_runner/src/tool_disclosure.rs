@@ -391,8 +391,8 @@ impl DisclosureCaps {
     }
 }
 
-static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
-    LazyLock::new(|| {
+static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = LazyLock::new(
+    || {
         let definitions = vec![
             bridge_tool_definition(
                 TOOL_SEARCH_NAME,
@@ -441,9 +441,8 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
                             "description": "Provider-facing tool name to invoke."
                         },
                         "arguments": {
-                            "type": "object",
-                            "description": "Arguments for the named tool.",
-                            "additionalProperties": true
+                            "type": "string",
+                            "description": "JSON object encoded as a string containing arguments for the named tool."
                         }
                     },
                     "required": ["name", "arguments"],
@@ -458,7 +457,8 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
                 (definition, est_schema_tokens)
             })
             .collect()
-    });
+    },
+);
 
 type BridgeDefinitionWithTokens = (&'static ProviderToolDefinition, u32);
 
@@ -522,7 +522,7 @@ fn catalog_index_tool_search_description(catalog: &CapabilityCatalog) -> String 
     const TAIL_NOTE_RESERVE: usize = 96;
     let total = names.len();
     let mut description = format!(
-        "These {total} tools are available on demand but are NOT shown with full schemas in your tool list. They are real and callable — never tell the user a capability is unavailable without checking this list first. To use one: call tool_describe(name) to load its parameter schema, then tool_call(name, arguments) to invoke it (once you know a tool's name you may also call it directly). `query` fuzzy-searches this list when you want ranked matches instead of scanning it. On-demand tools:"
+        "These {total} tools are available on demand but are NOT shown with full schemas in your tool list. They are real and callable — never tell the user a capability is unavailable without checking this list first. To use one: call tool_describe(name) to load its parameter schema, then tool_call(name, arguments) with the argument object encoded as a JSON string (once you know a tool's name you may also call it directly). `query` fuzzy-searches this list when you want ranked matches instead of scanning it. On-demand tools:"
     );
     let mut shown = 0usize;
     for name in &names {
@@ -1306,7 +1306,12 @@ mod tests {
         assert_eq!(
             bridges[2].parameters["required"],
             json!(["name", "arguments"]),
-            "tool_call requires target name and argument object"
+            "tool_call requires target name and encoded arguments"
+        );
+        assert_eq!(
+            bridges[2].parameters["properties"]["arguments"]["type"],
+            json!("string"),
+            "tool_call arguments must survive strict provider schema normalization"
         );
         assert_eq!(
             bridges[0].description,

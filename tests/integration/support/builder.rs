@@ -153,7 +153,7 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Tool disclosure mode for the underlying group's ONE planned runtime.
     /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
-    tool_disclosure: Option<ToolDisclosureMode>,
+    tool_disclosure: ToolDisclosureMode,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -388,7 +388,7 @@ impl RebornIntegrationHarnessBuilder {
     /// the `#[tokio::test]` concurrent-test race a raw env var would hit (see
     /// `ToolDisclosureMode::from_env`, `apply_hermetic_env`).
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -399,7 +399,7 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
     /// env-resolution path alone is not control-safe.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
         self
     }
 
@@ -618,13 +618,12 @@ impl RebornIntegrationHarnessBuilder {
             group_builder = group_builder.with_turn_event_sink();
         }
         match self.tool_disclosure {
-            Some(ToolDisclosureMode::Bridged) => {
+            ToolDisclosureMode::Bridged => {
                 group_builder = group_builder.with_tool_disclosure_bridged();
             }
-            Some(ToolDisclosureMode::Off) => {
+            ToolDisclosureMode::Off => {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
-            None => {}
         }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
@@ -755,7 +754,7 @@ impl RebornIntegrationHarness {
             turn_event_sink: false,
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
-            tool_disclosure: Some(ToolDisclosureMode::Off),
+            tool_disclosure: ToolDisclosureMode::Off,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,

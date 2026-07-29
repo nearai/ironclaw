@@ -82,8 +82,11 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
                 && message.content.contains("tool_search")
                 && message.content.contains("tool_describe")
                 && message.content.contains("tool_call")
+                && message
+                    .content
+                    .contains("When `extension_search` and `extension_install` are present")
         }),
-        "bridged disclosure should inject the tool-discovery protocol into the system prompt"
+        "bridged disclosure should inject a visibility-conditional discovery protocol"
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {

@@ -444,7 +444,7 @@ impl RebornIntegrationGroup {
             trace_capture: false,
             // General integration groups stay hermetic across production
             // default changes. Disclosure-specific tests opt into Bridged.
-            tool_disclosure: Some(ToolDisclosureMode::Off),
+            tool_disclosure: ToolDisclosureMode::Off,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -715,10 +715,8 @@ pub struct RebornIntegrationGroupBuilder {
     /// when both are opted in.
     trace_capture: bool,
     /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
-    /// `Bridged` only by `.with_tool_disclosure_bridged()`. Existing assembly
-    /// plumbing retains the `Option` fallback, but general constructors do not
-    /// leave it ambient.
-    tool_disclosure: Option<ToolDisclosureMode>,
+    /// `Bridged` only by `.with_tool_disclosure_bridged()`.
+    tool_disclosure: ToolDisclosureMode,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -895,7 +893,7 @@ impl RebornIntegrationGroupBuilder {
         // for bridged groups only; every non-bridged group keeps the strict
         // allowlist.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
+            if self.tool_disclosure == ToolDisclosureMode::Bridged {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     allow_set: CapabilityAllowSet::All,
                 })
@@ -1083,13 +1081,9 @@ impl RebornIntegrationGroupBuilder {
                 lease_recovery_interval: self
                     .lease_recovery_interval_override
                     .unwrap_or(DefaultPlannedRuntimeConfig::default().lease_recovery_interval),
-                // Enabler (b): explicit builder opt-in wins; otherwise resolve
-                // via `from_env()` exactly like `DefaultPlannedRuntimeConfig`'s
-                // own `Default` impl — never mutate the process env from a
-                // test (see `ToolDisclosureMode::from_env` doc, `apply_hermetic_env`).
-                tool_disclosure: self
-                    .tool_disclosure
-                    .unwrap_or_else(ToolDisclosureMode::from_env),
+                // Enabler (b): test groups are hermetically pinned and never
+                // resolve this production mode from the process environment.
+                tool_disclosure: self.tool_disclosure,
                 // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
                 // production rides out provider outages for minutes (deep
                 // availability retries with long backoff), which would stall

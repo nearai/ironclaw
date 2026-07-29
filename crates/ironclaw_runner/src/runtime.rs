@@ -109,10 +109,10 @@ impl ToolDisclosureMode {
             Ok(value) => Self::from_raw(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::from_raw(None),
             // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
-            // unreadable (a misconfiguration). Surface it and fail closed even
-            // if the normal unset default changes in the future.
+            // unreadable (a misconfiguration). Record it at the REPL-safe debug
+            // level and fail closed even if the unset default changes later.
             Err(std::env::VarError::NotUnicode(_)) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_TOOL_DISCLOSURE_ENV,
                     "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; falling back to Off"
@@ -131,7 +131,7 @@ impl ToolDisclosureMode {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
             Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
             Some(value) if !value.is_empty() => {
-                tracing::warn!(
+                tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_TOOL_DISCLOSURE_ENV,
                     "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
@@ -991,6 +991,42 @@ mod tests {
         // Per-variant gating is unchanged.
         assert!(!ToolDisclosureMode::Off.is_bridged());
         assert!(ToolDisclosureMode::Bridged.is_bridged());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_disclosure_mode_non_unicode_env_fails_closed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::process::Command;
+
+        use super::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
+
+        const CHILD_MARKER: &str = "IRONCLAW_NON_UNICODE_DISCLOSURE_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert_eq!(
+                ToolDisclosureMode::from_env(),
+                ToolDisclosureMode::Off,
+                "non-Unicode configuration must fail closed"
+            );
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "runtime::tests::tool_disclosure_mode_non_unicode_env_fails_closed",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(REBORN_TOOL_DISCLOSURE_ENV, OsString::from_vec(vec![0xff]))
+            .output()
+            .expect("spawn isolated non-Unicode environment test");
+        assert!(
+            output.status.success(),
+            "isolated non-Unicode environment test failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

@@ -900,6 +900,11 @@ impl ToolDisclosureCapabilityPort {
             BridgeKind::Search => self.invoke_tool_search(&request, &bridge).await,
             BridgeKind::Describe => self.invoke_tool_describe(&request, &bridge).await,
             BridgeKind::DescribeFirst => self.invoke_describe_first(&request, &bridge).await,
+            BridgeKind::Call if decode_tool_call_arguments(&bridge.arguments).is_none() => {
+                Ok(failed_invalid_input(
+                    "tool_call arguments must be a JSON object encoded as a string",
+                ))
+            }
             BridgeKind::Call => Ok(failed_invalid_input(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
@@ -1084,11 +1089,9 @@ impl ToolDisclosureCapabilityPort {
         if is_bridge_name(name) {
             return Ok(None);
         }
-        let arguments = tool_call
-            .arguments
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let Some(arguments) = decode_tool_call_arguments(&tool_call.arguments) else {
+            return Ok(None);
+        };
         let guard = self.turn_state()?;
         let Some(state) = guard.as_ref() else {
             return Ok(None);
@@ -1282,6 +1285,19 @@ fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Va
         "arguments": canonicalize_json(arguments),
     })
     .to_string()
+}
+
+/// Decode the provider-safe `tool_call.arguments` string while continuing to
+/// accept the original object form from recorded replays and in-flight callers.
+fn decode_tool_call_arguments(bridge_arguments: &Value) -> Option<Value> {
+    match bridge_arguments.get("arguments") {
+        None => Some(json!({})),
+        Some(Value::String(encoded)) => serde_json::from_str::<Value>(encoded)
+            .ok()
+            .filter(Value::is_object),
+        Some(value @ Value::Object(_)) => Some(value.clone()),
+        Some(_) => None,
+    }
 }
 
 fn failed_invalid_input(summary: &'static str) -> Resolution {
@@ -1625,7 +1641,7 @@ mod tests {
         let target = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
+                json!({"name": "hidden_tool", "arguments": r#"{"path":"demo"}"#}),
             )))
             .await
             .expect("disclosed tool_call registers as target");
@@ -1663,10 +1679,9 @@ mod tests {
                 .lock()
                 .expect("registered calls lock")
                 .last()
-                .expect("target call")
-                .name
-                .as_str(),
-            "hidden_tool"
+                .map(|call| (call.name.as_str(), &call.arguments)),
+            Some(("hidden_tool", &json!({"path": "demo"}))),
+            "the provider-safe string must decode before inner registration"
         );
         assert_eq!(
             inner
@@ -2841,6 +2856,89 @@ mod tests {
                 .expect("invocations lock")
                 .is_empty(),
             "recursion must not dispatch to the inner port"
+        );
+    }
+
+    #[tokio::test]
+    async fn advertised_tool_describe_errors_are_recoverable_without_dispatch() {
+        let inner = Arc::new(SpyPort {
+            definitions: vec![provider_definition(
+                "fixture.read_file",
+                "read_file",
+                "Read a file",
+            )],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        for (arguments, expected) in [
+            (json!({}), "tool_describe requires name"),
+            (json!({"name": 42}), "tool_describe requires name"),
+            (
+                json!({"name": TOOL_SEARCH_NAME}),
+                "tool_describe target must not be a bridge",
+            ),
+            (
+                json!({"name": "does_not_exist"}),
+                "tool_describe target is unknown",
+            ),
+        ] {
+            let candidate =
+                port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    provider_call(TOOL_DESCRIBE_NAME, arguments),
+                ))
+                .await
+                .expect("tool_describe registers on the bridge path");
+            let outcome = port
+                .invoke_capability(LoopRequest {
+                    activity_id: candidate.activity_id,
+                    surface_version: candidate.surface_version,
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
+                })
+                .await
+                .expect("tool_describe returns a recoverable result");
+            assert!(
+                matches!(
+                    outcome,
+                    Resolution::Done(ref output)
+                        if matches!(
+                            &output.verdict,
+                            ToolVerdict::RecoverableFailure { diagnostic, .. }
+                                if diagnostic.model_visible_text() == Some(expected)
+                        )
+                ),
+                "unexpected tool_describe outcome for {expected}: {outcome:?}"
+            );
+        }
+
+        assert!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .is_empty(),
+            "invalid tool_describe calls must not register an inner capability"
+        );
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "invalid tool_describe calls must not dispatch an inner capability"
         );
     }
 
