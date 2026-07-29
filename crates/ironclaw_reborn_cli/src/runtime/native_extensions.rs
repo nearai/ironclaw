@@ -199,6 +199,8 @@ mod tests {
                     extension_id: telegram.extension_id.clone(),
                     installation_id: "install_test".to_string(),
                     message,
+                    channel_adapter: Arc::clone(&telegram.adapter),
+                    channel_egress: None,
                 })
                 .await
                 .is_err(),
