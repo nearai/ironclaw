@@ -6,15 +6,18 @@
 
 ```text
 crates/extensions/
-├── ironclaw_extensions           manifests, registry, installation records
-├── ironclaw_extension_host       generic host: verify, bind, deliver
-├── ironclaw_extension_manager    product-side extension management
-└── packages/                     one self-contained directory per package
-    ├── first_party/              inventory, native executors & assets
-    │   └── assets/<ext>/         manifest, prompts, schemas, wasm
-    ├── slack/                    Slack channel package (protocol only)
-    └── telegram/                 Telegram channel package (protocol only)
+├── ironclaw_extensions               manifests, registry, installation records
+├── ironclaw_extension_host           generic host: verify, bind, deliver
+├── ironclaw_extension_manager        product-side extension management
+├── ironclaw_first_party_extensions   shared native executors & the package inventory
+└── packages/                         one self-contained directory per package
+    ├── slack/                        adapter crate + manifest + assets
+    ├── telegram/                     adapter crate + manifest + assets
+    ├── github/                       manifest, prompts, schemas, wasm (data only)
+    └── …                             gmail, google-*, web-access, notion, …
 ```
+
+Every directory under `packages/` is one installable extension, and every one of them is first-party in the shipping sense — bundled with the binary. The crate named `first_party` is not a package: it is the shared support crate holding the package inventory and the native tool executors that serve many packages at once. A package directory carries a crate only when it must (a channel adapter); otherwise it is pure data.
 
 ## Role
 
@@ -80,12 +83,12 @@ A generic verifier executes each channel's manifest-declared recipe — a signat
 
 ### `packages/` — directory rules
 
-Every installable extension's manifest, prompts, schemas, code, and any built-artifact sources live together in one package directory. A package earns its own crate only when it implements a channel adapter — linked exclusively by the binary, never by any generic crate — or when it carries a heavy or isolated native dependency that would otherwise leak into every consumer of a shared crate. Every other package is a directory of manifest and asset data with no code of its own; where a package needs native, non-WASM tool logic, that logic lives as a module inside the first-party package rather than as a crate of its own. Packages whose tools compile to a portable component artifact keep their build sources beside their manifest, entirely self-contained and independent of the workspace's own build graph: the artifact ships with the package, and the source that produced it travels with it, never housed as a separate concern elsewhere.
+Every installable extension's manifest, prompts, schemas, code, and any built-artifact sources live together in its own directory under `packages/` — one directory per extension, uniformly, whether or not it carries a crate. A package earns its own crate only when it implements a channel adapter — linked exclusively by the binary, never by any generic crate — or when it carries a heavy or isolated native dependency that would otherwise leak into every consumer of a shared crate. Every other package is a directory of manifest and asset data with no crate of its own; where a package needs native, non-WASM tool logic, that logic lives as a module in the shared `first_party` support crate, registered against the package's manifest identity. Packages whose tools compile to a portable component artifact keep their build sources beside their manifest, entirely self-contained and independent of the workspace's own build graph: the artifact ships with the package, and the source that produced it travels with it, never housed as a separate concern elsewhere.
 
-### `ironclaw_first_party_extensions` (`packages/first_party/`)
+### `ironclaw_first_party_extensions` (`crates/extensions/first_party/`)
 
-- **Purpose:** the sanctioned home for vendor-named, first-party package content — the package inventory, every non-channel package's assets, native tool executors, and the generic first-party tool implementations available to any deployment.
-- **Owns:** the package inventory; the asset tree for every first-party package that is not a channel; native tool executors — general-purpose file, text, and search tooling, groupware integrations, web access; the generic builtin tool implementations — file, shell, http, time, memory, trigger management, skill management and installation, and telemetry submission — available to any loop by capability grant, not by extension identity.
+- **Purpose:** the shared support crate for the bundled packages — the package inventory and the native tool executors that serve many packages at once. It is not itself a package: every installable extension lives in its own directory under `packages/`.
+- **Owns:** the package inventory (which package directories ship, with which trust-effect declarations); native tool executors — general-purpose file, text, and search tooling, groupware integrations, web access; the generic builtin tool implementations — file, shell, http, time, memory, trigger management, skill management and installation, and telemetry submission — available to any loop by capability grant, not by extension identity.
 - **Never contains:** a type only a loop-hosting crate should hold; this package is invoked only through the same capability-dispatch path any tool uses.
 - **Public surface:** tool-adapter implementations for its bundled tools, consumed through the generic dispatch path.
 - **Depends on:** `ironclaw_auth`, `ironclaw_extractors`, a storage substrate, `ironclaw_observability`, `ironclaw_safety`, `ironclaw_skills`, `extension_contracts`; the domains its bundled tools need — memory, traces, triggers — by declared charter.
