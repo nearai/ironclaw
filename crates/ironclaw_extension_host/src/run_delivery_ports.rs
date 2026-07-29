@@ -8,14 +8,119 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::UserId;
+use ironclaw_auth::{AuthProductError, AuthProviderId};
+use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
 use ironclaw_product::{
-    ApprovalPromptContextSource, AuthChallengeProvider, BlockedAuthPromptSource,
+    ApprovalPromptContextSource, AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptSource,
+    PairingAuthChallengeView,
 };
 use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
 use ironclaw_turns::{GateRef, TurnScope};
 
 use ironclaw_product::auth_prompt_view_for_blocked_auth;
+
+use crate::channel_pairing::ChannelPairingRegistry;
+
+/// One recipe-driven challenge materializer for every product surface.
+/// Product auth owns OAuth/manual challenges; the canonical channel-pairing
+/// registry owns host-issued pairing codes. Callers see one typed provider.
+pub struct RecipeAuthChallengeProvider {
+    product_auth: Option<Arc<dyn AuthChallengeProvider>>,
+    pairing: Option<Arc<ChannelPairingRegistry>>,
+}
+
+impl RecipeAuthChallengeProvider {
+    pub fn compose(
+        product_auth: Option<Arc<dyn AuthChallengeProvider>>,
+        pairing: Option<Arc<ChannelPairingRegistry>>,
+    ) -> Option<Arc<dyn AuthChallengeProvider>> {
+        if product_auth.is_none() && pairing.is_none() {
+            return None;
+        }
+        Some(Arc::new(Self {
+            product_auth,
+            pairing,
+        }))
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RecipeAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        scope: &ironclaw_turns::TurnScope,
+        owner_user_id: &UserId,
+        run_id: ironclaw_turns::TurnRunId,
+        gate_ref: &str,
+        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
+        if let [requirement] = credential_requirements
+            && requirement.setup == RuntimeCredentialAccountSetup::Pairing
+        {
+            let Some(service) = self
+                .pairing
+                .as_ref()
+                .and_then(|registry| registry.get(requirement.requester_extension.as_str()))
+            else {
+                return Ok(None);
+            };
+            let issue = service
+                .pending_or_issue(owner_user_id)
+                .await
+                .map_err(|error| {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::channel_pairing",
+                        %error,
+                        "pairing challenge materialization failed"
+                    );
+                    AuthProductError::BackendUnavailable
+                })?;
+            let Some(issue) = issue else {
+                return Ok(None);
+            };
+            return Ok(Some(AuthChallengeView {
+                kind: ironclaw_product::AuthPromptChallengeKind::Pairing,
+                provider: AuthProviderId::new(requirement.provider.as_str().to_string()).map_err(
+                    |error| {
+                        // `MalformedConfig` is a unit variant, so the cause has
+                        // nowhere to ride to the caller -- log it here rather
+                        // than dropping it (`.claude/rules/error-handling.md`).
+                        tracing::warn!(
+                            provider = %requirement.provider,
+                            %error,
+                            "pairing challenge has an unusable provider id"
+                        );
+                        AuthProductError::MalformedConfig
+                    },
+                )?,
+                account_label: None,
+                authorization_url: None,
+                expires_at: Some(issue.expires_at),
+                pairing: Some(PairingAuthChallengeView {
+                    code: issue.code.as_str().to_string(),
+                    deep_link: issue.deep_link,
+                    expires_at: issue.expires_at,
+                    connection: service.connection_requirement().clone(),
+                }),
+            }));
+        }
+
+        match &self.product_auth {
+            Some(provider) => {
+                provider
+                    .challenge_for_gate(
+                        scope,
+                        owner_user_id,
+                        run_id,
+                        gate_ref,
+                        credential_requirements,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+}
 
 /// Approval-gate context over the shared projection read model — the same
 /// source the WebUI gate projection renders from.

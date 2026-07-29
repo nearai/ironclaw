@@ -527,7 +527,7 @@ registerPack("hi", {
   "tools.description.builtin.trace_commons.credits": "वर्तमान उपयोगकर्ता की Trace Commons credit स्थिति, balances, submission counts और हाल की explanations रिपोर्ट करें।",
   "tools.description.builtin.trace_commons.profile_token": "browser या manual profile setup के लिए short-lived Trace Commons profile-management value mint करें।",
   "tools.description.builtin.trace_commons.profile_set": "स्पष्ट सहमति के बाद वर्तमान उपयोगकर्ता की public Trace Commons community profile बनाएं या अपडेट करें।",
-  "tools.description.builtin.profile_set": "उपयोगकर्ता के agent context के बारे में private local fact रिकॉर्ड करें: timezone, locale या location।",
+  "tools.description.ironclaw.memory.profile_set": "उपयोगकर्ता के agent context के बारे में private local fact रिकॉर्ड करें: timezone, locale या location।",
   "tools.description.builtin.memory_search": "वर्तमान scope में Reborn persistent memory documents खोजें",
   "tools.description.builtin.memory_write": "वर्तमान scope में Reborn persistent memory documents लिखें, append करें या patch करें",
   "tools.description.builtin.memory_read": "वर्तमान scope में Reborn persistent memory document पढ़ें",

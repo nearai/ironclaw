@@ -246,6 +246,7 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    Sandbox,
     FirstParty,
     System,
 }
@@ -265,6 +266,7 @@ Rules:
 - `RuntimeKind::FirstParty` and `RuntimeKind::System` are concrete host-lane markers for host-policy-selected services in the broader `Host | WASM | Script Runner` model.
 - `RuntimeKind::Mcp` is a capability adapter lane; local stdio MCP servers may still be process/sandbox-backed internally.
 - `RuntimeKind::Script` is the native CLI/script lane. Docker/container is the V1 backend selected by policy, not a distinct public host API runtime kind.
+- `RuntimeKind::Sandbox` is the sandboxed shell/process lane: a persistent, per-tenant OS-process sandbox. One invocation makes many outbound calls, so it shares the multi-call credential-reuse set with `Mcp`/`Wasm`.
 - `TrustClass` is an authority ceiling, not a permission grant and not a kernel bypass.
 - Shipped first-party code and bundled reference loops still need explicit grants, scoped mounts, resource reservations, leases, and obligation handling for privileged effects.
 - User-installed packages cannot self-declare `TrustClass::FirstParty` or `TrustClass::System`; those ceilings are assigned only by host policy, signed/bundled package metadata, or admin configuration.

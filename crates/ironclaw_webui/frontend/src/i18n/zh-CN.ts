@@ -527,7 +527,7 @@ registerPack("zh-CN", {
   "tools.description.builtin.trace_commons.credits": "报告当前用户的 Trace Commons 积分状态、余额、提交次数和近期说明。",
   "tools.description.builtin.trace_commons.profile_token": "为浏览器或手动资料设置铸造一个短期 Trace Commons 资料管理值。",
   "tools.description.builtin.trace_commons.profile_set": "在明确同意后创建或更新当前用户的公开 Trace Commons 社区资料。",
-  "tools.description.builtin.profile_set": "记录关于用户代理上下文的私有本地事实：时区、语言区域或位置。",
+  "tools.description.ironclaw.memory.profile_set": "记录关于用户代理上下文的私有本地事实：时区、语言区域或位置。",
   "tools.description.builtin.memory_search": "在当前作用域中搜索 Reborn 持久记忆文档",
   "tools.description.builtin.memory_write": "在当前作用域中写入、追加或修补 Reborn 持久记忆文档",
   "tools.description.builtin.memory_read": "读取当前作用域中的 Reborn 持久记忆文档",

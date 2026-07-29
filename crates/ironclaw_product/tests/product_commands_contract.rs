@@ -3,7 +3,8 @@
 use ironclaw_product::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
 use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    ProductCommand, ProductModelCommand, product_command_descriptors,
+    ProductCommand, ProductModelCommand, declared_command_help_text, product_command_descriptors,
+    validate_declared_product_command,
 };
 
 #[test]
@@ -417,4 +418,31 @@ fn command_registry_declares_canonical_lifecycle_commands() {
     ] {
         assert!(names.contains(&name), "missing lifecycle command {name}");
     }
+}
+
+#[test]
+fn declared_command_validation_uses_exact_registry_tokens() {
+    assert!(validate_declared_product_command("status").is_ok());
+    assert!(validate_declared_product_command("progress").is_ok());
+
+    let error =
+        validate_declared_product_command("notacommand").expect_err("unknown command must fail");
+    assert_eq!(
+        error.to_string(),
+        "unknown product command `notacommand`",
+        "startup diagnostics should identify the invalid manifest token"
+    );
+}
+
+#[test]
+fn declared_command_help_is_scoped_and_fail_closed() {
+    assert_eq!(
+        declared_command_help_text(["status"]),
+        "Available commands:\n/status"
+    );
+
+    let empty = declared_command_help_text(std::iter::empty::<&str>());
+    assert_eq!(empty, "Commands are not available in this channel.");
+    assert!(!empty.contains("/model"));
+    assert!(!empty.contains("/extension_configure"));
 }

@@ -32,6 +32,7 @@ display_name = "Telegram messages"
 inbound = true
 outbound = true
 conversation_model = "continuous"
+commands = ["status"]
 
 [channel.connection]
 provider = "telegram"

@@ -1019,6 +1019,14 @@ mod tests {
         id: &str,
         strategy: RebornChannelConnectStrategy,
     ) -> LifecycleSearchExtensionSummary {
+        search_summary_with_phase(id, strategy, None)
+    }
+
+    fn search_summary_with_phase(
+        id: &str,
+        strategy: RebornChannelConnectStrategy,
+        installation_phase: Option<InstallationState>,
+    ) -> LifecycleSearchExtensionSummary {
         LifecycleSearchExtensionSummary {
             summary: LifecycleExtensionSummary {
                 package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)
@@ -1045,7 +1053,7 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            installation_phase: None,
+            installation_phase,
         }
     }
 

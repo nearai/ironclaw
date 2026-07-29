@@ -487,6 +487,14 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_GROUP_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
+      # Group suites build a full Reborn runtime per scenario on the libtest
+      # test-thread stack, so their combined debug async frames sit within a
+      # few percent of whatever stack they are given (reborn_group_triggers'
+      # triggered_gate_group overflowed the 8 MiB libtest default on an
+      # unrelated layout shift). Same pathology and value as the root-tests
+      # job above and the documented RUST_MIN_STACK in
+      # reborn_qa_recorded_behavior.rs.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

@@ -161,7 +161,9 @@ pub fn route_kind_for_inbound_payload(
     }
 }
 
-fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationRouteKind {
+pub(crate) fn route_kind_for_trigger(
+    trigger: ProductTriggerReason,
+) -> ProductConversationRouteKind {
     binding_profile_for_trigger(trigger).0
 }
 
