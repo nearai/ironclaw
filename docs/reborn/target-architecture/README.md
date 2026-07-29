@@ -20,99 +20,37 @@ Keep the capability-based microkernel model and the **mechanically enforced 7-la
 
 ## The family map
 
+Ten families under `crates/`. The map stays at this altitude on purpose — the crates inside each family are defined in that family's spec file, linked from the table below.
+
 ```text
 crates/
-├── contracts/                          # neutral vocabulary & ports (leaf tier — no execution, no frameworks)
-│   ├── ironclaw_host_api
-│   ├── ironclaw_common
-│   ├── ironclaw_prompt_envelope
-│   ├── ironclaw_loop_contracts        # NEW
-│   ├── ironclaw_extension_contracts   # NEW
-│   └── ironclaw_product_contracts     # NEW
-├── substrate/                          # privileged mechanism substrates the kernel mediates
-│   ├── ironclaw_filesystem
-│   ├── ironclaw_secrets
-│   ├── ironclaw_network
-│   ├── ironclaw_safety
-│   └── ironclaw_observability
-├── events/                             # evidence → derived views → transport streams
-│   ├── ironclaw_events
-│   ├── ironclaw_event_store           # renamed from ironclaw_reborn_event_store
-│   ├── ironclaw_event_projections
-│   └── ironclaw_event_streams
-├── domains/                            # typed record/service domains behind the kernel (backend-neutral)
-│   ├── ironclaw_threads
-│   ├── ironclaw_conversations
-│   ├── ironclaw_triggers
-│   ├── ironclaw_memory
-│   ├── ironclaw_memory_native
-│   ├── ironclaw_memory_mem0
-│   ├── ironclaw_skills
-│   ├── ironclaw_auth
-│   ├── ironclaw_attachments
-│   ├── ironclaw_extractors
-│   ├── ironclaw_projects
-│   ├── ironclaw_identity              # renamed from ironclaw_reborn_identity
-│   ├── ironclaw_llm
-│   ├── ironclaw_traces                # renamed from ironclaw_reborn_traces
-│   └── ironclaw_outbound
-├── kernel/                             # the authority perimeter — deliberately nine focused crates, not one
-│   ├── ironclaw_trust
-│   ├── ironclaw_authorization
-│   ├── ironclaw_approvals
-│   ├── ironclaw_resources
-│   ├── ironclaw_runtime_policy
-│   ├── ironclaw_capabilities
-│   ├── ironclaw_processes
-│   ├── ironclaw_turns
-│   ├── ironclaw_host_runtime
-│   └── ironclaw_run_state             # transitional — deleted once the journal collapse lands
-├── lanes/                              # execution mechanisms for already-authorized work
-│   ├── ironclaw_wasm
-│   ├── ironclaw_wasm_limiter
-│   ├── ironclaw_mcp
-│   └── ironclaw_sandbox               # NEW — merges three currently-unwired fragments
-├── loop/                               # loop userland and its hosting adapters
-│   ├── ironclaw_agent_loop
-│   ├── ironclaw_loop_host
-│   ├── ironclaw_runner
-│   └── ironclaw_hooks
-├── extensions/                         # everything "installable package"
-│   ├── ironclaw_extensions            # manifests, registry, installation records
-│   ├── ironclaw_extension_host        # generic hosting: verify, bind, deliver
-│   ├── ironclaw_extension_manager     # NEW — product-side extension management
-│   └── packages/                      # one self-contained directory per package
-│       ├── first_party/               # inventory + native executors + assets
-│       ├── slack/
-│       └── telegram/                  # absorbs ironclaw_telegram_v2_adapter
-├── product/                            # first-party userland above the kernel
-│   ├── ironclaw_product
-│   ├── ironclaw_operator
-│   ├── ironclaw_openai_compat         # renamed from ironclaw_reborn_openai_compat
-│   ├── ironclaw_webui
-│   └── ironclaw_host_ingress
-└── app/                                # assembly & enforcement
-    ├── ironclaw_composition           # renamed from ironclaw_reborn_composition
-    ├── ironclaw_cli                   # binary `ironclaw` (dir renamed from ironclaw_reborn_cli)
-    ├── ironclaw_config                # renamed from ironclaw_reborn_config
-    └── ironclaw_architecture
-tools/                                  # stress harness, excluded helpers
+├── contracts/     neutral vocabulary & ports — the leaf tier every family may see
+├── substrate/     privileged mechanism substrates the kernel mediates
+├── events/        durable evidence → derived read models → transport streams
+├── domains/       typed record/service domains behind the kernel
+├── kernel/        the authority perimeter — every stage of the mediated effect pipeline
+├── lanes/         execution mechanisms for already-authorized work
+├── loop/          loop userland and its hosting adapters
+├── extensions/    everything "installable package" — registry, host, manager, packages/
+├── product/       first-party userland above the kernel
+└── app/           assembly & enforcement — composition, the binary, config, architecture tests
+tools/             developer diagnostics & excluded helpers
 ```
 
 ## Family roles and responsibilities (summary)
 
-| Family | Role | Owns | Must never contain |
+| Family (spec) | Role | Owns | Must never contain |
 |---|---|---|---|
-| `contracts/` | shared vocabulary + ports every tier may see | IDs/scopes, capability/decision/approval vocabulary, the sealed `Authorized` witness + dispatch port, loop/extension/product port sets, wire DTO homes | impls, frameworks, persistence, vendor names, behavior |
-| `substrate/` | privileged mechanisms (storage fabric, secrets, network policy, safety scanning, tracing macros) | containment, CAS, leases, egress hardening, redaction primitives | authority decisions, domain records, product behavior |
-| `events/` | durable evidence, derived read models, transport-neutral streams | canonical redacted events; backend selection + fail-closed profiles; rebuildable projections; admission-checked streams | transports, product views, any projection *writing* state |
-| `domains/` | typed domain owners over `ScopedFilesystem` | record grammar, domain services/factories, sealed domain trust types (outbound grants, trigger minting) | backend selection, authority decisions, HTTP surfaces, vendor branches (llm/auth vendor scope excepted by charter) |
-| `kernel/` | the security perimeter: every stage of the mediated effect pipeline | trust ceilings, grants/leases, exact-invocation approvals, reservations, lane policy, `CapabilityHost`, process lifecycle, turn admission, mediated services | product UX, loop strategy, vendor code, lane mechanics |
-| `lanes/` | how authorized work executes | runtime loading/isolation/metering, normalized outcomes | authorization, ambient network/secrets, product behavior, parallel lifecycles |
-| `loop/` | replaceable agent behavior + the adapters hosting it | executor/strategies (sealed), host-port impls, driver registry, hook middleware | authority (everything privileged crosses ports into the kernel) |
-| `extensions/` | the four extension responsibilities, colocated | manifests/registry/records; generic hosting (ingress verify, binding, egress transport); product-side management; concrete packages | vendor names outside `packages/`; registry-as-dispatcher; host absorbing product workflow |
-| `product/` | the supported first-party experience | ProductSurface impl, admission/bindings/idempotency, delivery semantics, operator control plane, transports (webui/openai) | authority decisions, lane mechanics, vendor protocol, assembly |
-| `app/` | deployment selection, wiring, the binary, enforcement | builders-of-owners, binding tables, boot config, architecture tests | any domain behavior, policy content, prompts, vendor flows |
+| [`contracts/`](families/contracts.md) — 6 crates | shared vocabulary + ports every tier may see | IDs/scopes, capability/decision/approval vocabulary, the sealed `Authorized` witness + dispatch port, loop/extension/product port sets, wire DTO homes | impls, frameworks, persistence, vendor names, behavior |
+| [`substrate/`](families/substrate.md) — 5 crates | privileged mechanisms (storage fabric, secrets, network policy, safety scanning, tracing macros) | containment, CAS, leases, egress hardening, redaction primitives | authority decisions, domain records, product behavior |
+| [`events/`](families/events.md) — 4 crates | durable evidence, derived read models, transport-neutral streams | canonical redacted events; backend selection + fail-closed profiles; rebuildable projections; admission-checked streams | transports, product views, any projection *writing* state |
+| [`domains/`](families/domains.md) — 15 crates | typed domain owners over `ScopedFilesystem` | record grammar, domain services/factories, sealed domain trust types (outbound grants, trigger minting) | backend selection, authority decisions, HTTP surfaces, vendor branches (llm/auth vendor scope excepted by charter) |
+| [`kernel/`](families/kernel.md) — 9 crates | the security perimeter: every stage of the mediated effect pipeline | trust ceilings, grants/leases, exact-invocation approvals, reservations, lane policy, `CapabilityHost`, process lifecycle, turn admission, mediated services | product UX, loop strategy, vendor code, lane mechanics |
+| [`lanes/`](families/lanes.md) — 4 crates | how authorized work executes | runtime loading/isolation/metering, normalized outcomes | authorization, ambient network/secrets, product behavior, parallel lifecycles |
+| [`loop/`](families/loop.md) — 4 crates | replaceable agent behavior + the adapters hosting it | executor/strategies (sealed), host-port impls, driver registry, hook middleware | authority (everything privileged crosses ports into the kernel) |
+| [`extensions/`](families/extensions.md) — 3 crates + `packages/` | the four extension responsibilities, colocated | manifests/registry/records; generic hosting (ingress verify, binding, egress transport); product-side management; concrete packages | vendor names outside `packages/`; registry-as-dispatcher; host absorbing product workflow |
+| [`product/`](families/product.md) — 5 crates | the supported first-party experience | ProductSurface impl, admission/bindings/idempotency, delivery semantics, operator control plane, transports (webui/openai) | authority decisions, lane mechanics, vendor protocol, assembly |
+| [`app/`](families/app.md) — 4 crates | deployment selection, wiring, the binary, enforcement | builders-of-owners, binding tables, boot config, architecture tests | any domain behavior, policy content, prompts, vendor flows |
 
 ## The five decisions reviewers should weigh
 
