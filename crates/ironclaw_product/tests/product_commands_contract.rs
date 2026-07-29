@@ -521,7 +521,9 @@ fn every_descriptor_has_presentation_metadata() {
             descriptor.name
         );
         assert!(
-            descriptor.usage.starts_with(&format!("/{}", descriptor.name)),
+            descriptor
+                .usage
+                .starts_with(&format!("/{}", descriptor.name)),
             "descriptor {} usage must start with /{}, got: {}",
             descriptor.name,
             descriptor.name,

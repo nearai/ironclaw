@@ -481,7 +481,9 @@ fn invalid_lifecycle_rejection(reason: impl Into<String>) -> Result<String, Prod
     ))
 }
 
-fn lifecycle_command_metadata(kind: LifecycleCommandKind) -> (&'static str, &'static str, &'static str) {
+fn lifecycle_command_metadata(
+    kind: LifecycleCommandKind,
+) -> (&'static str, &'static str, &'static str) {
     match kind {
         LifecycleCommandKind::ExtensionSearch => (
             "Search extensions",
