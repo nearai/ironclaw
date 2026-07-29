@@ -364,7 +364,8 @@ jobs:
 
             # One combined test+lcov invocation, not the two-step `--no-report test` + `report` shape (report has no --workspace/-p, only reports the root package).
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-            timeout --signal=INT --kill-after=30s 40m \
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              timeout --signal=INT --kill-after=30s 40m \
               "${incremental_env[@]}" cargo llvm-cov -p "$package" ${feature_flags} --all-targets \
                 --lcov --output-path "coverage/${package}.lcov" \
                 test -- --nocapture
@@ -469,7 +470,10 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn root tests
-        run: scripts/ci/run-reborn-root-partition.sh
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
+          scripts/ci/run-reborn-root-partition.sh
 
   reborn-group-tests:
     name: Reborn group tests
@@ -561,7 +565,7 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn group tests
-        run: scripts/ci/run-reborn-group-tests.sh
+        run: scripts/ci/run-hermetic-deterministic-suite.sh groups
 
   reborn-integration-coverage:
     name: Reborn integration coverage (${{ matrix.lane }})
@@ -662,7 +666,8 @@ jobs:
           # instrumented binaries) keeps the build-cache speed win while
           # guaranteeing this lane's lcov reflects only its own test run.
           cargo llvm-cov clean --profraw-only
-          scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
+          scripts/ci/run-hermetic-deterministic-suite.sh command \
+            scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
 
       - name: Upload lane lcov artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -814,9 +819,8 @@ jobs:
 
       - name: Run Reborn WebUI frontend tests
         run: |
-          cd crates/ironclaw_webui/frontend
-          pnpm install --frozen-lockfile
-          pnpm test
+          pnpm --dir crates/ironclaw_webui/frontend install --frozen-lockfile
+          scripts/ci/run-hermetic-deterministic-suite.sh frontend
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
@@ -866,7 +870,14 @@ jobs:
         run: scripts/ci/check-reborn-qa-fixtures.sh
 
       - name: Run Reborn QA fixture contracts and replay
-        run: cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior -- --nocapture
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
+          cargo test
+          -p ironclaw_reborn_integration_tests
+          --test reborn_qa_recorded_behavior
+          --
+          --nocapture
 
   reborn-tests:
     name: Tests (Reborn)

@@ -50,6 +50,7 @@ on:
       - "crates/ironclaw_*/**"
       - "docs/reborn/**"
       - "scripts/reborn-e2e-rust.sh"
+      - "scripts/ci/*hermetic*"
       - "tests/e2e/**"
       - "build.rs"
       - "providers.json"
@@ -99,7 +100,7 @@ jobs:
 
           # Keep this pattern in sync with the push `paths:` filter in the
           # `on:` block above.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"
@@ -138,7 +139,10 @@ jobs:
       - name: Run deterministic Reborn Rust gate
         env:
           CARGO_TEST_ARGS: "-- --nocapture"
-        run: scripts/reborn-e2e-rust.sh ${{ matrix.group }}
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          rust-e2e
+          ${{ matrix.group }}
 
   webui-v2-smoke:
     name: Reborn WebUI v2 smoke
@@ -276,6 +280,8 @@ jobs:
 
       - name: Run Reborn WebUI v2 smoke
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
           tests/e2e/scenarios/test_reborn_webui_v2_sso.py
@@ -286,6 +292,8 @@ jobs:
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_provider_capability_inventory.py
           tests/e2e/scenarios/test_journey_coverage.py
@@ -306,6 +314,8 @@ jobs:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
           IRONCLAW_JOURNEY_ORDER: reverse
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
           -v
@@ -331,7 +341,8 @@ jobs:
           echo "replaying ${#journeys[@]} journeys alone"
           for journey in "${journeys[@]}"; do
             echo "::group::alone: $journey"
-            pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
               -k "$journey and not isolated" \
               -v --timeout=120
             echo "::endgroup::"
@@ -346,7 +357,8 @@ jobs:
             echo "No Reborn Responses API E2E tests selected"
             exit 1
           fi
-          pytest "${responses_tests[@]}" -v --timeout=120
+          scripts/ci/run-hermetic-deterministic-suite.sh command \
+            pytest "${responses_tests[@]}" -v --timeout=120
 
       - name: Package live-canary binary
         id: live_canary_binary
@@ -442,7 +454,13 @@ jobs:
           pip install -e .
 
       - name: Run Reborn black-box smoke
-        run: pytest tests/e2e/scenarios/test_reborn_blackbox_smoke.py -v --timeout=120
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
+          pytest
+          tests/e2e/scenarios/test_reborn_blackbox_smoke.py
+          -v
+          --timeout=120
 
   reborn-e2e:
     name: Reborn E2E

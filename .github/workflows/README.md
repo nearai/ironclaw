@@ -18,6 +18,13 @@ on `push` to main, the merge queue must run it in the same shape first
 instead). External/live checks (canaries, deploys, releases, benchmark
 thresholds) are exempt: they stay out of the queue by design.
 
+The canonical local composition of the deterministic Reborn gates is
+`scripts/ci/run-hermetic-deterministic-suite.sh all`. CI invokes the same
+checked-in stages through that runner so credentials, ambient behavior,
+mutable roots, clock/seed inputs, and non-loopback egress have one mechanical
+boundary. Setup and exclusions are documented in
+`docs/internal/hermetic-deterministic-suite.md`.
+
 The WASM WIT compatibility lane uses two risk scopes. Pull requests run it only
 for direct WIT, WASM host, extension, compatibility-test, or lane-workflow
 changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
