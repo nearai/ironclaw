@@ -757,7 +757,7 @@ fn local_host_runtime_policy_for_profile_label(
             unreachable!("{profile_name} uses the local-host runtime policy shape") // safety: callers pass fixed labels for the standalone local-host profile.
         }
         RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
-            unreachable!("{profile_name} carries a runtime-policy request")
+            unreachable!("{profile_name} carries a runtime-policy request") // safety: callers pass fixed labels whose deployment configs always carry a policy request.
         }
     })
 }
