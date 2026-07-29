@@ -2082,6 +2082,28 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
         context.locator(SEL_V2["logs_context_chip"].format(key="source"))
     ).to_contain_text("slack")
 
+    native_dialogs: list[str] = []
+
+    async def dismiss_native_dialog(dialog) -> None:
+        native_dialogs.append(dialog.type)
+        await dialog.dismiss()
+
+    reborn_v2_page.on("dialog", dismiss_native_dialog)
+    clear_button = reborn_v2_page.get_by_role("button", name="Clear", exact=True)
+    await clear_button.click()
+    confirmation = reborn_v2_page.get_by_role(
+        "dialog", name="Clear all log entries?"
+    )
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+    await expect(entry).to_be_visible()
+
+    await clear_button.click()
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+    await expect(entry).to_have_count(0)
+    assert native_dialogs == []
+
 
 async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
     reborn_v2_server, reborn_v2_browser
