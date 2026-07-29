@@ -118,6 +118,12 @@ pub fn parse_host_pattern(raw: &str) -> Result<NetworkTargetPattern, NetworkPoli
     if trimmed.is_empty() {
         return Err(invalid_host_pattern(raw, "must not be empty"));
     }
+    // Mirror `validate_declaration`'s 253-byte cap (the DNS name length
+    // limit) so this validator is never laxer than the sibling it claims to
+    // be stricter than — see the doc comment above.
+    if trimmed.len() > 253 {
+        return Err(invalid_host_pattern(raw, "must be at most 253 bytes"));
+    }
     if trimmed == "*" {
         return Err(invalid_host_pattern(
             raw,
