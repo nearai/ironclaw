@@ -91,10 +91,6 @@ use ironclaw_extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    ironhub::{
-        extend_builtin_first_party_package as extend_builtin_ironhub_package,
-        insert_handlers as insert_ironhub_handlers,
-    },
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
         insert_handler as insert_operator_config_handler,
@@ -138,6 +134,10 @@ use ironclaw_host_runtime::{
 use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
+};
+use ironclaw_ironhub::{
+    extend_builtin_first_party_package as extend_builtin_ironhub_package,
+    insert_handlers as insert_ironhub_handlers,
 };
 use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;

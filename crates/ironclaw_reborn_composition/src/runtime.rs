@@ -706,7 +706,7 @@ pub struct RebornRuntime {
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     /// Durable nonce and signed-manifest replay state shared by CLI IronHub
     /// installs and the optional deep-link gateway.
-    pub(crate) ironhub_link_state: Arc<ironclaw_extension_host::ironhub::IronhubLinkStateStore>,
+    pub(crate) ironhub_link_state: Arc<ironclaw_ironhub::IronhubLinkStateStore>,
     /// Single composed IronHub deep-link service. `None` is the default-off
     /// registration gate; the same option controls facade and route wiring.
     pub(crate) ironhub_link_service: Option<Arc<dyn ironclaw_product::IronhubLinkService>>,
@@ -823,7 +823,7 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
     }
 }
 
-impl ironclaw_extension_host::ironhub::RebornIronHubRuntime for RebornRuntime {
+impl ironclaw_ironhub::RebornIronHubRuntime for RebornRuntime {
     fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
         Arc::clone(&self.skill_management)
     }
@@ -838,7 +838,7 @@ impl ironclaw_extension_host::ironhub::RebornIronHubRuntime for RebornRuntime {
         self.host_runtime_http_egress.clone()
     }
 
-    fn ironhub_link_state(&self) -> Arc<ironclaw_extension_host::ironhub::IronhubLinkStateStore> {
+    fn ironhub_link_state(&self) -> Arc<ironclaw_ironhub::IronhubLinkStateStore> {
         Arc::clone(&self.ironhub_link_state)
     }
 
@@ -4743,11 +4743,9 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         }
     }
 
-    let ironhub_link_state = Arc::new(
-        ironclaw_extension_host::ironhub::IronhubLinkStateStore::new(
-            services.extension_filesystem.clone(),
-        ),
-    );
+    let ironhub_link_state = Arc::new(ironclaw_ironhub::IronhubLinkStateStore::new(
+        services.extension_filesystem.clone(),
+    ));
     let ironhub_link_service = match ironhub_agent_shared_key {
         Some(shared_key) => {
             let egress = services.host_runtime_http_egress.clone().ok_or_else(|| {
@@ -4757,7 +4755,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
                             .to_string(),
                 }
             })?;
-            let service = ironclaw_extension_host::ironhub::RebornIronhubLinkService::new(
+            let service = ironclaw_ironhub::RebornIronhubLinkService::new(
                 services.skill_management.clone(),
                 services.extension_management.clone(),
                 egress,

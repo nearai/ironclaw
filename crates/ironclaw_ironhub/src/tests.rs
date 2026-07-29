@@ -416,19 +416,24 @@ async fn execute_search_marks_an_oversized_catalog_as_incomplete_with_the_true_t
 
 #[tokio::test]
 async fn verified_tool_and_skill_install_through_real_managers() {
-    let services =
-        crate::lifecycle_test_support::build_lifecycle_test_services("ironhub-owner", None, false)
-            .await;
-    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("ironhub-owner");
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        "ironhub-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "ironhub-owner",
+        );
     let manifest_url = "https://hub.ironclaw.com/tests/native-install/manifest.json";
     let tool_url = "https://hub.ironclaw.com/tests/native-install/tool.wasm";
     let capabilities_url = "https://hub.ironclaw.com/tests/native-install/capabilities.json";
     let tool_manifest_url = "https://hub.ironclaw.com/tests/native-install/manifest.toml";
     let skill_url = "https://hub.ironclaw.com/tests/native-install/SKILL.md";
-    let tool_bytes = include_bytes!(
-        "../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"
-    )
-    .to_vec();
+    let tool_bytes =
+        include_bytes!("../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm")
+            .to_vec();
     let capabilities_bytes = br#"{"capabilities":[]}"#.to_vec();
     let skill_bytes =
         b"---\nname: installed-skill\ndescription: Installed by IronHub\n---\n# Installed\n"
@@ -543,10 +548,16 @@ async fn verified_tool_and_skill_install_through_real_managers() {
 
 #[tokio::test]
 async fn replayed_private_manifest_is_rejected_across_rotating_access_tokens() {
-    let services =
-        crate::lifecycle_test_support::build_lifecycle_test_services("private-owner", None, false)
-            .await;
-    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("private-owner");
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        "private-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "private-owner",
+        );
     let configured_catalog_url = "https://hub.ironclaw.com/api/catalog/manifest.json";
     let private_url_a = "https://hub.ironclaw.com/api/private/manifest?access=token-a";
     let private_url_b = "https://hub.ironclaw.com/api/private/manifest?access=token-b";
@@ -614,11 +625,16 @@ async fn replayed_private_manifest_is_rejected_across_rotating_access_tokens() {
 async fn deep_link_install_uses_authenticated_caller_scope_not_signed_uid_or_runtime_owner() {
     const LINK_KEY: &str = "ihub_sk_CallerScopeTestKey0000000000000000000000000";
 
-    let services =
-        crate::lifecycle_test_support::build_lifecycle_test_services("runtime-owner", None, false)
-            .await;
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        "runtime-owner",
+        None,
+        false,
+    )
+    .await;
     let owner_scope =
-        crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("runtime-owner");
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "runtime-owner",
+        );
     let caller_user = UserId::new("authenticated-caller").expect("caller user");
     let caller = ProductSurfaceCaller::new(
         owner_scope.tenant_id.clone(),
@@ -780,15 +796,16 @@ async fn forced_tool_replacement_failure_preserves_tenant_shared_scope() {
 
 #[tokio::test]
 async fn forced_skill_replacement_failure_restores_url_source() {
-    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
         "ironhub-skill-rollback-owner",
         None,
         false,
     )
     .await;
-    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
-        "ironhub-skill-rollback-owner",
-    );
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "ironhub-skill-rollback-owner",
+        );
     let skill_filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let skill_management = ironclaw_skills::build_scoped_skill_management_port(
         UserId::new("ironhub-skill-rollback-owner").expect("owner id"),
@@ -878,15 +895,16 @@ async fn forced_skill_replacement_failure_restores_url_source() {
 
 #[tokio::test]
 async fn execute_rejects_artifact_size_and_sha256_mismatches() {
-    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
         "ironhub-artifact-owner",
         None,
         false,
     )
     .await;
-    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
-        "ironhub-artifact-owner",
-    );
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "ironhub-artifact-owner",
+        );
     let skill_bytes =
         b"---\nname: artifact-skill\ndescription: Artifact checks\n---\n# Skill\n".to_vec();
 
@@ -973,14 +991,16 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
 
 #[tokio::test]
 async fn execute_rejects_older_generated_at_after_cache_eviction() {
-    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
         "ironhub-replay-owner",
         None,
         false,
     )
     .await;
     let scope =
-        crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("ironhub-replay-owner");
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "ironhub-replay-owner",
+        );
     let manifest_url = "https://hub.ironclaw.com/tests/replay/manifest.json";
     let newer = signed_manifest(
         empty_manifest_json("2026-01-08T00:00:00Z"),
@@ -1022,18 +1042,22 @@ async fn fail_forced_tool_replacement(
     fixture: &str,
     tenant_shared: bool,
 ) -> (
-    crate::lifecycle_test_support::ExtensionLifecycleTestServices,
+    ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
     ResourceScope,
     IronHubCommandError,
 ) {
     let owner = format!("ironhub-{fixture}-owner");
-    let services =
-        crate::lifecycle_test_support::build_lifecycle_test_services(&owner, None, false).await;
-    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(&owner);
-    let tool_bytes = include_bytes!(
-        "../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        &owner, None, false,
     )
-    .to_vec();
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            &owner,
+        );
+    let tool_bytes =
+        include_bytes!("../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm")
+            .to_vec();
     let capabilities_bytes = br#"{"capabilities":[]}"#.to_vec();
     let old_manifest_url = format!("https://hub.ironclaw.com/tests/{fixture}/old-manifest.json");
     let old_tool_url = format!("https://hub.ironclaw.com/tests/{fixture}/old-tool.wasm");
@@ -1139,7 +1163,7 @@ async fn fail_forced_tool_replacement(
 
 fn configured_service(
     skill_management: Arc<ironclaw_skills::ScopedSkillManagementPort>,
-    extension_management: Arc<crate::ExtensionLifecycleManager>,
+    extension_management: Arc<ironclaw_extension_host::ExtensionLifecycleManager>,
     egress: Arc<RecordingEgress>,
     scope: ResourceScope,
     manifest_url: &str,
@@ -1235,9 +1259,12 @@ async fn catalog_test_service(
     skill_count: usize,
     description: &str,
 ) -> (IronHubService, Vec<String>) {
-    let services =
-        crate::lifecycle_test_support::build_lifecycle_test_services(owner, None, false).await;
-    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
     let manifest_url = format!("https://hub.ironclaw.com/tests/{fixture}/manifest.json");
     let (manifest_json, expected_names) =
         catalog_manifest_json(fixture, tool_count, skill_count, description);

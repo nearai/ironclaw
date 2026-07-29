@@ -21,7 +21,7 @@ use ironclaw_skills::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::ExtensionLifecycleManager;
+use ironclaw_extension_host::ExtensionLifecycleManager;
 
 use super::catalog::{
     CatalogOrigin, IronHubManifestSource, catalog, classify, classify_gate_and_digest,

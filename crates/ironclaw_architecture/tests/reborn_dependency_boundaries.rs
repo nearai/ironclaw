@@ -2982,6 +2982,37 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // The IronHub catalog client sits above `ironclaw_extension_host`
+            // and drives installs exclusively through its public seams
+            // (`registry_extension_package`, `ExtensionLifecycleManager`) and
+            // the runtime egress port. It must not reach beneath those seams
+            // into execution runtimes or secret storage, must not link the
+            // assembly/serve layers that consume it, and must not link
+            // concrete extension crates (DEL-7: only the binary and tests
+            // may).
+            crate_name: "ironclaw_ironhub",
+            forbidden: vec![
+                "ironclaw_legacy",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_oauth",
+                "ironclaw_tui",
+                "ironclaw_dispatcher",
+                "ironclaw_mcp",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_wasm",
+                "ironclaw_first_party_extensions",
+                "ironclaw_slack_extension",
+                "ironclaw_telegram_extension",
+                "ironclaw_reborn_composition",
+                "ironclaw_webui",
+                "ironclaw",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_events",
             forbidden: vec![
                 "ironclaw_authorization",

@@ -360,7 +360,7 @@ pub struct RebornRuntimeInput {
     /// Absence is the default-off gate. The runtime constructs one link
     /// service from this key and reuses that same optional service for both
     /// product-surface attachment and public register-route attachment.
-    pub ironhub_agent_shared_key: Option<ironclaw_extension_host::ironhub::IronhubSharedKey>,
+    pub ironhub_agent_shared_key: Option<ironclaw_ironhub::IronhubSharedKey>,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
@@ -477,7 +477,7 @@ impl RebornRuntimeInput {
     /// Enable the IronHub register/install gateway with a validated shared key.
     pub fn with_ironhub_agent_shared_key(
         mut self,
-        shared_key: ironclaw_extension_host::ironhub::IronhubSharedKey,
+        shared_key: ironclaw_ironhub::IronhubSharedKey,
     ) -> Self {
         self.ironhub_agent_shared_key = Some(shared_key);
         self

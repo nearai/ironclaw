@@ -17,7 +17,7 @@ use ironclaw_skills::ScopedSkillManagementPort;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ExtensionLifecycleManager;
+use ironclaw_extension_host::ExtensionLifecycleManager;
 
 use super::agent_link::{InstallDelivery, IronhubSharedKey, RegisterChallenge, verify_signature};
 use super::model::{IronHubCommand, IronHubCommandError, IronHubInstallOptions, IronHubPhase};

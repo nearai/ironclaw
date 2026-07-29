@@ -205,6 +205,18 @@ pub use runtime_input::{
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 
+/// Re-exported IronHub command vocabulary for the `ironclaw` binary's
+/// `ironhub` subcommand and serve wiring. The CLI's exact dependency
+/// allowlist (`reborn_cli_binary_crate_stays_separate_from_v1_root`) closes
+/// the direct path to `ironclaw_ironhub`, so the binary reaches the catalog
+/// client only through this facade.
+pub mod ironhub {
+    pub use ironclaw_ironhub::{
+        IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse, IronhubSharedKey,
+        IronhubSharedKeyError, execute_reborn_ironhub_command, render_reborn_ironhub_response,
+    };
+}
+
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose

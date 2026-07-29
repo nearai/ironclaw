@@ -58,7 +58,6 @@ pub mod host_api_contracts;
 mod hosted_mcp_discovery_authority;
 pub mod ingress;
 pub mod install_policy;
-pub mod ironhub;
 pub mod lifecycle;
 pub mod lifecycle_product_service;
 pub mod lifecycle_restore;
@@ -86,7 +85,7 @@ pub mod webui_extension_credentials;
 mod build_error;
 #[cfg(test)]
 mod host_remediation_contract_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "test_support/lifecycle.rs"]
 pub mod lifecycle_test_support;
 

@@ -3732,7 +3732,6 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
- "ed25519-dalek",
  "fs4",
  "futures",
  "hex",
@@ -4017,6 +4016,32 @@ dependencies = [
  "x509-parser",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "ironclaw_ironhub"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "hmac 0.13.0",
+ "ironclaw_extension_host",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_product",
+ "ironclaw_skills",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4383,6 +4408,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_ingress",
  "ironclaw_host_runtime",
+ "ironclaw_ironhub",
  "ironclaw_llm",
  "ironclaw_loop_host",
  "ironclaw_mcp",

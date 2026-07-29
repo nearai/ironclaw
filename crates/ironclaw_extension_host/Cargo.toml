@@ -16,7 +16,12 @@ layer = "products"
 [features]
 # Lightweight in-crate test fakes (fixtures, scripted adapters) reused by
 # downstream integration tests. Zero-byte in production.
-test-support = ["dep:ironclaw_first_party_extensions"]
+test-support = [
+    "dep:ironclaw_first_party_extensions",
+    "ironclaw_filesystem/test-support",
+    "ironclaw_host_api/test-support",
+    "ironclaw_processes/test-support",
+]
 # Dormant marker for the two moved test modules that still require composition
 # runtime-substrate fixtures. Keep disabled until those tests are rewritten over
 # extension-host-local fakes.
@@ -26,7 +31,6 @@ composition-substrate-tests = []
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
-ed25519-dalek = "2.2.0"
 hmac = "0.13"
 hex = "0.4.3"
 ironclaw_auth = { path = "../ironclaw_auth" }

@@ -1,6 +1,8 @@
 use ironclaw_extensions::{ExtensionRuntimeV2, ManifestSource};
 
-use crate::{AvailableExtensionPackage, parse_imported_manifest, registry_extension_package};
+use ironclaw_extension_host::{
+    AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
+};
 
 use super::catalog::validate_hub_name;
 use super::model::{
@@ -87,7 +89,7 @@ pub(crate) fn ironhub_tool_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ironhub::model::{IronHubArtifact, IronHubProvenance};
+    use crate::model::{IronHubArtifact, IronHubProvenance};
 
     /// A real WASI component; `registry_extension_package` rejects core modules.
     fn component() -> Vec<u8> {
