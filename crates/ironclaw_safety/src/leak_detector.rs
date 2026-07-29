@@ -95,6 +95,29 @@ pub struct LeakPattern {
     pub action: LeakAction,
 }
 
+/// Controls how a detected value may be represented outside the scanner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeakPreviewPolicy {
+    /// Retain only a bounded prefix and suffix around a masked middle.
+    Masked,
+    /// Never retain any bytes from private-key material.
+    PrivateKey,
+}
+
+impl LeakPreviewPolicy {
+    fn render(self, matched_text: &str) -> String {
+        match self {
+            Self::Masked => mask_secret(matched_text),
+            Self::PrivateKey => "[PRIVATE_KEY]".to_string(),
+        }
+    }
+}
+
+struct RegisteredLeakPattern {
+    pattern: LeakPattern,
+    preview_policy: LeakPreviewPolicy,
+}
+
 /// A detected potential secret leak.
 #[derive(Debug, Clone)]
 pub struct LeakMatch {
@@ -158,7 +181,7 @@ impl LeakScanResult {
 
 /// Detector for secret leaks in output data.
 pub struct LeakDetector {
-    patterns: Vec<LeakPattern>,
+    patterns: Vec<RegisteredLeakPattern>,
     /// For fast prefix matching of known patterns
     prefix_matcher: Option<AhoCorasick>,
     known_prefixes: Vec<(String, usize)>, // (prefix, pattern_index)
@@ -167,15 +190,32 @@ pub struct LeakDetector {
 impl LeakDetector {
     /// Create a new detector with default patterns.
     pub fn new() -> Self {
-        Self::with_patterns(default_patterns())
+        Self::with_pattern_policies(default_patterns())
     }
 
-    /// Create a detector with custom patterns.
+    /// Create a detector with custom patterns using masked previews.
     pub fn with_patterns(patterns: Vec<LeakPattern>) -> Self {
+        Self::with_pattern_policies(
+            patterns
+                .into_iter()
+                .map(|pattern| (pattern, LeakPreviewPolicy::Masked))
+                .collect(),
+        )
+    }
+
+    /// Create a detector with custom patterns and explicit preview policies.
+    pub fn with_pattern_policies(patterns: Vec<(LeakPattern, LeakPreviewPolicy)>) -> Self {
+        let patterns: Vec<_> = patterns
+            .into_iter()
+            .map(|(pattern, preview_policy)| RegisteredLeakPattern {
+                pattern,
+                preview_policy,
+            })
+            .collect();
         // Build prefix matcher for patterns that start with a known prefix
         let mut prefixes = Vec::new();
-        for (idx, pattern) in patterns.iter().enumerate() {
-            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str())
+        for (idx, registered) in patterns.iter().enumerate() {
+            if let Some(prefix) = extract_literal_prefix(registered.pattern.regex.as_str())
                 && prefix.len() >= 3
             {
                 prefixes.push((prefix, idx));
@@ -236,17 +276,15 @@ impl LeakDetector {
 
         // Check candidate patterns
         for idx in candidate_indices {
-            let pattern = &self.patterns[idx];
+            let registered = &self.patterns[idx];
+            let pattern = &registered.pattern;
             for mat in pattern.regex.find_iter(content) {
                 let matched_text = mat.as_str();
                 if pattern.name == "bare_jwt" && !has_json_web_token_header(matched_text) {
                     continue;
                 }
                 let location = mat.start()..mat.end();
-                let masked_preview = match pattern.name.as_str() {
-                    "pem_private_key" | "ssh_private_key" => "[PRIVATE_KEY]".to_string(),
-                    _ => mask_secret(matched_text),
-                };
+                let masked_preview = registered.preview_policy.render(matched_text);
 
                 let leak_match = LeakMatch {
                     pattern_name: pattern.name.clone(),
@@ -386,7 +424,19 @@ impl LeakDetector {
 
     /// Add a custom pattern at runtime.
     pub fn add_pattern(&mut self, pattern: LeakPattern) {
-        self.patterns.push(pattern);
+        self.add_pattern_with_preview_policy(pattern, LeakPreviewPolicy::Masked);
+    }
+
+    /// Add a custom pattern with an explicit preview policy at runtime.
+    pub fn add_pattern_with_preview_policy(
+        &mut self,
+        pattern: LeakPattern,
+        preview_policy: LeakPreviewPolicy,
+    ) {
+        self.patterns.push(RegisteredLeakPattern {
+            pattern,
+            preview_policy,
+        });
         // Note: prefix_matcher won't be updated; rebuild if needed
     }
 
@@ -561,8 +611,8 @@ fn decode_base64url_no_pad(input: &str) -> Option<Vec<u8>> {
 }
 
 /// Default leak detection patterns.
-fn default_patterns() -> Vec<LeakPattern> {
-    vec![
+fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
+    let mut patterns: Vec<_> = vec![
         // OpenAI API keys
         LeakPattern {
             name: "openai_api_key".to_string(),
@@ -612,30 +662,45 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
+    ]
+    .into_iter()
+    .map(|pattern| (pattern, LeakPreviewPolicy::Masked))
+    .collect();
+
+    patterns.extend([
         // PEM private keys
-        LeakPattern {
-            name: "pem_private_key".to_string(),
-            // Match the complete block so value-redaction consumers cannot
-            // remove only the BEGIN sentinel while retaining key material.
-            // A missing END sentinel consumes the bounded remainder of the
-            // scanned content, which deliberately over-redacts fail-safe.
-            regex: Regex::new(
-                r"-----BEGIN(?s:(?:\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$)))",
-            )
-            .unwrap(), // safety: hardcoded literal
-            severity: LeakSeverity::Critical,
-            action: LeakAction::Block,
-        },
+        (
+            LeakPattern {
+                name: "pem_private_key".to_string(),
+                // Match the complete block so value-redaction consumers cannot
+                // remove only the BEGIN sentinel while retaining key material.
+                // A missing END sentinel consumes the bounded remainder of the
+                // scanned content, which deliberately over-redacts fail-safe.
+                regex: Regex::new(
+                    r"-----BEGIN(?s:(?:\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$)))",
+                )
+                .unwrap(), // safety: hardcoded literal
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        ),
         // SSH private keys
-        LeakPattern {
-            name: "ssh_private_key".to_string(),
-            regex: Regex::new(
-                r"-----BEGIN(?s:(?:\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$)))",
-            )
-            .unwrap(), // safety: hardcoded literal
-            severity: LeakSeverity::Critical,
-            action: LeakAction::Block,
-        },
+        (
+            LeakPattern {
+                name: "ssh_private_key".to_string(),
+                regex: Regex::new(
+                    r"-----BEGIN(?s:(?:\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$)))",
+                )
+                .unwrap(), // safety: hardcoded literal
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        ),
+    ]);
+
+    let trailing_patterns = vec![
         // Google API keys
         LeakPattern {
             name: "google_api_key".to_string(),
@@ -688,10 +753,8 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Authorization header with key
         LeakPattern {
             name: "auth_header".to_string(),
-            regex: Regex::new(
-                r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9._~+/-]{20,}=*",
-            )
-            .unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9._~+/-]{20,}=*")
+                .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
@@ -764,15 +827,23 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Medium,
             action: LeakAction::Warn,
         },
-    ]
+    ];
+    patterns.extend(
+        trailing_patterns
+            .into_iter()
+            .map(|pattern| (pattern, LeakPreviewPolicy::Masked)),
+    );
+
+    patterns
 }
 
 #[cfg(test)]
 mod tests {
     use crate::leak_detector::{
-        LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakRedactionError,
-        LeakScanResult, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN,
+        LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakPreviewPolicy,
+        LeakRedactionError, LeakScanResult, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN,
     };
+    use regex::Regex;
 
     #[test]
     fn test_detect_openai_key() {
@@ -843,7 +914,7 @@ mod tests {
             let pattern_index = detector
                 .patterns
                 .iter()
-                .position(|pattern| pattern.name == pattern_name)
+                .position(|registered| registered.pattern.name == pattern_name)
                 .expect("default private-key pattern should exist");
 
             assert!(
@@ -983,6 +1054,31 @@ mod tests {
         assert_eq!(preview, "[PRIVATE_KEY]");
         assert!(!preview.contains(private_material));
         assert!(!error.to_string().contains("FFIX"));
+    }
+
+    #[test]
+    fn custom_private_key_preview_policy_does_not_depend_on_pattern_name() {
+        let detector = LeakDetector::with_pattern_policies(vec![(
+            LeakPattern {
+                name: "renamed_private_key".to_string(),
+                regex: Regex::new(
+                    r"-----BEGIN CUSTOM PRIVATE KEY-----.*-----END CUSTOM PRIVATE KEY-----",
+                )
+                .unwrap(),
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        )]);
+        let content = "-----BEGIN CUSTOM PRIVATE KEY-----synthetic-----END CUSTOM PRIVATE KEY-----";
+
+        let error = detector
+            .scan_and_clean(content)
+            .expect_err("the custom private-key pattern should block");
+        let LeakDetectionError::SecretLeakBlocked { pattern, preview } = error;
+
+        assert_eq!(pattern, "renamed_private_key");
+        assert_eq!(preview, "[PRIVATE_KEY]");
     }
 
     #[test]

@@ -27,6 +27,16 @@ use super::builder::RebornIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn summary_contents_lack(contents: &[&str], needle: &str) -> HarnessResult<()> {
+    if contents.is_empty() {
+        return Err("vacuous exclusion: zero durable summary artifacts persisted".into());
+    }
+    if contents.iter().all(|content| !content.contains(needle)) {
+        return Ok(());
+    }
+    Err("durable summary artifact contained forbidden content".into())
+}
+
 /// The two model-visible tool-error outcome classes a capability can surface
 /// (`CapabilityOutcome::Failed` vs `Denied`). A `Failed` and a `Denied` outcome
 /// can render the SAME reason token (e.g. `policy_denied` is both
@@ -786,11 +796,12 @@ impl RebornIntegrationHarness {
         .into())
     }
 
-    /// Assert one, and only one, typed redaction milestone was emitted for the
-    /// applied compaction since `baseline`.
+    /// Assert exactly one typed redaction milestone was emitted for the applied
+    /// compaction since `baseline`, carrying `expected_redactions`.
     pub async fn assert_compaction_redacted_once_since(
         &self,
         baseline: usize,
+        expected_redactions: u32,
     ) -> HarnessResult<()> {
         let milestones = self.loop_milestones();
         let Some(since) = milestones.get(baseline..) else {
@@ -800,25 +811,23 @@ impl RebornIntegrationHarness {
             )
             .into());
         };
-        let count = since
+        let redacted_counts: Vec<_> = since
             .iter()
-            .filter(|milestone| {
-                matches!(
-                    &milestone.kind,
-                    LoopHostMilestoneKind::CompactionLeakDetected {
-                        reason_kind,
-                        redacted_leak_count: 1,
-                        ..
-                    } if reason_kind.as_str() == "redacted"
-                )
+            .filter_map(|milestone| match &milestone.kind {
+                LoopHostMilestoneKind::CompactionLeakDetected {
+                    reason_kind,
+                    redacted_leak_count,
+                    ..
+                } if reason_kind.as_str() == "redacted" => Some(*redacted_leak_count),
+                _ => None,
             })
-            .count();
-        if count == 1 {
+            .collect();
+        if redacted_counts.as_slice() == [expected_redactions] {
             return Ok(());
         }
         let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
         Err(format!(
-            "expected exactly one redacted compaction milestone since baseline {baseline}, saw {count}: {seen:?}"
+            "expected exactly one redacted compaction milestone carrying redacted_leak_count={expected_redactions} since baseline {baseline}, saw counts {redacted_counts:?}: {seen:?}"
         )
         .into())
     }
@@ -1232,6 +1241,22 @@ impl RebornIntegrationHarness {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::summary_contents_lack;
+
+    #[test]
+    fn summary_exclusion_rejects_missing_durable_artifacts() {
+        let error = summary_contents_lack(&[], "synthetic secret")
+            .expect_err("an empty artifact set must not prove exclusion");
+
+        assert_eq!(
+            error.to_string(),
+            "vacuous exclusion: zero durable summary artifacts persisted"
+        );
+    }
+}
+
 /// Redact a `data:<mime>;base64,<bytes>` URL for safe inclusion in an assertion
 /// failure message — never prints the base64 payload itself (which is the raw
 /// attachment content) or even a prefix of it. Reports the mime type, decoded
@@ -1310,13 +1335,11 @@ impl RebornIntegrationHarness {
             .thread_harness
             .summary_artifacts(self.binding.thread_id.clone())
             .await?;
-        if summaries
+        let contents: Vec<_> = summaries
             .iter()
-            .all(|summary| !summary.content.contains(needle))
-        {
-            return Ok(());
-        }
-        Err("durable summary artifact contained forbidden content".into())
+            .map(|summary| summary.content.as_str())
+            .collect();
+        summary_contents_lack(&contents, needle)
     }
 
     /// Number of persisted thread-history messages right now. Capture this at

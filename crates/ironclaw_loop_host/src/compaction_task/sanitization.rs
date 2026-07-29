@@ -282,11 +282,12 @@ fn append_escaped_xml_checked(
                 if let Some(start) = run_start.take() {
                     push_checked(output, &value[start..idx], cap)?;
                 }
-                let segment = match character {
-                    '&' => "&amp;",
-                    '<' => "&lt;",
-                    '>' => "&gt;",
-                    _ => unreachable!(),
+                let segment = if character == '&' {
+                    "&amp;"
+                } else if character == '<' {
+                    "&lt;"
+                } else {
+                    "&gt;"
                 };
                 push_checked(output, segment, cap)?;
             }
