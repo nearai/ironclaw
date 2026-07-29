@@ -12,6 +12,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && pnpm check:bundle",
+    "build:demo": "VITE_DEMO_MODE=1 vite build --outDir dist-demo",
+    "dev:demo": "VITE_DEMO_MODE=1 vite --host 127.0.0.1",
     "check:bundle": "node --experimental-strip-types scripts/check-bundle-budgets.ts",
     "typecheck": "tsc --noEmit && tsc -p packages/ui --noEmit",
     "lint": "pnpm lint:conventions && pnpm typecheck",

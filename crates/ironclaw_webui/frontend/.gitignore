@@ -1,3 +1,4 @@
 /dist/
+/dist-demo/
 /node_modules/
 packages/*/node_modules/
