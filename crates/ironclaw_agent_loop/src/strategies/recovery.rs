@@ -392,8 +392,8 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     self.max_model_availability_attempts,
                     RetryScope::Call,
                     |attempts| {
-                        if next_fallback_index.is_some() {
-                            Some(RetryAlteration::AdvanceFallback)
+                        if let Some(fallback_index) = next_fallback_index {
+                            Some(RetryAlteration::AdvanceFallback { fallback_index })
                         } else {
                             Some(RetryAlteration::Backoff {
                                 delay_ms: availability_backoff_for(attempts),
@@ -754,8 +754,8 @@ pub(crate) enum RetryAlteration {
     /// hint. Used when the provider/model returned an empty or structurally
     /// invalid response for the active loop contract.
     RepairInvalidModelOutput,
-    /// Advance to the next entry in the host-resolved ordered fallback chain.
-    AdvanceFallback,
+    /// Advance to the host-selected entry in the ordered fallback chain.
+    AdvanceFallback { fallback_index: u32 },
 }
 
 /// Bounded retry backoff delay in milliseconds.
@@ -966,8 +966,9 @@ mod tests {
 
     #[test]
     fn retry_alteration_advance_fallback_round_trips() {
-        let alteration = RetryAlteration::AdvanceFallback;
+        let alteration = RetryAlteration::AdvanceFallback { fallback_index: 2 };
         let value = serde_json::to_value(&alteration).expect("serialize");
+        assert_eq!(value["fallback_index"], serde_json::json!(2));
         let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, alteration);
     }
@@ -1476,7 +1477,9 @@ mod tests {
                             matches!(
                                 outcome,
                                 RecoveryOutcome::Retry {
-                                    alter: Some(RetryAlteration::AdvanceFallback),
+                                    alter: Some(RetryAlteration::AdvanceFallback {
+                                        fallback_index: 1
+                                    }),
                                     ..
                                 }
                             ),
@@ -1511,7 +1514,10 @@ mod tests {
                         assert_eq!(scope, RetryScope::Call);
                         match class {
                             ModelErrorClass::Unavailable => {
-                                assert_eq!(alter, Some(RetryAlteration::AdvanceFallback));
+                                assert_eq!(
+                                    alter,
+                                    Some(RetryAlteration::AdvanceFallback { fallback_index: 1 })
+                                );
                             }
                             ModelErrorClass::Transient | ModelErrorClass::Internal => {
                                 assert!(matches!(alter, Some(RetryAlteration::Backoff { .. })));
@@ -1595,7 +1601,7 @@ mod tests {
                 outcome,
                 RecoveryOutcome::Retry {
                     scope: RetryScope::Call,
-                    alter: Some(RetryAlteration::AdvanceFallback),
+                    alter: Some(RetryAlteration::AdvanceFallback { fallback_index: 1 }),
                     ..
                 }
             ));

@@ -496,7 +496,12 @@ impl LlmProvider for RecoverableFailureLlm {
                     reasoning_details: None,
                 }),
                 RecoverableModelFailure::OutputTruncated => Ok(ToolCompletionResponse {
-                    content: Some("partial response that must not be reported as complete".into()),
+                    content: Some(
+                        "partial response that must not be reported as complete\n\
+                         to=builtin__http weirdjson\n\
+                         {\"url\":\"https://api.example.test/partial\"}"
+                            .into(),
+                    ),
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,

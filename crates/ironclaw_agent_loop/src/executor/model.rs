@@ -459,18 +459,18 @@ fn prepare_model_retry_alteration(
             state.pending_model_retry_directive =
                 Some(PendingModelRetryDirective::RepairInvalidOutput);
         }
-        Some(RetryAlteration::AdvanceFallback) => {
+        Some(RetryAlteration::AdvanceFallback { fallback_index }) => {
             if scope != RetryScope::Call {
                 return Err(AgentLoopExecutorError::PlannerContract {
                     detail: "fallback advancement requires call scope",
                 });
             }
-            state.model_state.fallback_index =
-                state.model_state.fallback_index.checked_add(1).ok_or(
-                    AgentLoopExecutorError::PlannerContract {
-                        detail: "fallback model route index overflowed",
-                    },
-                )?;
+            if *fallback_index <= state.model_state.fallback_index {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "fallback model route index did not advance",
+                });
+            }
+            state.model_state.fallback_index = *fallback_index;
         }
         None => {}
     }

@@ -191,6 +191,7 @@ async fn invalid_output_recovers_with_model_visible_observation() {
 #[tokio::test]
 async fn output_truncation_recovers_without_shrinking_input_context() {
     let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
         .output_truncated_model_times(1)
         .script([RebornScriptedReply::text(
             "concise complete answer after truncation",
@@ -225,4 +226,12 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
         .assert_conversation_history_lacks("partial response that must not be reported as complete")
         .await
         .expect("partial provider output is never durably reported as a successful reply");
+    harness
+        .assert_tool_not_invoked("builtin.http")
+        .await
+        .expect("a truncated textual tool call must never reach capability dispatch");
+    harness
+        .assert_egress_count(0)
+        .await
+        .expect("a truncated textual tool call must never reach HTTP egress");
 }

@@ -4307,7 +4307,7 @@ async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evi
             AgentLoopHostErrorKind::Unavailable,
             "model provider is temporarily unavailable",
         )
-        .with_next_fallback_index(1),
+        .with_next_fallback_index(2),
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -4321,8 +4321,33 @@ async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evi
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].fallback_index, 0);
-    assert_eq!(requests[1].fallback_index, 1);
-    assert_eq!(final_staged_state(&host).model_state.fallback_index, 1);
+    assert_eq!(requests[1].fallback_index, 2);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 2);
+}
+
+#[tokio::test]
+async fn model_unavailable_retry_rejects_a_non_advancing_fallback_index() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(0),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("a host-selected fallback index must advance the current route");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "fallback model route index did not advance"
+        }
+    ));
 }
 
 #[tokio::test]

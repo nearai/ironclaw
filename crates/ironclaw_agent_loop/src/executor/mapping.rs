@@ -363,7 +363,7 @@ pub(super) fn sanitized_strategy_summary_or_fallback(
 pub(super) fn honor_capability_retry_alteration(
     alteration: Option<&RetryAlteration>,
 ) -> Result<(), AgentLoopExecutorError> {
-    if matches!(alteration, Some(RetryAlteration::AdvanceFallback)) {
+    if matches!(alteration, Some(RetryAlteration::AdvanceFallback { .. })) {
         return Err(AgentLoopExecutorError::PlannerContract {
             detail: "fallback advancement is valid only for model recovery",
         });
