@@ -65,6 +65,42 @@ metadata, `GET/POST` WebUI command routes, and the composer slash menu.
 | 7 | Bundled manifests | Declare `["model", "status"]` (in PR-1, same PR as gating). Lifecycle commands stay undeclared on bundled channels; admins manage extensions from the WebUI. Third-party manifests may declare them; admission gates. |
 | 8 | Aliases | **Deleted in PR-1.** `progress` is the registry's only alias and is inert everywhere (declarations are exact tokens; nothing declares it). The whole mechanism goes with it: `aliases` descriptor field, alias matching branches, the aliases-never-implicitly-enabled validation rule and its pins (removed deliberately with the rule they pin), and #6678's frontend alias matching. Resurrect from git if a real synonym need appears. |
 
+## Shared pipeline: one center, thin edges
+
+Channels never parse or police commands; they only unwrap transport. All
+parsing, privilege policy, execution, and result shaping is defined once.
+
+```
+ Slack slash POST         Telegram DM           WebUI composer
+ /ironclaw status …       /status …             /status …
+       │                       │                     │
+ [slack adapter]          [telegram adapter]         │
+ dispatcher unwrap →      envelope only              │
+ text "/status …"         (text unchanged)           │
+       └───────────┬───────────┘                     │
+                   ▼                                 ▼
+   generic ingress sink (extension_host)   POST /threads/{id}/commands
+   → shared slash parser (host_api)        → same shared parser
+                   │                                 │
+                   ▼                                 ▼
+  ┌────────── shared command center (ironclaw_product) ──────────┐
+  │ registry: names + metadata + audience (commands.rs)          │
+  │ typed parse: ProductCommand::from_payload                    │
+  │ policy: direct-conv + declared set + required_audience ×     │
+  │   actor role (channel door: admission service + role port;   │
+  │   webui door: same audience table, authenticated caller)     │
+  │ execute: ProductSurface::invoke → per-command handlers       │
+  │ result: CommandResultView (title/fields/lines)               │
+  └──────────────────────────────────────────────────────────────┘
+                   │                                 │
+                   ▼                                 ▼
+   observer renders + delivers bot msg      ephemeral system-notice
+   (per-channel display prefix on help)     (generic renderer)
+```
+
+Two doors, zero drift: both consult the same registry, audience table, and
+operations — policy is defined once and consulted from both entries.
+
 ## PR-1 — Role-gated command admission
 
 ### Registry (`crates/ironclaw_product/src/commands.rs`)
