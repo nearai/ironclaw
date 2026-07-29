@@ -2897,6 +2897,19 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Shared libSQL runtime owns connection mechanics only. It must
+            // remain below every adapter that consumes its read/write lanes.
+            crate_name: "ironclaw_libsql_runtime",
+            forbidden: vec![
+                "ironclaw_events",
+                "ironclaw_filesystem",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_event_store",
+                "ironclaw_triggers",
+                "ironclaw_turns",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_filesystem",
             forbidden: vec![
                 "ironclaw_authorization",

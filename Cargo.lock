@@ -4020,6 +4020,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_libsql_runtime"
+version = "0.1.0"
+dependencies = [
+ "deadpool",
+ "libsql",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_llm"
 version = "0.1.0"
 dependencies = [
