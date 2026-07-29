@@ -898,12 +898,33 @@ impl Inner {
         }
     }
 
+    fn requeue_checkpointless_runner_failure(
+        &mut self,
+        mut record: RunRecord,
+    ) -> AppliedLoopTransition {
+        let transition = record.status.set(TurnStatus::Queued);
+        self.apply_status_transition(transition, &record);
+        record.failure = None;
+        clear_runner_lease(&mut record);
+        record.event_cursor = self.next_cursor();
+        self.update_active_lock(&record, Utc::now());
+        self.queued_runs.push_back(record.run_id);
+        let state = record.state();
+        self.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
+        AppliedLoopTransition::Applied {
+            record: Box::new(record),
+            state: Box::new(state),
+            prune_terminal: false,
+        }
+    }
+
     fn runner_failure_transition(
         &mut self,
         run_id: TurnRunId,
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
         failure: SanitizedFailure,
+        recovery: RunnerFailureRecovery,
     ) -> Result<TurnRunState, TurnError> {
         let record = self.take_record(run_id)?;
         let transition = (|| {
@@ -912,6 +933,16 @@ impl Inner {
                     record: Box::new(record),
                     error,
                 };
+            }
+            if record.status.get() == TurnStatus::CancelRequested {
+                return self.cancel_claimed_record(record);
+            }
+            if record.status.get() == TurnStatus::Running
+                && recovery == RunnerFailureRecovery::RedriveIfCheckpointless
+                && !self.run_has_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
+                && record.claim_count < u64::from(self.limits.max_crash_recovery_reclaims)
+            {
+                return self.requeue_checkpointless_runner_failure(record);
             }
             self.cancel_or_fail_claimed_record(record, failure)
         })();
@@ -1417,6 +1448,7 @@ impl TurnRunTransitionPort for TurnStateEngine {
                 request.runner_id,
                 request.lease_token,
                 request.failure,
+                request.recovery,
             )
         };
         self.persist_terminal_cleanup(request.run_id, gate_persisted, &result)

@@ -542,6 +542,7 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
         &self,
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
+        _observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
         if err.kind == ironclaw_host_api::FailureKind::PolicyDenied {
             return RecoveryOutcome::Retry {
@@ -576,6 +577,7 @@ impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
         &self,
         state: &LoopExecutionState,
         _err: &CapabilityErrorSummary,
+        _observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
         RecoveryOutcome::Abort {
             recovery: state.recovery_state.clone(),
@@ -592,6 +594,47 @@ impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
             recovery: state.recovery_state.clone(),
             scope: RetryScope::Call,
             alter: Some(RetryAlteration::ShrinkContext),
+        }
+    }
+}
+
+pub(super) struct RequireStructuredCapabilityObservationRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for RequireStructuredCapabilityObservationRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+        observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
+    ) -> RecoveryOutcome {
+        let saw_invalid_input = observation.is_some_and(|observation| {
+            matches!(
+                &observation.detail,
+                ironclaw_turns::run_profile::ToolObservationDetail::InvalidInput { issues }
+                    if issues.iter().any(|issue| issue.path == "file_path")
+            )
+        });
+        if saw_invalid_input {
+            RecoveryOutcome::ToolErrorResult {
+                recovery: state.recovery_state.clone(),
+            }
+        } else {
+            RecoveryOutcome::Abort {
+                recovery: state.recovery_state.clone(),
+                failure_kind: LoopFailureKind::DriverBug,
+            }
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::DriverBug,
         }
     }
 }
@@ -1314,6 +1357,19 @@ pub(super) fn family_with_shrink_context_call_scope_recovery() -> LoopFamily {
     let version = ComponentIdentity::from_static(
         "executor-shrink-context-call-scope-test",
         ComponentDigest([9; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_requiring_structured_capability_observation() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_recovery(Arc::new(
+        RequireStructuredCapabilityObservationRecoveryStrategy,
+    ));
+    let id = LoopFamilyId::new("executor-structured-capability-observation-test")
+        .expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-structured-capability-observation-test",
+        ComponentDigest([11; 32]),
     );
     LoopFamily::new(id, version, Arc::new(planner))
 }

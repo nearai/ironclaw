@@ -109,6 +109,47 @@ struct FailingExecutor {
     notify_started: Notify,
 }
 
+struct PreModelFailingExecutor {
+    failures_before_success: Option<usize>,
+    started: AtomicUsize,
+    notify_started: Notify,
+    claims: Mutex<Vec<(TurnRunId, AcceptedMessageRef)>>,
+}
+
+impl PreModelFailingExecutor {
+    fn fail_once() -> Self {
+        Self {
+            failures_before_success: Some(1),
+            started: AtomicUsize::new(0),
+            notify_started: Notify::new(),
+            claims: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn always_fail() -> Self {
+        Self {
+            failures_before_success: None,
+            started: AtomicUsize::new(0),
+            notify_started: Notify::new(),
+            claims: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn wait_for_started(&self, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            while self.started.load(Ordering::SeqCst) < expected {
+                self.notify_started.notified().await;
+            }
+        })
+        .await
+        .expect("pre-model executor did not start expected attempts");
+    }
+
+    fn claims(&self) -> Vec<(TurnRunId, AcceptedMessageRef)> {
+        self.claims.lock().unwrap().clone()
+    }
+}
+
 #[derive(Default)]
 struct PanickingExecutor {
     started: AtomicUsize,
@@ -164,6 +205,41 @@ impl TurnRunExecutor for FailingExecutor {
         self.started.fetch_add(1, Ordering::SeqCst);
         self.notify_started.notify_waiters();
         Err(TurnRunExecutorError::new("scheduler_test_error").unwrap())
+    }
+}
+
+#[async_trait]
+impl TurnRunExecutor for PreModelFailingExecutor {
+    async fn execute_claimed_run(
+        &self,
+        claimed: ClaimedTurnRun,
+        transitions: Arc<dyn TurnRunTransitionPort>,
+    ) -> Result<(), TurnRunExecutorError> {
+        self.claims.lock().unwrap().push((
+            claimed.state.run_id,
+            claimed.state.accepted_message_ref.clone(),
+        ));
+        let attempt = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+        self.notify_started.notify_waiters();
+        if self
+            .failures_before_success
+            .is_none_or(|failures| attempt <= failures)
+        {
+            return Err(TurnRunExecutorError::from_failure(
+                ironclaw_turns::SanitizedFailure::new("host_stage_unavailable_prompt")
+                    .unwrap()
+                    .with_detail("safe prompt construction detail"),
+            ));
+        }
+        transitions
+            .complete_run(CompleteRunRequest {
+                run_id: claimed.state.run_id,
+                runner_id: claimed.runner_id,
+                lease_token: claimed.lease_token,
+            })
+            .await
+            .unwrap();
+        Ok(())
     }
 }
 
@@ -1659,6 +1735,106 @@ async fn executor_error_fails_run_instead_of_retrying() {
     })
     .await
     .expect("run did not move to failed");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn pre_model_transient_failure_redrives_same_run_from_accepted_message() {
+    let store = Arc::new(in_memory_turn_state_store());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let executor = Arc::new(PreModelFailingExecutor::fail_once());
+    let scheduler =
+        TurnRunScheduler::new(Arc::clone(&transitions), executor.clone(), fast_config());
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-pre-model-redrive", "idem-pre-model-redrive");
+    let scope = request.scope.clone();
+    let response = coordinator.submit_turn(request).await.unwrap();
+    let SubmitTurnResponse::Accepted {
+        run_id,
+        accepted_message_ref,
+        ..
+    } = response;
+
+    executor.wait_for_started(2).await;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Completed {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("re-driven run did not complete");
+
+    let claims = executor.claims();
+    assert_eq!(claims.len(), 2);
+    assert!(
+        claims
+            .iter()
+            .all(|identity| identity == &(run_id, accepted_message_ref.clone())),
+        "redrive must preserve run identity and reconstruct from the same accepted message"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn pre_model_transient_failure_exhaustion_preserves_original_cause() {
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_crash_recovery_reclaims(2)),
+    );
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let executor = Arc::new(PreModelFailingExecutor::always_fail());
+    let scheduler =
+        TurnRunScheduler::new(Arc::clone(&transitions), executor.clone(), fast_config());
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-pre-model-exhaustion", "idem-pre-model-exhaustion");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    executor.wait_for_started(2).await;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Failed {
+                assert_eq!(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                    Some("host_stage_unavailable_prompt"),
+                    "bounded exhaustion must preserve the original sanitized cause"
+                );
+                assert_eq!(
+                    state.failure.as_ref().and_then(|failure| failure.detail()),
+                    Some("safe prompt construction detail"),
+                    "bounded exhaustion must preserve the redacted safe detail"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pre-model failure did not exhaust");
+    assert_eq!(executor.claims().len(), 2, "claim_count must bound redrive");
     handle.shutdown().await;
 }
 

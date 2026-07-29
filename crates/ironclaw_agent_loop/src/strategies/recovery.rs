@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{FailureFate, FailureKind};
 use ironclaw_turns::{
     LoopDiagnosticRef, LoopFailureKind, ModelInvalidOutputDetailReason,
-    run_profile::LoopSafeSummary,
+    run_profile::{LoopSafeSummary, ModelVisibleToolObservation},
 };
 
 use crate::state::{
@@ -30,10 +30,15 @@ use crate::state::{
 /// swaps it into the next whole state.
 #[async_trait]
 pub(crate) trait RecoveryStrategy: Send + Sync {
+    /// Decide recovery from the sanitized summary plus the exact bounded,
+    /// provenance-tagged observation the executor will expose to the model.
+    /// `None` is reserved for failures that intentionally have no model-visible
+    /// structured observation.
     async fn on_capability_error(
         &self,
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
+        observation: Option<&ModelVisibleToolObservation>,
     ) -> RecoveryOutcome;
 
     async fn on_model_error(
@@ -258,6 +263,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
         &self,
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
+        _observation: Option<&ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
         // Wildcard-free by construction: the four `FailureFate` arms are
         // exhaustive, and `FailureKind::fate` is itself wildcard-free over the
@@ -1138,7 +1144,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Cancelled))
+                .on_capability_error(&state, &cap_err(FailureKind::Cancelled), None)
                 .await;
 
             assert!(matches!(
@@ -1156,7 +1162,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::InputEncode))
+                .on_capability_error(&state, &cap_err(FailureKind::InputEncode), None)
                 .await;
 
             match outcome {
@@ -1177,7 +1183,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::OperationFailed))
+                .on_capability_error(&state, &cap_err(FailureKind::OperationFailed), None)
                 .await;
 
             match outcome {
@@ -1194,7 +1200,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied))
+                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied), None)
                 .await;
 
             match outcome {
@@ -1214,7 +1220,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::AuthRequired))
+                .on_capability_error(&state, &cap_err(FailureKind::AuthRequired), None)
                 .await;
 
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
@@ -1228,7 +1234,7 @@ mod tests {
                 let state =
                     state_with_attempts_for(attempts, RecoveryAttemptClass::CapabilityTransient);
                 let outcome = strategy
-                    .on_capability_error(&state, &cap_err(FailureKind::Transient))
+                    .on_capability_error(&state, &cap_err(FailureKind::Transient), None)
                     .await;
                 assert!(
                     matches!(
@@ -1244,7 +1250,7 @@ mod tests {
 
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Transient))
+                .on_capability_error(&state, &cap_err(FailureKind::Transient), None)
                 .await;
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
         }
@@ -1264,7 +1270,9 @@ mod tests {
                 ),
             ] {
                 let state = state_with_attempts_for(2, attempt_class);
-                let outcome = strategy.on_capability_error(&state, &cap_err(kind)).await;
+                let outcome = strategy
+                    .on_capability_error(&state, &cap_err(kind), None)
+                    .await;
                 assert!(
                     matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }),
                     "{kind:?} at retry budget should become a tool error, got {outcome:?}"
@@ -1283,7 +1291,9 @@ mod tests {
             let strategy = DefaultRecoveryStrategy::default();
             for &kind in FailureKind::ALL {
                 let state = state_with_no_attempts();
-                let outcome = strategy.on_capability_error(&state, &cap_err(kind)).await;
+                let outcome = strategy
+                    .on_capability_error(&state, &cap_err(kind), None)
+                    .await;
                 match kind.fate() {
                     FailureFate::Retry => {
                         assert!(
@@ -1607,7 +1617,7 @@ mod tests {
                 .with_incremented_attempts_for(RecoveryAttemptClass::CapabilityUnavailable);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Transient))
+                .on_capability_error(&state, &cap_err(FailureKind::Transient), None)
                 .await;
 
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
@@ -1619,7 +1629,7 @@ mod tests {
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Unavailable))
+                .on_capability_error(&state, &cap_err(FailureKind::Unavailable), None)
                 .await;
 
             match outcome {
@@ -1643,7 +1653,7 @@ mod tests {
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied))
+                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied), None)
                 .await;
             let RecoveryOutcome::ToolErrorResult { recovery } = outcome else {
                 panic!("expected policy denied tool error result");

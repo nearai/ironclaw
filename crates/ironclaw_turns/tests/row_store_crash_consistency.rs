@@ -74,7 +74,8 @@ use ironclaw_turns::{
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        RecordRunnerFailureRequest, RecoverExpiredLeasesRequest, RunnerFailureRecovery,
+        TurnRunTransitionPort,
     },
 };
 
@@ -2168,6 +2169,86 @@ async fn lease_expiry_requeues_checkpointless_run_as_redrivable() {
         Some(run_id),
         "a re-queued checkpoint-less run must be re-claimable so it re-drives"
     );
+}
+
+/// A graceful executor failure before the first checkpoint must survive a
+/// graceful process restart as the same queued run. The durable runner-lease
+/// retirement and row-store replay together preserve the accepted input
+/// identity and claim counter that bound subsequent re-drives.
+#[tokio::test]
+async fn checkpointless_runner_failure_redrive_survives_reopen_with_same_identity_and_bound() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+
+    let (run_id, turn_id, accepted_message_ref) = {
+        let store = open_row_store(Arc::clone(&scoped));
+        let run_id = submit_one(&store, &scope, "idem-runner-failure-redrive").await;
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let claimed = store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(scope.clone()),
+            })
+            .await
+            .unwrap()
+            .expect("initial claim");
+        let state = store
+            .record_runner_failure(RecordRunnerFailureRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                failure: SanitizedFailure::new("host_stage_unavailable_input")
+                    .unwrap()
+                    .with_detail("safe input drain detail"),
+                recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+            })
+            .await
+            .expect("checkpointless redrive transition");
+        assert_eq!(state.status, TurnStatus::Queued);
+        store.drain().await.expect("flush redrive before restart");
+        (
+            run_id,
+            claimed.state.turn_id,
+            claimed.state.accepted_message_ref,
+        )
+    };
+
+    let reopened = open_row_store(Arc::clone(&scoped));
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("requeued run survives reopen");
+    assert_eq!(state.status, TurnStatus::Queued);
+    assert_eq!(state.turn_id, turn_id);
+    assert_eq!(state.accepted_message_ref, accepted_message_ref);
+    assert!(state.failure.is_none(), "transient requeue is not terminal");
+
+    let snapshot = reopened.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .expect("requeued run is durable");
+    assert_eq!(run.claim_count, 1, "restart must preserve the retry bound");
+
+    let reclaimed = reopened
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope),
+        })
+        .await
+        .unwrap()
+        .expect("requeued run remains claimable after restart");
+    assert_eq!(reclaimed.state.run_id, run_id);
+    assert_eq!(reclaimed.state.turn_id, turn_id);
+    assert_eq!(reclaimed.state.accepted_message_ref, accepted_message_ref);
 }
 
 /// #6284 — the checkpoint-less re-drive loop is BOUNDED by `claim_count`. A run

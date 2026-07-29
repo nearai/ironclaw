@@ -4956,10 +4956,18 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    executor
-        .execute_family(&crate::families::default(), &host, state)
+    let exit = executor
+        .execute_family(
+            &family_requiring_structured_capability_observation(),
+            &host,
+            state,
+        )
         .await
         .expect("execute");
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the real caller must feed the strategy the same structured observation it appends"
+    );
 
     let appended = host.appended_result_refs();
     assert_eq!(appended.len(), 1);

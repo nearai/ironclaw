@@ -17,8 +17,9 @@ use ironclaw_turns::{
     BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
     InMemoryRunProfileResolver, InMemoryTurnEventSink, LifecyclePublicationErrorPort,
-    LifecyclePublishingTurnStateStore, LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping,
-    LoopGateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
+    LifecyclePublishingTurnStateStore, LoopBlockedKind, LoopCheckpointStateRef,
+    LoopCheckpointStore, LoopExitMapping, LoopGateRef, ProductTurnContext,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
     RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
@@ -35,12 +36,16 @@ use ironclaw_turns::{
     TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
     TurnStateStoreLimits, TurnStatus, TurnSurfaceType,
     events::EventCursor,
-    run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
+    run_profile::{
+        CheckpointSchemaId, LoopCheckpointKind, LoopGateKind, LoopModelRouteSnapshot,
+        LoopModelUsage,
+    },
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort, TurnRunnerOutcome,
+        RecoverExpiredLeasesResponse, RunnerFailureRecovery, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
     test_support::{in_memory_turn_state_store, in_memory_turns_filesystem},
 };
@@ -2466,6 +2471,7 @@ async fn lifecycle_publishing_store_publishes_record_runner_failure_as_failed_ev
             runner_id,
             lease_token,
             failure: SanitizedFailure::new("driver_timeout").unwrap(),
+            recovery: RunnerFailureRecovery::Terminal,
         })
         .await
         .unwrap();
@@ -4557,6 +4563,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
             runner_id,
             lease_token,
             failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            recovery: RunnerFailureRecovery::Terminal,
         })
         .await
         .unwrap();
@@ -8067,13 +8074,15 @@ async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled
         })
         .await
         .unwrap();
-    // Runner then records a terminal failure (e.g. driver error after cancel was requested).
+    // Runner then requests a checkpointless redrive after cancel was requested.
+    // Cancellation must win over automatic recovery.
     let state = transition_port
         .record_runner_failure(RecordRunnerFailureRequest {
             run_id,
             runner_id,
             lease_token,
             failure: SanitizedFailure::new("driver_timeout").unwrap(),
+            recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
         })
         .await
         .unwrap();
@@ -8360,6 +8369,71 @@ async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
     );
 }
 
+#[tokio::test]
+async fn runner_failure_redrive_never_restarts_a_run_that_recorded_a_checkpoint() {
+    let (coordinator, store) = coordinator();
+    let thread = "thread-rrf-checkpoint";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread, "idem-rrf-checkpoint-submit"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: claimed.state.scope.clone(),
+            turn_id: claimed.state.turn_id,
+            run_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:rrf-checkpoint:state").unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(1),
+            kind: LoopCheckpointKind::BeforeModel,
+            gate_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let failure = SanitizedFailure::new("host_stage_unavailable_prompt")
+        .unwrap()
+        .with_detail("safe prompt construction detail");
+    let state = store
+        .record_runner_failure(RecordRunnerFailureRequest {
+            run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            failure: failure.clone(),
+            recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(state.status, TurnStatus::Failed);
+    assert_eq!(state.failure, Some(failure));
+    assert!(
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(scope(thread)),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "any durable loop checkpoint must prevent a scratch redrive"
+    );
+}
+
 // L4: record_runner_failure produces terminal Failed with sanitized failure category preserved
 #[tokio::test]
 async fn record_runner_failure_produces_terminal_failed_with_sanitized_category() {
@@ -8387,6 +8461,7 @@ async fn record_runner_failure_produces_terminal_failed_with_sanitized_category(
             runner_id,
             lease_token,
             failure: SanitizedFailure::new("driver_timeout").unwrap(),
+            recovery: RunnerFailureRecovery::Terminal,
         })
         .await
         .unwrap();

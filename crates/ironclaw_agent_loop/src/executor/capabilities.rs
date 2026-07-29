@@ -959,7 +959,7 @@ impl CapabilityStage {
             match ctx
                 .planner
                 .recovery()
-                .on_capability_error(&state, &summary)
+                .on_capability_error(&state, &summary, model_observation.as_ref())
                 .await
             {
                 RecoveryOutcome::ModelErrorObservation { .. } => {

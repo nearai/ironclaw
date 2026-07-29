@@ -11,7 +11,8 @@ use ironclaw_turns::{
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
     runner::{
         ClaimRunsRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
-        RecoverExpiredLeasesRequest, RelinquishRunRequest, TurnRunTransitionPort,
+        RecoverExpiredLeasesRequest, RelinquishRunRequest, RunnerFailureRecovery,
+        TurnRunTransitionPort,
     },
 };
 use tokio::{
@@ -803,7 +804,7 @@ fn spawn_executor_task(
             match outcome {
                 ExecutorTaskOutcome::Completed => {}
                 ExecutorTaskOutcome::TerminalFailure(Some(failure)) => {
-                    if let Err(error) = record_terminal_failure(
+                    if let Err(error) = record_executor_failure(
                         Arc::clone(&transitions),
                         recovery_run_id,
                         recovery_runner_id,
@@ -817,7 +818,7 @@ fn spawn_executor_task(
                         debug!(
                             error = %error,
                             run_id = %recovery_run_id,
-                            "turn run scheduler terminal failure recording exhausted; relinquishing claimed run"
+                            "turn run scheduler executor failure transition exhausted; relinquishing claimed run"
                         );
                         if let Err(relinquish_error) = transitions
                             .relinquish_run(RelinquishRunRequest {
@@ -949,7 +950,7 @@ async fn heartbeat_claimed_run(
     }
 }
 
-async fn record_terminal_failure(
+async fn record_executor_failure(
     transitions: Arc<dyn TurnRunTransitionPort>,
     run_id: ironclaw_turns::TurnRunId,
     runner_id: ironclaw_turns::TurnRunnerId,
@@ -958,6 +959,7 @@ async fn record_terminal_failure(
     max_attempts: usize,
     retry_backoff: Duration,
 ) -> Result<(), TurnError> {
+    let recovery = runner_failure_recovery(&failure);
     for attempt in 1..=max_attempts {
         let result = transitions
             .record_runner_failure(RecordRunnerFailureRequest {
@@ -965,6 +967,7 @@ async fn record_terminal_failure(
                 runner_id,
                 lease_token,
                 failure: failure.clone(),
+                recovery,
             })
             .await;
         match result {
@@ -976,7 +979,7 @@ async fn record_terminal_failure(
                     attempt,
                     max_attempts,
                     retryable,
-                    "turn run scheduler terminal failure transition failed"
+                    "turn run scheduler executor failure transition failed"
                 );
                 if !retryable || attempt == max_attempts {
                     return Err(error);
@@ -986,6 +989,23 @@ async fn record_terminal_failure(
         tokio::time::sleep(retry_backoff).await;
     }
     Ok(())
+}
+
+fn runner_failure_recovery(failure: &SanitizedFailure) -> RunnerFailureRecovery {
+    // These categories are emitted only while draining input or constructing
+    // the capability surface/context/prompt before `BeforeModel`. The store
+    // still owns the authoritative checkpoint and claim-bound checks, so a
+    // mislabeled or racing later failure cannot restart side effects.
+    if matches!(
+        failure.category(),
+        "host_stage_unavailable_input"
+            | "host_stage_unavailable_prompt"
+            | "host_stage_unavailable_capability"
+    ) {
+        RunnerFailureRecovery::RedriveIfCheckpointless
+    } else {
+        RunnerFailureRecovery::Terminal
+    }
 }
 
 fn scheduler_failure(category: &'static str) -> Option<SanitizedFailure> {
