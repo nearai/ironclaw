@@ -211,7 +211,7 @@ async fn normalized_user_memberships_survive_runtime_restart_and_soft_removal() 
 
     let filesystem = rebuilt
         .runtime
-        .local_dev_profile_filesystem_for_test()
+        .standalone_profile_filesystem_for_test()
         .expect("local-dev profile filesystem");
     for collection in ["installations", "memberships"] {
         let rows = filesystem
