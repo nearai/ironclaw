@@ -41,6 +41,7 @@ mod support;
 
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::extension_surface::BUNDLED_EXTENSION_CAPABILITY_IDS;
 use reborn_support::reply::RebornScriptedReply;
 
 /// Bridge meta-tool names (`tool_disclosure.rs`'s `TOOL_SEARCH_NAME`/
@@ -61,6 +62,17 @@ const FLAT_GITHUB_TOOL_NAME: &str = "github__get_repo";
 
 /// Flat first-party tool (wire form) for the below-caps threshold control.
 const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
+
+/// More than `DisclosureCaps::default().max_tools` GitHub capabilities while
+/// still excluding the tail of the catalog, so narrowed deferred-mode tests
+/// exercise both bridge availability and metadata filtering.
+const WIDE_EFFECTIVE_GITHUB_CAPABILITY_COUNT: usize = 33;
+
+fn wide_effective_github_allowlist() -> impl Iterator<Item = &'static str> {
+    BUNDLED_EXTENSION_CAPABILITY_IDS[..WIDE_EFFECTIVE_GITHUB_CAPABILITY_COUNT]
+        .iter()
+        .copied()
+}
 
 /// Bridged mode + a catalog over `DisclosureCaps::default().max_tools` (48
 /// github capabilities > 32): `select_active_set` defers, so the model sees
@@ -159,98 +171,72 @@ async fn bridged_mode_below_caps_keeps_the_flat_list() {
         .expect("no bridge meta tools below the disclosure caps");
 }
 
-/// #5647 regression: a narrowed capability allow-set atop Bridged-mode
-/// deferral must not strip the synthetic `ironclaw.*` bridge ids — they are
-/// host-exempt in `CapabilitySurfaceProfileFilter`, not granted capabilities.
+/// Selector-budget regression: a physically wide catalog with only one
+/// permitted capability is effectively below the disclosure caps. The one
+/// permitted tool stays flat and directly callable; no bridge is advertised.
 #[tokio::test]
-async fn bridged_mode_survives_narrowed_capability_allow_set() {
+async fn bridged_mode_single_permitted_tool_stays_flat_and_direct() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
         .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
-        .script([RebornScriptedReply::text("done")])
-        .build()
-        .await
-        .expect("narrowed bridged-disclosure harness builds");
-
-    harness.submit_turn("hello").await.expect("turn completes");
-
-    harness
-        .assert_model_tools_contains(TOOL_SEARCH_NAME)
-        .await
-        .expect(
-            "bridge ids are host-owned synthesis, not real capabilities — \
-                 a narrowed allow-set must not strip them from a deferred catalog",
-        );
-    harness
-        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
-        .await
-        .expect("deferral still replaces the flat list under a narrowed profile");
-}
-
-/// Empty allow-set boundary: host-owned bridge synthesis remains reachable,
-/// but the bridge must expose no underlying catalog names or results, and a
-/// direct call to a catalog capability must still fail before dispatch.
-#[tokio::test]
-async fn empty_allow_set_keeps_bridges_without_disclosing_tools() {
-    let harness = RebornIntegrationHarness::test_default()
-        .with_tool_disclosure_bridged()
-        .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test([])
         .script([
-            RebornScriptedReply::tool_call(
-                TOOL_SEARCH_NAME,
-                serde_json::json!({"query": "github", "limit": 20}),
-            ),
             RebornScriptedReply::tool_call(
                 "github.get_repo",
                 serde_json::json!({"owner": "octo", "repo": "demo"}),
             ),
+            RebornScriptedReply::text("done"),
         ])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("inspect the permitted repository")
+        .await
+        .expect("direct permitted tool call completes");
+
+    harness
+        .assert_model_tools_contains(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("the sole permitted tool stays on the flat model surface");
+    harness
+        .assert_model_tools_excludes(TOOL_SEARCH_NAME)
+        .await
+        .expect("an effectively below-cap surface must not advertise tool_search");
+    harness
+        .assert_network_egress_count(1)
+        .await
+        .expect("the permitted flat tool remains directly callable");
+}
+
+/// Empty effective surface: no real tool or synthetic bridge is advertised.
+/// The test drives a normal text turn and inspects the actual model tool list;
+/// it does not guess a bridge name that the empty surface never offered.
+#[tokio::test]
+async fn empty_allow_set_advertises_no_tools() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test([])
+        .script([RebornScriptedReply::text("done")])
         .build()
         .await
         .expect("empty-allow-set bridged-disclosure harness builds");
 
-    let run_id = harness
-        .submit_turn_async("find a GitHub tool, then call it directly")
+    harness
+        .submit_turn("answer without tools")
         .await
-        .expect("turn submits");
-    let state = harness
-        .wait_for_status(run_id, TurnStatus::Failed)
-        .await
-        .expect("direct underlying call is denied");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("a Failed run must carry a failure detail");
-    assert_eq!(failure.category(), "model_unavailable", "got {failure:?}");
+        .expect("text-only turn completes");
 
     harness
-        .assert_model_tools_contains(TOOL_SEARCH_NAME)
+        .assert_model_tools_empty()
         .await
-        .expect("the host-owned tool_search bridge remains advertised");
-    harness
-        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
-        .await
-        .expect("no underlying tool is advertised directly");
-    harness
-        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__")
-        .await
-        .expect("tool_search's catalog index exposes no underlying tool names");
-
-    let output = harness
-        .tool_result_output("ironclaw.tool_search")
-        .await
-        .expect("tool_search result recorded");
-    let results = output["results"].as_array().expect("results is an array");
-    assert!(
-        results.is_empty(),
-        "an empty allow-set must expose no tool_search results: {results:?}"
-    );
+        .expect("an empty effective allow-set advertises no tools or bridges");
     harness
         .assert_network_egress_count(0)
         .await
-        .expect("a direct underlying call must be denied before dispatch");
+        .expect("an empty surface performs no capability side effects");
 }
 
 /// #5647 trust boundary: the bridge-id exemption must not widen access to
@@ -296,18 +282,19 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .expect("a non-allowlisted underlying tool must never reach dispatch");
 }
 
-/// #5659-w6 follow-up: the tool_search bridge's own advertised *description*
+/// #5659-w6 follow-up: a genuinely wide effective allow-set still defers and
+/// keeps the tool_search bridge, whose own advertised *description*
 /// (the always-on catalog index of discoverable tool names, see
 /// `catalog_index_tool_search_description`) must be narrowed by the caller's
 /// allow-set too — not just tool_search RESULTS and tool_describe (#5712).
 /// The bridge id is host-exempt from the outer `CapabilitySurfaceProfileFilter`
 /// (#5647) so nothing else strips a leaked name out of that description text.
 #[tokio::test]
-async fn bridged_mode_tool_search_description_is_narrowed_by_allow_set() {
+async fn bridged_mode_wide_effective_allow_set_keeps_narrowed_tool_search_description() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .with_narrowed_capability_allow_set_for_bridged_test(wide_effective_github_allowlist())
         .script([RebornScriptedReply::text("done")])
         .build()
         .await
@@ -327,7 +314,7 @@ async fn bridged_mode_tool_search_description_is_narrowed_by_allow_set() {
                  advertised description index — narrowing must not empty the index outright",
         );
     harness
-        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__list_issues")
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__handle_webhook")
         .await
         .expect(
             "non-allowlisted tool name must not leak via tool_search's own \
@@ -343,7 +330,7 @@ async fn narrowed_allow_set_filters_tool_search_results() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .with_narrowed_capability_allow_set_for_bridged_test(wide_effective_github_allowlist())
         .script([
             RebornScriptedReply::tool_call(
                 "tool_search",
@@ -369,10 +356,13 @@ async fn narrowed_allow_set_filters_tool_search_results() {
         !results.is_empty(),
         "query must still match the allowlisted github.get_repo"
     );
+    let allowed: std::collections::BTreeSet<&str> = wide_effective_github_allowlist().collect();
     for result in results {
-        assert_eq!(
-            result["capability_id"].as_str(),
-            Some("github.get_repo"),
+        let capability_id = result["capability_id"]
+            .as_str()
+            .expect("search result capability id");
+        assert!(
+            allowed.contains(capability_id),
             "non-allowlisted capability metadata leaked into tool_search results: {result}"
         );
     }

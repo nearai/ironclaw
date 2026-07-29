@@ -204,24 +204,24 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         let Some(state) = state.as_ref() else {
             return Ok(Vec::new());
         };
-        let catalog_total_count = state.catalog.len();
-        let catalog_total_schema_tokens = state.catalog.total_schema_tokens();
+        let (effective_catalog_count, effective_catalog_schema_tokens) =
+            state.catalog.effective_metrics(&self.allow_set);
         // Live token savings = how much of the full (authorized) tool surface we
         // avoided advertising this turn. Lets a benchmark/live run report the
         // real reduction directly from one log line (the fixture benchmark can't,
         // since its names are decoupled from the real core).
-        let reduction_pct = if catalog_total_schema_tokens > 0 {
+        let reduction_pct = if effective_catalog_schema_tokens > 0 {
             100.0
                 * (1.0
                     - (f64::from(state.active.advertised_tokens)
-                        / f64::from(catalog_total_schema_tokens)))
+                        / f64::from(effective_catalog_schema_tokens)))
         } else {
             0.0
         };
         debug!(
             target: "ironclaw::reborn::context_shadow",
-            catalog_total_count,
-            catalog_total_schema_tokens,
+            effective_catalog_count,
+            effective_catalog_schema_tokens,
             advertised_tool_count = state.active.definitions.len(),
             advertised_tool_schema_tokens = state.active.advertised_tokens,
             deferred = state.active.deferred,

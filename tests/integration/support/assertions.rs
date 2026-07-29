@@ -452,6 +452,28 @@ impl RebornIntegrationHarness {
         Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
     }
 
+    /// Assert that at least one model request was captured and every captured
+    /// `tools` argument was empty. This is the positive boundary assertion for
+    /// an effective empty capability allow-set; unlike `assert_model_tools_excludes`,
+    /// an empty surface is the expected signal rather than a vacuous failure.
+    pub async fn assert_model_tools_empty(&self) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        if definitions.is_empty() {
+            return Err(
+                "no model requests captured; cannot prove the tool surface was empty".into(),
+            );
+        }
+        let seen: Vec<String> = definitions
+            .iter()
+            .flatten()
+            .map(|definition| definition.name.clone())
+            .collect();
+        if seen.is_empty() {
+            return Ok(());
+        }
+        Err(format!("expected an empty model tool surface; saw {seen:?}").into())
+    }
+
     /// Assert the captured `tools` argument's definition named `name` has a
     /// `description` field that does NOT contain `needle`, on every request
     /// where that definition appears. Complements

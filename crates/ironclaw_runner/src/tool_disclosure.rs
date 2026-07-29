@@ -92,7 +92,6 @@ pub(crate) enum ToolTier {
 #[derive(Debug, Clone)]
 pub(crate) struct CapabilityCatalog {
     entries: Vec<CatalogEntry>,
-    total_schema_tokens: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -157,21 +156,30 @@ impl CapabilityCatalog {
             })
             .collect();
         entries.sort_by(|left, right| left.definition.name.cmp(&right.definition.name));
-        let total_schema_tokens = entries.iter().fold(0_u32, |total, entry| {
-            total.saturating_add(entry.est_schema_tokens)
-        });
-        CapabilityCatalog {
-            entries,
-            total_schema_tokens,
-        }
+        CapabilityCatalog { entries }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub(crate) fn total_schema_tokens(&self) -> u32 {
-        self.total_schema_tokens
+    fn effective_entries<'a>(
+        &'a self,
+        allow_set: &'a CapabilityAllowSet,
+    ) -> impl Iterator<Item = &'a CatalogEntry> + 'a {
+        self.entries
+            .iter()
+            .filter(|entry| allow_set.permits(&entry.definition.capability_id))
+    }
+
+    pub(crate) fn effective_metrics(&self, allow_set: &CapabilityAllowSet) -> (usize, u32) {
+        self.effective_entries(allow_set)
+            .fold((0, 0_u32), |(count, tokens), entry| {
+                (
+                    count.saturating_add(1),
+                    tokens.saturating_add(entry.est_schema_tokens),
+                )
+            })
     }
 
     fn entry_by_name(&self, name: &str) -> Option<&CatalogEntry> {
@@ -588,26 +596,29 @@ pub(crate) fn select_active_set(
     caps: DisclosureCaps,
     allow_set: &CapabilityAllowSet,
 ) -> ActiveSet {
-    if catalog.total_schema_tokens() <= caps.defer_threshold_tokens()
-        && catalog.len() <= caps.max_tools
+    let effective_entries: Vec<&CatalogEntry> = catalog.effective_entries(allow_set).collect();
+    let effective_schema_tokens = effective_entries.iter().fold(0_u32, |total, entry| {
+        total.saturating_add(entry.est_schema_tokens)
+    });
+    if effective_schema_tokens <= caps.defer_threshold_tokens()
+        && effective_entries.len() <= caps.max_tools
     {
         return ActiveSet {
-            definitions: catalog
-                .entries
+            definitions: effective_entries
                 .iter()
                 .map(|entry| entry.definition.clone())
                 .collect(),
             deferred: false,
-            advertised_tokens: catalog.total_schema_tokens(),
+            advertised_tokens: effective_schema_tokens,
         };
     }
 
     let mut core_definitions = Vec::new();
     let mut core_names: HashSet<String> = HashSet::new();
 
-    for entry in catalog
-        .entries
+    for entry in effective_entries
         .iter()
+        .copied()
         .filter(|entry| entry.tier == ToolTier::Core)
     {
         if core_names.insert(entry.definition.name.to_string()) {
@@ -615,7 +626,6 @@ pub(crate) fn select_active_set(
         }
     }
 
-    let threshold_tokens = caps.defer_threshold_tokens();
     let core_tokens = sum_definition_tokens(&core_definitions);
     let mut advertised_non_bridge_count = core_definitions.len();
 
@@ -630,8 +640,8 @@ pub(crate) fn select_active_set(
             core_definitions
                 .len()
                 .saturating_add(bridge_definitions.len()),
-            threshold_tokens,
-            caps.max_tools,
+            caps,
+            allow_set,
         );
         let next_advertised_non_bridge_count = core_definitions
             .len()
@@ -791,20 +801,25 @@ fn select_promoted_definitions(
     core_names: &HashSet<String>,
     mut advertised_tokens: u32,
     mut advertised_count: usize,
-    threshold_tokens: u32,
-    max_tools: usize,
+    caps: DisclosureCaps,
+    allow_set: &CapabilityAllowSet,
 ) -> Vec<(ProviderToolDefinition, u32)> {
     let mut selected = Vec::new();
     let mut included_names = core_names.clone();
     for name in promoted.iter() {
         if let Some(entry) = catalog.entry_by_name(name) {
+            if !allow_set.permits(&entry.definition.capability_id) {
+                continue;
+            }
             if included_names.contains(name) {
                 continue;
             }
-            if advertised_count >= max_tools {
+            if advertised_count >= caps.max_tools {
                 break;
             }
-            if advertised_tokens.saturating_add(entry.est_schema_tokens) > threshold_tokens {
+            if advertised_tokens.saturating_add(entry.est_schema_tokens)
+                > caps.defer_threshold_tokens()
+            {
                 break;
             }
             included_names.insert(entry.definition.name.to_string());
@@ -1382,7 +1397,148 @@ mod tests {
 
         assert!(!active.deferred);
         assert_eq!(active.definitions.len(), 2);
-        assert_eq!(active.advertised_tokens, catalog.total_schema_tokens());
+        assert_eq!(
+            active.advertised_tokens,
+            catalog.effective_metrics(&CapabilityAllowSet::All).1
+        );
+    }
+
+    #[test]
+    fn select_active_set_applies_thresholds_to_effective_allowlisted_catalog() {
+        let mut definitions = vec![fixture_tool(
+            "allowed_tool",
+            "Allowed",
+            small_no_arg_schema(),
+        )];
+        for index in 0..40 {
+            definitions.push(fixture_tool(
+                format!("denied_tool_{index:02}"),
+                "Denied",
+                medium_schema(index),
+            ));
+        }
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allow_set = CapabilityAllowSet::allowlist([
+            CapabilityId::new("fixture.allowed_tool").expect("valid allowed capability id")
+        ]);
+
+        let active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps::default(),
+            &allow_set,
+        );
+
+        assert!(catalog.len() > DisclosureCaps::default().max_tools);
+        assert_eq!(catalog.effective_metrics(&allow_set).0, 1);
+        assert!(
+            !active.deferred,
+            "one effective tool stays on the flat surface"
+        );
+        assert_eq!(
+            active
+                .definitions
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["allowed_tool"]
+        );
+        assert_eq!(
+            active.advertised_tokens,
+            catalog
+                .entry_by_name("allowed_tool")
+                .expect("allowed entry")
+                .est_schema_tokens
+        );
+    }
+
+    #[test]
+    fn select_active_set_denied_core_does_not_consume_deferred_caps() {
+        let definitions = vec![
+            fixture_tool("read_file", "Denied core", medium_schema(0)),
+            fixture_tool("memory_search", "Allowed core", medium_schema(1)),
+            fixture_tool("allowed_extra_1", "Allowed extra", medium_schema(2)),
+            fixture_tool("allowed_extra_2", "Allowed extra", medium_schema(3)),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allow_set = CapabilityAllowSet::allowlist(
+            [
+                "fixture.memory_search",
+                "fixture.allowed_extra_1",
+                "fixture.allowed_extra_2",
+            ]
+            .into_iter()
+            .map(|id| CapabilityId::new(id).expect("valid allowed capability id")),
+        );
+
+        let active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps {
+                max_tokens: u32::MAX,
+                max_tools: 2,
+                ctx_limit: None,
+            },
+            &allow_set,
+        );
+        let names = active
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(active.deferred);
+        assert_eq!(names, vec!["memory_search", TOOL_SEARCH_NAME]);
+        assert!(!names.contains(&"read_file"));
+        assert_eq!(active.definitions.len(), 2);
+    }
+
+    #[test]
+    fn select_active_set_skips_denied_promotions_before_budget_break() {
+        let definitions = vec![
+            fixture_tool("read_file", "Allowed core", medium_schema(0)),
+            fixture_tool("denied_promoted", "Denied promoted", large_nested_schema(1)),
+            fixture_tool("allowed_promoted", "Allowed promoted", medium_schema(2)),
+            fixture_tool("allowed_extra_1", "Allowed extra", medium_schema(3)),
+            fixture_tool("allowed_extra_2", "Allowed extra", medium_schema(4)),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allow_set = CapabilityAllowSet::allowlist(
+            [
+                "fixture.read_file",
+                "fixture.allowed_promoted",
+                "fixture.allowed_extra_1",
+                "fixture.allowed_extra_2",
+            ]
+            .into_iter()
+            .map(|id| CapabilityId::new(id).expect("valid allowed capability id")),
+        );
+        let mut promoted = PromotedSet::default();
+        promoted.push("denied_promoted");
+        promoted.push("allowed_promoted");
+
+        let active = select_active_set(
+            &catalog,
+            &promoted,
+            DisclosureCaps {
+                max_tokens: u32::MAX,
+                max_tools: 3,
+                ctx_limit: None,
+            },
+            &allow_set,
+        );
+        let names = active
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(active.deferred);
+        assert_eq!(
+            names,
+            vec!["read_file", TOOL_SEARCH_NAME, "allowed_promoted"]
+        );
+        assert!(!names.contains(&"denied_promoted"));
     }
 
     #[test]
@@ -1517,7 +1673,7 @@ mod tests {
                     .est_schema_tokens,
             );
         assert!(
-            catalog.total_schema_tokens() > token_threshold,
+            catalog.effective_metrics(&CapabilityAllowSet::All).1 > token_threshold,
             "fixture must force deferred mode by token budget"
         );
         let by_tokens = select_active_set(
@@ -1778,7 +1934,7 @@ mod tests {
         let definitions = representative_tool_fixture();
         let catalog = CapabilityCatalog::new(&definitions, &[]);
         let full_count = catalog.len();
-        let full_tokens = catalog.total_schema_tokens();
+        let full_tokens = catalog.effective_metrics(&CapabilityAllowSet::All).1;
 
         let disclosed = select_active_set(
             &catalog,
