@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{LoopDiagnosticRef, LoopGateRef};
+use crate::LoopGateRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,8 +128,6 @@ pub struct AgentLoopHostError {
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_ref: Option<LoopGateRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
     /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
     /// carries the original error text (paths, codes, schema refs) so the model
     /// can retry or explain. Secret VALUES are redacted by the producer via
@@ -146,7 +144,6 @@ impl AgentLoopHostError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
-            diagnostic_ref: None,
             detail: None,
         }
     }
@@ -163,11 +160,6 @@ impl AgentLoopHostError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
-        self
-    }
-
-    pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
-        self.diagnostic_ref = Some(diagnostic_ref);
         self
     }
 }

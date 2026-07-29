@@ -76,6 +76,9 @@ jobs:
     secrets: inherit
     with:
       ref: ${{ github.sha }}
+      # Workstream 9 of #6524: longer generated lifecycle orderings than a
+      # pull request can afford (84 sequences vs 20).
+      deep_generations: true
 
   reborn-e2e:
     name: Reborn E2E

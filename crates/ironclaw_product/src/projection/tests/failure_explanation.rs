@@ -83,6 +83,16 @@ async fn product_event_stream_projects_scheduler_executor_panic_summary() {
 }
 
 #[tokio::test]
+async fn product_event_stream_projects_crash_retry_exhausted_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-crash-retry-exhausted-thread",
+        "crash_retry_exhausted",
+        "The run could not be recovered after repeated runner crashes. Retry the request, and contact support if it happens again.",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn product_event_stream_projects_unknown_failure_summary_without_echoing_code() {
     assert_failed_run_status_summary(
         "webui-events-unknown-thread",

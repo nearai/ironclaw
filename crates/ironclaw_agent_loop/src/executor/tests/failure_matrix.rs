@@ -314,9 +314,9 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .with_batch_outcomes(vec![batch_outcome(resolution::failed(
                 FailureKind::OperationFailed,
                 "permanent protocol failure".to_string(),
-                Some(CapabilityFailureDetail::Diagnostic {
+                CapabilityFailureDetail::Diagnostic {
                     text: OPERATION_FAILED_CAPABILITY_DETAIL.to_string(),
-                }),
+                },
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -339,9 +339,9 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .with_batch_outcomes(vec![batch_outcome(resolution::failed(
                 FailureKind::OutputDecode,
                 INVALID_OUTPUT_CAPABILITY_SUMMARY.to_string(),
-                Some(CapabilityFailureDetail::Diagnostic {
+                CapabilityFailureDetail::Diagnostic {
                     text: INVALID_OUTPUT_CAPABILITY_DETAIL.to_string(),
-                }),
+                },
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -702,7 +702,13 @@ fn batch_outcome(outcome: ironclaw_host_api::Resolution) -> ironclaw_host_api::R
 }
 
 fn failed_capability(error_kind: FailureKind, safe_summary: &str) -> ironclaw_host_api::Resolution {
-    resolution::failed(error_kind, safe_summary.to_string(), None)
+    resolution::failed(
+        error_kind,
+        safe_summary.to_string(),
+        CapabilityFailureDetail::Diagnostic {
+            text: safe_summary.to_string(),
+        },
+    )
 }
 
 fn batch_outcome_stopped(
