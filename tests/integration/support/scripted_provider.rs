@@ -226,8 +226,20 @@ impl RecoverableModelFailureScript {
 
 #[derive(Default)]
 struct ModelProviderCallRecords {
-    interactive_requests: Vec<Vec<String>>,
-    text_requests: Vec<Vec<String>>,
+    requests: Vec<ModelProviderCallRecord>,
+}
+
+enum ModelProviderCallRecord {
+    Interactive(Vec<String>),
+    Text(Vec<String>),
+}
+
+impl ModelProviderCallRecord {
+    fn messages(&self) -> &[String] {
+        match self {
+            Self::Interactive(messages) | Self::Text(messages) => messages,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -241,27 +253,38 @@ impl ModelProviderCallProbe {
             .collect();
         let mut records = lock(&self.0);
         if interactive {
-            records.interactive_requests.push(contents);
+            records
+                .requests
+                .push(ModelProviderCallRecord::Interactive(contents));
         } else {
-            records.text_requests.push(contents);
+            records
+                .requests
+                .push(ModelProviderCallRecord::Text(contents));
         }
     }
 
     pub fn interactive_calls(&self) -> usize {
-        lock(&self.0).interactive_requests.len()
+        lock(&self.0)
+            .requests
+            .iter()
+            .filter(|request| matches!(request, ModelProviderCallRecord::Interactive(_)))
+            .count()
     }
 
     pub fn text_calls(&self) -> usize {
-        lock(&self.0).text_requests.len()
+        lock(&self.0)
+            .requests
+            .iter()
+            .filter(|request| matches!(request, ModelProviderCallRecord::Text(_)))
+            .count()
     }
 
     pub fn message_content_occurrences(&self, needle: &str) -> usize {
         let records = lock(&self.0);
         records
-            .interactive_requests
+            .requests
             .iter()
-            .chain(&records.text_requests)
-            .flatten()
+            .flat_map(ModelProviderCallRecord::messages)
             .map(|content| content.matches(needle).count())
             .sum()
     }
@@ -269,26 +292,48 @@ impl ModelProviderCallProbe {
     pub fn message_content_contains(&self, needle: &str) -> bool {
         let records = lock(&self.0);
         records
-            .interactive_requests
+            .requests
             .iter()
-            .chain(&records.text_requests)
-            .flatten()
+            .flat_map(ModelProviderCallRecord::messages)
             .any(|content| content.contains(needle))
     }
 
-    pub fn text_message_content_contains(&self, needle: &str) -> bool {
-        lock(&self.0)
-            .text_requests
-            .iter()
-            .flatten()
-            .any(|content| content.contains(needle))
+    pub fn text_message_content_contains(&self, needle: &str) -> Option<bool> {
+        let records = lock(&self.0);
+        let mut text_requests = records.requests.iter().filter_map(|request| match request {
+            ModelProviderCallRecord::Text(messages) => Some(messages),
+            ModelProviderCallRecord::Interactive(_) => None,
+        });
+        let first = text_requests.next()?;
+        Some(
+            first
+                .iter()
+                .chain(text_requests.flatten())
+                .any(|content| content.contains(needle)),
+        )
     }
 
-    pub fn last_interactive_message_content_contains(&self, needle: &str) -> bool {
-        lock(&self.0)
-            .interactive_requests
-            .last()
-            .is_some_and(|messages| messages.iter().any(|content| content.contains(needle)))
+    pub fn post_text_interactive_message_content_contains(&self, needle: &str) -> Option<bool> {
+        let records = lock(&self.0);
+        let last_text = records
+            .requests
+            .iter()
+            .rposition(|request| matches!(request, ModelProviderCallRecord::Text(_)))?;
+        let mut interactive_requests = records
+            .requests
+            .iter()
+            .skip(last_text.saturating_add(1))
+            .filter_map(|request| match request {
+                ModelProviderCallRecord::Interactive(messages) => Some(messages),
+                ModelProviderCallRecord::Text(_) => None,
+            });
+        let first = interactive_requests.next()?;
+        Some(
+            first
+                .iter()
+                .chain(interactive_requests.flatten())
+                .any(|content| content.contains(needle)),
+        )
     }
 }
 
@@ -489,5 +534,58 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), gate.park())
             .await
             .expect("second park() call must return immediately, not block");
+    }
+
+    #[test]
+    fn call_probe_distinguishes_missing_and_leaking_boundary_traffic() {
+        let probe = ModelProviderCallProbe::default();
+        assert_eq!(probe.text_message_content_contains("secret"), None);
+        assert_eq!(
+            probe.post_text_interactive_message_content_contains("secret"),
+            None
+        );
+
+        lock(&probe.0)
+            .requests
+            .push(ModelProviderCallRecord::Text(vec![
+                "safe input".to_string(),
+            ]));
+        assert_eq!(probe.text_message_content_contains("secret"), Some(false));
+        assert_eq!(
+            probe.post_text_interactive_message_content_contains("secret"),
+            None
+        );
+
+        lock(&probe.0)
+            .requests
+            .push(ModelProviderCallRecord::Interactive(vec![
+                "leaked secret".to_string(),
+            ]));
+        lock(&probe.0)
+            .requests
+            .push(ModelProviderCallRecord::Interactive(vec![
+                "later clean request".to_string(),
+            ]));
+        assert_eq!(
+            probe.post_text_interactive_message_content_contains("secret"),
+            Some(true),
+            "a later clean retry must not hide an earlier post-compaction leak"
+        );
+
+        let clean_probe = ModelProviderCallProbe::default();
+        lock(&clean_probe.0)
+            .requests
+            .push(ModelProviderCallRecord::Text(vec![
+                "safe input".to_string(),
+            ]));
+        lock(&clean_probe.0)
+            .requests
+            .push(ModelProviderCallRecord::Interactive(vec![
+                "safe request".to_string(),
+            ]));
+        assert_eq!(
+            clean_probe.post_text_interactive_message_content_contains("secret"),
+            Some(false)
+        );
     }
 }

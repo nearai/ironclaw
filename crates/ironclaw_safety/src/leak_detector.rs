@@ -677,7 +677,7 @@ fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
                 // A missing END sentinel consumes the bounded remainder of the
                 // scanned content, which deliberately over-redacts fail-safe.
                 regex: Regex::new(
-                    r"-----BEGIN(?s:(?:\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$)))",
+                    r"-----BEGIN(?s:(?:\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$)|\s+ENCRYPTED\s+PRIVATE\s+KEY-----.*?(?:-----END\s+ENCRYPTED\s+PRIVATE\s+KEY-----|$)))",
                 )
                 .unwrap(), // safety: hardcoded literal
                 severity: LeakSeverity::Critical,
@@ -691,6 +691,19 @@ fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
                 name: "ssh_private_key".to_string(),
                 regex: Regex::new(
                     r"-----BEGIN(?s:(?:\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$)))",
+                )
+                .unwrap(), // safety: hardcoded literal
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        ),
+        // OpenPGP private-key armor
+        (
+            LeakPattern {
+                name: "pgp_private_key".to_string(),
+                regex: Regex::new(
+                    r"-----BEGIN(?s:\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----.*?(?:-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----|$))",
                 )
                 .unwrap(), // safety: hardcoded literal
                 severity: LeakSeverity::Critical,
@@ -910,7 +923,7 @@ mod tests {
     fn private_key_patterns_use_the_shared_begin_prefix_filter() {
         let detector = LeakDetector::new();
 
-        for pattern_name in ["pem_private_key", "ssh_private_key"] {
+        for pattern_name in ["pem_private_key", "ssh_private_key", "pgp_private_key"] {
             let pattern_index = detector
                 .patterns
                 .iter()
@@ -955,6 +968,8 @@ mod tests {
         for label in [
             "RSA PRIVATE KEY",
             "PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
             "OPENSSH PRIVATE KEY",
             "EC PRIVATE KEY",
             "DSA PRIVATE KEY",
@@ -981,7 +996,12 @@ mod tests {
     fn private_key_patterns_leave_public_key_near_misses_clean() {
         let detector = LeakDetector::new();
 
-        for label in ["RSA PUBLIC KEY", "OPENSSH PUBLIC KEY", "CERTIFICATE"] {
+        for label in [
+            "RSA PUBLIC KEY",
+            "OPENSSH PUBLIC KEY",
+            "PGP PUBLIC KEY BLOCK",
+            "CERTIFICATE",
+        ] {
             let content = format!(
                 "before\n-----BEGIN {label}-----\nPUBLIC_MATERIAL\n-----END {label}-----\nafter"
             );
@@ -997,6 +1017,8 @@ mod tests {
         for label in [
             "RSA PRIVATE KEY",
             "PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
             "OPENSSH PRIVATE KEY",
             "EC PRIVATE KEY",
             "DSA PRIVATE KEY",
@@ -1019,6 +1041,8 @@ mod tests {
         for (begin_label, mismatched_end_label) in [
             ("RSA PRIVATE KEY", "PRIVATE KEY"),
             ("PRIVATE KEY", "RSA PRIVATE KEY"),
+            ("ENCRYPTED PRIVATE KEY", "PRIVATE KEY"),
+            ("PGP PRIVATE KEY BLOCK", "PGP PUBLIC KEY BLOCK"),
             ("OPENSSH PRIVATE KEY", "EC PRIVATE KEY"),
             ("EC PRIVATE KEY", "DSA PRIVATE KEY"),
             ("DSA PRIVATE KEY", "EC PRIVATE KEY"),
@@ -2192,6 +2216,24 @@ mod tests {
             assert!(
                 elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "ssh_private_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn pgp_private_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            let chunk = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n";
+            let payload = chunk.repeat(3000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(result.is_clean());
+            assert!(
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
+                "pgp_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
         }

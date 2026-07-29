@@ -425,10 +425,11 @@ impl RebornIntegrationHarness {
             .model_provider_call_probe
             .as_ref()
             .ok_or("model provider call probe is not enabled for this harness")?;
-        if !probe.text_message_content_contains(needle) {
-            return Ok(());
+        match probe.text_message_content_contains(needle) {
+            Some(false) => Ok(()),
+            Some(true) => Err("text-only model message content contained forbidden content".into()),
+            None => Err("no text-only model request was captured".into()),
         }
-        Err("text-only model message content contained forbidden content".into())
     }
 
     /// Assert a text-only system-inference request received expected safe
@@ -441,15 +442,18 @@ impl RebornIntegrationHarness {
             .model_provider_call_probe
             .as_ref()
             .ok_or("model provider call probe is not enabled for this harness")?;
-        if probe.text_message_content_contains(needle) {
-            return Ok(());
+        match probe.text_message_content_contains(needle) {
+            Some(true) => Ok(()),
+            Some(false) => {
+                Err("text-only model message content omitted expected safe content".into())
+            }
+            None => Err("no text-only model request was captured".into()),
         }
-        Err("text-only model message content omitted expected safe content".into())
     }
 
-    /// Assert the next interactive request after compaction does not rehydrate
-    /// a secret from the persisted summary.
-    pub async fn assert_last_interactive_model_message_content_not_contains(
+    /// Assert every interactive request after the final text-only compaction
+    /// inference omits a secret from the persisted summary.
+    pub async fn assert_post_compaction_interactive_model_message_content_not_contains(
         &self,
         needle: &str,
     ) -> HarnessResult<()> {
@@ -457,10 +461,15 @@ impl RebornIntegrationHarness {
             .model_provider_call_probe
             .as_ref()
             .ok_or("model provider call probe is not enabled for this harness")?;
-        if !probe.last_interactive_message_content_contains(needle) {
-            return Ok(());
+        match probe.post_text_interactive_message_content_contains(needle) {
+            Some(false) => Ok(()),
+            Some(true) => {
+                Err("post-compaction interactive model message contained forbidden content".into())
+            }
+            None => {
+                Err("no interactive model request was captured after compaction inference".into())
+            }
         }
-        Err("last interactive model message content contained forbidden content".into())
     }
 
     /// Assert some SINGLE model request contains EVERY needle in `needles`
@@ -1241,22 +1250,6 @@ impl RebornIntegrationHarness {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::summary_contents_lack;
-
-    #[test]
-    fn summary_exclusion_rejects_missing_durable_artifacts() {
-        let error = summary_contents_lack(&[], "synthetic secret")
-            .expect_err("an empty artifact set must not prove exclusion");
-
-        assert_eq!(
-            error.to_string(),
-            "vacuous exclusion: zero durable summary artifacts persisted"
-        );
-    }
-}
-
 /// Redact a `data:<mime>;base64,<bytes>` URL for safe inclusion in an assertion
 /// failure message — never prints the base64 payload itself (which is the raw
 /// attachment content) or even a prefix of it. Reports the mime type, decoded
@@ -1656,5 +1649,21 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<()> {
         self.conversation_history_contains_impl(baseline, Some(kind), needle)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary_contents_lack;
+
+    #[test]
+    fn summary_exclusion_rejects_missing_durable_artifacts() {
+        let error = summary_contents_lack(&[], "synthetic secret")
+            .expect_err("an empty artifact set must not prove exclusion");
+
+        assert_eq!(
+            error.to_string(),
+            "vacuous exclusion: zero durable summary artifacts persisted"
+        );
     }
 }

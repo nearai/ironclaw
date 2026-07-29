@@ -6,6 +6,8 @@ use ironclaw_threads::MessageKind;
 use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
 
 const MAX_XML_ESCAPE_EXPANSION: usize = 5;
+const SUMMARY_OPEN_TAG: &str = "<summary>";
+const SUMMARY_CLOSE_TAG: &str = "</summary>";
 
 pub(super) struct SanitizedContent {
     pub(super) content: String,
@@ -45,8 +47,7 @@ impl<'a> CompactionSanitizer<'a> {
         let mut content = String::new();
         let mut redacted_leak_count = 0_u32;
         for message in messages {
-            let sanitized =
-                self.sanitize_retained_fragment(&message.body, Some(self.max_input_bytes))?;
+            let sanitized = self.sanitize_retained_fragment(&message.body, self.max_input_bytes)?;
             redacted_leak_count = redacted_leak_count
                 .checked_add(sanitized.redacted_leak_count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
@@ -70,11 +71,23 @@ impl<'a> CompactionSanitizer<'a> {
         &self,
         output_text: &str,
     ) -> Result<SanitizedContent, CompactionError> {
-        let sanitized = self.sanitize_retained_fragment(output_text, None)?;
-        let content = format!(
-            "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
-            sanitized.content
-        );
+        let envelope_bytes = ANTI_INJECTION_PREFIX
+            .len()
+            .checked_add(SUMMARY_OPEN_TAG.len())
+            .and_then(|bytes| bytes.checked_add(SUMMARY_CLOSE_TAG.len()))
+            .ok_or(CompactionError::LeakRedactionFailed)?;
+        let body_cap = self.max_input_bytes.checked_sub(envelope_bytes).ok_or(
+            CompactionError::InputTooLarge {
+                cap: self.max_input_bytes,
+                observed_bytes: envelope_bytes,
+            },
+        )?;
+        let sanitized = self.sanitize_retained_fragment(output_text, body_cap)?;
+        let mut content = String::new();
+        push_checked(&mut content, ANTI_INJECTION_PREFIX, self.max_input_bytes)?;
+        push_checked(&mut content, SUMMARY_OPEN_TAG, self.max_input_bytes)?;
+        push_checked(&mut content, &sanitized.content, self.max_input_bytes)?;
+        push_checked(&mut content, SUMMARY_CLOSE_TAG, self.max_input_bytes)?;
         self.validate_serialized_content(&content)?;
 
         Ok(SanitizedContent {
@@ -118,8 +131,9 @@ impl<'a> CompactionSanitizer<'a> {
     fn sanitize_retained_fragment(
         &self,
         content: &str,
-        max_escaped_bytes: Option<usize>,
+        max_escaped_bytes: usize,
     ) -> Result<SanitizedContent, CompactionError> {
+        ensure_within_cap(content, max_escaped_bytes)?;
         if !self.injection_scanner.scan_injection(content).is_empty() {
             return Err(CompactionError::InjectionDetected);
         }
@@ -134,10 +148,7 @@ impl<'a> CompactionSanitizer<'a> {
         {
             return Err(CompactionError::InjectionDetected);
         }
-        let escaped = match max_escaped_bytes {
-            Some(max_bytes) => escape_xml_checked(redacted_content, max_bytes)?,
-            None => escape_xml(redacted_content),
-        };
+        let escaped = escape_xml_checked(redacted_content, max_escaped_bytes)?;
         let escape_transformed_content = escaped != redacted_content;
         let escaped_redaction = if escape_transformed_content {
             self.redact_leaks(&escaped)?
@@ -148,6 +159,7 @@ impl<'a> CompactionSanitizer<'a> {
             }
         };
         let escaped_content = escaped_redaction.content.unwrap_or(escaped);
+        ensure_within_cap(&escaped_content, max_escaped_bytes)?;
         if (escape_transformed_content || escaped_redaction.count > 0)
             && !self
                 .injection_scanner
@@ -180,17 +192,17 @@ impl<'a> CompactionSanitizer<'a> {
             });
         }
         let redacted_leak_count = u32::try_from(scan.matches.len()).map_err(|error| {
-            tracing::error!(%error, "compaction leak match count exceeded telemetry bound");
+            tracing::debug!(%error, "compaction leak match count exceeded telemetry bound");
             CompactionError::LeakRedactionFailed
         })?;
         let redacted = scan
             .redact_all_matches(content)
             .map_err(|error| {
-                tracing::error!(%error, "compaction leak scanner returned an invalid range");
+                tracing::debug!(%error, "compaction leak scanner returned an invalid range");
                 CompactionError::LeakRedactionFailed
             })?
             .ok_or_else(|| {
-                tracing::error!("non-clean compaction leak scan produced no redacted content");
+                tracing::debug!("non-clean compaction leak scan produced no redacted content");
                 CompactionError::LeakRedactionFailed
             })?;
         if !self.leak_scanner.scan_leaks(&redacted).is_clean() {
@@ -322,11 +334,14 @@ fn push_checked(output: &mut String, segment: &str, cap: usize) -> Result<(), Co
     Ok(())
 }
 
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn ensure_within_cap(content: &str, cap: usize) -> Result<(), CompactionError> {
+    if content.len() > cap {
+        return Err(CompactionError::InputTooLarge {
+            cap,
+            observed_bytes: content.len(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

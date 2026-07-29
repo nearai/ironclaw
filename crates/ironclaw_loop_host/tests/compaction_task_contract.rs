@@ -284,17 +284,17 @@ async fn compaction_port_redacts_complete_private_keys_on_input_and_output() {
     fixture
         .append_user(concat!(
             "input before\n",
-            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\n",
             "INPUT_PRIVATE_KEY_MATERIAL\n",
-            "-----END RSA PRIVATE KEY-----\n",
+            "-----END ENCRYPTED PRIVATE KEY-----\n",
             "input after"
         ))
         .await;
     let inference = Arc::new(CapturingInference::new(concat!(
         "output before\n",
-        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\n",
         "OUTPUT_PRIVATE_KEY_MATERIAL\n",
-        "-----END OPENSSH PRIVATE KEY-----\n",
+        "-----END PGP PRIVATE KEY BLOCK-----\n",
         "output after"
     )));
     let port = fixture.port_with_inference(
@@ -687,6 +687,8 @@ async fn compaction_port_rejects_private_keys_split_across_message_boundaries() 
     for (index, label) in [
         "RSA PRIVATE KEY",
         "PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "PGP PRIVATE KEY BLOCK",
         "OPENSSH PRIVATE KEY",
         "EC PRIVATE KEY",
         "DSA PRIVATE KEY",
@@ -1312,6 +1314,62 @@ async fn compaction_task_rejects_oversized_input_before_inference() {
 }
 
 #[tokio::test]
+async fn compaction_task_rejects_xml_expanded_output_before_persistence() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("summarize me").await;
+    let inference = Arc::new(CapturingInference::new("&".repeat(256 * 1024 / 5 + 1)));
+    let port = fixture.port_with_inference(
+        inference,
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("XML-expanded model output must remain within the retention byte cap");
+
+    assert!(matches!(error, LoopCompactionError::InputTooLarge));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_post_escape_redaction_expansion_before_persistence() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("summarize me").await;
+    let port = fixture.port(
+        "&".repeat(30_000),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(ExpandingSerializedEntityLeakScanner),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("post-escape redaction expansion must preserve the retention byte cap");
+
+    assert!(matches!(error, LoopCompactionError::InputTooLarge));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
+}
+
+#[tokio::test]
 async fn compaction_task_maps_inference_error_classes_to_loop_errors() {
     let cases = [
         (
@@ -1792,7 +1850,7 @@ impl CompactionFixture {
 
     fn port(
         &self,
-        inference_output: &'static str,
+        inference_output: impl Into<String>,
         injection_scanner: Arc<dyn InjectionScanner>,
         leak_scanner: Arc<dyn LeakScanner>,
     ) -> HostManagedLoopCompactionPort<InMemorySessionThreadService> {
@@ -1967,15 +2025,15 @@ impl SystemInferencePort for FailingInference {
 }
 
 struct CapturingInference {
-    output: &'static str,
+    output: String,
     last_input: Mutex<Option<String>>,
     last_prompt_id: Mutex<Option<String>>,
 }
 
 impl CapturingInference {
-    fn new(output: &'static str) -> Self {
+    fn new(output: impl Into<String>) -> Self {
         Self {
-            output,
+            output: output.into(),
             last_input: Mutex::new(None),
             last_prompt_id: Mutex::new(None),
         }
@@ -2005,7 +2063,7 @@ impl SystemInferencePort for CapturingInference {
         *self.last_input.lock().unwrap() = Some(request.input_text);
         Ok(SystemInferenceResponse {
             task_id: request.task_id,
-            output_text: self.output.to_string(),
+            output_text: self.output.clone(),
             elapsed_ms: 1,
         })
     }

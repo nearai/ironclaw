@@ -59,7 +59,10 @@ async fn context_overflow_recovers_with_model_visible_observation() {
     let first_setup_turn =
         format!("first setup turn credentials {input_secret} and {second_input_secret}");
     let oversized_setup_turn = format!("third setup turn {}", "history ".repeat(5_000));
-    let compacted_summary = "compacted recovery history credential [REDACTED] retained";
+    let output_secret = "OUTPUT_PRIVATE_KEY_MATERIAL";
+    let compacted_summary = format!(
+        "compacted recovery history\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n{output_secret}\n-----END ENCRYPTED PRIVATE KEY-----\nretained"
+    );
     let harness = RebornIntegrationHarness::test_default()
         .context_overflow_model_after(3, 3)
         .script([
@@ -119,13 +122,17 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .await
         .expect("compaction inference input carries the deterministic redaction marker");
     harness
-        .assert_last_interactive_model_message_content_not_contains(input_secret)
+        .assert_post_compaction_interactive_model_message_content_not_contains(input_secret)
         .await
         .expect("the next interactive request does not rehydrate the transcript secret");
     harness
-        .assert_compaction_redacted_once_since(before_recovery_milestones, 2)
+        .assert_post_compaction_interactive_model_message_content_not_contains(output_secret)
         .await
-        .expect("the applied compaction emits one typed milestone with the aggregate count");
+        .expect("the next interactive request does not rehydrate model-output key material");
+    harness
+        .assert_compaction_redacted_once_since(before_recovery_milestones, 3)
+        .await
+        .expect("input and output redactions produce one typed aggregate milestone");
     harness
         .assert_summary_artifacts_lack(input_secret)
         .await
@@ -134,6 +141,10 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .assert_summary_artifacts_lack(second_input_secret)
         .await
         .expect("the durable compaction summary omits every transcript secret");
+    harness
+        .assert_summary_artifacts_lack(output_secret)
+        .await
+        .expect("the durable compaction summary omits model-output key material");
     harness
         .assert_summary_artifact_contains("[REDACTED]")
         .await
