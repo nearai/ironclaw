@@ -118,7 +118,7 @@ where
         Fut: std::future::Future<Output = Result<T, TurnError>> + Send,
         T: Send,
     {
-        self.ensure_not_degraded().await?;
+        self.ensure_mutation_admitted().await?;
         let critical = async {
             let mut guard = self.snapshot_state.lock().await;
             let mut refreshed_after_stale_error = false;
@@ -196,8 +196,9 @@ where
                 // non-critical write-behind op reserves a slot here, under
                 // `snapshot_state`, so concurrent callers can never grow the
                 // journal channel past the cap while the flusher is stalled.
-                // A degraded reservation → clear the hot cache (next read
-                // reloads from durable) and fail fast.
+                // A failed reservation clears the hot cache only when the
+                // journal generation is fatal; contention recovery retains
+                // accepted hot state.
                 if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
                     *guard = None;
                     return Err(error);
@@ -253,7 +254,7 @@ where
             + Send,
         T: Send,
     {
-        self.ensure_not_degraded().await?;
+        self.ensure_mutation_admitted().await?;
         let critical = async {
             let mut guard = self.snapshot_state.lock().await;
             let mut build_delta = Some(build_delta);

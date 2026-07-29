@@ -220,7 +220,7 @@ where
     async fn read_snapshot_for_observability(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
         match self.snapshot_state.try_lock() {
             Ok(mut guard) => {
-                self.drop_cache_if_degraded(&mut guard);
+                self.drop_cache_if_failed_fatal(&mut guard);
                 if guard.is_none() {
                     *guard = Some(self.load_snapshot_from_rows().await?);
                 }
@@ -281,7 +281,7 @@ where
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
         let mut guard = self.snapshot_state.lock().await;
-        self.drop_cache_if_degraded(&mut guard);
+        self.drop_cache_if_failed_fatal(&mut guard);
         if guard.is_none() {
             *guard = Some(self.load_snapshot_from_rows().await?);
         }
@@ -305,7 +305,7 @@ where
         R: FnOnce(&TurnPersistenceSnapshot) -> T,
     {
         let mut guard = self.snapshot_state.lock().await;
-        self.drop_cache_if_degraded(&mut guard);
+        self.drop_cache_if_failed_fatal(&mut guard);
         if guard.is_none() {
             *guard = Some(self.load_snapshot_from_rows().await?);
         }
@@ -322,11 +322,12 @@ where
         *self.snapshot_state.lock().await = None;
     }
 
-    /// If the store degraded after a write-behind append failure, drop the hot
-    /// cache so the next read reloads from the last consistent durable point.
-    /// A pure atomic check off the hot path when not degraded.
-    fn drop_cache_if_degraded(&self, guard: &mut Option<RowSnapshotState>) {
-        if self.delta_journal.is_degraded() {
+    /// After a fatal write-behind append failure, drop the hot cache so the
+    /// next read reloads from the last consistent durable point. Retryable
+    /// contention keeps the hot cache because the flusher still owns the exact
+    /// accepted batch.
+    fn drop_cache_if_failed_fatal(&self, guard: &mut Option<RowSnapshotState>) {
+        if self.delta_journal.health() == journal::DeltaJournalHealth::FailedFatal {
             *guard = None;
         }
     }

@@ -43,11 +43,13 @@ The RootFilesystem-backed row store uses `/turns/rows/v1` as its durable shape.
 Each logical family has its own keyed row collection under that root, with
 `/turns/rows/v1/meta/state.json` carrying the last fully materialized
 delta-journal sequence (`journal_seq`) and the event retention floor. Writers
-update the hot in-process row cache, enqueue a `SnapshotDelta`, and return only
-after the delta is durably appended. Row materialization is allowed to lag
-behind the foreground ack: the background materializer coalesces journal tails
-into row updates and advances `journal_seq`, while restart and durable read
-paths replay any journal tail newer than `journal_seq` before trusting row
+update the hot in-process row cache and enqueue a `SnapshotDelta`.
+Recoverability-critical mutations wait for the durable append acknowledgement;
+non-critical mutations may return after enqueue within the bounded
+write-behind window. Row materialization is allowed to lag behind the
+foreground acknowledgement: the background materializer coalesces journal
+tails into row updates and advances `journal_seq`, while restart and durable
+read paths replay any journal tail newer than `journal_seq` before trusting row
 projections. Materialization writers are serialized within the runtime so an
 older projector cannot overwrite rows after a newer projector has advanced the
 projection. This keeps the journal as the crash-recovery source of truth while
@@ -55,6 +57,20 @@ avoiding full-snapshot rewrites on hot writes. Tier-2 run-record rows (`turns`,
 `turn_runs`, and lifecycle events) remain durable even when terminal runs are
 evicted from hot in-memory indexes; cache limits are eviction thresholds, not
 deletion thresholds for the durable run record.
+
+The delta journal distinguishes `Healthy`, `RecoveringContention`, and
+`FailedFatal`. An atomic append that returns
+`FilesystemError::BackendBusy` retains the exact serialized batch, leaves its
+acknowledgements unresolved, pauses new mutation admission, and retries the
+same bytes with capped jittered exponential backoff. Reads continue from the
+hot snapshot while recovery owns that accepted batch. After the append
+succeeds, acknowledgements resolve in order and normal admission resumes
+without reopening the store or restarting the process. A caller timeout is an
+ambiguous outcome and does not discard the retained batch or hot snapshot;
+idempotent retry and durable read-back resolve the outcome. Any other append
+failure remains fatal for that journal generation: it stops later deltas from
+landing behind a durable gap, fails queued acknowledgements, and clears the hot
+snapshot back to the last consistent durable point.
 
 Legacy `/turns/state.json` blobs migrate into `/turns/rows/v1` through the same
 delta journal. On first row-store load, if materialized rows and replayed

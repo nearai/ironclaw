@@ -120,6 +120,9 @@ struct FaultConfig {
     /// Number of upcoming `append`/`append_batch` calls to fail (one-shot
     /// countdown). Models a crash while flushing the journal batch.
     fail_next_appends: usize,
+    /// Number of upcoming journal appends to reject with retryable backend
+    /// contention before allowing the exact retained batch to succeed.
+    busy_next_appends: usize,
     /// Fail writes whose path contains this substring.
     fail_path_substr: Option<String>,
 }
@@ -192,6 +195,10 @@ impl FaultBackend {
         self.cfg().fail_next_appends = n;
     }
 
+    fn busy_next_appends(&self, n: usize) {
+        self.cfg().busy_next_appends = n;
+    }
+
     /// Fail the mutating write at 1-based index `n` (counting from the current
     /// write count).
     fn fail_at_relative_write(&self, n: usize) {
@@ -214,6 +221,13 @@ impl FaultBackend {
     fn maybe_fault(&self, path: &VirtualPath, is_append: bool) -> Option<FilesystemError> {
         let index = self.write_count.fetch_add(1, Ordering::SeqCst) + 1;
         let mut cfg = self.cfg();
+        if is_append && cfg.busy_next_appends > 0 {
+            cfg.busy_next_appends -= 1;
+            return Some(FilesystemError::BackendBusy {
+                path: path.clone(),
+                operation: FilesystemOperation::Append,
+            });
+        }
         if is_append && cfg.fail_next_appends > 0 {
             cfg.fail_next_appends -= 1;
             return Some(injected_error(path, FilesystemOperation::Append));
@@ -236,6 +250,22 @@ impl FaultBackend {
 
     fn recorded_ops(&self) -> Vec<RecordedOp> {
         self.recorded.lock().expect("recorded mutex").clone()
+    }
+
+    fn recorded_delta_appends(&self) -> usize {
+        self.recorded_ops()
+            .iter()
+            .filter(|operation| match operation {
+                RecordedOp::Append { path, .. } | RecordedOp::AppendBatch { path, .. } => {
+                    path.as_str().ends_with("/turns/rows/v1/deltas/log")
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    fn write_attempts(&self) -> usize {
+        self.write_count.load(Ordering::SeqCst)
     }
 
     /// Reconstruct an independent, byte-identical copy of the durable state as
@@ -2515,6 +2545,182 @@ fn scope_b_regression() -> TurnScope {
         Some(ProjectId::new("project1").unwrap()),
         ThreadId::new("thread-regression-b").unwrap(),
     )
+}
+
+/// A retryable storage-contention result must retain the exact in-flight
+/// journal append and recover inside the same store. The old boolean
+/// degradation latch halted the flusher permanently, so this drain failed
+/// until the whole process was restarted.
+#[tokio::test]
+async fn write_behind_backend_busy_retries_exact_batch_and_recovers_without_reopen() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let store = open_row_store(Arc::clone(&scoped));
+    let scope = only_scope();
+    let run_id = submit_one(&store, &scope, "idem-busy-recovery-base").await;
+    let durable_appends_before_claim = backend.recorded_delta_appends();
+
+    backend.busy_next_appends(1);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .expect("claim query")
+        .expect("non-critical claim returns after enqueue");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), store.drain())
+        .await
+        .expect("contention recovery must remain bounded in the test")
+        .expect("same store recovers and durably acknowledges the retained batch");
+    assert_eq!(
+        backend.recorded_delta_appends(),
+        durable_appends_before_claim + 1,
+        "the failed contention attempt must not create a second durable copy"
+    );
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("read recovered run");
+    assert_eq!(state.status, TurnStatus::Running);
+
+    submit_one(&store, &scope_b_regression(), "idem-busy-recovery-next").await;
+    store
+        .drain()
+        .await
+        .expect("healthy admission continues without reopening");
+}
+
+#[tokio::test]
+async fn write_behind_contention_recovery_preserves_hot_reads_and_pauses_new_admission() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let store = open_row_store(Arc::clone(&scoped));
+    let scope = only_scope();
+    let run_id = submit_one(&store, &scope, "idem-busy-health-base").await;
+
+    backend.busy_next_appends(10);
+    let attempts_before_claim = backend.write_attempts();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .expect("claim query")
+        .expect("non-critical claim returns after enqueue");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while backend.write_attempts() == attempts_before_claim {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+    })
+    .await
+    .expect("flusher observes injected contention");
+
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("hot read remains available while exact batch is retained");
+    assert_eq!(state.status, TurnStatus::Running);
+    let rejected = store
+        .submit_turn(
+            submit_request(
+                scope_b_regression(),
+                TurnRunId::new(),
+                "idem-busy-health-paused",
+            ),
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await;
+    assert!(
+        matches!(rejected, Err(TurnError::Unavailable { .. })),
+        "new mutation admission must pause during contention recovery, got {rejected:?}"
+    );
+
+    backend.disarm();
+    tokio::time::timeout(std::time::Duration::from_secs(2), store.drain())
+        .await
+        .expect("contention recovery completes")
+        .expect("retained batch is acknowledged");
+}
+
+#[tokio::test]
+async fn write_behind_timed_out_critical_ack_still_commits_and_replays_idempotently() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped))
+        .with_limits(limits())
+        .with_apply_timeout(std::time::Duration::from_millis(40));
+    let scope = only_scope();
+    let requested_run_id = TurnRunId::new();
+    let request = submit_request(
+        scope.clone(),
+        requested_run_id,
+        "idem-busy-critical-timeout",
+    );
+
+    backend.busy_next_appends(10);
+    let timed_out = store
+        .submit_turn(
+            request.clone(),
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await;
+    assert!(
+        matches!(timed_out, Err(TurnError::Unavailable { .. })),
+        "critical caller must see an ambiguous timeout while recovery owns its batch"
+    );
+    let hot_state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id: requested_run_id,
+        })
+        .await
+        .expect("caller timeout must not clear the accepted hot snapshot");
+    assert_eq!(hot_state.status, TurnStatus::Queued);
+
+    backend.disarm();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while backend.recorded_delta_appends() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retained critical batch eventually commits");
+    let replay = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            match store
+                .submit_turn(
+                    request.clone(),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+            {
+                Ok(replay) => break replay,
+                Err(TurnError::Unavailable { .. }) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected idempotency replay error: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("same idempotency key replays after the ambiguous timeout");
+    let SubmitTurnResponse::Accepted { run_id, .. } = replay;
+    assert_eq!(run_id, requested_run_id);
 }
 
 /// #6263 Step 3 — critical ops are durability BARRIERS. Under write-behind a
