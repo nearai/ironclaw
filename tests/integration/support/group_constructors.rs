@@ -74,6 +74,17 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Same group as [`Self::extension_lifecycle`], but with auto-approve
+    /// DISABLED for the group scope at construction — so a lifecycle
+    /// operation (`builtin.extension_install`/`builtin.extension_remove`,
+    /// both `PermissionMode::Ask`) raises a real `BlockedApproval` gate
+    /// instead of auto-completing. Mirrors [`Self::live_approvals`] for the
+    /// lifecycle capability surface. Resolve with `approve_gate`/`deny_gate`
+    /// per thread.
+    pub async fn extension_lifecycle_no_auto_approve() -> HarnessResult<Self> {
+        Self::builder().extension_lifecycle_no_auto_approve().await
+    }
+
     /// Extension-lifecycle group extended with the invented-vendor fixture
     /// (native factory + on-disk assets): drives the full generic runtime
     /// path — install → dispatch-from-snapshot → remove — with
@@ -318,6 +329,30 @@ impl RebornIntegrationGroupBuilder {
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
         )
         .await
+    }
+
+    /// Build an extension-lifecycle group with auto-approve OFF. See
+    /// [`RebornIntegrationGroup::extension_lifecycle_no_auto_approve`].
+    pub async fn extension_lifecycle_no_auto_approve(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let group = self
+            .extension_lifecycle_with_profile(
+                super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
+            )
+            .await?;
+        // Disable auto-approve once so every thread faces real approval
+        // gates on the Ask-mode lifecycle verbs; mirrors `live_approvals`.
+        // Always `HostRuntime` here, so `Some` is guaranteed.
+        let scope = group
+            .shared
+            .auto_approve_scope()
+            .expect("extension_lifecycle always uses HostRuntime; scope is always Some");
+        let arc = group
+            .capability_harness()
+            .expect("extension_lifecycle always uses HostRuntime");
+        arc.disable_global_auto_approve(scope).await?;
+        Ok(group)
     }
 
     /// Same group as [`Self::extension_lifecycle`], but with a Google OAuth
