@@ -2,15 +2,23 @@
 # Requires Python 3.10+ for PEP 604 union syntax such as `int | None`.
 
 import argparse
+import collections
+import json
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
 
 
-PANIC_PATTERN = re.compile(r"\.(?:unwrap|expect)\(|(?<!_)assert(?:_eq|_ne)?!")
+PANIC_PATTERN = re.compile(
+    r"\.(?:unwrap|expect)\("
+    r"|(?<!_)assert(?:_eq|_ne)?!"
+    r"|(?<![A-Za-z0-9_])(?:panic|unreachable|unimplemented|todo)!"
+)
+SAFETY_RATIONALE_PATTERN = re.compile(r"//\s*safety:\s*\S", re.IGNORECASE)
 TEST_ATTR_PATTERN = re.compile(
     r"^\s*#\s*\[\s*(?:"
     r"test"
@@ -26,6 +34,20 @@ ITEM_PATTERN = re.compile(
     r"(?:(?:async|unsafe|const)\s+)*"
     r"(fn|mod|struct|enum|trait|union|impl)\b"
     r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?"
+)
+OUT_OF_LINE_MOD_PATTERN = re.compile(
+    r"^\s*"
+    r"(?:(?:pub(?:\([^)]*\))?|crate)\s+)?"
+    r"mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+PATH_ATTR_PATTERN = re.compile(
+    r'^\s*#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]'
+)
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
+SHIPPING_PACKAGE_MANIFEST = (
+    REPO_ROOT / "crates" / "ironclaw_reborn_cli" / "Cargo.toml"
 )
 
 
@@ -251,6 +273,221 @@ def is_test_only_path(path: str) -> bool:
     return bool(suffix) and (suffix[0] == "test_support" or suffix == ("test_support.rs",))
 
 
+def run_cargo_metadata() -> dict:
+    result = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def shipping_reborn_source_roots(metadata: dict) -> list[pathlib.Path]:
+    """Return production target roots in the shipping Reborn dependency closure.
+
+    The shipping binary's normal-dependency graph is the owned scope. This is
+    deliberately derived from Cargo instead of a hand-maintained crate list so
+    a newly wired runtime/persistence/transport crate enters the gate
+    automatically. External packages and non-production targets (tests,
+    examples, benches, build scripts) are excluded.
+    """
+
+    packages = {package["id"]: package for package in metadata["packages"]}
+    shipping_manifest = SHIPPING_PACKAGE_MANIFEST.resolve()
+    shipping_ids = [
+        package_id
+        for package_id, package in packages.items()
+        if pathlib.Path(package["manifest_path"]).resolve() == shipping_manifest
+    ]
+    if len(shipping_ids) != 1:
+        raise RuntimeError(
+            "expected exactly one shipping Reborn package at "
+            f"{shipping_manifest}, found {len(shipping_ids)}"
+        )
+
+    resolve = metadata.get("resolve")
+    if not resolve:
+        raise RuntimeError("cargo metadata did not return a dependency graph")
+    nodes = {node["id"]: node for node in resolve["nodes"]}
+    reachable: set[str] = set()
+    pending = list(shipping_ids)
+    while pending:
+        package_id = pending.pop()
+        if package_id in reachable:
+            continue
+        reachable.add(package_id)
+        node = nodes.get(package_id)
+        if node is None:
+            continue
+        for dependency in node["deps"]:
+            if any(kind.get("kind") is None for kind in dependency["dep_kinds"]):
+                pending.append(dependency["pkg"])
+
+    roots: set[pathlib.Path] = set()
+    crates_root = (REPO_ROOT / "crates").resolve()
+    for package_id in reachable:
+        package = packages[package_id]
+        manifest = pathlib.Path(package["manifest_path"]).resolve()
+        if manifest.parent.parent != crates_root:
+            continue
+        for target in package["targets"]:
+            if not ({"lib", "bin"} & set(target["kind"])):
+                continue
+            source = pathlib.Path(target["src_path"]).resolve()
+            if source.suffix == ".rs":
+                roots.add(source)
+    return sorted(roots)
+
+
+def default_module_candidates(source: pathlib.Path, name: str) -> tuple[pathlib.Path, ...]:
+    if source.name in {"lib.rs", "main.rs", "mod.rs"}:
+        module_dir = source.parent
+    else:
+        module_dir = source.parent / source.stem
+    return module_dir / f"{name}.rs", module_dir / name / "mod.rs"
+
+
+def module_edges(
+    source: pathlib.Path,
+    inherited_test_only: bool,
+) -> list[tuple[pathlib.Path, bool]]:
+    lines = source.read_text(encoding="utf-8").splitlines()
+    contexts = line_test_contexts(lines)
+    lexer = LexerState()
+    pending_path: str | None = None
+    edges: list[tuple[pathlib.Path, bool]] = []
+
+    for raw, local_test_context in zip(lines, contexts):
+        code = sanitize_line(raw, lexer)
+        path_attr = PATH_ATTR_PATTERN.match(raw)
+        if path_attr and code.lstrip().startswith("#["):
+            pending_path = path_attr.group(1)
+            continue
+
+        module = OUT_OF_LINE_MOD_PATTERN.match(code)
+        if module:
+            if pending_path is not None:
+                candidates = (source.parent / pending_path,)
+            else:
+                candidates = default_module_candidates(source, module.group(1))
+            for candidate in candidates:
+                if candidate.is_file():
+                    edges.append(
+                        (
+                            candidate.resolve(),
+                            inherited_test_only
+                            or local_test_context
+                            or is_test_only_path(candidate.as_posix()),
+                        )
+                    )
+                    break
+            pending_path = None
+            continue
+
+        stripped = code.strip()
+        if stripped and not stripped.startswith("#["):
+            pending_path = None
+
+    return edges
+
+
+def discover_reachable_rust_files(
+    roots: list[pathlib.Path],
+) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
+    """Follow Rust module edges, retaining whether each file is test-only."""
+
+    states: dict[pathlib.Path, bool] = {}
+    pending: list[tuple[pathlib.Path, bool]] = [
+        (path.resolve(), False) for path in roots
+    ]
+    while pending:
+        source, test_only = pending.pop()
+        previous = states.get(source)
+        if previous is False or previous == test_only:
+            continue
+        states[source] = test_only
+        pending.extend(module_edges(source, test_only))
+
+    production = {path for path, test_only in states.items() if not test_only}
+    tests = {path for path, test_only in states.items() if test_only}
+    return production, tests
+
+
+def repository_relative(path: pathlib.Path) -> str:
+    return path.resolve().relative_to(REPO_ROOT).as_posix()
+
+
+def normalized_source_line(line: str) -> str:
+    return " ".join(line.strip().split())
+
+
+def violation_fingerprint(path: str, line: str) -> tuple[str, str]:
+    return path, normalized_source_line(line)
+
+
+def collect_file_violations(
+    paths: set[pathlib.Path],
+) -> list[tuple[str, int, str]]:
+    violations: list[tuple[str, int, str]] = []
+    for path in sorted(paths):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        contexts = line_test_contexts(lines)
+        lexer = LexerState()
+        for line_no, (raw, test_context) in enumerate(zip(lines, contexts), 1):
+            code = sanitize_line(raw, lexer)
+            if test_context or SAFETY_RATIONALE_PATTERN.search(raw):
+                continue
+            if PANIC_PATTERN.search(code):
+                violations.append(
+                    (repository_relative(path), line_no, raw.rstrip())
+                )
+    return violations
+
+
+def load_reborn_baseline(
+    path: pathlib.Path,
+) -> collections.Counter[tuple[str, str]]:
+    approved: collections.Counter[tuple[str, str]] = collections.Counter()
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        fields = raw.split("\t", 2)
+        if len(fields) != 3 or not fields[2].strip():
+            raise RuntimeError(
+                f"{path}:{line_no}: expected path<TAB>source<TAB>non-empty reason"
+            )
+        approved[(fields[0], fields[1])] += 1
+    return approved
+
+
+def compare_reborn_baseline(
+    violations: list[tuple[str, int, str]],
+    approved: collections.Counter[tuple[str, str]],
+) -> tuple[
+    list[tuple[str, int, str]],
+    collections.Counter[tuple[str, str]],
+]:
+    remaining = approved.copy()
+    new: list[tuple[str, int, str]] = []
+    for path, line_no, line in violations:
+        fingerprint = violation_fingerprint(path, line)
+        if remaining[fingerprint]:
+            remaining[fingerprint] -= 1
+            if remaining[fingerprint] == 0:
+                del remaining[fingerprint]
+        else:
+            new.append((path, line_no, line))
+    return new, remaining
+
+
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
     output = run_git("diff", "--name-only", f"{base}...{head}", "--", "src", "crates")
     files = []
@@ -306,7 +543,7 @@ def collect_violations(base: str, head: str) -> list[tuple[str, int, str]]:
                 continue
             if contexts[line_no - 1]:
                 continue
-            if "// safety:" in lines[line_no - 1]:
+            if SAFETY_RATIONALE_PATTERN.search(lines[line_no - 1]):
                 continue
             if PANIC_PATTERN.search(sanitized[line_no - 1]):
                 violations.append((str(path), line_no, lines[line_no - 1].rstrip()))
@@ -319,12 +556,51 @@ def main() -> int:
     parser.add_argument("--base", required=False, default="origin/staging")
     parser.add_argument("--head", required=False, default="HEAD")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--reborn-baseline",
+        action="store_true",
+        help=(
+            "scan the complete production module graph in the shipping Reborn "
+            "normal-dependency closure and compare it with the audited baseline"
+        ),
+    )
     args = parser.parse_args()
 
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(CheckNoPanicsTests)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
+
+    if args.reborn_baseline:
+        roots = shipping_reborn_source_roots(run_cargo_metadata())
+        production, _tests = discover_reachable_rust_files(roots)
+        violations = collect_file_violations(production)
+        approved = load_reborn_baseline(REBORN_BASELINE_PATH)
+        new, stale = compare_reborn_baseline(violations, approved)
+        if not new and not stale:
+            print(
+                "OK: Reborn production panic baseline matches "
+                f"({len(production)} files, {len(violations)} reviewed invariant(s))."
+            )
+            return 0
+
+        print("::error::Reborn production panic baseline changed.")
+        if new:
+            print("")
+            print("New or changed panic-style calls:")
+            for path, line_no, line in new[:20]:
+                print(f"{path}:{line_no}: {line}")
+            if len(new) > 20:
+                print(f"... and {len(new) - 20} more")
+        if stale:
+            print("")
+            print("Stale baseline entries (remove them to ratchet downward):")
+            for (path, source), count in list(stale.items())[:20]:
+                suffix = f" (x{count})" if count > 1 else ""
+                print(f"{path}: {source}{suffix}")
+            if len(stale) > 20:
+                print(f"... and {len(stale) - 20} more")
+        return 1
 
     violations = collect_violations(args.base, args.head)
     if not violations:
@@ -478,6 +754,114 @@ class CheckNoPanicsTests(unittest.TestCase):
         contexts = line_test_contexts(lines)
 
         self.assertTrue(all(contexts))
+
+    def test_all_panic_style_macros_are_detected(self) -> None:
+        sources = [
+            'value.unwrap();',
+            'value.expect("reason");',
+            'assert!(ready);',
+            'assert_eq!(left, right);',
+            'assert_ne!(left, right);',
+            'panic!("boom");',
+            'unreachable!("invariant");',
+            'unimplemented!("missing");',
+            'todo!("later");',
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                lexer = LexerState()
+                self.assertIsNotNone(PANIC_PATTERN.search(sanitize_line(source, lexer)))
+
+        lexer = LexerState()
+        self.assertIsNone(
+            PANIC_PATTERN.search(sanitize_line("debug_assert!(ready);", lexer))
+        )
+
+    def test_safety_suppression_requires_a_reason(self) -> None:
+        self.assertIsNone(SAFETY_RATIONALE_PATTERN.search("panic!(); // safety:"))
+        self.assertIsNone(SAFETY_RATIONALE_PATTERN.search("panic!(); // safety:   "))
+        self.assertIsNotNone(
+            SAFETY_RATIONALE_PATTERN.search(
+                "panic!(); // safety: fixed static literal is validated"
+            )
+        )
+
+    def test_out_of_line_test_modules_are_excluded_transitively(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source_root = root / "src"
+            source_root.mkdir()
+            (source_root / "lib.rs").write_text(
+                "mod production;\n"
+                '#[cfg(feature = "test-support")]\n'
+                "mod test_support;\n"
+                "#[cfg(test)]\n"
+                "#[path = \"tests_out.rs\"]\n"
+                "mod tests_out;\n",
+                encoding="utf-8",
+            )
+            (source_root / "production.rs").write_text(
+                "pub fn value() -> u8 { 1 }\n",
+                encoding="utf-8",
+            )
+            (source_root / "test_support.rs").write_text(
+                'fn fixture() { panic!("feature-gated test support"); }\n',
+                encoding="utf-8",
+            )
+            (source_root / "tests_out.rs").write_text(
+                "#[path = \"nested_fixture.rs\"]\n"
+                "mod nested_fixture;\n",
+                encoding="utf-8",
+            )
+            (source_root / "nested_fixture.rs").write_text(
+                'fn fixture() { panic!("test-only"); }\n',
+                encoding="utf-8",
+            )
+
+            production, tests = discover_reachable_rust_files(
+                [source_root / "lib.rs"]
+            )
+
+            self.assertIn((source_root / "production.rs").resolve(), production)
+            self.assertNotIn((source_root / "test_support.rs").resolve(), production)
+            self.assertNotIn((source_root / "tests_out.rs").resolve(), production)
+            self.assertNotIn(
+                (source_root / "nested_fixture.rs").resolve(), production
+            )
+            self.assertIn((source_root / "test_support.rs").resolve(), tests)
+            self.assertIn((source_root / "tests_out.rs").resolve(), tests)
+            self.assertIn((source_root / "nested_fixture.rs").resolve(), tests)
+
+    def test_baseline_comparison_rejects_new_and_stale_entries(self) -> None:
+        approved = collections.Counter(
+            {
+                (
+                    "crates/example/src/lib.rs",
+                    'unreachable!("static invariant")',
+                ): 1
+            }
+        )
+        matching = [
+            (
+                "crates/example/src/lib.rs",
+                10,
+                '    unreachable!("static invariant")',
+            )
+        ]
+        new, stale = compare_reborn_baseline(matching, approved)
+        self.assertEqual(new, [])
+        self.assertEqual(stale, collections.Counter())
+
+        changed = [
+            (
+                "crates/example/src/lib.rs",
+                10,
+                '    panic!("runtime input")',
+            )
+        ]
+        new, stale = compare_reborn_baseline(changed, approved)
+        self.assertEqual(new, changed)
+        self.assertEqual(stale, approved)
 
 
 if __name__ == "__main__":

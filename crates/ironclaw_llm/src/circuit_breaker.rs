@@ -167,16 +167,14 @@ impl CircuitBreakerProvider {
                 }
             }
             CircuitState::Open => {
-                debug_assert!(
-                    false,
-                    "BUG: record_success() called while circuit breaker is Open — \
-                     check_allowed() was bypassed for provider {}",
-                    self.inner.model_name()
+                // Another request can fail after this request passes
+                // `check_allowed()` but before it completes. Its failure opens
+                // the breaker; this older success must not erase that newer
+                // state or panic the in-flight run.
+                tracing::debug!(
+                    provider = self.inner.model_name(),
+                    "Circuit breaker: ignoring late success from a request admitted before Open"
                 );
-                // Shouldn't get here (check_allowed blocks Open), but recover
-                state.state = CircuitState::Closed;
-                state.consecutive_failures = 0;
-                state.opened_at = None;
             }
         }
     }
@@ -319,9 +317,12 @@ impl LlmProvider for CircuitBreakerProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     use crate::testing::StubLlm;
+    use tokio::sync::{Notify, mpsc};
 
     fn make_request() -> CompletionRequest {
         CompletionRequest::new(vec![crate::ChatMessage::user("hello")])
@@ -657,6 +658,104 @@ mod tests {
         let result = cb.complete(make_request()).await;
         assert!(result.is_ok());
         assert_eq!(cb.circuit_state().await, CircuitState::Closed);
+    }
+
+    struct ConcurrentOutcomeProvider {
+        call_index: AtomicUsize,
+        started: mpsc::UnboundedSender<usize>,
+        release_failure: Notify,
+        release_success: Notify,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ConcurrentOutcomeProvider {
+        fn model_name(&self) -> &str {
+            "concurrent-outcomes"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let call_index = self.call_index.fetch_add(1, Ordering::SeqCst);
+            let _ = self.started.send(call_index);
+            match call_index {
+                0 => {
+                    self.release_failure.notified().await;
+                    Err(LlmError::RequestFailed {
+                        provider: self.model_name().to_string(),
+                        reason: "controlled failure".to_string(),
+                    })
+                }
+                1 => {
+                    self.release_success.notified().await;
+                    Ok(CompletionResponse {
+                        content: "controlled success".to_string(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        finish_reason: crate::FinishReason::Stop,
+                        reasoning: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    })
+                }
+                other => panic!("unexpected concurrent test call {other}"),
+            }
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("concurrent circuit-breaker regression uses complete()");
+        }
+    }
+
+    #[tokio::test]
+    async fn late_success_does_not_close_breaker_opened_by_concurrent_failure() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(ConcurrentOutcomeProvider {
+            call_index: AtomicUsize::new(0),
+            started: started_tx,
+            release_failure: Notify::new(),
+            release_success: Notify::new(),
+        });
+        let cb = Arc::new(CircuitBreakerProvider::new(
+            Arc::clone(&inner) as Arc<dyn LlmProvider>,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: Duration::from_secs(60),
+                half_open_successes_needed: 1,
+            },
+        ));
+
+        let first = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(started_rx.recv().await, Some(0));
+
+        let second = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(started_rx.recv().await, Some(1));
+
+        inner.release_failure.notify_one();
+        assert!(first.await.expect("failure task must not panic").is_err());
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+
+        inner.release_success.notify_one();
+        assert!(second.await.expect("success task must not panic").is_ok());
+        assert_eq!(
+            cb.circuit_state().await,
+            CircuitState::Open,
+            "a success admitted before the failure must not erase the open state"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,67 @@
+# Audited panic-style calls in the shipping Reborn production dependency closure.
+#
+# Format: repository path<TAB>normalized source line<TAB>review rationale
+# Duplicate source lines are repeated because the checker compares this as a multiset.
+# Remove an entry when its invariant is eliminated; CI rejects both new and stale entries.
+
+crates/ironclaw_agent_loop/src/executor/capabilities.rs	_ => unreachable!("guarded to RecoverableFailure"),	Exhaustive match after the recoverable-failure arm returns to the model.
+crates/ironclaw_agent_loop/src/strategies/recovery.rs	Err(reason) => panic!("invalid trusted static strategy summary: {reason}"),	Compile-time-owned recovery strategy text is validated during construction.
+crates/ironclaw_auth/src/credential.rs	unreachable!("single account recovery cannot produce account selection required")	Single-account recovery cannot construct the multi-account selection outcome.
+crates/ironclaw_auth/src/domain.rs	unreachable!("single account recovery cannot produce account selection required")	Single-account recovery cannot construct the multi-account selection outcome.
+crates/ironclaw_authorization/src/lib.rs	unreachable!("authorization index key `tenant_id` must be a simple identifier")	The fixed ASCII index key is validated by the typed constructor.
+crates/ironclaw_authorization/src/lib.rs	unreachable!(	The fixed ASCII authorization index name is validated by the typed constructor.
+crates/ironclaw_capabilities/src/helpers.rs	(false, false) => unreachable!("resume context mismatch kind called without mismatch"),	The mismatch classifier is called only after at least one compared field differs.
+crates/ironclaw_capabilities/src/host.rs	unreachable!("matched AuthRequired above")	The preceding match arm handles every AuthRequired outcome.
+crates/ironclaw_conversations/src/conversation_state_store.rs	.unwrap_or_else(|_| unreachable!("tenant_ids is a simple ascii identifier"))	The fixed ASCII index name is validated by the typed constructor.
+crates/ironclaw_extension_host/src/extension_ingress.rs	None => unreachable!(),	The None branch is excluded by the preceding optional-input guard.
+crates/ironclaw_extension_host/src/extension_ingress.rs	None => unreachable!(),	The None branch is excluded by the preceding optional-input guard.
+crates/ironclaw_filesystem/src/libsql_pool.rs	Err(error) => unreachable!("libSQL pool build cannot fail: {error}"),	The libSQL pool builder has no fallible runtime configuration inputs.
+crates/ironclaw_hooks/src/dispatch/mod.rs	unreachable!(	The dispatch branch is selected only after the corresponding hook payload variant is matched.
+crates/ironclaw_hooks/src/dispatch/mod.rs	unreachable!(	The dispatch branch is selected only after the corresponding hook payload variant is matched.
+crates/ironclaw_hooks/src/dispatch/mod.rs	unreachable!(	The dispatch branch is selected only after the corresponding hook payload variant is matched.
+crates/ironclaw_hooks/src/wasm/runtime.rs	None => unreachable!(),	The result is checked for absence immediately before extraction.
+crates/ironclaw_host_api/src/decision.rs	_ => unreachable!("extract_inject_handle called for {kind:?}"),	The helper is private to inject-decision variants that carry handles.
+crates/ironclaw_host_runtime/src/services.rs	panic!("LocalSingleUser + LocalDev runtime policy must resolve for local testing: {error}")	The fixed local-testing policy combination is a host startup invariant.
+crates/ironclaw_llm/src/recording.rs	_ => unreachable!(),	The provider-event variant is selected by the immediately preceding classification.
+crates/ironclaw_loop_host/src/budget_accountant.rs	.unwrap_or_else(|_| panic!("internal budget-accountant invariant: {reason}"))	Only internally computed bounded budget values reach this typed conversion.
+crates/ironclaw_loop_host/src/compaction_task.rs	Err(reason) => unreachable!("invalid static system prompt id {value}: {reason}"),	The system prompt identifier is a fixed source literal.
+crates/ironclaw_loop_host/src/compaction_task.rs	_ => unreachable!(),	The task outcome variant is narrowed by the preceding match.
+crates/ironclaw_memory_native/src/repo/filesystem.rs	.unwrap_or_else(|_| unreachable!("`memory_document` is a valid record kind"))	The record kind is a fixed valid source literal.
+crates/ironclaw_memory_native/src/repo/filesystem.rs	.unwrap_or_else(|_| unreachable!("`memory_chunk` is a valid record kind"))	The record kind is a fixed valid source literal.
+crates/ironclaw_memory_native/src/repo/filesystem.rs	.unwrap_or_else(|_| unreachable!("`memory_document_version` is a valid record kind"))	The record kind is a fixed valid source literal.
+crates/ironclaw_memory_native/src/repo/filesystem.rs	IndexKey::new(name).unwrap_or_else(|_| unreachable!("{name} is a valid index key"))	Callers supply only fixed schema-owned index keys.
+crates/ironclaw_memory_native/src/repo/filesystem.rs	.unwrap_or_else(|_| unreachable!("valid index name")),	The index name is fixed by the memory schema.
+crates/ironclaw_memory_native/src/repo/filesystem.rs	.unwrap_or_else(|_| unreachable!("valid index name")),	The index name is fixed by the memory schema.
+crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs	None => unreachable!(),	The option is checked before the OAuth login response is assembled.
+crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs	None => unreachable!(),	The option is checked before the OAuth login response is assembled.
+crates/ironclaw_operator/src/operator_service_lifecycle.rs	ServicePlatform::Unsupported => unreachable!("handled above"),	The unsupported-platform branch returns before platform dispatch.
+crates/ironclaw_outbound/src/outbound_state_store.rs	Err(_) => unreachable!(	The fixed outbound index identifier is validated by the typed constructor.
+crates/ironclaw_outbound/src/outbound_state_store.rs	Err(_) => unreachable!(	The fixed outbound index identifier is validated by the typed constructor.
+crates/ironclaw_process_sandbox/src/plan.rs	unreachable!("non-header targets are rejected during sandbox credential validation")	Validation rejects non-header credential targets before plan construction.
+crates/ironclaw_processes/src/process_store.rs	.unwrap_or_else(|_| unreachable!("process index name {value} must be a simple identifier"))	The process index name comes from a fixed schema-owned literal.
+crates/ironclaw_processes/src/process_store.rs	.unwrap_or_else(|_| unreachable!("process index key {value} must be a simple identifier"))	The process index key comes from a fixed schema-owned literal.
+crates/ironclaw_product/src/reborn_services.rs	ToolPermissionState::AlwaysAllow => unreachable!(),	The always-allow state is returned before approval-request construction.
+crates/ironclaw_product/src/reborn_services.rs	ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())	The fallback thread identifier is a fixed valid source literal.
+crates/ironclaw_product/src/run_delivery/triggered.rs	unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")	The OAuth non-DM outcome is returned by the dedicated preceding arm.
+crates/ironclaw_reborn_cli/src/commands/config/set.rs	ConfigKey::WebuiToken => unreachable!("handled by execute_webui_token"),	The WebUI token key is dispatched to its dedicated handler first.
+crates/ironclaw_reborn_composition/src/deployment.rs	unreachable!("local-dev-yolo is a local runtime profile")	The deployment profile table fixes local-dev-yolo to a local runtime.
+crates/ironclaw_reborn_composition/src/deployment.rs	unreachable!("local-dev-yolo carries a runtime-policy request")	The deployment profile table always supplies this request.
+crates/ironclaw_reborn_composition/src/deployment.rs	unreachable!("{profile_name} uses the local-dev runtime policy shape")	The matched profile is defined with the local-dev policy shape.
+crates/ironclaw_reborn_composition/src/deployment.rs	unreachable!("{profile_name} carries a runtime-policy request")	The matched profile definition always carries this request.
+crates/ironclaw_runner/src/tool_disclosure.rs	panic!("invalid static bridge tool name: {error}");	The bridge tool name is a fixed runner-owned source literal.
+crates/ironclaw_runner/src/tool_disclosure.rs	panic!("invalid static bridge capability id: {error}");	The bridge capability identifier is a fixed runner-owned source literal.
+crates/ironclaw_runtime_policy/src/resolver.rs	_ => panic!(	The resolver intentionally fails loudly if a new deployment mode lacks an explicit policy.
+crates/ironclaw_runtime_policy/src/resolver.rs	_ => panic!("sandboxed_filesystem_for: unhandled DeploymentMode variant"),	The resolver intentionally fails loudly if a new deployment mode lacks an explicit filesystem policy.
+crates/ironclaw_runtime_policy/src/resolver.rs	_ => panic!("sandboxed_secret_for: unhandled DeploymentMode variant"),	The resolver intentionally fails loudly if a new deployment mode lacks an explicit secret policy.
+crates/ironclaw_runtime_policy/src/resolver.rs	_ => panic!("audit_for: unhandled DeploymentMode variant"),	The resolver intentionally fails loudly if a new deployment mode lacks an explicit audit policy.
+crates/ironclaw_secrets/src/secret_store.rs	unreachable!("secrets index key `tenant_id` must be a simple identifier")	The fixed ASCII secrets index key is validated by the typed constructor.
+crates/ironclaw_secrets/src/secret_store.rs	unreachable!("secrets index name `secrets_by_tenant` must be a simple identifier")	The fixed ASCII secrets index name is validated by the typed constructor.
+crates/ironclaw_turns/src/turn_state_row_store/turn_state_engine/transitions.rs	_ => unreachable!("status checked above"),	The transition checks and returns for disallowed statuses before mutation.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/product_auth/mod.rs	None => unreachable!(),	The option is checked before the product-auth response is assembled.
+crates/ironclaw_webui/src/webui_rate_limit.rs	None => unreachable!(),	The selected limiter is guaranteed present by the preceding configuration branch.
