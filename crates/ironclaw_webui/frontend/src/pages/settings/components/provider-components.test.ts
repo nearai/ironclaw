@@ -114,10 +114,16 @@ function customProvider(id, overrides = {}) {
   };
 }
 
-function useProviderManagementActionsStub({ providers, activeProviderId }) {
+function useProviderManagementActionsStub({
+  providers,
+  activeProviderId,
+  providerToDelete = null,
+}) {
   return () => ({
     allProviderIds: providers.map((provider) => provider.id),
+    cancelDelete: () => {},
     closeDialog: () => {},
+    confirmDelete: () => {},
     dialogProvider: null,
     filteredProviders: providers,
     handleDelete: () => {},
@@ -126,6 +132,7 @@ function useProviderManagementActionsStub({ providers, activeProviderId }) {
     isDialogOpen: false,
     message: null,
     openDialog: () => {},
+    providerToDelete,
     providerState: {
       activeProviderId,
       builtinOverrides: {},
@@ -137,11 +144,18 @@ function useProviderManagementActionsStub({ providers, activeProviderId }) {
   });
 }
 
-function renderProviderManagement({ providers, activeProviderId = "nearai", searchQuery = "" }) {
+function renderProviderManagement({
+  providers,
+  activeProviderId = "nearai",
+  searchQuery = "",
+  providerToDelete = null,
+}) {
   const ProviderCard = "ProviderCard";
+  const ConfirmDialog = "ConfirmDialog";
   const context = {
     Button: "Button",
     Card: "Card",
+    ConfirmDialog,
     Icon: "Icon",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
@@ -152,6 +166,7 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     useProviderManagementActions: useProviderManagementActionsStub({
       providers,
       activeProviderId,
+      providerToDelete,
     }),
     useProviderLogin: () => ({
       codexBusy: false,
@@ -177,7 +192,7 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
   const cardProps = findComponentNodes(rendered, ProviderCard).map((node) =>
     componentProps(node, ProviderCard)
   );
-  return { rendered, cardProps };
+  return { ConfirmDialog, rendered, cardProps };
 }
 
 function evalIsLocalDevOrigin({ hostname }) {
@@ -401,6 +416,22 @@ test("ProviderManagement hides empty buckets after search filtering", () => {
     cardProps.map((props) => props.provider.id),
     ["openai"]
   );
+});
+
+test("ProviderManagement renders provider deletion through the shared dialog", () => {
+  const provider = customProvider("legacy-local");
+  const { ConfirmDialog, rendered, cardProps } = renderProviderManagement({
+    providers: [provider],
+    providerToDelete: provider,
+  });
+
+  assert.equal(cardProps[0].onDelete instanceof Function, true);
+  const [dialog] = findComponentNodes(rendered, ConfirmDialog).map((node) =>
+    componentProps(node, ConfirmDialog)
+  );
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.title, "llm.confirmDelete");
+  assert.equal(dialog.confirmLabel, "common.delete");
 });
 
 test("ProviderCard disclosure responds to row, keyboard, and chevron controls", () => {

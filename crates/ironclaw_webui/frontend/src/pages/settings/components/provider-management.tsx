@@ -1,5 +1,6 @@
 import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
+import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { SettingsSearchEmpty } from "./settings-search-empty";
@@ -140,6 +141,14 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
         onSave={actions.handleSave}
         onTest={state.testConnection}
         onListModels={state.listModels}
+      />
+      <ConfirmDialog
+        open={Boolean(actions.providerToDelete)}
+        title={t("llm.confirmDelete", { id: actions.providerToDelete?.id })}
+        confirmLabel={t("common.delete")}
+        isConfirming={state.isBusy}
+        onConfirm={actions.confirmDelete}
+        onCancel={actions.cancelDelete}
       />
     </Card>
   );

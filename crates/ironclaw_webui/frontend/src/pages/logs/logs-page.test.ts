@@ -17,7 +17,7 @@ function logsPageSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { LogsPage, LogEntry };`;
 }
 
-function renderLogsPage(overrides = {}) {
+function createLogsPageHarness(overrides = {}) {
   const logs = {
     entries: [],
     totalCount: 0,
@@ -38,20 +38,52 @@ function renderLogsPage(overrides = {}) {
     needsThreadScope: false,
     ...overrides,
   };
+  const hookValues = [];
+  let hookCursor = 0;
+  function ConfirmDialog() {}
   const context = {
+    ConfirmDialog,
     globalThis: {},
     React: {
-      useRef: (initial) => ({ current: initial }),
+      useRef: (initial) => {
+        const index = hookCursor;
+        hookCursor += 1;
+        if (!(index in hookValues)) hookValues[index] = { current: initial };
+        return hookValues[index];
+      },
       useEffect: () => {},
       useCallback: (fn) => fn,
-      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+      useState: (initial) => {
+        const index = hookCursor;
+        hookCursor += 1;
+        if (!(index in hookValues)) {
+          hookValues[index] = typeof initial === "function" ? initial() : initial;
+        }
+        return [
+          hookValues[index],
+          (next) => {
+            hookValues[index] =
+              typeof next === "function" ? next(hookValues[index]) : next;
+          },
+        ];
+      },
     },
     useT: () => (key) => key,
     useOutletContext: () => ({ isAdmin: true, threadsState: null }),
     useLogs: () => logs,
   };
   vm.runInNewContext(logsPageSourceForTest(), context);
-  return context.globalThis.__testExports.LogsPage();
+  return {
+    ConfirmDialog,
+    render() {
+      hookCursor = 0;
+      return context.globalThis.__testExports.LogsPage();
+    },
+  };
+}
+
+function renderLogsPage(overrides = {}) {
+  return createLogsPageHarness(overrides).render();
 }
 
 // Render a single LogEntry with a mocked React context. Returns the captured
@@ -117,6 +149,43 @@ function firstValueMatching(node, predicate) {
     if (found) return found;
   }
   return undefined;
+}
+
+function visit(node, fn) {
+  if (Array.isArray(node)) {
+    for (const item of node) visit(item, fn);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  fn(node);
+  visit(node.values, fn);
+}
+
+function componentProps(root, component) {
+  const props = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (let index = 0; index < node.values.length; index += 1) {
+      if (node.values[index] !== component) continue;
+      const current = {};
+      for (let propIndex = index + 1; propIndex < node.values.length; propIndex += 1) {
+        const name = node.strings[propIndex]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
+        if (name) current[name] = node.values[propIndex];
+      }
+      props.push(current);
+    }
+  });
+  return props;
+}
+
+function nativeNodeByText(root, tagName, text) {
+  let match;
+  visit(root, (node) => {
+    if (!match && node.type === tagName && flattenMarkup(node).includes(text)) {
+      match = node;
+    }
+  });
+  return match;
 }
 
 // Build a window stub whose getSelection() reports a selection rooted at the
@@ -224,4 +293,36 @@ test("LogsPage keeps the scrollable log output container", () => {
   const markup = flattenMarkup(renderLogsPage());
   // The inner output region is the actual scroll surface.
   assert.match(markup, /min-h-0 flex-1 overflow-y-auto/);
+});
+
+test("LogsPage clears entries only after confirming the shared dialog", () => {
+  let clearCount = 0;
+  const harness = createLogsPageHarness({
+    clearEntries: () => {
+      clearCount += 1;
+    },
+  });
+
+  let rendered = harness.render();
+  const clearButton = nativeNodeByText(rendered, "button", "logs.clear");
+  assert.ok(clearButton, "expected the clear logs button");
+  clearButton.props.onClick();
+  assert.equal(clearCount, 0);
+
+  rendered = harness.render();
+  let [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.title, "logs.confirmClear");
+
+  dialog.onCancel();
+  rendered = harness.render();
+  [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  assert.equal(dialog.open, false);
+  assert.equal(clearCount, 0);
+
+  nativeNodeByText(rendered, "button", "logs.clear").props.onClick();
+  rendered = harness.render();
+  [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  dialog.onConfirm();
+  assert.equal(clearCount, 1);
 });
