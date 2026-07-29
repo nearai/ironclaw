@@ -10,14 +10,12 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+# Signer-continuation driver + resume port; depends on ironclaw_turns (kernel).
+layer = "kernel"
+
 [package.metadata.dist]
 dist = false
-
-[package.metadata.ironclaw]
-# Signer-continuation driver + resume port. Depends on ironclaw_turns, so
-# it sits at kernel — above the attestation/chain-signing substrates it
-# drives, and below composition which wires it.
-layer = "kernel"
 
 [dependencies]
 async-trait = "0.1"

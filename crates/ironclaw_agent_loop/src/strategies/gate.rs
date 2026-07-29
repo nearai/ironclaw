@@ -65,6 +65,11 @@ pub(crate) enum GateKind {
     Resource,
     AwaitDependentRun,
     ExternalTool,
+    /// Awaiting an attested blockchain signature. A blocking gate like
+    /// `Approval` — the loop parks and the ceremony resumes crypto-side outside
+    /// this crate. `SkipAndContinue` is invalid (dropping the call would lose
+    /// the signature request).
+    Attested,
 }
 
 /// Strategy decision for a gate, plus the new `gate_state` slot value.
@@ -101,7 +106,8 @@ impl GateOutcome {
         match (kind, self) {
             (GateKind::Approval, GateOutcome::SkipAndContinue { .. })
             | (GateKind::AwaitDependentRun, GateOutcome::SkipAndContinue { .. })
-            | (GateKind::ExternalTool, GateOutcome::SkipAndContinue { .. }) => {
+            | (GateKind::ExternalTool, GateOutcome::SkipAndContinue { .. })
+            | (GateKind::Attested, GateOutcome::SkipAndContinue { .. }) => {
                 Err(LoopFailureKind::DriverBug)
             }
             _ => Ok(()),
@@ -211,6 +217,7 @@ mod tests {
             (GateKind::Resource, "resource"),
             (GateKind::AwaitDependentRun, "await_dependent_run"),
             (GateKind::ExternalTool, "external_tool"),
+            (GateKind::Attested, "attested"),
         ] {
             let value = serde_json::to_value(variant).expect("serialize");
             assert_eq!(value, serde_json::json!(wire));
@@ -227,6 +234,7 @@ mod tests {
             GateKind::Resource,
             GateKind::AwaitDependentRun,
             GateKind::ExternalTool,
+            GateKind::Attested,
         ] {
             let summary = GateSummary {
                 kind,
@@ -331,6 +339,7 @@ mod tests {
             GateKind::Resource,
             GateKind::AwaitDependentRun,
             GateKind::ExternalTool,
+            GateKind::Attested,
         ] {
             let summary = GateSummary {
                 kind,

@@ -1836,6 +1836,7 @@ mod tests {
             gate_ref: LoopGateRef::new("gate:auth-deadbeef").expect("valid gate ref"),
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
+            expected_tx_hash: None,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:auth-block-unsourceable")
                 .expect("valid"),

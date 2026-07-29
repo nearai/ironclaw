@@ -23,7 +23,9 @@ mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod attested;
+mod attested_config;
 mod attested_continuation;
+mod attested_raise;
 mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
@@ -68,7 +70,13 @@ pub use attested::{
     InMemoryAttestedComposition, NoopBroadcaster, RebornAttestedComposition,
     RegisterAttestedGateError,
 };
+pub use attested_config::{
+    AttestedConfigError, AttestedProvidersConfig, MIN_STATE_SECRET_BYTES, NEAR_CALLBACK_URL_ENV,
+    NEAR_STATE_SECRET_ENV, NEAR_WALLET_BASE_URL_ENV, NearRedirectConfig,
+    WALLETCONNECT_PROJECT_ID_ENV, WalletConnectConfig,
+};
 pub use attested_continuation::RebornAttestedContinuation;
+pub use attested_raise::RebornAttestedRaiseHook;
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;

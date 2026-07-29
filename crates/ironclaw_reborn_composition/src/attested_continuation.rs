@@ -381,6 +381,12 @@ fn map_continuation_error(error: ContinuationError) -> AttestedContinuationRejec
         // client's proof was bad; map it to Unavailable (503) so the client can
         // retry the broadcast tail instead.
         ContinuationError::Broadcast { .. } => AttestedContinuationRejection::Unavailable,
+        // A startup/assembly misconfiguration should never reach this runtime
+        // mapping — it is raised while building the durable composition, long
+        // before any gate resolves. If one ever does, surface it as a backend
+        // health failure rather than as a client proof rejection, which would
+        // blame the caller for our own wiring fault.
+        ContinuationError::Config { .. } => AttestedContinuationRejection::BackendUnavailable,
     }
 }
 

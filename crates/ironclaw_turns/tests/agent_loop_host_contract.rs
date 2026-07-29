@@ -2783,6 +2783,7 @@ impl AgentLoopDriver for CapabilityDriver {
             gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
+            expected_tx_hash: None,
             checkpoint_id,
             state_ref,
             exit_id: LoopExitId::new("exit:capability-driver").unwrap(),

@@ -116,6 +116,10 @@ pub enum AttestedContinuationRejection {
     MalformedProof,
     /// The continuation port is not wired on this deployment.
     Unavailable,
+    /// An infrastructure/runtime backend failed (chain-signing backend error,
+    /// broadcast/RPC outage). This is a service-health failure, not a client
+    /// input failure, so it must surface as a retryable 503 rather than a 400.
+    BackendUnavailable,
 }
 
 impl AttestedContinuationRejection {
@@ -128,6 +132,7 @@ impl AttestedContinuationRejection {
             Self::LedgerGuard => "attested_ledger_guard",
             Self::MalformedProof => "attested_malformed_proof",
             Self::Unavailable => "attested_unavailable",
+            Self::BackendUnavailable => "attested_backend_unavailable",
         }
     }
 }

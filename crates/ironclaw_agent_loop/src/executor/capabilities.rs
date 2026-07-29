@@ -487,6 +487,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             kind: GateKind::AwaitDependentRun,
                             gate_ref: shared_gate_ref,
                             credential_requirements: Vec::new(),
+                            expected_tx_hash: None,
                             approval_resume: None,
                             auth_resume: None,
                         },
@@ -774,6 +775,7 @@ impl CapabilityStage {
                             kind: GateKind::Approval,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            expected_tx_hash: None,
                             approval_resume,
                             auth_resume: None,
                         },
@@ -808,6 +810,7 @@ impl CapabilityStage {
                             kind: GateKind::Auth,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            expected_tx_hash: None,
                             approval_resume: prior_approval,
                             auth_resume,
                         },
@@ -825,6 +828,38 @@ impl CapabilityStage {
                             kind: GateKind::Resource,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            expected_tx_hash: None,
+                            approval_resume: None,
+                            auth_resume: None,
+                        },
+                    )
+                    .await
+            }
+            Resolution::Blocked(Blocked::Attested(attested)) => {
+                let gate_ref = loop_gate_ref_from_origin(attested.waypoint.origin.as_ref())?;
+                // The model requested an attested blockchain signature. Park the
+                // run on the ceremony; the opaque proof is verified crypto-side
+                // outside this crate on resume. No loop resume token — the
+                // authoritative binding is store-side, keyed by the gate ref.
+                // The opaque `expected_tx_hash` rides onto the blocked exit so
+                // the durable turn record holds what the resume port re-checks
+                // against that authoritative binding.
+                let expected_tx_hash = ironclaw_turns::ApprovedTxHashRef::new(
+                    attested.expected_tx_hash.clone(),
+                )
+                .map_err(|_| AgentLoopExecutorError::PlannerContract {
+                    detail: "attested gate carried an unrepresentable transaction-hash binding",
+                })?;
+                GateStage
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::Attested,
+                            gate_ref,
+                            credential_requirements: Vec::new(),
+                            expected_tx_hash: Some(expected_tx_hash),
                             approval_resume: None,
                             auth_resume: None,
                         },
@@ -845,6 +880,7 @@ impl CapabilityStage {
                             kind: GateKind::ExternalTool,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            expected_tx_hash: None,
                             approval_resume: None,
                             auth_resume: None,
                         },

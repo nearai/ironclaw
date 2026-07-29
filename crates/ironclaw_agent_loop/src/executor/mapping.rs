@@ -33,6 +33,7 @@ pub(super) fn blocked_kind(kind: GateKind) -> LoopBlockedKind {
         GateKind::Resource => LoopBlockedKind::Resource,
         GateKind::AwaitDependentRun => LoopBlockedKind::AwaitDependentRun,
         GateKind::ExternalTool => LoopBlockedKind::ExternalTool,
+        GateKind::Attested => LoopBlockedKind::Attested,
     }
 }
 
@@ -43,6 +44,7 @@ pub(super) fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
         GateKind::Resource => LoopGateKind::ResourceWait,
         GateKind::AwaitDependentRun => LoopGateKind::AwaitDependentRun,
         GateKind::ExternalTool => LoopGateKind::ExternalTool,
+        GateKind::Attested => LoopGateKind::Attested,
     }
 }
 

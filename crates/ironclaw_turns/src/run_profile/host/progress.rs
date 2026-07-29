@@ -154,6 +154,8 @@ pub enum LoopGateKind {
     ResourceWait,
     AwaitDependentRun,
     ExternalTool,
+    /// Parked on an attested blockchain-signature ceremony.
+    Attested,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

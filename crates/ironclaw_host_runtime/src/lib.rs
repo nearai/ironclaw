@@ -37,6 +37,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
+mod attested_raise;
 mod capability_catalog;
 mod document_output;
 mod egress;
@@ -66,6 +67,7 @@ pub use user_profile_source::MemoryBackedUserProfileSource;
 
 pub use memory_native_extension::native_memory_first_party_package;
 
+pub use attested_raise::{AttestedRaiseHook, AttestedRaiseRequest};
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
     publish_hot_capability_catalog,
@@ -90,15 +92,16 @@ pub use first_party_tools::{
     HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, REQUEST_SIGNATURE_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver,
@@ -428,6 +431,24 @@ pub struct RuntimeResourceGate {
     pub estimate: ResourceEstimate,
 }
 
+/// Attested-signing suspension state.
+///
+/// Produced by the composition-owned raise hook when a `request_signature`
+/// invocation has had its authoritative gate binding persisted and one-shot
+/// grant sealed. The loop blocks on `gate_ref`; the resume path verifies the
+/// caller's later proof against the bound `expected_tx_hash`.
+///
+/// `expected_tx_hash` is the opaque, already-computed `ApprovedTxHash` rendered
+/// as a stable string ref. No crypto/chain type crosses into the loop/turns
+/// layers — only this opaque ref and the `gate_ref`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAttestedGate {
+    pub gate_id: RuntimeGateId,
+    pub capability_id: CapabilityId,
+    pub expected_tx_hash: String,
+    pub reason: RuntimeBlockedReason,
+}
+
 /// Spawned/background process summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProcessHandle {
@@ -511,6 +532,7 @@ pub enum RuntimeCapabilityOutcome {
     ApprovalRequired(RuntimeApprovalGate),
     AuthRequired(RuntimeAuthGate),
     ResourceBlocked(RuntimeResourceGate),
+    AttestedSigningRequired(RuntimeAttestedGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
     Unknown(RuntimeCapabilityUnknown),
@@ -523,6 +545,7 @@ impl RuntimeCapabilityOutcome {
             Self::ApprovalRequired(_) => "approval_required",
             Self::AuthRequired(_) => "auth_required",
             Self::ResourceBlocked(_) => "resource_blocked",
+            Self::AttestedSigningRequired(_) => "attested_signing_required",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
             Self::Unknown(_) => "unknown",
@@ -537,6 +560,7 @@ pub enum RuntimeBlockedReason {
     AuthRequired,
     ResourceLimit,
     ResourceUnavailable,
+    AttestedSigningRequired,
 }
 
 /// Opt-in local diagnostic switch for raw HTTP egress failures.

@@ -31,11 +31,11 @@ use ironclaw_host_runtime::{
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, REQUEST_SIGNATURE_CAPABILITY_ID,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
@@ -10231,4 +10231,101 @@ fn trust_decision() -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: chrono::Utc::now(),
     }
+}
+
+// --- attested-signing raise intercept (attested-signing PR14) ---------------
+
+/// Records what the runtime handed the raise hook, and answers with a fixed
+/// attested gate. Stands in for the composition-owned hook so this test can
+/// assert the ROUTING contract without pulling the attested substrate in.
+#[derive(Default)]
+struct RecordingAttestedRaiseHook {
+    seen: std::sync::Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+}
+
+#[async_trait]
+impl ironclaw_host_runtime::AttestedRaiseHook for RecordingAttestedRaiseHook {
+    async fn raise(
+        &self,
+        request: ironclaw_host_runtime::AttestedRaiseRequest,
+    ) -> RuntimeCapabilityOutcome {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((request.capability_id.clone(), request.input.clone()));
+        RuntimeCapabilityOutcome::AttestedSigningRequired(
+            ironclaw_host_runtime::RuntimeAttestedGate {
+                gate_id: ironclaw_host_runtime::RuntimeGateId::default(),
+                capability_id: request.capability_id,
+                expected_tx_hash: "deadbeef".to_string(),
+                reason: ironclaw_host_runtime::RuntimeBlockedReason::AttestedSigningRequired,
+            },
+        )
+    }
+}
+
+/// `request_signature` is routed to the injected raise hook instead of being
+/// dispatched to its (fail-closed) first-party handler.
+#[tokio::test]
+async fn request_signature_routes_to_the_attested_raise_hook() {
+    let hook = Arc::new(RecordingAttestedRaiseHook::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+    .with_attested_raise_hook(hook.clone());
+
+    let input = json!({"provider_hint": "custodial", "signer_account": "abcd"});
+    let outcome = runtime
+        .invoke_capability((
+            execution_context([REQUEST_SIGNATURE_CAPABILITY_ID]),
+            capability_id(REQUEST_SIGNATURE_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            input.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::AttestedSigningRequired(gate) = outcome else {
+        panic!("expected AttestedSigningRequired, got {outcome:?}");
+    };
+    assert_eq!(gate.capability_id.as_str(), REQUEST_SIGNATURE_CAPABILITY_ID);
+    assert_eq!(gate.expected_tx_hash, "deadbeef");
+
+    // The hook saw the raw params, unmodified, under the request_signature id.
+    let seen = hook.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the hook is called exactly once");
+    assert_eq!(seen[0].0.as_str(), REQUEST_SIGNATURE_CAPABILITY_ID);
+    assert_eq!(seen[0].1, input);
+}
+
+/// With NO raise hook wired, `request_signature` must NOT silently succeed: it
+/// falls through to the fail-closed first-party handler and refuses. A runtime
+/// that does not compose the attested substrate can never half-raise a gate.
+#[tokio::test]
+async fn request_signature_without_a_raise_hook_fails_closed() {
+    let outcome = runtime()
+        .invoke_capability((
+            execution_context([REQUEST_SIGNATURE_CAPABILITY_ID]),
+            capability_id(REQUEST_SIGNATURE_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"provider_hint": "custodial", "signer_account": "abcd"}),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Failed(_)),
+        "a hookless runtime must refuse request_signature, got {outcome:?}"
+    );
 }

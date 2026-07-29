@@ -307,6 +307,7 @@ pub(super) fn blocked_exit_with_checkpoint(
         gate_ref: LoopGateRef::new("gate:test").expect("valid"),
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
+        expected_tx_hash: None,
         checkpoint_id,
         state_ref,
         exit_id: test_exit_id(),

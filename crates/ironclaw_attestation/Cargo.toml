@@ -10,6 +10,10 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
+[package.metadata.ironclaw]
+# Rendering + binding-hash + grant/ledger contracts over the signing-provider types.
+layer = "substrates"
+
 [package.metadata.dist]
 dist = false
 
@@ -25,13 +29,6 @@ test-support = []
 # contract against their impls. Mirrors `ironclaw_hooks`'s `contract-tests`
 # feature. Production builds MUST NOT enable this.
 contract-tests = ["dep:tokio"]
-
-[package.metadata.ironclaw]
-# Crypto-free attestation core: canonical bytes, the sealed one-shot grant
-# store, and the signing ledger. Depends only on the contracts crate, and is
-# forbidden from depending on ironclaw_secrets — key material has no path in
-# here, which is why the signer implementations live at kernel.
-layer = "substrates"
 
 [dependencies]
 async-trait = "0.1"

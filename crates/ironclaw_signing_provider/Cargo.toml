@@ -10,15 +10,12 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+# Crypto-free provider/proof types and the `SigningProvider` trait; no ironclaw deps.
+layer = "contracts"
+
 [package.metadata.dist]
 dist = false
-
-[package.metadata.ironclaw]
-# Pure contract: the SigningProvider trait and its value types, with no
-# IronClaw dependencies at all. Nothing here executes a ceremony or holds a
-# key — that is what lets every layer above name the trait without inverting
-# the dependency graph.
-layer = "contracts"
 
 [dependencies]
 async-trait = "0.1"

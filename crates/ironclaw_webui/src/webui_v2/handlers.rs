@@ -3045,6 +3045,11 @@ fn admin_configuration_blocked(blocked: Blocked) -> ProductSurfaceError {
         Blocked::Approval(_) => ProductSurfaceErrorKind::BlockedApproval,
         Blocked::Auth(_) => ProductSurfaceErrorKind::BlockedAuthentication,
         Blocked::Resource(_) => ProductSurfaceErrorKind::BlockedResource,
+        // Admin configuration capabilities never request a blockchain
+        // signature; an attested gate here is a wiring fault, not a state the
+        // caller can resolve, so it surfaces as internal rather than as a
+        // retryable 409 the operator would poll forever.
+        Blocked::Attested(_) => return ProductSurfaceError::internal(),
     };
     ProductSurfaceError {
         code: ProductSurfaceErrorCode::Conflict,

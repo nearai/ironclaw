@@ -10,15 +10,12 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+# Durable grant/ledger/binding stores for the attested runtime (kernel).
+layer = "kernel"
+
 [package.metadata.dist]
 dist = false
-
-[package.metadata.ironclaw]
-# Durable PostgreSQL + libSQL backends for the attested-signing stores.
-# Kernel, like the runtime it serves: it depends on ironclaw_attested_runtime
-# for the binding-store trait, and enforces the one-shot/idempotency
-# invariants at the DATABASE level rather than in application code.
-layer = "kernel"
 
 [features]
 default = []

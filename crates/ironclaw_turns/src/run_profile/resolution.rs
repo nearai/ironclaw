@@ -63,11 +63,12 @@
 //! read derive the same key (byte-stable resume).
 
 use ironclaw_host_api::{
-    Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult, FailureKind, GateRecord,
-    GateRef, GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues,
-    ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint,
-    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId,
-    RuntimeCredentialAuthRequirement, SafeSummary, Suspension, TerminateHint, ToolVerdict,
+    AttestedGateWaypoint, Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult,
+    FailureKind, GateRecord, GateRef, GateWaypoint, LoopRef, ModelFailureDiagnostic,
+    ModelInputIssue, ModelInputIssues, ModelResultPreview, Outcome, OutcomeRefs, OutputDigest,
+    ProcessRef, ProcessWaypoint, Resolution, ResultPreviewMeta, ResultProgress, ResultRef,
+    ResumeToken, RunId, RuntimeCredentialAuthRequirement, SafeSummary, Suspension, TerminateHint,
+    ToolVerdict,
 };
 
 use super::content_digest::ContentDigest;
@@ -79,7 +80,7 @@ use super::model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, ModelVisibleToolObservation,
     ToolObservationDetail,
 };
-use crate::{LoopGateRef, LoopResultRef, TurnRunId};
+use crate::{ApprovedTxHashRef, LoopGateRef, LoopResultRef, TurnRunId};
 
 /// A [`Resolution`] on a gate/suspension channel paired with the durable
 /// [`GateRecord`] its opaque ref renders from (§5.2.9).
@@ -284,6 +285,35 @@ pub fn resource_blocked(gate_ref: LoopGateRef, safe_summary: String) -> GatedRes
     GatedResolution::gated(
         Resolution::Blocked(Blocked::Resource(waypoint)),
         GateRecord::Resource {
+            summary: safe_summary_or_placeholder(safe_summary),
+        },
+    )
+}
+
+/// The `Blocked(Attested)` re-entrant gate: needs an attested blockchain
+/// signature before the call may complete. No loop resume token — the attested
+/// resume verifies the opaque proof against the authoritative binding the host
+/// persisted at raise (keyed by the gate ref in the attestation layer), not a
+/// loop-carried token.
+///
+/// `expected_tx_hash` is the opaque, already-computed hash ref of that binding.
+/// It rides the channel so the loop can persist it on the durable turn record —
+/// the resume path reads it back and hands it to the attested resume port, which
+/// re-checks it against the authoritative binding and fails closed on mismatch.
+/// The model-visible [`GateRecord::Attested`] still carries only the redacted
+/// summary.
+pub fn attested_signing_required(
+    gate_ref: LoopGateRef,
+    expected_tx_hash: ApprovedTxHashRef,
+    safe_summary: String,
+) -> GatedResolution {
+    let waypoint = gate_waypoint(GateRef::new(), &gate_ref, None);
+    GatedResolution::gated(
+        Resolution::Blocked(Blocked::Attested(AttestedGateWaypoint::new(
+            waypoint,
+            expected_tx_hash.as_str(),
+        ))),
+        GateRecord::Attested {
             summary: safe_summary_or_placeholder(safe_summary),
         },
     )
@@ -726,6 +756,11 @@ mod tests {
             None,
         );
         let external = external_tool_pending(gate_ref(), "awaiting external tool".to_string());
+        let attested = attested_signing_required(
+            gate_ref(),
+            ApprovedTxHashRef::new("deadbeef").expect("hash ref"),
+            "awaiting signature".to_string(),
+        );
         let deny = denied(
             CapabilityDeniedReasonKind::EmptySurface,
             "denied by policy".to_string(),
@@ -813,6 +848,14 @@ mod tests {
                 gate_record: external.gate_record.as_ref().map(GateRecord::kind),
                 deny_record: false,
             },
+            Row {
+                label: "attested_signing_required",
+                resolution: attested.resolution.clone(),
+                // Re-entrant gate (`Blocked`), NOT a suspension — like approval.
+                suspends: false,
+                gate_record: attested.gate_record.as_ref().map(GateRecord::kind),
+                deny_record: false,
+            },
         ];
 
         // Expected gate-record kinds spelled once, matched against what the gate
@@ -823,9 +866,10 @@ mod tests {
             ("resource_blocked", Some("resource")),
             ("await_dependent_run", Some("dependent_run")),
             ("external_tool_pending", Some("external_tool")),
+            ("attested_signing_required", Some("attested")),
         ];
 
-        assert_eq!(rows.len(), 10, "all ten producer channels covered");
+        assert_eq!(rows.len(), 11, "all eleven producer channels covered");
 
         for row in &rows {
             assert_eq!(
@@ -859,6 +903,11 @@ mod tests {
             approval_required(gate_ref(), "a".to_string(), None),
             auth_required(auth_gate_ref(), vec![], "a".to_string(), None),
             resource_blocked(gate_ref(), "a".to_string()),
+            attested_signing_required(
+                gate_ref(),
+                ApprovedTxHashRef::new("deadbeef").expect("hash ref"),
+                "a".to_string(),
+            ),
         ] {
             assert!(gated.resolution.is_reentrant_gate());
             assert!(

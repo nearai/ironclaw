@@ -95,6 +95,11 @@ pub enum GateRecord {
     },
     /// Awaiting a client-executed external tool the host does not run.
     ExternalTool { summary: SafeSummary },
+    /// Awaiting an attested blockchain signature. Carries only the redacted,
+    /// model-visible summary; the authoritative binding (approved-tx-hash,
+    /// decoded tx, signing context) lives in the attestation layer keyed by the
+    /// gate ref, never here.
+    Attested { summary: SafeSummary },
 }
 
 impl GateRecord {
@@ -105,7 +110,8 @@ impl GateRecord {
             | GateRecord::Auth { summary, .. }
             | GateRecord::Resource { summary }
             | GateRecord::DependentRun { summary, .. }
-            | GateRecord::ExternalTool { summary } => summary,
+            | GateRecord::ExternalTool { summary }
+            | GateRecord::Attested { summary } => summary,
         }
     }
 
@@ -117,6 +123,7 @@ impl GateRecord {
             GateRecord::Resource { .. } => "resource",
             GateRecord::DependentRun { .. } => "dependent_run",
             GateRecord::ExternalTool { .. } => "external_tool",
+            GateRecord::Attested { .. } => "attested",
         }
     }
 }
@@ -165,6 +172,7 @@ mod tests {
                 GateRecord::ExternalTool { summary: summary() },
                 "external_tool",
             ),
+            (GateRecord::Attested { summary: summary() }, "attested"),
         ];
         for (record, tag) in variants {
             let wire = serde_json::to_value(&record).unwrap();

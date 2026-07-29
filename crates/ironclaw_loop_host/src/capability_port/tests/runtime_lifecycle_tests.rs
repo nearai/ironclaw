@@ -16,10 +16,10 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
-    RuntimeAuthGate, RuntimeAuthResume, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityUnknown, RuntimeGateId,
-    RuntimeInvocation, RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest,
-    VisibleCapabilitySurface,
+    RuntimeAttestedGate, RuntimeAuthGate, RuntimeAuthResume, RuntimeBlockedReason,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityUnknown, RuntimeGateId, RuntimeInvocation, RuntimeProcessHandle,
+    RuntimeResourceGate, RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
@@ -533,6 +533,12 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             capability_id: capability_id.clone(),
             reason: RuntimeBlockedReason::ResourceLimit,
             estimate: ResourceEstimate::default(),
+        }),
+        RuntimeCapabilityOutcome::AttestedSigningRequired(RuntimeAttestedGate {
+            gate_id: RuntimeGateId::new(),
+            capability_id: capability_id.clone(),
+            expected_tx_hash: "deadbeef".to_string(),
+            reason: RuntimeBlockedReason::AttestedSigningRequired,
         }),
         RuntimeCapabilityOutcome::SpawnedProcess(RuntimeProcessHandle {
             process_id: ProcessId::new(),
@@ -1891,3 +1897,58 @@ impl LoopHostMilestoneSink for FailOnceTerminalMilestoneSink {
 }
 
 // arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175
+
+/// The attested gate's opaque binding survives the runtime→loop mapping, and
+/// the loop gate ref is EXACTLY the `gate:attested-{gate_id}` key the
+/// composition raise hook persisted the authoritative binding under. If either
+/// drifts, the attested resume reads back no binding (or the wrong one) and the
+/// ceremony fails closed at resolve time instead of at review time.
+#[tokio::test]
+async fn attested_gate_carries_its_binding_and_gate_ref_onto_the_loop_channel() {
+    // The fixed provider tool call this harness registers resolves to
+    // `demo.echo`; the attested routing under test is independent of which
+    // capability raised the gate.
+    let capability_id = CapabilityId::new("demo.echo").expect("capability id");
+    let provider_id = ExtensionId::new("demo").expect("provider id");
+    let gate_id = RuntimeGateId::new();
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::AttestedSigningRequired(
+                RuntimeAttestedGate {
+                    gate_id: gate_id.clone(),
+                    capability_id: capability_id.clone(),
+                    expected_tx_hash: "deadbeef".to_string(),
+                    reason: RuntimeBlockedReason::AttestedSigningRequired,
+                },
+            ))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        "thread-runtime-attested-gate",
+    )
+    .await;
+
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("attested gate is a blocked outcome");
+
+    let Resolution::Blocked(Blocked::Attested(attested)) = &outcome else {
+        panic!("attested gate must surface as an attested block, got {outcome:?}");
+    };
+    assert_eq!(attested.expected_tx_hash, "deadbeef");
+    assert_eq!(
+        attested
+            .waypoint
+            .origin
+            .as_ref()
+            .expect("attested block preserves its loop gate origin")
+            .as_str(),
+        format!("gate:attested-{gate_id}"),
+    );
+}

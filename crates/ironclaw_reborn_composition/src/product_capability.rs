@@ -360,6 +360,16 @@ async fn product_resolution(
                 GateRef::from_uuid(invocation_id.as_uuid()),
             ))))
         }
+        RuntimeCapabilityOutcome::AttestedSigningRequired(_gate) => {
+            // The attested-signing ceremony is resumed by the TURN machinery:
+            // the blocked run carries the binding on its durable record and the
+            // attested resume verifies against it. A product/WebUI caller has no
+            // such run, so a gate raised here could never be resolved. Fail
+            // closed rather than hand back an unresumable gate.
+            Err(ProductSurfaceError::internal_from(
+                "attested signing is not available on the product capability path",
+            ))
+        }
         RuntimeCapabilityOutcome::SpawnedProcess(process) => {
             Ok(Resolution::Suspended(Suspension::Process(
                 ProcessWaypoint::new(ProcessRef::from_uuid(process.process_id.as_uuid())),
@@ -441,6 +451,7 @@ fn ensure_matching_capability(
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::AuthRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
         RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,

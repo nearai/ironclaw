@@ -251,11 +251,13 @@ impl GateKind {
     }
 
     /// Build the data-carrying [`BlockedReason`] for this gate kind. Only `Auth`
-    /// carries credential requirements; the rest ignore them.
+    /// carries credential requirements and only `Attested` carries the opaque
+    /// approved-transaction-hash binding; the rest ignore both.
     pub fn into_blocked_reason(
         self,
         gate_ref: GateRef,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     ) -> BlockedReason {
         match self {
             Self::Approval => BlockedReason::Approval { gate_ref },
@@ -268,7 +270,7 @@ impl GateKind {
             Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
             Self::Attested => BlockedReason::Attested {
                 gate_ref,
-                expected_tx_hash: None,
+                expected_tx_hash,
             },
         }
     }

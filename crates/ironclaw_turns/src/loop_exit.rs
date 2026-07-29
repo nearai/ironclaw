@@ -5,8 +5,8 @@ use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopDiagnosticRef, LoopExitId,
-    LoopGateRef, LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure,
+    ApprovedTxHashRef, BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopDiagnosticRef,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure,
     TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
@@ -290,10 +290,11 @@ impl LoopExit {
         match self {
             Self::Completed(exit) => validate_completed_exit(exit_id, exit, policy),
             Self::Blocked(exit) if policy.blocked_evidence_verified => {
-                match exit
-                    .kind
-                    .to_blocked_reason(exit.gate_ref, exit.credential_requirements)
-                {
+                match exit.kind.to_blocked_reason(
+                    exit.gate_ref,
+                    exit.credential_requirements,
+                    exit.expected_tx_hash,
+                ) {
                     Ok(reason) => LoopExitValidationDecision::trusted(
                         exit_id,
                         TurnRunnerOutcome::Blocked {
@@ -387,6 +388,13 @@ pub struct LoopBlocked {
     pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    /// The opaque approved-transaction-hash binding, present only on an
+    /// [`LoopBlockedKind::Attested`] block. Persisted onto the durable turn
+    /// record so the attested resume can hand it to the verification port
+    /// (which re-checks it against the authoritative binding). `None` for every
+    /// standard gate kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_tx_hash: Option<ApprovedTxHashRef>,
     pub checkpoint_id: TurnCheckpointId,
     pub state_ref: LoopCheckpointStateRef,
     pub exit_id: LoopExitId,
@@ -404,6 +412,10 @@ pub enum LoopBlockedKind {
     /// run and returns control to the API client, which resumes by submitting
     /// the tool output. Bridges to [`BlockedReason::ExternalTool`].
     ExternalTool,
+    /// The model requested an attested blockchain signature. The loop parks the
+    /// run on the attested-signing ceremony; resume verifies the opaque proof
+    /// crypto-side outside this crate. Bridges to [`BlockedReason::Attested`].
+    Attested,
 }
 
 impl From<LoopBlockedKind> for GateKind {
@@ -414,6 +426,7 @@ impl From<LoopBlockedKind> for GateKind {
             LoopBlockedKind::Resource => Self::Resource,
             LoopBlockedKind::AwaitDependentRun => Self::AwaitDependentRun,
             LoopBlockedKind::ExternalTool => Self::ExternalTool,
+            LoopBlockedKind::Attested => Self::Attested,
         }
     }
 }
@@ -423,9 +436,14 @@ impl LoopBlockedKind {
         self,
         gate_ref: LoopGateRef,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        expected_tx_hash: Option<ApprovedTxHashRef>,
     ) -> Result<BlockedReason, ()> {
         let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
-        Ok(GateKind::from(self).into_blocked_reason(gate_ref, credential_requirements))
+        Ok(GateKind::from(self).into_blocked_reason(
+            gate_ref,
+            credential_requirements,
+            expected_tx_hash,
+        ))
     }
 }
 

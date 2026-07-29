@@ -368,6 +368,7 @@ async fn budget_approval_blocked_exit(
         gate_ref,
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
+        expected_tx_hash: None,
         checkpoint_id: checked.checkpoint_id,
         state_ref: checked.state_ref,
         exit_id: exit_id(ctx.host, "blocked")?,

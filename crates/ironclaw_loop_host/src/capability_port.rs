@@ -3557,6 +3557,29 @@ async fn runtime_outcome_to_loop(
             loop_gate_ref("resource", gate.gate_id.to_string())?,
             blocked_summary(gate.reason).to_string(),
         ),
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => {
+            // The composition raise hook already persisted the authoritative
+            // binding and sealed the one-shot grant; all that crosses here is
+            // the opaque gate ref + expected-tx-hash. No resume token: the
+            // attested resume is verified against the store-side binding, not
+            // against a loop-carried token. A hash the loop cannot represent
+            // fails the invocation rather than raising a gate whose binding the
+            // resume path could never read back.
+            let expected_tx_hash = ironclaw_turns::ApprovedTxHashRef::new(
+                gate.expected_tx_hash.clone(),
+            )
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "attested gate transaction-hash binding could not be represented",
+                )
+            })?;
+            resolution::attested_signing_required(
+                loop_gate_ref("attested", gate.gate_id.to_string())?,
+                expected_tx_hash,
+                blocked_summary(gate.reason).to_string(),
+            )
+        }
         RuntimeCapabilityOutcome::SpawnedProcess(process) => {
             GatedResolution::bare(resolution::spawned_process(
                 LoopProcessRef::new(format!("process:{}", process.process_id)).map_err(|_| {
@@ -3678,6 +3701,7 @@ fn runtime_terminal_milestone(
         RuntimeCapabilityOutcome::ApprovalRequired(_)
         | RuntimeCapabilityOutcome::AuthRequired(_)
         | RuntimeCapabilityOutcome::ResourceBlocked(_)
+        | RuntimeCapabilityOutcome::AttestedSigningRequired(_)
         | RuntimeCapabilityOutcome::SpawnedProcess(_) => None,
     })
 }
@@ -3882,6 +3906,7 @@ fn ensure_runtime_outcome_matches(
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::AuthRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
         RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
@@ -3997,6 +4022,9 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
         RuntimeBlockedReason::AuthRequired => "capability requires authentication",
         RuntimeBlockedReason::ResourceLimit => "capability is blocked by resource limits",
         RuntimeBlockedReason::ResourceUnavailable => "capability resources are unavailable",
+        RuntimeBlockedReason::AttestedSigningRequired => {
+            "capability requires an attested blockchain signature"
+        }
     }
 }
 

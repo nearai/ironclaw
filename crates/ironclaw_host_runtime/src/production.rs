@@ -95,14 +95,14 @@ fn trace_capability_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
-    CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
-    RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
-    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId,
-    RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, obligations::secret_owner_scope,
-    surface::CapabilityCatalog,
+    AttestedRaiseHook, AttestedRaiseRequest, BuiltinObligationHandler, BuiltinObligationServices,
+    CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, REQUEST_SIGNATURE_CAPABILITY_ID,
+    RuntimeApprovalGate, RuntimeApprovalResume, RuntimeAuthGate, RuntimeAuthResume,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId, RuntimeInvocation,
+    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -131,6 +131,12 @@ pub struct DefaultHostRuntime {
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
+    /// Composition-owned attested-signing raise hook. When set, a
+    /// `request_signature` invocation is routed here instead of normal dispatch
+    /// (attested-signing PR14). Keeps all crypto/chain logic in composition.
+    // arch-exempt: optional_arc, attested substrate is only composed in graphs
+    // that wire the raise hook; bare/test runtimes fail closed without it.
+    attested_raise_hook: Option<Arc<dyn AttestedRaiseHook>>,
     /// Optional secret store used for pre-flight credential presence checks.
     ///
     /// When present, capability dispatch (both `invoke_capability` and
@@ -209,6 +215,7 @@ impl DefaultHostRuntime {
             surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
+            attested_raise_hook: None,
             credential_preflight_store: None,
             surface_version,
             runtime_policy,
@@ -354,6 +361,17 @@ impl DefaultHostRuntime {
         self
     }
 
+    /// Attaches the composition-owned attested-signing raise hook.
+    ///
+    /// When set, a `request_signature` invocation is routed to this hook instead
+    /// of normal capability dispatch (attested-signing PR14). The hook owns all
+    /// decode/render/hash/bind/seal logic, keeping crypto/chain types out of the
+    /// host-runtime/loop/turns layers, and fails closed on any error.
+    pub fn with_attested_raise_hook(mut self, hook: Arc<dyn AttestedRaiseHook>) -> Self {
+        self.attested_raise_hook = Some(hook);
+        self
+    }
+
     /// Installs a fully configured built-in obligation handler using the shared
     /// service graph supplied by host-runtime composition.
     ///
@@ -443,6 +461,41 @@ impl HostRuntime for DefaultHostRuntime {
         if let Err(error) = context.validate() {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
+
+        // Attested-signing raise (attested-signing PR14): a `request_signature`
+        // invocation does not sign — it routes to the composition-owned raise
+        // hook, which builds + binds + seals the gate and returns
+        // `AttestedSigningRequired` (or `Failed`, fail-closed), short-circuiting
+        // before the kernel dispatch below. The capability declares
+        // `PermissionMode::Ask` and the attested gate it raises IS the
+        // human-in-the-loop boundary; the capability-surface authorization layer
+        // gates the `request_signature` dispatch before this runtime is invoked.
+        // NOTE (rebase): main moved trust/policy/credential authorization into
+        // the kernel `authorize()` fold inside `host.invoke_json`; this intercept
+        // sits before that fold, so `request_signature` does not pass the kernel
+        // authorization path — acceptable because the raise only persists a gate
+        // and seals a one-shot grant (no signing/broadcast) and fails closed.
+        if capability_id.as_str() == REQUEST_SIGNATURE_CAPABILITY_ID
+            && let Some(hook) = self.attested_raise_hook.clone()
+        {
+            let outcome = hook
+                .raise(AttestedRaiseRequest::new(
+                    capability_id.clone(),
+                    context.clone(),
+                    input.clone(),
+                ))
+                .await;
+            trace_capability_latency_ok(
+                "invoke_capability",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
+            return Ok(outcome);
+        }
+        // When `request_signature` has no raise hook wired, fall through to the
+        // fail-closed first-party handler, which refuses (never silently
+        // succeeds).
 
         // Credential pre-flight and the persistent-approval re-authorize fold now
         // run inside the capability kernel's `authorize()` fold (§5.2.7/§5.3.2),

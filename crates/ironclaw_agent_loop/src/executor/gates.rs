@@ -59,6 +59,11 @@ pub(super) struct GateInput {
     pub(super) kind: GateKind,
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
     pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    /// The opaque approved-transaction-hash binding carried by an attested
+    /// gate (`GateKind::Attested`); `None` for every other gate kind. Threaded
+    /// onto the blocked exit so the durable turn record holds the binding the
+    /// attested resume verifies the caller's proof against.
+    pub(super) expected_tx_hash: Option<ironclaw_turns::ApprovedTxHashRef>,
     pub(super) approval_resume: Option<CapabilityApprovalResume>,
     pub(super) auth_resume: Option<ironclaw_turns::run_profile::CapabilityAuthResume>,
 }
@@ -179,6 +184,10 @@ impl ExecutorStage<GateInput> for GateStage {
                     gate_ref,
                     blocked_activity_id: Some(call.activity_id),
                     credential_requirements: input.credential_requirements,
+                    // Approval/auth/resource blocks carry no binding; an
+                    // attested-signing block carries the opaque expected-tx-hash
+                    // the resume path verifies the caller's proof against.
+                    expected_tx_hash: input.expected_tx_hash,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
                     exit_id: exit_id(ctx.host, "blocked")?,
@@ -286,6 +295,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     gate_ref,
                     blocked_activity_id: Some(call.activity_id),
                     credential_requirements: Vec::new(),
+                    expected_tx_hash: None,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
                     exit_id: exit_id(ctx.host, "blocked")?,

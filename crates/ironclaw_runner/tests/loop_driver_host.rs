@@ -9040,6 +9040,7 @@ impl AgentLoopDriver for ApprovalBlockThenFinalReplyDriver {
             gate_ref: LoopGateRef::new("gate:approval-resume-e2e").unwrap(),
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
+            expected_tx_hash: None,
             checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:approval-resume-state").unwrap(),
             exit_id: LoopExitId::new("exit:approval-resume-blocked").unwrap(),

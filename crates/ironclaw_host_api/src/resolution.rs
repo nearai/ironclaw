@@ -193,6 +193,40 @@ pub enum Blocked {
     Auth(GateWaypoint),
     /// Needs resource budget currently unavailable.
     Resource(GateWaypoint),
+    /// Awaiting an attested blockchain signature (external wallet / hardware
+    /// device or custodial+WebAuthn ceremony). Authorize-time-only, like
+    /// `Approval`/`Resource`.
+    Attested(AttestedGateWaypoint),
+}
+
+/// A gate waypoint plus the opaque approved-transaction-hash binding raised
+/// with an attested-signing gate.
+///
+/// The *authoritative* binding (decoded transaction, signing context, sealed
+/// grant) lives in the attestation layer keyed by the gate ref and never rides
+/// this channel. `expected_tx_hash` is the opaque, already-computed rendering
+/// of that binding's hash, carried so the loop can persist it on the durable
+/// turn record: the resume path reads it back and hands it to the attested
+/// resume port, which re-checks it against the authoritative binding and fails
+/// closed on any mismatch. It is a public commitment, not a secret, and it is
+/// never trusted on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedGateWaypoint {
+    /// The gate waypoint (kernel handle + preserved origin).
+    #[serde(flatten)]
+    pub waypoint: GateWaypoint,
+    /// Opaque approved-transaction-hash ref (lowercase hex, no `0x`).
+    pub expected_tx_hash: String,
+}
+
+impl AttestedGateWaypoint {
+    /// Pair a gate waypoint with its opaque approved-transaction-hash ref.
+    pub fn new(waypoint: GateWaypoint, expected_tx_hash: impl Into<String>) -> Self {
+        Self {
+            waypoint,
+            expected_tx_hash: expected_tx_hash.into(),
+        }
+    }
 }
 
 impl Blocked {
@@ -201,6 +235,7 @@ impl Blocked {
     pub fn waypoint(&self) -> &GateWaypoint {
         match self {
             Blocked::Approval(w) | Blocked::Auth(w) | Blocked::Resource(w) => w,
+            Blocked::Attested(attested) => &attested.waypoint,
         }
     }
 
@@ -225,6 +260,7 @@ impl Blocked {
             Blocked::Approval(_) => "approval",
             Blocked::Auth(_) => "auth",
             Blocked::Resource(_) => "resource",
+            Blocked::Attested(_) => "attested",
         }
     }
 
@@ -729,6 +765,10 @@ mod tests {
         GateWaypoint::new(gate())
     }
 
+    fn attested_wp() -> AttestedGateWaypoint {
+        AttestedGateWaypoint::new(gate_wp(), "deadbeef")
+    }
+
     fn proc_ref() -> ProcessRef {
         ProcessRef::parse(PROC_UUID).unwrap()
     }
@@ -766,6 +806,7 @@ mod tests {
             (Blocked::Approval(gate_wp()), "approval"),
             (Blocked::Auth(gate_wp()), "auth"),
             (Blocked::Resource(gate_wp()), "resource"),
+            (Blocked::Attested(attested_wp()), "attested"),
         ] {
             let wire = serde_json::to_value(&blocked).unwrap();
             let tag_on_wire = wire.as_object().unwrap().keys().next().unwrap().clone();
@@ -802,6 +843,7 @@ mod tests {
         assert!(Blocked::Auth(gate_wp()).is_dispatch_time_permitted());
         assert!(!Blocked::Approval(gate_wp()).is_dispatch_time_permitted());
         assert!(!Blocked::Resource(gate_wp()).is_dispatch_time_permitted());
+        assert!(!Blocked::Attested(attested_wp()).is_dispatch_time_permitted());
     }
 
     #[test]

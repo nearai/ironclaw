@@ -203,6 +203,15 @@ pub enum ContinuationError {
         /// Opaque description (never key material).
         reason: String,
     },
+    /// A startup / assembly-time misconfiguration (a malformed RPC endpoint, a
+    /// failed store migration, etc.) detected while building the durable
+    /// composition — distinct from a runtime [`Self::Broadcast`] outage so ops
+    /// can tell "misconfigured at boot" from "RPC is down at runtime". Never
+    /// carries key material.
+    Config {
+        /// Opaque description (never key material).
+        reason: String,
+    },
     /// A broadcast-idempotency ledger row already exists for this `gate_ref`
     /// (a prior continuation attempt). This is the one-shot guard firing on
     /// re-entry — distinct from a generic invalid ledger transition. Carries the
@@ -237,6 +246,7 @@ impl std::fmt::Display for ContinuationError {
             }
             Self::Rebuild(e) => write!(f, "decoded-binding rebuild failed: {e}"),
             Self::Broadcast { reason } => write!(f, "broadcast failed: {reason}"),
+            Self::Config { reason } => write!(f, "attested composition misconfigured: {reason}"),
             Self::LedgerRowExists { current } => {
                 write!(
                     f,

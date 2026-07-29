@@ -13,15 +13,12 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
+[package.metadata.ironclaw]
+# External-wallet (WalletConnect) client over the signing-provider types.
+layer = "substrates"
+
 [package.metadata.dist]
 dist = false
-
-[package.metadata.ironclaw]
-# External-wallet providers: injected, NEAR redirect, WalletConnect. Holds no
-# key material — the user's wallet does — so it carries signer-recovery
-# primitives but never ironclaw_secrets or the chain SDKs, which the boundary
-# suite pins. Depends only on contracts and substrates.
-layer = "substrates"
 
 [dependencies]
 tracing = "0.1"

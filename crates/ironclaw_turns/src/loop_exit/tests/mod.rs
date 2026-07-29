@@ -25,7 +25,7 @@ fn policy_denied_failure_kind_serializes_as_snake_case() {
 fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
     let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
     let reason = LoopBlockedKind::AwaitDependentRun
-        .to_blocked_reason(gate_ref.clone(), Vec::new())
+        .to_blocked_reason(gate_ref.clone(), Vec::new(), None)
         .unwrap();
 
     assert_eq!(
@@ -347,6 +347,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
         gate_ref: loop_gate_ref,
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
+        expected_tx_hash: None,
         checkpoint_id,
         state_ref: state_ref.clone(),
         exit_id: exit_id("exit:blocked"),
@@ -381,6 +382,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         gate_ref: loop_gate_ref("gate:approval-gate"),
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
+        expected_tx_hash: None,
         checkpoint_id: TurnCheckpointId::new(),
         state_ref: checkpoint_state_ref(),
         exit_id: exit_id("exit:unverified-blocked"),
@@ -897,17 +899,25 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         LoopBlockedKind::Resource,
         LoopBlockedKind::AwaitDependentRun,
         LoopBlockedKind::ExternalTool,
+        LoopBlockedKind::Attested,
     ] {
         let checkpoint_id = TurnCheckpointId::new();
         let lg = loop_gate_ref("gate:test-gate");
         let gate_ref = GateRef::new(lg.as_str()).unwrap();
         let state_ref = checkpoint_state_ref();
 
+        // Only an attested block carries a transaction binding. Setting it for
+        // every kind pins BOTH halves of the rule: it must survive onto
+        // `BlockedReason::Attested` (the durable record the attested resume
+        // verifies against) and must be dropped by every standard gate kind.
+        let expected_tx_hash = ApprovedTxHashRef::new("deadbeef").expect("hash ref");
+
         let decision = LoopExit::Blocked(LoopBlocked {
             kind,
             gate_ref: lg,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
+            expected_tx_hash: Some(expected_tx_hash.clone()),
             checkpoint_id,
             state_ref: state_ref.clone(),
             exit_id: exit_id("exit:blocked-variant"),
@@ -923,6 +933,10 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
             LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
             LoopBlockedKind::ExternalTool => BlockedReason::ExternalTool { gate_ref },
+            LoopBlockedKind::Attested => BlockedReason::Attested {
+                gate_ref,
+                expected_tx_hash: Some(expected_tx_hash),
+            },
         };
 
         assert_eq!(decision.violation, None);
