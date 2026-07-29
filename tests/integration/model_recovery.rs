@@ -126,6 +126,10 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .await
         .expect("the next interactive request does not rehydrate the transcript secret");
     harness
+        .assert_post_compaction_interactive_model_message_content_not_contains(second_input_secret)
+        .await
+        .expect("the next interactive request does not rehydrate any transcript secret");
+    harness
         .assert_post_compaction_interactive_model_message_content_not_contains(output_secret)
         .await
         .expect("the next interactive request does not rehydrate model-output key material");
@@ -165,6 +169,29 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .assert_model_message_content_not_contains(&CONTEXT_OVERFLOW_USED_TOKENS.to_string())
         .await
         .expect("provider diagnostics do not enter the recovery prompt");
+}
+
+#[tokio::test]
+async fn summary_exclusion_rejects_missing_durable_artifacts() {
+    let harness = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("ordinary reply")])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("ordinary turn without compaction")
+        .await
+        .expect("turn establishes a durable thread without a summary");
+
+    let error = harness
+        .assert_summary_artifacts_lack("synthetic secret")
+        .await
+        .expect_err("an empty artifact set must not prove exclusion");
+
+    assert_eq!(
+        error.to_string(),
+        "vacuous exclusion: zero durable summary artifacts persisted"
+    );
 }
 
 #[tokio::test]

@@ -1651,19 +1651,3 @@ impl RebornIntegrationHarness {
             .await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::summary_contents_lack;
-
-    #[test]
-    fn summary_exclusion_rejects_missing_durable_artifacts() {
-        let error = summary_contents_lack(&[], "synthetic secret")
-            .expect_err("an empty artifact set must not prove exclusion");
-
-        assert_eq!(
-            error.to_string(),
-            "vacuous exclusion: zero durable summary artifacts persisted"
-        );
-    }
-}
