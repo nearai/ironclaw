@@ -2,3 +2,5 @@
 /dist-demo/
 /node_modules/
 packages/*/node_modules/
+/test-results/
+/playwright-report/
