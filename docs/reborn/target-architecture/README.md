@@ -7,16 +7,28 @@ This is the north star for the architecture cleanup: a concrete crate/folder map
 
 ---
 
-## The one-paragraph decision
+## What this proposes
 
-Keep the capability-based microkernel model and the **mechanically enforced 7-layer ladder exactly as it exists today** (`[package.metadata.ironclaw] layer` + the matrix test in `ironclaw_architecture`). Physicalize ownership as **ten family directories** under `crates/` — discoverability groupings, **never** trust boundaries by themselves. Create exactly **three new contracts crates** (`ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`) where today's dependency graph proves upper-layer vocabulary pooled in the wrong crate. **Narrow the four god crates** (`composition`, `extension_host`, `host_runtime`, `runner`) by moving inventoried behavior to named owners. **Delete the verified-dead surface** (two whole crates plus an itemized list). **Colocate every installable extension package** under `crates/extensions/packages/`. Net effect: 66 → 64 workspace packages, and **all 20 standing `LAYER_MATRIX_EXCEPTIONS` — the repo's own machine-tracked debt register — dissolve with zero new exceptions**.
+Today `crates/` is a flat list of sixty-odd crates. The architecture underneath is actually in good shape — there are real dependency rules between the crates, and CI enforces them — but none of that is visible from the tree, and over the past months code has pooled into a handful of oversized crates that own far more than their names say. Figuring out where anything belongs takes archaeology, and every agent or new contributor pays that tax on every change.
+
+The proposal is to reorganize the workspace into the shape the architecture already wants: **ten families, stacked in one direction.** User-facing code sits at the top, shared vocabulary at the bottom, and in the middle sits the **kernel** — the code that decides what is allowed to happen. A crate may only depend on crates in families at or below its own. That single rule *is* the architecture, and once the tree mirrors it, the tree tells the story by itself: the app wires everything together, the product asks the kernel for privileged work, the kernel checks and mediates every privileged action, and everything below it is mechanism and vocabulary with no authority of its own.
+
+Getting there is mostly reorganization, not rewrite:
+
+- **Move** most crates into their family folder unchanged.
+- **Add three small contracts crates** holding the shared interfaces for the loop, for extensions, and for the product surface — so lower layers stop reaching *upward* to borrow types, which is where most of today's dependency tangles come from.
+- **Slim the four oversized crates** (composition, the extension host, the host runtime, the runner) by moving what they absorbed back to the crates that actually own it.
+- **Delete code that is verifiably dead**, and fold a few single-purpose fragments into the crate they serve.
+- **Give every installable extension one self-contained folder** — manifest, assets, and code together, with vendor-specific code allowed nowhere else.
+
+Nothing about the security model changes: the same checks run, in the same order, enforced by the same tests. What changes is that ownership becomes obvious, the dependency rules become visible, and the exceptions to those rules that we currently tolerate get removed structurally instead of waived indefinitely.
 
 ## Why this shape
 
-1. **The layer model already works; the filesystem doesn't.** The matrix is enforced and violated only through 20 dated exceptions the code itself labels with milestones (`W4.3`, `W6`, `W7`). A flat 65-directory `crates/` hides that model; families make it visible, and the new contracts crates make the exceptions deletable.
-2. **The audit found vocabulary pooling, not missing layers.** `host_api` is 38% migrated product/channel vocabulary; `turns` is three crates wearing one name; `product` defines ~17 single-impl ports whose real impls live in composition/extension_host/operator. The fix is contract-layer homes, not new concepts.
-3. **God crates decompose along seams the code already names** — extension_host's product-serve half arrived from composition in two identifiable PRs; host_runtime's builtin tools already use a registrar pattern the binary drives; composition's `local_dev/` is the mislabeled production path.
-4. **Moves are cheap; splits are few.** Family placement is `git mv` + manifest edits. Only six crates genuinely split, each along a seam with existing tests on both sides.
+1. **The rules already exist — the layout just hides them.** Every dependency rule below is already enforced in CI today; the flat tree is what makes them invisible. Families make the enforced model legible, and the handful of currently-waived rule violations each become fixable instead of grandfathered.
+2. **The problem is vocabulary in the wrong place, not missing concepts.** The audit found shared types and interfaces that migrated into whichever crate everything could already see, forcing upper and lower layers into each other. The fix is giving that vocabulary proper homes in the contracts tier — not inventing new layers.
+3. **The oversized crates split along seams history already drew.** Each of the four grew by absorbing other owners' code in identifiable steps, so each split is a return to a known owner — not a judgment call made fresh.
+4. **Moves are cheap; splits are few.** Family placement is a rename plus manifest edits. Only six crates genuinely split, each along a seam with existing tests on both sides.
 
 ## The family map
 
