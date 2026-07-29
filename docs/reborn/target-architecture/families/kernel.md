@@ -102,10 +102,10 @@ Kernel crates depend on the neutral authority vocabulary every layer shares (ide
 capability and decision types), on the substrate family for mediated storage, credential, and
 egress mechanics, on the events family for durable audit, on the lane family where a closed
 executor must construct lane adapters, and on each other along the stage order above. Kernel
-crates never depend on `loop/`, `product/`, or `app/`, with two deliberate inversions: a port
-defined inside the kernel and implemented by a higher layer. Dispatch routing is defined here and
-implemented by the membrane itself; process-kind execution is defined here and registered by
-whichever crate owns that kind of work.
+crates never depend on `loop/`, `product/`, or `app/`, with one deliberate inversion: a port
+defined inside the kernel and implemented by a higher layer — process-kind execution is defined
+here and registered by whichever crate owns that kind of work. The dispatch port is neutral
+contracts vocabulary (`host_api`); the membrane is its production implementation.
 
 Every other family depends on this one, directly or through a typed port; nothing in this family
 depends back.
@@ -254,9 +254,8 @@ depends back.
 - **Public surface:** the sealed authorization witness — the one artifact that proves a specific
   effect was authorized, mintable only by this crate's own fold, consumed exactly once by
   dispatch.
-- **Depends on:** every other kernel crate along the stage order — trust, authorization,
-  approvals, resources, runtime policy, processes, and the turn vocabulary needed to resume a
-  parked invocation.
+- **Depends on:** the stage crates before it — trust, authorization, approvals, resources,
+  runtime_policy — never the mediated-services crate or the turn coordinator.
 - **Never depends on:** `ironclaw_host_runtime` — the direction is strictly the other way — nor
   any loop, product, or app crate, nor any lane crate directly.
 - **Security & authority role:** the membrane itself. No loop, extension, or product surface
@@ -331,7 +330,8 @@ depends back.
   receives network access or credential material, always scoped and always consumed exactly
   once; the closed lane executor, which invokes only the lane a sealed witness names and nothing
   else; dispatch composition, assembling the membrane from the kernel's other services for a
-  given deployment.
+  given deployment; resolution of the memory service through its provider-neutral contract — the
+  concrete provider arrives from assembly and is never named here.
 - **Never contains:** vendor-specific tool-handler implementations, sandboxed process or
   container mechanics, product workflow, or any driver dependency beyond what mediation itself
   requires.
@@ -364,6 +364,10 @@ depends back.
   on first read: `trust` → ceiling, `authorization` → decision, `approvals` → consent,
   `resources` → reservation, `runtime_policy` → planning, `capabilities` → the membrane,
   `processes` → lifecycle, `turns` → admission, `host_runtime` → mediated execution;
+- the family's dependency direction, restated as a check: kernel crates depend on contracts,
+  substrate, events, the lane family where the closed executor needs adapters, and each other
+  only along the stage order — never on `loop/`, `product/`, or `app/`, which reach back only
+  through a defined port or a registered executor;
 - the crate-boundary test every new addition to this family must pass: name your stage, name
   your fail-closed rule or your reason for more than one implementation — otherwise it is a
   module of one of the nine, not a tenth crate.

@@ -52,7 +52,7 @@ Contracts is the vocabulary tier: the one family every other family depends on, 
 
 ## Security & authority
 
-Contracts holds the sealed constructors that make forged authority a compile-time impossibility rather than a review discipline: the `Authorized` witness, the privileged variants of `TrustClass`, and the verified-inbound and bearer/session evidence types. None of these can be constructed outside the tight, crate-visible seam their owner exposes — a kernel authorizer mints `Authorized`, a host authenticator mints bearer/session evidence, a generic ingress verifier mints channel evidence. Because this family executes nothing and persists nothing, a defect here can misdescribe authority — a wrong field, a bad DTO — but can never grant it. That is exactly why the family's admission test forbids execution and persistence: either one would turn a vocabulary crate into a second place authority could originate.
+Contracts holds the sealed constructors that make forged authority a compile-time impossibility rather than a review discipline: the `Authorized` witness, the privileged variants of `TrustClass`, and the verified-inbound and bearer/session evidence types. None of these can be constructed outside its sealed constructor path — callable in production only by the sanctioned minters, enforced by constructor visibility plus a workspace string-scan pin: the capability membrane mints `Authorized`, a host authenticator mints bearer/session evidence, a generic ingress verifier mints channel evidence. Because this family executes nothing and persists nothing, a defect here can misdescribe authority — a wrong field, a bad DTO — but can never grant it. That is exactly why the family's admission test forbids execution and persistence: either one would turn a vocabulary crate into a second place authority could originate.
 
 ## Crates
 
@@ -70,7 +70,7 @@ Contracts holds the sealed constructors that make forged authority a compile-tim
   - `runtime`, `runtime_policy`, `trust` — runtime-kind and trust-class vocabulary, deployment-mode and policy shapes.
   - `turn` — the complete canonical turn vocabulary: turn and run identity, status, and the small set of turn-scoped reference types — such as the reply-target binding a channel adapter resolves against — that any crate touching a turn needs without importing the turn kernel.
 - **Never contains:** vendor names; adapter-trait implementations; product surface or product DTOs; loop-port traits; rendering, parsing, or classification helpers; logging or async-runtime side effects; persistence ports.
-- **Public surface:** the vocabulary above, plus sealed constructors for `Authorized` and for bearer/session evidence. The evidence constructors are visible only to the host authenticator that performs verification — no other caller, including a channel adapter or a product handler, can construct them.
+- **Public surface:** the vocabulary above, plus sealed constructors for `Authorized` and for bearer/session evidence. The evidence constructors are callable in production only by the host authenticator that performs verification — enforced by visibility plus the workspace scan; no other caller, including a channel adapter or a product handler, can construct them.
 - **Depends on:** nothing internal.
 - **Never depends on:** any other crate in the workspace; any HTTP framework, database client, or WASM runtime.
 - **Security & authority role:** the authority-vocabulary boundary for the whole system. It is security-relevant purely by declaration — it holds the sealed `Authorized` and `TrustClass` constructors that every privileged path in the system is built on.
@@ -80,7 +80,7 @@ Contracts holds the sealed constructors that make forged authority a compile-tim
 
 - **Purpose:** domain-free cross-cutting primitives that carry long-lived, persisted-compatibility guarantees.
 - **Owns:**
-  - `identity` — the credential, extension, MCP-server, and external-thread identity newtypes that anchor the workspace's newtype discipline, including the deliberate wire-compatibility exception the oldest of them still carries.
+  - `identity` — the credential, extension, MCP-server, and external-thread identity newtypes that anchor the workspace's newtype discipline, including the one documented wire-compatibility exception this crate is permitted to carry.
   - `pkce`, `hashing`, `paths`, `timezone`, `util`, `env_helpers` — small, genuinely domain-free helpers.
   - `attachment` — a generic attachment reference and format vocabulary, distinct in name and shape from the channel-facing attachment reference that `ironclaw_extension_contracts` owns for vendor payloads.
 - **Never contains:** wire protocols or event vocabulary, which belong to `product_contracts`; LLM domain data; prompt-construction data; budget-policy constants; or any scaffolding without a live consumer.
@@ -121,6 +121,7 @@ Contracts holds the sealed constructors that make forged authority a compile-tim
 - **Purpose:** the neutral vocabulary of what an installable extension is and exposes — surfaces, adapters, recipes, states, and verified-inbound evidence — shared by lanes, hosts, packages, and product without any of them importing the extension registry.
 - **Owns:**
   - `ChannelAdapter` — a small trait an extension package implements once for inbound normalization, outbound rendering and delivery, and target resolution — plus its supporting vocabulary: normalized inbound messages, outbound envelopes and parts, delivery reports, target queries and candidates, and channel error shapes.
+  - the channel-facing vendor attachment reference, distinct in name and shape from `ironclaw_common`'s generic attachment vocabulary.
   - `ToolAdapter` and `RestrictedEgress` — the model-callable-tool counterpart.
   - `Extension` and `ExtensionEntrypoint` — the manifest-bound entrypoint every extension package exposes, and the bindings it returns.
   - Channel manifest-surface descriptors, the auth recipe schema, and the memory manifest surface — the declarative shape a manifest compiles into.

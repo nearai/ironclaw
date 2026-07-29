@@ -34,9 +34,9 @@ The family favors narrow, single-purpose crates over shared infrastructure. Most
 
 - **vs `substrate/`** (filesystem, secrets, network, safety, observability): substrate crates are generic mechanism with no domain grammar — the filesystem substrate has no notion of a "trigger" or a "thread." Domains crates are the typed grammar layered on top of that mechanism; strip away every Reborn product concept and a substrate crate still compiles, a domains crate does not.
 - **vs `kernel/`** (trust, authorization, approvals, resources, capabilities, processes, turns, host_runtime): kernel crates decide whether and how an effect happens; domains crates decide what a record means once the kernel has already admitted the request. No domains crate depends on a kernel crate, and no domains crate can construct a capability-authorization witness or a lease.
-- **vs `events/`** (events, event_store, event_projections, event_streams): events are immutable, replayable evidence of what happened; domains own live state, mutated in place under compare-and-swap. A projection is a rebuildable read cache derived from events and is never a second write authority.
-- **vs `product/`** (product, operator, openai_compat, webui, host_ingress): product orchestrates user-facing workflow, admission, and delivery across many domains at once inside a single request; a domains crate knows nothing about channels, commands, or views — it owns one record type's invariants only.
-- **vs `extensions/`** (extensions, extension_host, extension_manager, packages): extensions are the installable-package concept — manifests, lifecycle, hosting, vendor packages. A domains crate is a durable business-record type available to every extension, product, and kernel caller, with no notion of install, activate, or package.
+- **vs `events/`** (event_log, event_store, event_projections, event_streams): events are immutable, replayable evidence of what happened; domains own live state, mutated in place under compare-and-swap. A projection is a rebuildable read cache derived from events and is never a second write authority.
+- **vs `product/`** (assistant, operator, openai_compat, webui, host_ingress): product orchestrates user-facing workflow, admission, and delivery across many domains at once inside a single request; a domains crate knows nothing about channels, commands, or views — it owns one record type's invariants only.
+- **vs `extensions/`** (extension_registry, extension_host, extension_manager, packages): extensions are the installable-package concept — manifests, lifecycle, hosting, vendor packages. A domains crate is a durable business-record type available to every extension, product, and kernel caller, with no notion of install, activate, or package.
 - **Two vendor-scoped charters, permitted nowhere else in the family:** `ironclaw_llm` is a closed provider cone holding model-vendor adapters and their authentication flows; `ironclaw_auth` keeps vendor differences as recipe data consumed by one generic engine, never a code branch. No other domains crate holds a vendor name.
 - **The sealed-trust-types pattern:** two crates mint and seal trust through private constructors instead of kernel authorization machinery. `ironclaw_outbound` seals its delivery-attempt and access-grant types so only its own policy service can construct them. `ironclaw_triggers` seals the trusted-submission binding that identifies its own poller as a host-trusted sender. Both keep one narrow, reviewable trust responsibility inside a domain crate instead of promoting the crate into the kernel family.
 
@@ -69,7 +69,7 @@ Most crates in this family hold no authority at all: a call into `ironclaw_threa
 - **`ironclaw_triggers`** is the one host-trusted inbound path outside the generic ingress verifier — its trusted-submission binding is the sealed evidence that a fire came from its own poller.
 - **`ironclaw_auth`** is a credential-custody domain: it holds durable token-lifecycle state, but never raw secret bytes, and it never makes an authorization decision itself.
 
-Every other crate — threads, conversations, the memory family, skills, attachments, extractors, projects, identity, llm, traces — is a pure record and service authority with no minting power. None of the fifteen can construct a kernel-sealed authorization witness, a trust ceiling, or a capability lease; those constructors are unreachable from this family's dependency set.
+Every other crate — threads, conversations, memory, skills, attachments, extractors, projects, identity, llm, traces — is a pure record and service authority with no minting power. None of the thirteen can construct a kernel-sealed authorization witness, a trust ceiling, or a capability lease; those constructors are unreachable from this family's dependency set.
 
 ## Crates
 
@@ -124,7 +124,7 @@ Every other crate — threads, conversations, the memory family, skills, attachm
   - First-party trigger management capabilities such as create, list, or remove.
   - Turn-coordinator wiring, or database connection and handle construction.
 - **Public surface:** the repository, materializer, submitter, and state-lookup ports the poller tick is built from; the sealed trusted-submission binding.
-- **Depends on:** `ironclaw_common`, `ironclaw_host_api` (including its turn vocabulary).
+- **Depends on:** `ironclaw_common`, `ironclaw_filesystem`, `ironclaw_host_api` (including its turn vocabulary).
 - **Never depends on:** the turn coordinator crate directly; anything above substrates.
 - **Security & authority role:** host-trusted ingress minting — the sealed trusted-submission path is one of only two mint-capable authorities in the whole family.
 - **Why a separate crate:** a distinct scheduling domain with a trusted-mint authority, consumed by conversations, product, and composition.
@@ -145,7 +145,7 @@ Every other crate — threads, conversations, the memory family, skills, attachm
 - **Depends on:** `ironclaw_host_api`, `ironclaw_prompt_envelope`.
 - **Never depends on:** any concrete provider crate — providers live above this family, as extension packages; anything above substrates.
 - **Security & authority role:** none directly — a neutral contract.
-- **Why a separate crate:** one neutral contract implemented by provider extension packages above it and consumed by every memory-reading caller below, proven real by a conformance suite rather than by convention alone.
+- **Why a separate crate:** one neutral contract implemented by provider extension packages above it and consumed by every memory-reading caller above, proven real by a conformance suite rather than by convention alone.
 
 Memory *providers* are not domains crates. Each provider — the bundled native one and the mem0-backed alternative — ships as an extension package (`extensions/packages/memory-native/`, `extensions/packages/mem0/`) declaring a `[memory]` manifest surface, implementing this crate's `MemoryService`, and passing this crate's conformance suite. Their specifications live in [extensions.md](extensions.md).
 

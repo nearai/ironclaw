@@ -21,7 +21,7 @@
 2. **WS8 safe deletions, first tranche** — the zero-consumer items with the smallest blast radius: `dispatcher`, `embeddings`, `llm::reasoning`, `common::trust_boundary`, `events` jsonl helpers, `outbound`/`approvals` dead traits, `event_projections`' three dead subsystems (this alone shrinks its dep set to events+host_api), unused dep edges, root `fuzz/`, `auth::loopback_oauth`, gating `auth::fakes`. Each with the un-masking discipline.
 3. **WS11 drift hotfixes that mislead agents today** — the references to seven nonexistent crates, `build_reborn_services`, `NetworkPolicyDecider`, the composition guide's phantom `src/webui/` section, stale feature-gating claims. These don't wait for the restructure; they are wrong *now*.
 4. **WS0 baselines + WS10 §11.2.2 exception ratchet** (armed at 20, must only go down) and the §11.2.7 include-scan in warn mode (it will fail until WS2 — that's the point; it makes the debt visible).
-5. **Decision round #1** **[decision]**: confirm Strategy B + the rename batch scope + tools default-members. One thread with Illia.
+5. **Decision round #1** **[decision]**: confirm Strategy B + the scope of the severable `reborn_` rename batch + tools default-members. One thread with Illia. The three renames (`ironclaw_events`→`ironclaw_event_log`, `ironclaw_extensions`→`ironclaw_extension_registry`, `ironclaw_product`→`ironclaw_assistant`) are already decided (2026-07-29 owner review) and execute unconditionally; only the severable `reborn_` batch is gated here.
 
 *Exit criteria: exception count still 20 but ratcheted; dead-surface tranche gone; prelude de-wildcarded; team sign-off recorded.*
 
@@ -37,19 +37,19 @@
 
 *The most ordering-sensitive wave.* ⚠ **Port inversions land before the layer flip**: extension_host implements `product_contracts` ports first; only when its `ironclaw_product` dep is gone does its layer move to loops (otherwise it cannot compile). Same discipline for `operator` and `webui`/`openai_compat` flips.
 
-- Sequence: port flips (extension_host, operator, webui, openai_compat) → `extension_manager` split (the #6616/#6669 inventory moves as a unit, like it arrived) → strays out (pairing routes→webui, skill-learning seam, bundled skills) → include_str kills + package colocation + telegram merge → re-layer extensions/extension_host → naming-trap fixes (conversations/threads) → attachments widening.
+- Sequence: port flips (extension_host, operator, webui, openai_compat) → `extension_manager` split (the #6616/#6669 inventory moves as a unit, like it arrived) → strays out (pairing routes→webui, skill-learning seam, bundled skills) → include_str kills + package colocation + telegram merge → memory-provider package move (`memory-native` + `mem0` → `extensions/packages/`, landing with the enforcement re-point — the mem0-naming architecture test + composition's `memory-mem0` feature migration — in the same PR) → re-layer extensions/extension_host → naming-trap fixes (conversations/threads) → attachments widening.
 - **Milestone:** `extension_host→product` edge gone; packages self-contained under `extensions/packages/`; Discord-proof (§10.1) is now literally true — a new channel touches one package dir + one binding line.
 
 ## Wave 3 — Kernel + loop narrowing (WS3 + WS4, non-gated parts)
 
-- Sequence: first-party tools → package (registrar pattern; one tool family per PR) → `sandbox` lane merge (no production behavior — verify at land time) → `mcp` contracts flip → obligations/builder internal splits → secrets direct-consumer tightening ⚠ (port replacements before edge removal) → runner sheds (composition functions out, model gateway → loop_host, tool disclosure) → re-layer runner/hooks/processes → `wit/` move.
+- Sequence: first-party tools → `extensions/first_party/` (registrar pattern; one tool family per PR) → `sandbox` lane merge (no production behavior — verify at land time) → `mcp` contracts flip → obligations/builder internal splits → secrets direct-consumer tightening ⚠ (port replacements before edge removal) → runner sheds (composition functions out, model gateway → loop_host, tool disclosure) → re-layer runner/hooks/processes → `wit/` move.
 - **Milestone:** exceptions 12 → 0. The ratchet pins it. `host_runtime` has no Docker/DB-driver cone; runner is the thin loop-hosting adapter.
 
 ## Wave 4 — Composition, app, domains (WS6)
 
 *Overlaps Waves 2–3 freely — every eviction is independent.* This wave is deliberately aligned with **PR #6691 (IN FLIGHT)**: if it lands first, several evictions become rebases instead of new work; if it doesn't, this wave subsumes its intent. Either way, coordinate with its author before starting the same modules.
 
-- Composition evictions one owner per PR (the §6.10.1 inventory); `local_dev` misnomer retired; `RebornRuntime` slimming; config vendor-section removal with its compat window; CLI vendor-resolution shed; the rename batch (whatever Decision round #1 approved) as pure-rename PRs.
+- Composition evictions one owner per PR (the §6.10.1 inventory); `local_dev` misnomer retired; `RebornRuntime` slimming; config vendor-section removal with its compat window; CLI vendor-resolution shed; the renames in two tranches: (a) the three decided renames (`ironclaw_events`→`ironclaw_event_log`, `ironclaw_extensions`→`ironclaw_extension_registry`, `ironclaw_product`→`ironclaw_assistant`) as pure-rename PRs, no shims, each landing *after* that crate's content-change PRs in Waves 2–3 — so each crate churns once for content and once for name, never interleaved; (b) the severable `reborn_` batch, still gated on Decision round #1.
 - **Milestone:** composition reads as assembly (its mass ratchet re-baselined at the new floor); config has no vendor sections; renames done.
 
 ## Wave 5 — Physical family moves (WS7)
@@ -74,8 +74,8 @@
 1. `host_api`: de-wildcard prelude + repoint consumers (WS0.1).
 2. Dead-surface tranche #1: `dispatcher` + `embeddings` + `llm::reasoning` + unused dep edges (WS8).
 3. Guidance drift hotfix: nonexistent-crate references + phantom modules across root docs, `crates/AGENTS.md`, composition guides, `.claude` skills (WS11.3 subset).
-4. Turn vocabulary completion in `host_api::turn` + delete the turns re-export shims + repoint the six vocabulary-only consumers (WS1.1) — exceptions drop 20→13 in one PR.
-5. `contracts/ironclaw_loop_contracts` extraction + `agent_loop` flip (WS1.2) — exceptions 13→12, and the loop tier has its contract home.
+4. Turn vocabulary completion in `host_api::turn` + delete the turns re-export shims + repoint the six vocabulary-only consumers (WS1.1) — exceptions drop 20→15 in one PR (five of the six consumers carry exceptions; conversations and hooks follow with the port PRs).
+5. `contracts/ironclaw_loop_contracts` extraction + `agent_loop` flip (WS1.2) — exceptions 15→12 (the conversations and hooks stragglers fall with the port repoints here), and the loop tier has its contract home.
 
 ## Coordination notes
 

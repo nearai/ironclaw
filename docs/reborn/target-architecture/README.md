@@ -11,7 +11,7 @@ This is the north star for the architecture cleanup: a concrete crate/folder map
 
 Today `crates/` is a flat list of sixty-odd crates. The architecture underneath is actually in good shape — there are real dependency rules between the crates, and CI enforces them — but none of that is visible from the tree, and over the past months code has pooled into a handful of oversized crates that own far more than their names say. Figuring out where anything belongs takes archaeology, and every agent or new contributor pays that tax on every change.
 
-The proposal is to reorganize the workspace into the shape the architecture already wants: **ten families, stacked in one direction.** User-facing code sits at the top, shared vocabulary at the bottom, and in the middle sits the **kernel** — the code that decides what is allowed to happen. A crate may only depend on crates in families at or below its own. That single rule *is* the architecture, and once the tree mirrors it, the tree tells the story by itself: the app wires everything together, the product asks the kernel for privileged work, the kernel checks and mediates every privileged action, and everything below it is mechanism and vocabulary with no authority of its own.
+The proposal is to reorganize the workspace into the shape the architecture already wants: **ten families, stacked in one direction.** User-facing code sits at the top, shared vocabulary at the bottom, and in the middle sits the **kernel** — the code that decides what is allowed to happen. Every crate sits on a seven-layer ladder — shared vocabulary at the bottom, the binary at the top — and may only depend on crates at or below its own layer. CI enforces exactly that matrix today; the ten families are those layers made visible on disk. That single ladder *is* the architecture, and once the tree mirrors it, the tree tells the story by itself: the app wires everything together, the product asks the kernel for privileged work, the kernel checks and mediates every privileged action, and everything below it is mechanism and vocabulary with no authority of its own.
 
 Getting there is mostly reorganization, not rewrite:
 
@@ -21,18 +21,18 @@ Getting there is mostly reorganization, not rewrite:
 - **Delete code that is verifiably dead**, and fold a few single-purpose fragments into the crate they serve.
 - **Give every installable extension one self-contained folder** — manifest, assets, and code together, with vendor-specific code allowed nowhere else.
 
-Nothing about the security model changes: the same checks run, in the same order, enforced by the same tests. What changes is that ownership becomes obvious, the dependency rules become visible, and the exceptions to those rules that we currently tolerate get removed structurally instead of waived indefinitely.
+The runtime security mechanisms are preserved — the same checks run in the same order — and the three deliberate boundary *tightenings* this proposal does make (evidence-mint consolidation, secrets narrowing, host/verifier colocation) are named and individually risk-tracked rather than slipped in silently. What changes is that ownership becomes obvious, the dependency rules become visible, and the exceptions to those rules that we currently tolerate get removed structurally instead of waived indefinitely.
 
 ## Why this shape
 
 1. **The rules already exist — the layout just hides them.** Every dependency rule below is already enforced in CI today; the flat tree is what makes them invisible. Families make the enforced model legible, and the handful of currently-waived rule violations each become fixable instead of grandfathered.
 2. **The problem is vocabulary in the wrong place, not missing concepts.** The audit found shared types and interfaces that migrated into whichever crate everything could already see, forcing upper and lower layers into each other. The fix is giving that vocabulary proper homes in the contracts tier — not inventing new layers.
 3. **The oversized crates split along seams history already drew.** Each of the four grew by absorbing other owners' code in identifiable steps, so each split is a return to a known owner — not a judgment call made fresh.
-4. **Moves are cheap; splits are few.** Family placement is a rename plus manifest edits. Only six crates genuinely split, each along a seam with existing tests on both sides.
+4. **Moves are cheap; splits are few.** Family placement is a rename plus manifest edits. Only a handful of crates genuinely split — three true splits (host_api, turns, the extension host) plus the mass evictions from composition, the host runtime, and the runner — each along a seam with existing tests on both sides.
 
 ## The family map
 
-Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. Crate names are shown without their `ironclaw_` prefix. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below.
+Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. Crate names are shown without their `ironclaw_` prefix. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below. Crates tagged `NEW` exist only in the target; the map shows the steady state (one transitional crate, `run_state`, remains under `kernel/` until its scheduled deletion — PROPOSAL §5).
 
 ```text
 crates/
@@ -108,7 +108,7 @@ crates/
 │       ├── github/            manifest + wasm + prompts (data only)
 │       ├── memory-native/     native memory provider (crate)
 │       ├── mem0/              mem0-backed memory provider (crate)
-│       └── …                  gmail, google-*, web-access, notion, …
+│       └── …                  gmail, google-*, web-access, notion-mcp, …
 │
 ├── product/                   first-party userland
 │   ├── assistant              the assistant: ProductSurface impl & delivery
@@ -142,7 +142,7 @@ tools/                         developer diagnostics & excluded helpers
 
 **[`loop/`](families/loop.md).** Replaceable agent behavior and the adapters that host it: the sealed executor and strategy families, the host-port implementations, the driver registry, and the hook middleware. A shipped loop is not trusted — everything privileged crosses ports into the kernel.
 
-**[`extensions/`](families/extensions.md).** Everything "installable package," with the four responsibilities kept apart: the manifest registry and installation records, the generic host (ingress verification, binding, egress transport), the product-side manager, and the concrete packages themselves. Vendor names exist only under `packages/`; the registry never dispatches, and the host never absorbs product workflow.
+**[`extensions/`](families/extensions.md).** Everything "installable package," with the four responsibilities kept apart: the manifest registry and installation records, the generic host (ingress verification, binding, egress transport), the product-side manager, and the concrete packages themselves. Vendor names exist only under `packages/`; the registry never dispatches, and the host never carries product workflow.
 
 **[`product/`](families/product.md).** The supported first-party experience: the `ProductSurface` implementation, admission/bindings/idempotency, delivery semantics, the operator control plane, and the transports (WebUI, OpenAI-compatible). Product asks the kernel for privileged work — it never decides authority, never touches lane mechanics, and never speaks a vendor protocol.
 
@@ -152,11 +152,20 @@ tools/                         developer diagnostics & excluded helpers
 
 `domains/`, `loop/`, and `lanes/` are the easiest to confuse, and the difference is the whole model:
 
-- **`domains/` is what the system *knows*** — passive, typed owners of records (transcripts, triggers, memory, projects, delivery state). They store and serve; they never run agent logic, never execute anything, never decide permissions.
+- **`domains/` is what the system *knows*** — passive, typed owners of records (transcripts, triggers, memory, projects, delivery state). They store and serve; they never run agent logic, never execute anything, and — outside three narrow named authorities (outbound's sealed delivery grants, triggers' trusted-fire minting, projects' membership ACL) — never decide permissions.
 - **`loop/` is what the agent *decides*** — assemble the prompt, call the model, pick a tool, retry, checkpoint. Deliberately untrusted: it can only *request* effects through typed ports; it cannot touch storage, network, or secrets itself.
 - **`lanes/` is how an approved action *physically runs*** — the WASM sandbox, the MCP client, the container sandbox. A lane doesn't think and doesn't decide; it executes an already-authorized invocation in isolation and returns a normalized result.
 
 One request stitches them together: a message arrives → the **loop** decides to call `github.search` → the **kernel** checks and authorizes it → a **lane** executes it in a sandbox → the outcome lands in **domains** (the transcript) and **events** (the record of what happened). *Loop chooses, kernel permits, lane runs, domains remember.*
+
+### Why ten — and where reasonable people could disagree
+
+The seven-layer ladder is the load-bearing choice; the ten families are how it reads on disk, and two of the groupings are judgment calls worth debating up front rather than discovering later:
+
+- **`events/` could fold into `domains/`.** Both sit at the substrates layer. It stays separate because evidence has a different write model from records — append-only, replay-derived, never authority — and its four crates form one strict one-way pipeline. Merging down to nine families would not change a single dependency rule; it would only blur that write-model line on disk.
+- **`extensions/` is the one deliberately *vertical* family.** Its crates span three layers (the registry at substrates, the host at loops, the manager and packages at products) because colocating everything "installable package" is what makes rules like "vendor names only under `packages/`" checkable in one place. It is the one spot where family and layer diverge — and the ladder, not the family, is what CI checks.
+
+Every other cut is firm: substrate vs domains is mechanisms vs records; the kernel stays one family with one crate per pipeline stage (a family per stage would add directory depth and no new rule); loop vs lanes is untrusted strategy vs post-authorization mechanism — they sound alike and are enforced apart.
 
 ## The five decisions reviewers should weigh
 
@@ -172,7 +181,7 @@ Untrusted input becomes **validated** at the listener/verifier (webui middleware
 
 ## What is explicitly *not* decided here
 
-Open PRs stay open: #6691 (composition builders) is directionally identical but not presumed; #6696 (process-journal collapse) gates four mapping rows (`processes` widening, `run_state` deletion, `approvals` widening, `runner`'s scheduler/await-edge shed) — the target is valid whether or not it lands. Ten genuinely open decisions (prompt-envelope/safety unification, trust's inert signed-registry path, the three-OAuth-stacks question, openai-compat-as-extension, the `reborn_` rename batch, and more) are listed in PROPOSAL.md §12.10 and in each affected crate spec, not silently resolved.
+Open PRs stay open: #6691 (composition builders) is directionally identical but not presumed; #6696 (process-journal collapse) gates four mapping rows (`processes` widening, `run_state` deletion, `approvals` widening, `runner`'s scheduler/await-edge shed) — the target is valid whether or not it lands. Ten genuinely open decisions (prompt-envelope/safety unification, trust's inert signed-registry path, the three-OAuth-stacks question, openai-compat-as-extension, the `reborn_` rename batch, and more) are listed in PROPOSAL.md §12.10 and in each affected crate spec, not silently resolved. PR #6253 (the interactive architecture explorer) models the superseded 2026-07-17 design note; it should be regenerated against this target or closed, in coordination with its author.
 
 ## How to review
 

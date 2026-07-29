@@ -49,7 +49,7 @@ Composition sees everything; nothing depends on `app`. Every crate in every othe
 
 ## Security & authority
 
-Fail-closed readiness is the assembly root's one true authority-adjacent act: a deployment's readiness computation either confirms every required handle is present and correctly shaped, or it blocks — production and any migration-style profile must fail closed on a missing or under-specified handle, never default to a permissive shape. This is a gate on whether an assembled deployment is safe to serve traffic, never a gate on what an individual request may do; that decision belongs entirely to the kernel family, several layers below.
+Fail-closed readiness is the assembly root's one true authority-adjacent act: a deployment's readiness computation either confirms every required handle is present and correctly shaped, or it blocks — production and any data-migration profile must fail closed on a missing or under-specified handle, never default to a permissive shape. This is a gate on whether an assembled deployment is safe to serve traffic, never a gate on what an individual request may do; that decision belongs entirely to the kernel family, several layers below.
 
 Deployment policy is data, never content: the assembly root selects a deployment mode and a runtime profile as plain values, and the kernel family resolves what those values actually permit. The security property this buys is auditability — a reviewer can enumerate every deployment shape by reading a small set of enums, rather than tracing predicate logic scattered through the assembly crate.
 
@@ -62,7 +62,7 @@ The enforcement suite is the mechanism, not a participant, in every claim this d
 ### `ironclaw_composition`
 
 - **Purpose:** the assembly root — deployment selection and dependency wiring, exclusively.
-- **Owns:** deployment configuration as data; the host-binding input structures a binary supplies bindings through; storage-backend selection; owner-factory invocation across every family; readiness computation; service-graph handles, exposed as methods rather than raw internals; background-task lifecycle management; and the selection of which concrete memory provider a deployment uses, since the assembly root is the one crate trusted to see every provider implementation at once.
+- **Owns:** deployment configuration as data; the host-binding input structures a binary supplies bindings through; storage-backend selection; owner-factory invocation across every family; readiness computation; service-graph handles, exposed as methods rather than raw internals; background-task lifecycle management; and wiring the memory provider where the kernel consumes its contract — the concrete provider is linked and constructed by the binary, like every package crate; composition receives the handle and never names an implementation.
 - **Never contains:** approval or authorization policy content; trigger-firing logic beyond starting and stopping a poller's lifecycle; conversation, automation-panel, or admin-user behavior; prompt content of any kind; HTTP route handler logic beyond mounting a prebuilt carrier; or any domain record shape.
 - **Public surface:** the host-binding input structures, the service-graph handle type exposing product, auth, and readiness as methods, and the token-minting port it defines for the binary to satisfy.
 - **Depends on:** every owning crate in every other family, as the one designed exception to the family's own boundary rule.

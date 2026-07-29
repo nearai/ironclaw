@@ -44,14 +44,14 @@ Substrate holds the durable, reusable mechanisms the kernel mediates: storage fa
 
 ## Dependency direction
 
-- **Depends on:** `ironclaw_host_api` and `ironclaw_observability`, at the family floor, for every crate. Filesystem additionally depends on safety for a single sensitive-path classification. Secrets additionally depends on filesystem, since durable secret metadata is itself filesystem-backed.
+- **Depends on:** at most `ironclaw_host_api` and `ironclaw_observability`, plus one family-internal edge (secrets builds on the storage fabric); several crates depend on nothing internal at all. Filesystem additionally depends on safety for a single sensitive-path classification.
 - **Never depends on:** any other substrate crate beyond the two exceptions above — a lattice of substrate-on-substrate dependencies would recreate the driver-cone leakage this family exists to prevent. No crate in this family depends on anything above substrates.
-- **Depended on by:** kernel is the primary consumer — the kernel's service graph mediates filesystem, secrets, and network for everything above it, so most upper-tier access to this family is indirect. Domains hold direct filesystem access, since backend-neutral persistence is the point of the storage-placement rule. The durable event backend is built on filesystem. Composition selects backends and constructs the concrete implementations. No lane, loop, extension, or product crate may hold a direct dependency on a substrate crate — mediated services arrive by injection only.
+- **Depended on by:** kernel is the primary consumer — the kernel's service graph mediates filesystem, secrets, and network for everything above it, so most upper-tier access to this family is indirect. Domains hold direct filesystem access, since backend-neutral persistence is the point of the storage-placement rule. The durable event backend is built on filesystem. Composition selects backends and constructs the concrete implementations. A lane crate never holds a direct dependency on a substrate crate — mediated services arrive by injection. Every other family's substrate access is charter-governed: a crate depends on exactly the substrate its charter names — storage for record owners, safety for scanners — and nothing more; secrets is the tightest, reachable directly only from the kernel's staging path and the auth engine.
 - **Inversions:** the filesystem trait is itself a dependency-inversion target — every crate above substrate holds a handle against the trait, never against a concrete backend, so a backend change never touches a domain crate.
 
 ## Security & authority
 
-Every crate in this family executes a kernel-mediated responsibility without deciding, itself, who may invoke it. Filesystem enforces path containment once handed a mount view. Secrets enforces one-shot consumption once handed a lease. Network enforces policy once handed a network policy. Safety enforces detection and redaction rules that are data, not authority. The one crate in this family authorized to sit beside a product-tier credential flow without kernel mediation in between is the auth engine, because it owns the token-custody flows — OAuth handshakes, refresh, session issuance — that need lease access on every request; every other product-tier surface reaches secrets through a mediated port instead.
+Every crate in this family executes a kernel-mediated responsibility without deciding, itself, who may invoke it. Filesystem enforces path containment once handed a mount view. Secrets enforces one-shot consumption once handed a lease. Network enforces policy once handed a network policy. Safety enforces detection and redaction rules that are data, not authority. The one crate authorized to reach secrets directly, with no kernel mediation in between, is the auth engine — a domains-family crate — because it owns the token-custody flows — OAuth handshakes, refresh, session issuance — that need lease access on every request; every other consumer reaches secrets through a mediated port instead.
 
 ## Crates
 
@@ -82,7 +82,7 @@ Every crate in this family executes a kernel-mediated responsibility without dec
 - **Never contains:** runtime credential injection or staging, which is the kernel's obligation-handling job, not this crate's; provider HTTP; product or vendor flows.
 - **Public surface:** the secret store port, an account store port, and a session store port. Exactly one production implementation of each, built on the filesystem fabric.
 - **Depends on:** `ironclaw_filesystem`, `ironclaw_host_api`.
-- **Never depends on:** anything above substrates. Only the auth engine, among product-tier crates, may depend on this crate directly; every other product-tier surface reaches it through a mediated port.
+- **Never depends on:** anything above substrates. Only the auth engine — a domains-family crate — may depend on this crate directly; every other consumer reaches it through a mediated port.
 - **Security & authority role:** secret custody. The invariant that raw material is readable only at one-shot consumption is this crate's entire reason to exist.
 - **Why a separate crate:** a custody contract that must keep cryptography and keychain dependencies out of every other crate, and a direct-consumer boundary tight enough that a module sharing its host crate's full access could never enforce it.
 
@@ -137,4 +137,4 @@ Each family root states, for every crate beneath it, the same four things a revi
 - The "mechanism, not authority" line: a substrate crate enforces its own local invariant but never decides whether the caller was entitled to invoke it — that decision always comes from the kernel before the call reaches here.
 - The dependency-cone rationale per crate, so a reviewer sees why five crates exist instead of one — each crate's dependency list is the enforcement mechanism, this file is the explanation.
 - The two sanctioned substrate-on-substrate dependencies — filesystem on safety, secrets on filesystem — as the only internal edges within the family.
-- The persistence rule: outside this family's filesystem crate and the durable event backend, no crate may depend on a database driver directly.
+- The persistence rule: outside this family's filesystem crate and the durable event backend, no crate may depend on a database driver directly (two documented, shrink-only exceptions — the trigger and hook predicate stores — carry ADR-or-converge status).
