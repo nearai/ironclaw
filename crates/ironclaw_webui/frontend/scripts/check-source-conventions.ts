@@ -168,7 +168,7 @@ function runCli(): void {
   // Frontend-relative root prefixes are kept in the reported paths so
   // violations in e.g. packages/ui/src/components and src/components stay
   // unambiguous.
-  const sourceRoots = ["src", "packages/ui/src", "packages/ui/stories", "packages/ui/.storybook"];
+  const sourceRoots = ["e2e", "src", "packages/ui/src", "packages/ui/stories", "packages/ui/.storybook"];
   const violations = sourceRoots.flatMap((sourceRoot) =>
     checkSourceTree(resolve(scriptDirectory, "..", sourceRoot)).map((violation) => ({
       ...violation,

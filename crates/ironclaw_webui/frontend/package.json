@@ -19,6 +19,11 @@
     "lint": "pnpm lint:conventions && pnpm typecheck",
     "lint:conventions": "node --experimental-strip-types scripts/check-source-conventions.ts",
     "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:storybook": "playwright test --project=storybook",
+    "test:e2e:app": "playwright test --project=app",
+    "e2e:server:storybook": "corepack pnpm --filter @ironclaw/ui build-storybook && node --experimental-strip-types scripts/serve-static.ts packages/ui/storybook-static 6106",
+    "e2e:server:app": "corepack pnpm run build:demo && node --experimental-strip-types scripts/serve-static.ts dist-demo 5199 --spa",
     "vendor": "bash vendor.sh",
     "all": "bash build.sh"
   },
@@ -36,6 +41,7 @@
     "react-router": "7.15.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@tailwindcss/vite": "4.3.2",
     "@types/node": "26.1.0",
     "@types/qrcode": "1.5.6",
