@@ -368,8 +368,9 @@ async fn cancellation_after_pending_input_ack_strict_profile_propagates_checkpoi
 
     assert_eq!(
         err,
-        AgentLoopExecutorError::CheckpointFailed {
-            stage: CheckpointKind::Final
+        AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::Final,
+            safe_summary: LoopSafeSummary::new("scripted checkpoint failure").expect("safe"),
         }
     );
 }
@@ -768,8 +769,9 @@ async fn cancellation_checkpoint_failure_propagates_executor_error_for_strict_pr
 
     assert_eq!(
         err,
-        AgentLoopExecutorError::CheckpointFailed {
-            stage: CheckpointKind::Final
+        AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::Final,
+            safe_summary: LoopSafeSummary::new("scripted checkpoint failure").expect("safe"),
         }
     );
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);

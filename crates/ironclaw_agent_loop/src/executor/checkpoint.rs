@@ -133,13 +133,15 @@ impl CheckpointStage {
             // into a checkpoint-free `Cancelled` exit. Other variants (e.g.
             // `HostUnavailable`) must propagate so the runner can apply its
             // recovery policy.
-            Err(AgentLoopExecutorError::CheckpointFailed { .. })
-                if !ctx
-                    .host
-                    .run_context()
-                    .resolved_run_profile
-                    .checkpoint_policy
-                    .require_final_checkpoint =>
+            Err(
+                AgentLoopExecutorError::CheckpointFailed { .. }
+                | AgentLoopExecutorError::CheckpointRejected { .. },
+            ) if !ctx
+                .host
+                .run_context()
+                .resolved_run_profile
+                .checkpoint_policy
+                .require_final_checkpoint =>
             {
                 Ok(CancelCheck::Exit(cancelled_exit_with_reason(
                     ctx.host,
@@ -177,13 +179,15 @@ impl CheckpointStage {
             // pending ack is intentionally NOT flushed here — no durable
             // checkpoint was written, so advancing the input cursor would
             // commit progress that the runner has no record of.
-            Err(AgentLoopExecutorError::CheckpointFailed { .. })
-                if !ctx
-                    .host
-                    .run_context()
-                    .resolved_run_profile
-                    .checkpoint_policy
-                    .require_final_checkpoint =>
+            Err(
+                AgentLoopExecutorError::CheckpointFailed { .. }
+                | AgentLoopExecutorError::CheckpointRejected { .. },
+            ) if !ctx
+                .host
+                .run_context()
+                .resolved_run_profile
+                .checkpoint_policy
+                .require_final_checkpoint =>
             {
                 Ok(CancelCheck::Exit(cancelled_exit_with_reason(
                     ctx.host,
@@ -210,6 +214,20 @@ fn checkpoint_host_error(
         return AgentLoopExecutorError::Cancelled;
     }
     debug_host_unavailable(HostStage::Checkpoint, &error);
+    if error.kind == AgentLoopHostErrorKind::CheckpointRejected {
+        let safe_summary = LoopSafeSummary::new(error.safe_summary).unwrap_or_else(|error| {
+            tracing::debug!(
+                checkpoint_kind = ?kind,
+                validation_error = %error,
+                "checkpoint rejection summary rejected; using fixed fallback"
+            );
+            LoopSafeSummary::checkpoint_rejected()
+        });
+        return AgentLoopExecutorError::CheckpointRejected {
+            stage: kind,
+            safe_summary,
+        };
+    }
     if matches!(
         error.kind,
         AgentLoopHostErrorKind::Unavailable

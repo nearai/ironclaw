@@ -3954,9 +3954,10 @@ async fn retry_transition_checkpoint_failure_stops_before_second_model_call() {
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::CheckpointFailed {
-            stage: CheckpointKind::BeforeModel
-        }
+        AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::BeforeModel,
+            safe_summary,
+        } if safe_summary.as_str() == "scripted checkpoint failure"
     ));
     assert_eq!(host.model_requests().len(), 1);
 }
