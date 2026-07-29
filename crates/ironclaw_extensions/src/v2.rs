@@ -57,6 +57,12 @@ pub const MANIFEST_SCHEMA_VERSION: &str = "reborn.extension_manifest.v2";
 /// Reserved extension-ID prefix for host-bundled extensions.
 pub const RESERVED_HOST_BUNDLED_ID_PREFIX: &str = "ironclaw.";
 
+/// Reserved extension-ID prefix for user-registered MCP servers. Only a
+/// [`ManifestSource::UserRegistered`] manifest may declare an id in this
+/// namespace; enforced as a single arm in [`crate::v3::parse_v3`] so every
+/// import path that reaches it inherits the rule.
+pub const RESERVED_MCP_ID_PREFIX: &str = "mcp-";
+
 /// Upper bound on raw manifest TOML input size.
 ///
 /// Loaders feed installed manifests of ≤ a few KB; this cap exists to fail
@@ -131,6 +137,12 @@ pub enum ManifestSource {
     /// Installed from registry/catalog with digest/signature metadata. Never
     /// eligible for effective FirstParty/System in v2.
     RegistryInstalled,
+    /// Registered directly by the user (e.g. a hand-configured MCP server).
+    /// Never eligible for effective FirstParty/System trust — sits alongside
+    /// `InstalledLocal` for trust purposes. Only source allowed to declare an
+    /// extension id in the reserved `mcp-` namespace (see
+    /// [`crate::v3::parse_v3`]).
+    UserRegistered,
 }
 
 impl ManifestSource {

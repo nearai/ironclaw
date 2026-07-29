@@ -3167,6 +3167,7 @@ enum WireManifestSource {
     HostBundled,
     InstalledLocal,
     RegistryInstalled,
+    UserRegistered,
 }
 
 impl WireManifestSource {
@@ -3175,6 +3176,7 @@ impl WireManifestSource {
             ManifestSource::HostBundled => Self::HostBundled,
             ManifestSource::InstalledLocal => Self::InstalledLocal,
             ManifestSource::RegistryInstalled => Self::RegistryInstalled,
+            ManifestSource::UserRegistered => Self::UserRegistered,
         }
     }
 
@@ -3183,6 +3185,7 @@ impl WireManifestSource {
             Self::HostBundled => ManifestSource::HostBundled,
             Self::InstalledLocal => ManifestSource::InstalledLocal,
             Self::RegistryInstalled => ManifestSource::RegistryInstalled,
+            Self::UserRegistered => ManifestSource::UserRegistered,
         }
     }
 }
@@ -3449,6 +3452,7 @@ fn manifest_source_key(source: ManifestSource) -> &'static str {
         ManifestSource::HostBundled => "host_bundled",
         ManifestSource::InstalledLocal => "installed_local",
         ManifestSource::RegistryInstalled => "registry_installed",
+        ManifestSource::UserRegistered => "user_registered",
     }
 }
 
@@ -3562,6 +3566,62 @@ mod tests {
                 serde_json::from_str::<ExtensionRemovalChannelId>(&wire).is_err(),
                 "invalid cleanup channel must be rejected: {invalid}"
             );
+        }
+    }
+
+    /// Wire round-trip: `ManifestSource::UserRegistered` survives
+    /// serialize -> deserialize with the documented `"user_registered"`
+    /// wire label.
+    #[test]
+    fn wire_manifest_source_round_trips_user_registered() {
+        let wire = WireManifestSource::from_manifest_source(ManifestSource::UserRegistered);
+        assert_eq!(wire, WireManifestSource::UserRegistered);
+        let json = serde_json::to_string(&wire).expect("serialize wire manifest source");
+        assert_eq!(json, "\"user_registered\"");
+        let back: WireManifestSource =
+            serde_json::from_str(&json).expect("deserialize wire manifest source");
+        assert_eq!(back.into_manifest_source(), ManifestSource::UserRegistered);
+    }
+
+    /// A full manifest record with `ManifestSource::UserRegistered` survives
+    /// the same wire round trip used to persist/reload installation rows.
+    #[test]
+    fn wire_manifest_record_round_trips_user_registered_source() {
+        let record = ExtensionManifestRecord::from_toml(
+            manifest_toml("user-registered-fixture"),
+            ManifestSource::UserRegistered,
+            &HostPortCatalog::empty(),
+            None,
+            &capability_provider_contracts(),
+            None,
+        )
+        .expect("user-registered manifest record");
+        let wire = WireManifestRecord::from(&record);
+        let payload = serde_json::to_string(&wire).expect("serialize wire manifest record");
+        let deserialized: WireManifestRecord =
+            serde_json::from_str(&payload).expect("deserialize wire manifest record");
+        let round_tripped = deserialized
+            .into_manifest_record()
+            .expect("round-tripped record rebuilds");
+        assert_eq!(
+            round_tripped.manifest().source,
+            ManifestSource::UserRegistered
+        );
+    }
+
+    /// Back-compat: rows persisted before `UserRegistered` existed (only the
+    /// three original wire labels) still deserialize under the extended
+    /// enum.
+    #[test]
+    fn existing_persisted_manifest_source_rows_still_deserialize() {
+        for (json, expected) in [
+            (r#""host_bundled""#, ManifestSource::HostBundled),
+            (r#""installed_local""#, ManifestSource::InstalledLocal),
+            (r#""registry_installed""#, ManifestSource::RegistryInstalled),
+        ] {
+            let wire: WireManifestSource = serde_json::from_str(json)
+                .expect("pre-existing wire manifest source label still deserializes");
+            assert_eq!(wire.into_manifest_source(), expected);
         }
     }
 

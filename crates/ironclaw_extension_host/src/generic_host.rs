@@ -632,6 +632,130 @@ input_schema_ref = "schemas/echo.input.json"
             .expect("persist installation");
     }
 
+    /// A `wasm` / `third_party` fixture — deliberately never eligible for
+    /// first-party trust, used to pin the *other* arm of the no-durable-
+    /// record classification fallback below.
+    fn third_party_wasm_fixture_manifest_toml(id: &str) -> String {
+        format!(
+            r#"
+schema_version = "{schema}"
+id = "{id}"
+name = "H5 third-party fallback fixture"
+version = "0.1.0"
+description = "classification fallback fixture extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.echo"
+description = "Echoes input"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/echo.input.json"
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+            id = id,
+        )
+    }
+
+    /// Builds a `LoadContext` for `toml`, without persisting anything in an
+    /// installation store — the resulting `resolved` is exactly what
+    /// `CompositionExtensionLoader::load` sees when there is no durable
+    /// record for the extension id.
+    async fn load_context_for(id: &str, toml: &str) -> LoadContext {
+        let record = ExtensionManifestRecord::from_toml(
+            toml.to_string(),
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            None,
+            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
+        )
+        .expect("fixture manifest resolves");
+        LoadContext {
+            extension_id: id.to_string(),
+            installation_id: id.to_string(),
+            resolved: Arc::new(record.resolved().clone()),
+        }
+    }
+
+    fn test_loader(
+        installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    ) -> CompositionExtensionLoader {
+        CompositionExtensionLoader {
+            binder: test_binder(),
+            factories: HashMap::new(),
+            channel_adapters: HashMap::new(),
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            installation_store,
+        }
+    }
+
+    /// H.5 classification-fallback pin (extension-runtime P2 trap):
+    /// `CompositionExtensionLoader::load`'s no-durable-record branch derives
+    /// `ManifestSource` from `RequestedTrustClass`, not from any persisted
+    /// source — adding a `ManifestSource` variant produces no compiler error
+    /// here, so this test pins both arms directly. If the match ever
+    /// collapses or reorders (e.g. the wildcard arm starts returning
+    /// `HostBundled`), a `ThirdParty`-trust manifest would silently pass the
+    /// `to_internal` trust re-check it must fail, and this test's second
+    /// assertion changes from a runtime-backend error to a success/entirely
+    /// different error shape.
+    #[tokio::test]
+    async fn no_durable_record_fallback_derives_source_from_requested_trust_only() {
+        let store = Arc::new(filesystem_installation_store_for_test().await);
+        // No installation seeded for either id: `get_manifest` returns
+        // `None`, forcing the fallback branch under test.
+        let loader = test_loader(Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>);
+
+        // FirstPartyRequested trust -> fallback must derive `HostBundled`
+        // (`to_internal` allows it) and fail downstream on the *missing
+        // runtime backend*, not on a trust rejection.
+        let ctx = load_context_for(
+            "h5-first-party-fallback",
+            &fixture_manifest_toml("h5-first-party-fallback"),
+        )
+        .await;
+        let error = match loader.load(&ctx).await {
+            Ok(_) => panic!("no first-party factory is registered for this fixture's service"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("no runtime backend is configured"),
+            "FirstPartyRequested trust with no durable record must still resolve to \
+             ManifestSource::HostBundled, failing downstream on the missing runtime backend \
+             rather than on trust; got: {error}"
+        );
+
+        // ThirdParty trust -> fallback must derive `InstalledLocal`
+        // (never eligible for first-party) and still pass `to_internal`,
+        // failing downstream on the missing wasm lane, not on trust.
+        let ctx = load_context_for(
+            "h5-third-party-fallback",
+            &third_party_wasm_fixture_manifest_toml("h5-third-party-fallback"),
+        )
+        .await;
+        let error = match loader.load(&ctx).await {
+            Ok(_) => panic!("no wasm lane is registered in the test binder"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("no runtime backend is configured"),
+            "ThirdParty trust with no durable record must resolve to a source that still \
+             passes to_internal, failing downstream on the missing wasm lane rather than on \
+             trust; got: {error}"
+        );
+    }
+
     fn test_binder() -> ExtensionLaneToolBinder {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
