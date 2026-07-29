@@ -50,7 +50,8 @@ use ironclaw_turns::{
         AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, HookDecisionSummary,
         InstructionSafetyContext, LoopCheckpointKind, LoopDriverId, LoopGateKind,
         LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunContext,
         LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
@@ -970,6 +971,74 @@ fn milestone_for(
         loop_driver_id: LoopDriverId::new("milestone-projection-driver").unwrap(),
         kind,
     }
+}
+
+#[tokio::test]
+async fn failure_recovery_milestone_is_durable_and_projected_exactly_once() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_id = ThreadId::new("thread-failure-recovery-event").unwrap();
+    let run_id = TurnRunId::new();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &milestone_thread_scope(),
+            thread_id.clone(),
+            run_id,
+        )
+        .unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        thread_id.clone(),
+    );
+
+    sink.publish_loop_milestone(milestone_for(
+        scope,
+        run_id,
+        LoopHostMilestoneKind::FailureRecovered {
+            sequence: 1,
+            stage: LoopRecoveryStage::Capability,
+            class: LoopRecoveryClass::Capability(ironclaw_host_api::FailureKind::Backend),
+            disposition: LoopRecoveryDisposition::Retried,
+        },
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()))
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(thread_id),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    let recovered = snapshot
+        .timeline
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == TimelineEntryKind::FailureRecovered)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "one applied recovery milestone must append exactly one durable numerator event"
+    );
+    assert_eq!(recovered[0].recovery_stage.as_deref(), Some("capability"));
+    assert_eq!(recovered[0].recovery_class.as_deref(), Some("backend"));
+    assert_eq!(
+        recovered[0].recovery_disposition.as_deref(),
+        Some("retried")
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(
+        snapshot.runs[0].status,
+        RunProjectionStatus::Running,
+        "recovery telemetry must not invent a terminal run transition"
+    );
 }
 
 #[tokio::test]

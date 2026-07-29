@@ -15,21 +15,37 @@ use ironclaw_threads::{
 
 pub const TRANSCRIPT_FAILURE_SECRET: &str = "sk-TRANSCRIPT0123456789SECRET";
 
-/// Runtime transcript seam that rejects the single-write final assistant
-/// persistence method before any draft exists. Reads and inbound writes still
-/// delegate to the real filesystem-backed service.
-pub struct FailingAppendFinalizedAssistantThreadService {
-    inner: Arc<dyn SessionThreadService>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailingTranscriptWrite {
+    AppendFinalizedAssistantMessage,
+    AppendToolResultReference,
 }
 
-impl FailingAppendFinalizedAssistantThreadService {
-    pub fn new(inner: Arc<dyn SessionThreadService>) -> Self {
-        Self { inner }
+/// Runtime transcript seam that rejects one selected persistence method while
+/// reads and unrelated writes delegate to the real filesystem-backed service.
+pub struct FailingTranscriptWriteThreadService {
+    inner: Arc<dyn SessionThreadService>,
+    failure: FailingTranscriptWrite,
+}
+
+impl FailingTranscriptWriteThreadService {
+    pub fn append_finalized_assistant_message(inner: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            inner,
+            failure: FailingTranscriptWrite::AppendFinalizedAssistantMessage,
+        }
+    }
+
+    pub fn append_tool_result_reference(inner: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            inner,
+            failure: FailingTranscriptWrite::AppendToolResultReference,
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl SessionThreadService for FailingAppendFinalizedAssistantThreadService {
+impl SessionThreadService for FailingTranscriptWriteThreadService {
     async fn ensure_thread(
         &self,
         request: EnsureThreadRequest,
@@ -86,16 +102,24 @@ impl SessionThreadService for FailingAppendFinalizedAssistantThreadService {
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        Err(SessionThreadError::Backend(format!(
-            "write rejected for raw transcript {:?} using token {TRANSCRIPT_FAILURE_SECRET}",
-            request.content.as_text()
-        )))
+        if self.failure == FailingTranscriptWrite::AppendFinalizedAssistantMessage {
+            return Err(SessionThreadError::Backend(format!(
+                "write rejected for raw transcript {:?} using token {TRANSCRIPT_FAILURE_SECRET}",
+                request.content.as_text()
+            )));
+        }
+        self.inner.append_finalized_assistant_message(request).await
     }
 
     async fn append_tool_result_reference(
         &self,
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if self.failure == FailingTranscriptWrite::AppendToolResultReference {
+            return Err(SessionThreadError::Backend(format!(
+                "write rejected for raw tool result {request:?} using token {TRANSCRIPT_FAILURE_SECRET}"
+            )));
+        }
         self.inner.append_tool_result_reference(request).await
     }
 

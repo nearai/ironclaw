@@ -315,14 +315,12 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             kind,
             safe_summary,
             reason_kind,
-            diagnostic_ref,
             detail,
         } => {
             tracing::warn!(
                 stage = ?stage,
                 kind = ?kind,
                 reason_kind = ?reason_kind,
-                diagnostic_ref = ?diagnostic_ref,
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
@@ -354,6 +352,13 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
             AgentLoopDriverError::Failed {
                 reason_kind: "checkpoint_rejected".to_string(),
+                detail: None,
+            }
+        }
+        AgentLoopExecutorError::RecoverySequenceExhausted => {
+            tracing::warn!("planned driver exhausted durable recovery event identity space");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
                 detail: None,
             }
         }
@@ -573,7 +578,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -594,7 +598,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
             safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -616,7 +619,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -637,7 +639,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("safe summary wording is display-only")
                 .expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -657,7 +658,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some("HTTP 404 model not found".to_string()),
         });
 
@@ -683,7 +683,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some(format!("provider rejected token {secret} at /host/route")),
         });
 
@@ -715,7 +714,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -735,7 +733,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 

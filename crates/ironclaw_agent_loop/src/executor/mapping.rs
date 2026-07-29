@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlockedKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopCheckpointKind,
-        LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
+        LoopGateKind, LoopRecoveryClass, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
@@ -151,6 +151,22 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
     }
 }
 
+pub(super) fn model_recovery_class(class: ModelErrorClass) -> LoopRecoveryClass {
+    match class {
+        ModelErrorClass::Transient => LoopRecoveryClass::ModelTransient,
+        ModelErrorClass::ContextOverflow => LoopRecoveryClass::ModelContextOverflow,
+        ModelErrorClass::ContentFiltered => LoopRecoveryClass::ModelContentFiltered,
+        ModelErrorClass::InvalidOutput => LoopRecoveryClass::ModelInvalidOutput,
+        ModelErrorClass::OutputTruncated => LoopRecoveryClass::ModelOutputTruncated,
+        ModelErrorClass::Unavailable => LoopRecoveryClass::ModelUnavailable,
+        ModelErrorClass::Internal => LoopRecoveryClass::ModelInternal,
+        ModelErrorClass::StaleRequest => LoopRecoveryClass::ModelStaleRequest,
+        ModelErrorClass::Unauthorized => LoopRecoveryClass::ModelUnauthorized,
+        ModelErrorClass::CheckpointRejected => LoopRecoveryClass::ModelCheckpointRejected,
+        ModelErrorClass::TranscriptWriteFailed => LoopRecoveryClass::ModelTranscriptWriteFailed,
+    }
+}
+
 /// Whether a capability-stage port `Err` is a genuine host fault that must end
 /// the run (`capability_host_error`), as opposed to a caller-shaped failure the
 /// model can recover from (surfaced as a tool error via
@@ -191,6 +207,9 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     if error.kind == AgentLoopHostErrorKind::Cancelled {
         return AgentLoopExecutorError::Cancelled;
     }
+    if error.kind == AgentLoopHostErrorKind::TranscriptWriteFailed {
+        return transcript_host_error(error);
+    }
     // Fail soft on a malformed summary: a summary that fails strict validation
     // (e.g. contains `/`, `{`) must NOT bork the run. Degrade to a canned
     // fallback and carry the real cause on the model-visible detail channel so
@@ -212,7 +231,7 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         }
     };
     let detail = error.detail.or(rejected_summary_detail);
-    if detail.is_none() && error.reason_kind.is_none() && error.diagnostic_ref.is_none() {
+    if detail.is_none() && error.reason_kind.is_none() {
         return AgentLoopExecutorError::HostUnavailable {
             stage: HostStage::Capability,
         };
@@ -222,7 +241,6 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         kind: error.kind,
         safe_summary,
         reason_kind: error.reason_kind,
-        diagnostic_ref: error.diagnostic_ref,
         detail,
     }
 }
@@ -241,7 +259,6 @@ pub(super) fn transcript_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         kind: error.kind,
         safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
         reason_kind: error.reason_kind,
-        diagnostic_ref: error.diagnostic_ref,
         // Fail closed even if a non-production host supplied detail: transcript
         // diagnostics can contain raw assistant text or storage credentials.
         detail: None,
@@ -251,11 +268,10 @@ pub(super) fn transcript_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 /// Sanitized failure-category wire strings for a terminal capability failure.
 ///
 /// The seven output strings are a HARD cross-crate contract: the runner's
-/// failure lane (`failure_lane.rs`) and auto-retry disposition
-/// (`retry_disposition.rs`) and the product failure explanations match on them
+/// failure summaries and the product failure explanations match on them
 /// byte-for-byte. This bucketing preserves the retired `CapabilityErrorClass`
-/// membership for the retired kinds and assigns each precise kind to the
-/// bucket its coarse ancestor used:
+/// membership for the retired kinds and assigns each precise kind to the bucket
+/// its coarse ancestor used:
 ///
 /// - `capability_permanent` survives only for `Cancelled` (the retired
 ///   `Permanent` *kind* merged into `OperationFailed`, so its old bucket is no
@@ -407,9 +423,8 @@ mod tests {
 
     /// Classification lock for the seven-string failure-category contract:
     /// every unified `FailureKind` maps to a deliberate wire category, and the
-    /// bucket set never grows — the runner's failure lane and auto-retry
-    /// disposition and the product failure explanations match these strings
-    /// byte-for-byte.
+    /// bucket set never grows — runner and product failure explanations match
+    /// these strings byte-for-byte.
     ///
     /// This complements the compile-time guarantee (the match is exhaustive
     /// with no `_ =>` wildcard) by also catching a silent *re-bucketing* of an
@@ -562,6 +577,14 @@ mod tests {
     }
 
     #[test]
+    fn output_truncation_preserves_its_recovery_identity() {
+        assert_eq!(
+            model_recovery_class(ModelErrorClass::OutputTruncated).as_str(),
+            "model_output_truncated"
+        );
+    }
+
+    #[test]
     fn invalid_model_output_is_distinct_from_unavailable() {
         let error = AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidOutput,
@@ -571,6 +594,28 @@ mod tests {
         assert_eq!(
             model_error_class(&error),
             Some(ModelErrorClass::InvalidOutput)
+        );
+    }
+
+    #[test]
+    fn capability_result_transcript_failure_uses_terminal_transcript_lane() {
+        let mapped = capability_host_error(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                "raw tool result",
+            )
+            .with_detail("storage credential sk-secret"),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: HostStage::Transcript,
+                kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+                safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+                reason_kind: None,
+                detail: None,
+            }
         );
     }
 }

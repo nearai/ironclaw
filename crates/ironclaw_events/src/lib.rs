@@ -54,6 +54,7 @@ pub use runtime_event::{
     UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,
     runtime_event_from_trusted_json_slice, runtime_event_from_trusted_json_str,
     sanitize_error_kind, sanitize_error_summary, sanitize_hook_id, sanitize_hook_label,
+    sanitize_recovery_label,
 };
 pub use security_audit::{
     InMemorySecurityAuditSink, NoopSecurityAuditSink, SecurityAuditEvent, SecurityAuditSink,

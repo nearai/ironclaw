@@ -13,11 +13,16 @@ mod support;
 use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::doubles::TRANSCRIPT_FAILURE_SECRET;
+use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
+use serde_json::json;
 
 const UNPERSISTED_ASSISTANT_REPLY: &str =
     "raw assistant transcript that must never be reported as a reply";
+const UNPERSISTED_TOOL_RESULT: &str =
+    "raw tool result that must never enter the transcript failure";
+const TRANSCRIPT_FAILURE_TOOL_URL: &str = "https://transcript-failure.example.test/result";
 
 #[tokio::test]
 async fn content_filtered_completion_recovers_with_model_visible_observation() {
@@ -201,10 +206,20 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
 #[tokio::test]
 async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect() {
     let harness = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::for_url(
+            TRANSCRIPT_FAILURE_TOOL_URL,
+            UNPERSISTED_TOOL_RESULT,
+        )])
         .record_model_calls_for_test()
         .fail_append_finalized_assistant_message_for_test()
         .with_turn_event_sink()
-        .script([RebornScriptedReply::text(UNPERSISTED_ASSISTANT_REPLY)])
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http",
+                json!({"url": TRANSCRIPT_FAILURE_TOOL_URL}),
+            ),
+            RebornScriptedReply::text(UNPERSISTED_ASSISTANT_REPLY),
+        ])
         .build()
         .await
         .expect("harness builds");
@@ -246,17 +261,107 @@ async fn transcript_write_failure_stops_without_another_model_or_tool_side_effec
         .await
         .expect("no draft or fabricated finalized reply is persisted");
     harness
-        .assert_interactive_model_provider_call_count(1)
+        .assert_interactive_model_provider_call_count(2)
         .await
-        .expect("a failed transcript boundary must not trigger a second model call");
+        .expect("a failed transcript boundary must not trigger a third model call");
     harness
         .assert_text_model_provider_call_count(0)
         .await
         .expect("a failed transcript boundary must not trigger model inference");
     harness
-        .assert_only_tools_invoked(&[])
+        .assert_tool_invocation_count("builtin.http", 1)
         .await
-        .expect("a failed transcript boundary must not dispatch a tool");
+        .expect("the prior capability is not repeated after final reply persistence fails");
+    harness
+        .assert_capability_result_count("builtin.http", 1)
+        .await
+        .expect("the prior capability effect is not repeated");
+    harness
+        .assert_egress_count(1)
+        .await
+        .expect("the prior external side effect is issued exactly once");
+    harness
+        .assert_model_message_content_occurrences("model error observation", 0)
+        .await
+        .expect("no model-visible observation is fabricated after persistence fails");
+    harness
+        .assert_turn_event_recorded(TurnEventKind::Failed)
+        .await
+        .expect("the terminal transcript failure is published durably");
+}
+
+#[tokio::test]
+async fn tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::for_url(
+            TRANSCRIPT_FAILURE_TOOL_URL,
+            UNPERSISTED_TOOL_RESULT,
+        )])
+        .record_model_calls_for_test()
+        .fail_append_tool_result_reference_for_test()
+        .with_turn_event_sink()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http",
+                json!({"url": TRANSCRIPT_FAILURE_TOOL_URL}),
+            ),
+            RebornScriptedReply::text("must not be called after transcript persistence fails"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn_async("use the echo tool once")
+        .await
+        .expect("turn submitted");
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("tool-result transcript persistence failure reaches a terminal failed state");
+    let failure = state
+        .failure
+        .as_ref()
+        .expect("failed tool-result persistence carries a durable failure");
+
+    assert_eq!(failure.category(), "transcript_write_failed");
+    assert_eq!(
+        failure.detail(),
+        Some("assistant transcript write failed"),
+        "the terminal projection retains only the fixed host-authored cause"
+    );
+    let durable_failure = format!("{failure:?}");
+    assert!(!durable_failure.contains(TRANSCRIPT_FAILURE_SECRET));
+    assert!(!durable_failure.contains(UNPERSISTED_TOOL_RESULT));
+
+    harness
+        .assert_conversation_history_lacks(TRANSCRIPT_FAILURE_SECRET)
+        .await
+        .expect("backend credentials do not enter conversation history");
+    harness
+        .assert_conversation_history_lacks(UNPERSISTED_TOOL_RESULT)
+        .await
+        .expect("unpersisted tool output does not enter conversation history");
+    harness
+        .assert_interactive_model_provider_call_count(1)
+        .await
+        .expect("tool-result persistence failure must not trigger another model call");
+    harness
+        .assert_text_model_provider_call_count(0)
+        .await
+        .expect("tool-result persistence failure must not trigger model inference");
+    harness
+        .assert_tool_invocation_count("builtin.http", 1)
+        .await
+        .expect("the capability executes exactly once");
+    harness
+        .assert_capability_result_count("builtin.http", 1)
+        .await
+        .expect("the capability effect is not repeated");
+    harness
+        .assert_egress_count(1)
+        .await
+        .expect("the external tool effect is issued exactly once");
     harness
         .assert_model_message_content_occurrences("model error observation", 0)
         .await

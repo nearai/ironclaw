@@ -110,7 +110,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
-use super::doubles::{FailingAppendFinalizedAssistantThreadService, RecordingSecurityAuditSink};
+use super::doubles::{FailingTranscriptWriteThreadService, RecordingSecurityAuditSink};
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -452,6 +452,7 @@ impl RebornIntegrationGroup {
             lease_recovery_interval_override: None,
             planned_default_iteration_limit: None,
             fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
@@ -750,6 +751,8 @@ pub struct RebornIntegrationGroupBuilder {
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Test-only runtime seam that rejects final assistant transcript writes.
     fail_append_finalized_assistant_message: bool,
+    /// Test-only runtime seam that rejects tool-result transcript writes.
+    fail_append_tool_result_reference: bool,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -990,14 +993,22 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),
             );
-        let runtime_thread_service: Arc<dyn SessionThreadService> =
-            if self.fail_append_finalized_assistant_message {
-                Arc::new(FailingAppendFinalizedAssistantThreadService::new(
-                    group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
-                ))
-            } else {
-                group_thread_harness.service.clone() as Arc<dyn SessionThreadService>
-            };
+        let mut runtime_thread_service =
+            group_thread_harness.service.clone() as Arc<dyn SessionThreadService>;
+        if self.fail_append_finalized_assistant_message {
+            runtime_thread_service = Arc::new(
+                FailingTranscriptWriteThreadService::append_finalized_assistant_message(
+                    runtime_thread_service,
+                ),
+            );
+        }
+        if self.fail_append_tool_result_reference {
+            runtime_thread_service = Arc::new(
+                FailingTranscriptWriteThreadService::append_tool_result_reference(
+                    runtime_thread_service,
+                ),
+            );
+        }
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the

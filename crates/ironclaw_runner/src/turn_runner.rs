@@ -56,6 +56,8 @@ pub(crate) fn sanitized_driver_failure(
             | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
             | TRANSCRIPT_WRITE_FAILED_CATEGORY
+            | "model_context_overflow"
+            | "model_output_truncated"
             | "interrupted_unexpectedly"
     ) {
         match SanitizedFailure::new(reason_kind.to_string()) {
@@ -203,5 +205,16 @@ mod tests {
             crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
         );
         assert_eq!(failure.detail(), Some("assistant transcript write failed"));
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_terminal_model_recovery_categories() {
+        for category in ["model_context_overflow", "model_output_truncated"] {
+            let failure = sanitized_driver_failure(category, Some("bounded model failure"))
+                .expect("terminal model recovery category is valid");
+
+            assert_eq!(failure.category(), category);
+            assert_eq!(failure.detail(), Some("bounded model failure"));
+        }
     }
 }

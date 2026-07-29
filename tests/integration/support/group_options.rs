@@ -187,6 +187,13 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Reject tool-result transcript writes after the capability has completed,
+    /// while retaining the real capability path and thread read-back service.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
+        self
+    }
+
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's

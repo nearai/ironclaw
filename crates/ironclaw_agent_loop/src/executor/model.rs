@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlocked, LoopBlockedKind, LoopExit, LoopFailureKind,
     run_profile::{
         AgentLoopHostErrorKind, LoopDriverNoteKind, LoopModelCapabilityView, LoopModelRequest,
-        LoopProgressEvent, LoopSafeSummary,
+        LoopProgressEvent, LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     },
 };
 use tracing::debug;
@@ -22,7 +22,7 @@ use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     HostStage, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
-    model_error_class, model_error_failure_summary, model_preference_to_host,
+    model_error_class, model_error_failure_summary, model_preference_to_host, model_recovery_class,
     sanitized_strategy_summary_or_fallback,
 };
 
@@ -210,7 +210,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             kind: error.kind,
                             safe_summary,
                             reason_kind: error.reason_kind,
-                            diagnostic_ref: error.diagnostic_ref,
                             detail,
                         });
                     };
@@ -230,7 +229,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     let summary = ModelErrorSummary {
                         class,
                         safe_summary,
-                        diagnostic_ref: error.diagnostic_ref,
                     };
                     last_error_summary = Some(summary.clone());
                     last_error_detail.clone_from(&model_failure_detail);
@@ -239,18 +237,31 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         .recovery()
                         .on_model_error(&state, &summary)
                         .await;
-                    let (recovery, scope, alter, observation) = match recovery_outcome {
+                    let (recovery, scope, alter, observation, disposition) = match recovery_outcome
+                    {
                         RecoveryOutcome::Retry {
                             recovery,
                             scope,
                             alter,
-                        } => (recovery, scope, alter, None),
+                        } => (
+                            recovery,
+                            scope,
+                            alter,
+                            None,
+                            LoopRecoveryDisposition::Retried,
+                        ),
                         RecoveryOutcome::ModelErrorObservation {
                             recovery,
                             scope,
                             alter,
                             observation,
-                        } => (recovery, scope, alter, Some(observation)),
+                        } => (
+                            recovery,
+                            scope,
+                            alter,
+                            Some(observation),
+                            LoopRecoveryDisposition::ModelVisible,
+                        ),
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
                                 detail: "ToolErrorResult on model error",
@@ -283,21 +294,29 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 failure_kind,
                                 Some(checked.checkpoint_id),
                                 FailedExitDetails {
-                                    diagnostic_ref: summary.diagnostic_ref.clone(),
                                     safe_summary: Some(safe_failure),
                                     explanation_message_ref: None,
                                 },
                             )?));
                         }
                     };
-                    state.recovery_state = recovery;
-                    state.pending_model_error_observation = observation;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                     }
                     let retry_action =
                         prepare_model_retry_alteration(&mut state, scope, alter.as_ref())?;
+                    state.recovery_state = recovery;
+                    state.pending_model_error_observation = observation;
+                    CheckpointStage
+                        .emit_recovery(
+                            ctx,
+                            &mut state,
+                            LoopRecoveryStage::Model,
+                            model_recovery_class(class),
+                            disposition,
+                        )
+                        .await?;
                     // Persist the consumed retry/observation budget before the
                     // next model attempt. Otherwise a worker restart reloads
                     // the pre-error BeforeModel checkpoint and grants the
@@ -361,7 +380,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     safe_failure = safe_failure.with_detail(detail);
                 }
                 FailedExitDetails {
-                    diagnostic_ref: summary.diagnostic_ref.clone(),
                     safe_summary: Some(safe_failure),
                     explanation_message_ref: None,
                 }

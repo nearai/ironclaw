@@ -184,7 +184,6 @@ fn map_host_error(stage: HostStage, error: AgentLoopHostError) -> AgentLoopDrive
         stage = stage_name,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
-        diagnostic_ref = ?error.diagnostic_ref,
         safe_summary = %safe_summary_for_log,
         "loop host port returned sanitized error"
     );
@@ -300,6 +299,20 @@ mod tests {
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
         MODEL_CREDITS_EXHAUSTED_REASON_KIND, TRANSCRIPT_WRITE_FAILED_CATEGORY,
     };
+    use ironclaw_agent_loop::test_support::{
+        MockAgentLoopDriverHost, MockHostCall, test_run_context,
+    };
+
+    fn text_only_context(
+        driver: &TextOnlyModelReplyDriver,
+    ) -> ironclaw_turns::run_profile::LoopRunContext {
+        let descriptor = driver.descriptor();
+        let mut context = test_run_context("text-only-transcript-failure");
+        context.resolved_run_profile.loop_driver = descriptor.clone();
+        context.loop_driver_id = descriptor.id;
+        context.loop_driver_version = descriptor.version;
+        context
+    }
 
     #[test]
     fn host_internal_errors_map_to_sanitized_unavailable() {
@@ -365,6 +378,45 @@ mod tests {
             }
             Ok(())
         });
+    }
+
+    #[tokio::test]
+    async fn text_only_driver_preserves_terminal_transcript_failure_category() {
+        let driver = TextOnlyModelReplyDriver::default();
+        let context = text_only_context(&driver);
+        let (host, _) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .fail_transcript_with(AgentLoopHostErrorKind::TranscriptWriteFailed)
+            .build();
+
+        let error = driver
+            .run(
+                AgentLoopDriverRunRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    resolved_run_profile: context.resolved_run_profile,
+                },
+                &host,
+            )
+            .await
+            .expect_err("transcript persistence failure must terminate the text-only driver");
+
+        assert_eq!(
+            error,
+            AgentLoopDriverError::Failed {
+                reason_kind: TRANSCRIPT_WRITE_FAILED_CATEGORY.to_string(),
+                detail: Some("assistant transcript write failed".to_string()),
+            }
+        );
+        assert_eq!(host.model_call_count(), 1);
+        assert!(host.finalized_assistant_messages().is_empty());
+        assert_eq!(
+            host.call_log()
+                .iter()
+                .filter(|call| matches!(call, MockHostCall::FinalizeAssistantMessage))
+                .count(),
+            1
+        );
     }
 
     #[test]
