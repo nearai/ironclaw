@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { Callout, cn, useInterfaceTheme } from "@ironclaw/ui";
+import { cn, useInterfaceTheme } from "@ironclaw/ui";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
 import { useNotifications } from "../hooks/useNotifications";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
@@ -155,9 +155,17 @@ export function GatewayLayout({
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {statusQuery.error &&
           (
-            <Callout tone="danger" className="m-4">
+            // Main's exact banner: rounded-[14px], block layout. Callout uses
+            // rounded-xl and a flex row, so it is not a 1:1 replacement here.
+            <div
+              className={cn(
+                "m-4 rounded-[14px] border px-4 py-3 text-sm",
+                "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))]",
+                "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
+              )}
+            >
               {statusQuery.error.message || t("error.gatewayConnection")}
-            </Callout>
+            </div>
           )}
           <Outlet
             context={{

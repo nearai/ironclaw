@@ -35,7 +35,8 @@ export function Breadcrumb({
     >
       {items.map((item, index) => (
         <React.Fragment key={item.key ?? `${index}:${item.label}`}>
-          {index > 0 && (<span className="text-[var(--v2-text-muted)]">/</span>)}
+          {/* faint, not muted: the original used text-iron-400 (--v2-text-faint) */}
+          {index > 0 && (<span className="text-[var(--v2-text-faint)]">/</span>)}
           <button
             type="button"
             onClick={item.onSelect}

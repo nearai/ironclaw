@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Badge, Button, Callout } from "@ironclaw/ui";
+import { Badge, Button } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
@@ -50,9 +50,15 @@ export function WorkspacePage() {
 
           {workspace.error &&
           (
-            <Callout tone="danger" role="alert">
+            // Main's exact banner (red-* literals, no flex row) — Callout's
+            // danger tone renders different colors, and this extraction must
+            // not change rendered output.
+            <div
+              role="alert"
+              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+            >
               {workspace.error.message}
-            </Callout>
+            </div>
           )}
           <FeedbackBanner
             result={workspace.result}
