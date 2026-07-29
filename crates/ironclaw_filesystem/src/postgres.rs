@@ -882,6 +882,16 @@ impl RootFilesystem for PostgresRootFilesystem {
             .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
         Ok(())
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Postgres rows are scoped by virtual-path prefix, not by an OS
+        // directory fd; containment is enforced by that row scoping, so
+        // there is no mount to narrow here.
+        Ok(())
+    }
 }
 impl PostgresRootFilesystem {
     async fn exact_entry_with_client(

@@ -110,6 +110,16 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //   JUSTIFIED (Bucket-3 by meaning): "hook-local id" — an identifier local to
     //     one hook, a genuine domain concept, not a deployment tier.
     "HookLocalId",
+    //   JUSTIFIED (Bucket-3 by meaning): `ironclaw_filesystem::local::mount_registry`'s
+    //     "locally-mounted host directory" registration record (an fd-rooted
+    //     `DiskFilesystem` mount entry) — "local" here means "on the local
+    //     filesystem", the same sense as the crate's own `local.rs`/`DiskFilesystem`
+    //     naming, not the `LocalDev`/hosted-tier deployment-mode axis this ratchet
+    //     polices. Only newly `pub(super)`-visible (crossing into this ratchet's
+    //     scan) because FIX 4 (the mount-registry extraction) split it into its own
+    //     file, which needs the type nameable one module up; it was always this
+    //     name, just previously private and invisible to the scanner.
+    "LocalMount",
     //   RebornLocal* composition family — local-dev-as-type mode names in the
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):

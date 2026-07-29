@@ -403,6 +403,13 @@ impl RootFilesystem for FaultBackend {
         self.record(RecordedOp::ReserveSequence { path: path.clone() });
         Ok(seq)
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        // Not fault-gated: faults here target durable-write op paths, not
+        // mount scoping, matching the pattern in `ironclaw_filesystem`'s
+        // own `FaultInjecting` decorator.
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

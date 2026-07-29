@@ -93,8 +93,46 @@ pub enum FilesystemError {
     },
     #[error("virtual path escaped backend mount {path}")]
     PathOutsideMount { path: VirtualPath },
-    #[error("symlink escapes backend mount at virtual path {path}")]
-    SymlinkEscape { path: VirtualPath },
+    /// The local disk backend refused to resolve `path` because it has more
+    /// path components than the local disk backend's `MAX_PATH_COMPONENTS`
+    /// cap allows (PR #6817 review follow-up). `resolve_walk`/
+    /// `descend_creating` hold one open ancestor fd per path component
+    /// *simultaneously* for the duration of a resolution — an unbounded
+    /// component count is an unbounded, process-wide fd budget an attacker
+    /// fully controls (every path component is caller-supplied). Rejecting a
+    /// pathologically deep path before any fd is opened bounds that budget
+    /// without weakening containment: this check runs before the walk
+    /// starts, so it never changes which paths resolve *successfully*, only
+    /// whether an absurdly deep one is rejected up front instead of
+    /// consuming `max_components` fds to discover the same failure partway
+    /// through.
+    #[error(
+        "virtual path {path} has more than {max_components} path components; refusing to resolve"
+    )]
+    PathTooDeep {
+        path: VirtualPath,
+        max_components: usize,
+    },
+    /// `detail`, when present, names the specific escape reason the
+    /// resolver already knows (PR #6817 review follow-up — diagnosability
+    /// for the "absolute symlink target rejected even though it would land
+    /// in-bounds" case, the shape `local-dev-yolo`'s `/host` real-home-
+    /// directory mount hits routinely: pyenv version envs, chezmoi/stow in
+    /// absolute mode, cloud-sync placeholders). `None` for every other
+    /// escape reason (an out-of-bounds `..`, a mount-crossing rejection,
+    /// a symlink chain exceeding the depth cap, …), where the resolver has
+    /// no more specific information than "this fell outside the mount" to
+    /// offer. Never includes anything the caller did not themselves already
+    /// put on disk inside their own mount (the symlink's own name and its
+    /// own target text) — no host path outside the mount is ever named.
+    #[error(
+        "symlink escapes backend mount at virtual path {path}{}",
+        detail.as_deref().map(|detail| format!(": {detail}")).unwrap_or_default()
+    )]
+    SymlinkEscape {
+        path: VirtualPath,
+        detail: Option<String>,
+    },
     #[error("backend mount conflict at virtual path {path}")]
     MountConflict { path: VirtualPath },
     #[error("filesystem backend error during {operation} at {path}: {reason}")]

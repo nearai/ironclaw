@@ -3829,6 +3829,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_safety",
  "libsql",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",

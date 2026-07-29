@@ -1661,6 +1661,13 @@ mod tests {
         ) -> Result<(), FilesystemError> {
             self.inner.ensure_index(path, spec).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     #[tokio::test]
@@ -2225,6 +2232,13 @@ mod tests {
         ) -> Result<(), FilesystemError> {
             self.inner.ensure_index(path, spec).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     /// Sibling of [`VersionRacingBackend`] for CAS-exhaustion tests: races
@@ -2308,6 +2322,13 @@ mod tests {
         ) -> Result<(), FilesystemError> {
             self.inner.ensure_index(path, spec).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     /// Sibling of [`VersionRacingBackend`]/[`AlwaysRacingBackend`] for the
@@ -2376,6 +2397,13 @@ mod tests {
             spec: &IndexSpec,
         ) -> Result<(), FilesystemError> {
             self.inner.ensure_index(path, spec).await
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
         }
     }
 

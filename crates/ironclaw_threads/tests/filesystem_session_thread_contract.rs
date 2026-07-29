@@ -3348,6 +3348,10 @@ impl RootFilesystem for QueryCountingBackend {
     async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
         self.inner.reserve_sequence(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[async_trait]
@@ -3406,6 +3410,10 @@ impl RootFilesystem for TransactionalRaceBackend {
             staged_puts: HashMap::new(),
         }))
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[async_trait]
@@ -3453,6 +3461,10 @@ impl RootFilesystem for ConcurrentToolResultWriteBackend {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 

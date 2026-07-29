@@ -410,6 +410,16 @@ where
         self.gate(FilesystemOperation::CreateDirAll, path)?;
         self.inner.create_dir_all(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        // Decorator over `self.inner` like every other method here — must
+        // forward so containment narrowing still reaches the wrapped
+        // backend through fault injection. Not fault-gated: tests wrap a
+        // real backend to inject storage-op faults, not to simulate mount
+        // failures, and gating this would make `ensure_scoped_mount` calls
+        // silently fail under fault rules aimed at read/write/delete.
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[cfg(test)]

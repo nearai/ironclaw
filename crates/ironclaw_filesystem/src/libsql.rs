@@ -1114,6 +1114,16 @@ impl RootFilesystem for LibSqlRootFilesystem {
             }
         }
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // libSQL rows are scoped by virtual-path prefix, not by an OS
+        // directory fd; containment is enforced by that row scoping, so
+        // there is no mount to narrow here.
+        Ok(())
+    }
 }
 async fn put_libsql_inner(
     conn: &libsql::Connection,

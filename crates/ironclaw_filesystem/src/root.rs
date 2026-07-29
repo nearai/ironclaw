@@ -124,6 +124,34 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::EnsureIndex)
     }
 
+    /// Dynamically registers (idempotently) a scoped mount rooted exactly at
+    /// `virtual_root`, narrowing this backend's containment boundary to that
+    /// exact subtree for every subsequent operation under it.
+    ///
+    /// Exists to close a same-storage-root cross-tenant/cross-user symlink
+    /// escape for a backend whose containment root is wider than the subtree
+    /// a specific caller is actually granted — e.g. a `/projects` mount
+    /// spanning the whole local-dev storage root, while a caller's `/skills`
+    /// [`ironclaw_host_api::MountGrant`] only authorizes
+    /// `/projects/tenants/<t>/users/<u>/skills`. [`ScopedFilesystem`](crate::ScopedFilesystem)
+    /// calls this on every permission-checked resolution, passing the exact
+    /// `MountGrant::target` it already holds, so no caller can reach the
+    /// backend without first narrowing containment to its own grant.
+    ///
+    /// No default impl: this is a security control, not an optional
+    /// capability, so every implementor must make an explicit containment
+    /// decision instead of silently inheriting a no-op. Only a backend with
+    /// OS-level directory-fd containment (the local disk backend,
+    /// `DiskFilesystem`) actually narrows anything here. Row/prefix-scoped
+    /// backends (Postgres, libSQL, in-memory) have no OS path to anchor an fd
+    /// on and enforce containment through their own per-row/prefix scoping
+    /// instead — those must still implement this method, returning `Ok(())`
+    /// with a comment explaining why there is nothing to narrow. Any backend
+    /// that wraps or delegates to another `RootFilesystem` MUST forward this
+    /// call to the inner backend rather than no-op, or containment narrowing
+    /// silently stops propagating through the wrapper.
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError>;
+
     /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 
@@ -425,6 +453,14 @@ mod tests {
                     payload: vec![seq as u8],
                 })
                 .collect())
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Unit-struct fixture with no storage to narrow.
+            Ok(())
         }
     }
 

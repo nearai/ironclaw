@@ -55,6 +55,14 @@ impl RootFilesystem for OversizedManifestFs {
             path.as_str()
         );
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Test fixture with no storage to narrow.
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -119,6 +127,14 @@ async fn discovery_within_bound_proceeds_to_read() {
                 path: path.clone(),
                 operation: FilesystemOperation::ReadFile,
             })
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
         }
     }
 
@@ -256,6 +272,14 @@ impl RootFilesystem for CountingManifestFs {
             })),
             None => Ok(None),
         }
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Test fixture with no storage to narrow.
+        Ok(())
     }
 }
 
@@ -406,6 +430,14 @@ async fn tolerant_discovery_propagates_root_list_failure() {
                 path: path.clone(),
                 operation: FilesystemOperation::ReadFile,
             })
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
         }
     }
 

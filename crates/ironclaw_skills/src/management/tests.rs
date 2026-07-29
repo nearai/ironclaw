@@ -1050,6 +1050,10 @@ impl RootFilesystem for CleanupDeleteDenyingFilesystem {
             operation: FilesystemOperation::Delete,
         })
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 fn skill_mounts() -> MountView {

@@ -1356,6 +1356,10 @@ impl RootFilesystem for RaceApproveOnFirstRead {
 
         result
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 struct ConcurrentMissingReadFilesystem {
@@ -1441,6 +1445,10 @@ impl RootFilesystem for ConcurrentMissingReadFilesystem {
         }
         result
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 struct DisappearingApprovalReadFilesystem {
@@ -1523,6 +1531,10 @@ impl RootFilesystem for DisappearingApprovalReadFilesystem {
             return Ok(None);
         }
         self.inner.get(path).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 

@@ -144,6 +144,10 @@ impl RootFilesystem for DiskFullFilesystem {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[tokio::test]

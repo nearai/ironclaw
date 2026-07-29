@@ -1861,6 +1861,10 @@ impl RootFilesystem for StatLenOverrideFilesystem {
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 /// KEPT (not folded to `ironclaw_filesystem::FaultInjecting`): the coding
@@ -1905,6 +1909,10 @@ impl RootFilesystem for WriteFailureFilesystem {
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 /// KEPT (not folded to `ironclaw_filesystem::FaultInjecting`): this fake returns
@@ -1943,6 +1951,10 @@ impl RootFilesystem for ReadInfrastructureFailureFilesystem {
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 
@@ -1999,6 +2011,14 @@ impl RootFilesystem for ManySkippedEntriesFilesystem {
             operation: FilesystemOperation::CreateDirAll,
             reason: "unexpected mkdir".to_string(),
         })
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Unit-struct test fixture with no storage to narrow.
+        Ok(())
     }
 }
 

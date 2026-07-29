@@ -865,6 +865,14 @@ async fn unreadable_extension_root_falls_back_to_builtin_only() {
                 operation: FilesystemOperation::Stat,
             })
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Unit-struct test fixture with no storage to narrow.
+            Ok(())
+        }
     }
 
     let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");

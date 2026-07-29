@@ -1921,6 +1921,10 @@ impl RootFilesystem for VersionRacingBackend {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 /// Synchronization decorator for deterministic two-store conditional-delete
@@ -2053,6 +2057,10 @@ impl RootFilesystem for DeletePauseBackend {
             }
         }
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 /// Test backend that mimics a mount that cannot honor CAS writes for critical
@@ -2138,6 +2146,10 @@ impl RootFilesystem for UnsupportedCriticalCasBackend {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 

@@ -571,6 +571,14 @@ mod tests {
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
             Err(unsupported(path, FilesystemOperation::Stat))
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -612,6 +620,14 @@ mod tests {
 
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
             Err(unsupported(path, FilesystemOperation::Stat))
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
         }
     }
 
@@ -657,6 +673,14 @@ mod tests {
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
             Err(unsupported(path, FilesystemOperation::Stat))
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -687,6 +711,14 @@ mod tests {
 
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
             Err(unsupported(path, FilesystemOperation::Stat))
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
         }
     }
 

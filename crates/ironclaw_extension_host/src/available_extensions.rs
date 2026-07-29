@@ -2519,6 +2519,14 @@ credential_handle = "channel_ext_token"
                 .insert(path.as_str().to_string(), bytes.to_vec());
             Ok(())
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
+        }
     }
 
     fn test_extension_package() -> AvailableExtensionPackage {

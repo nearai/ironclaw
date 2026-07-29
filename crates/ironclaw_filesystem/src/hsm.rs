@@ -125,6 +125,15 @@ impl RootFilesystem for HsmBackend {
         // same as every other unified-entry-plane method on this wrapper.
         self.inner.delete_if_version(path, expected_version).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        // HsmBackend wraps an InMemoryBackend (see `inner` above); this is a
+        // delegating wrapper like every other unified-entry-plane method on
+        // it, not a distinct storage root, so it must forward rather than
+        // no-op even though the inner backend itself has no OS path to
+        // narrow.
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[cfg(test)]

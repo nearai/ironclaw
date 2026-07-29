@@ -475,6 +475,16 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             sensitive: false,
         })
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Backed by an in-process `MemoryBackend` keyed by prefix, not an OS
+        // path; containment is enforced by that key scoping, so there is no
+        // mount to narrow here.
+        Ok(())
+    }
 }
 
 /// [`RootFilesystem`] backend exposing DB-backed memory documents as virtual files.
@@ -881,5 +891,15 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             modified: None,
             sensitive: false,
         })
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Backed by a `MemoryDocumentRepository` keyed by relative path, not
+        // an OS path; containment is enforced by that repository's own
+        // scoping, so there is no mount to narrow here.
+        Ok(())
     }
 }

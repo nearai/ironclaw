@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Local filesystem backend now resolves via fd-rooted, kernel-enforced
+  containment (`openat2(RESOLVE_BENEATH)` on Linux; a portable fd-anchored
+  walk elsewhere) instead of path-string checks, closing a family of
+  TOCTOU containment escapes.** Three behavior changes are deliberate and
+  upgrade-affecting for the `local-dev` and, especially, `local-dev-yolo`
+  profiles (`--profile local-yolo --confirm-host-access`, which mounts the
+  user's real host home directory at `/host`):
+  - **Absolute symlink targets are now rejected outright**, even when the
+    target would resolve inside the mount (matching Linux's own
+    `openat2(RESOLVE_BENEATH)` semantics) — a real home directory routinely
+    has legitimate absolute symlinks that resolved before this change and
+    fail after it (pyenv version envs, chezmoi/stow in absolute mode,
+    cloud-sync placeholders). The error now names the offending symlink and
+    its target and states that absolute targets are unsupported, so the fix
+    (replace with a relative symlink) is discoverable without guessing.
+  - **Deleting a bare mount root now fails closed** instead of silently
+    succeeding as a side effect of the old path-based resolver.
+  - **Symlink chain depth is capped at 32 hops** per resolution (shared
+    across every hop the walk takes, not reset per path component); a
+    chain deeper than that — always either a cycle or pathological —
+    now fails closed instead of being followed indefinitely.
+  - Relative, in-bounds symlinks (the common case — package manager
+    layouts, git worktree links, monorepo aliases) now resolve correctly
+    where they previously did not.
 - **Extension persistence:** normalize filesystem-backed extension lifecycle
   state into typed installation (with the embedded, hash-pinned manifest
   definition), user-membership, and credential-binding records with bounded

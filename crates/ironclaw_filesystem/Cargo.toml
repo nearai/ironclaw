@@ -31,6 +31,12 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+# fd-rooted (openat/openat2-beneath) local-backend traversal — see
+# `src/local.rs`. Pinned to `=1.1.4`: that's the version already resolved
+# transitively (via wasmtime-wasi's cap-net-ext), so pinning keeps this crate
+# on that single resolved version instead of letting a direct-dep version
+# range pull a second copy into the lockfile.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

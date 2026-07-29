@@ -2051,6 +2051,13 @@ impl RootFilesystem for QueryCountingBackend {
         self.inner.capabilities()
     }
 
+    async fn ensure_scoped_mount(
+        &self,
+        virtual_root: &VirtualPath,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
+
     async fn put(
         &self,
         path: &VirtualPath,

@@ -690,6 +690,14 @@ impl RootFilesystem for TxnStubBackend {
     async fn begin(&self, _path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         Ok(Box::new(StubTxn::default()))
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Stub fixture with no storage to narrow.
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -820,4 +828,76 @@ async fn scoped_txn_per_op_acl_blocks_delete_without_delete_permission() {
         }
         other => panic!("expected Backend(permission), got {other:?}"),
     }
+}
+
+/// Wraps [`InMemoryBackend`] and always fails `ensure_scoped_mount`, while
+/// recording whether `get` (the default `read_file`'s own backend call) was
+/// ever reached — proving `resolve_with_permission_view`'s chokepoint
+/// (`scoped.rs`) propagates an `ensure_scoped_mount` error instead of
+/// dispatching to the backend operation anyway.
+struct EnsureScopedMountFailingBackend {
+    inner: InMemoryBackend,
+    get_called: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl RootFilesystem for EnsureScopedMountFailingBackend {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<crate::DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<crate::FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: virtual_root.clone(),
+            operation: FilesystemOperation::MountLocal,
+            reason: "planted ensure_scoped_mount failure".to_string(),
+        })
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.get_called
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get(path).await
+    }
+}
+
+#[tokio::test]
+async fn ensure_scoped_mount_failure_propagates_without_reaching_backend_operation() {
+    let backend = Arc::new(EnsureScopedMountFailingBackend {
+        inner: InMemoryBackend::new(),
+        get_called: std::sync::atomic::AtomicBool::new(false),
+    });
+    let scoped = ScopedFilesystem::with_fixed_view(
+        backend.clone(),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/scoped_test").unwrap(),
+            MountPermissions::read_only(),
+        )])
+        .unwrap(),
+    );
+
+    let err = scoped
+        .read_file(
+            &test_scope(),
+            &ScopedPath::new("/workspace/file.txt").unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            FilesystemError::Backend { reason, .. } if reason == "planted ensure_scoped_mount failure"
+        ),
+        "expected the planted ensure_scoped_mount error to propagate unchanged, got {err:?}"
+    );
+    assert!(
+        !backend.get_called.load(std::sync::atomic::Ordering::SeqCst),
+        "read_file must not reach the backend's get() once ensure_scoped_mount fails"
+    );
 }

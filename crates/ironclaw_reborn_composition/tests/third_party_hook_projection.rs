@@ -114,6 +114,14 @@ impl RootFilesystem for FakeExtensionFs {
             version: RecordVersion::from_backend(0),
         }))
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Test fixture with no storage to narrow.
+        Ok(())
+    }
 }
 
 // ── Manifest builders ────────────────────────────────────────────────────────

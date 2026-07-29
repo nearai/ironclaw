@@ -143,6 +143,13 @@ where
             operation: ironclaw_filesystem::FilesystemOperation::Append,
         })
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        virtual_root: &VirtualPath,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 struct BlockFirstAppendFilesystem<F> {
@@ -256,6 +263,13 @@ where
     ) -> Result<Vec<ironclaw_filesystem::SeqNo>, ironclaw_filesystem::FilesystemError> {
         self.maybe_block_first_append();
         self.inner.append_batch(path, payloads).await
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        virtual_root: &VirtualPath,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 
@@ -1919,6 +1933,13 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
         spec: &ironclaw_filesystem::IndexSpec,
     ) -> Result<(), ironclaw_filesystem::FilesystemError> {
         self.inner.ensure_index(path, spec).await
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        virtual_root: &VirtualPath,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 

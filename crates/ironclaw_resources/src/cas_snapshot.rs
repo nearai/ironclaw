@@ -581,6 +581,13 @@ mod tests {
         async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
             self.inner.stat(path).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     fn scoped(backend: Arc<SlowGetBackend>) -> Arc<ScopedFilesystem<SlowGetBackend>> {

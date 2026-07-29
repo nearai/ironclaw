@@ -183,6 +183,10 @@ impl RootFilesystem for CasWithoutDeleteBackend {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[tokio::test]
@@ -271,6 +275,10 @@ impl RootFilesystem for NonCasBackend {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 // ─── A backend that always reports VersionMismatch on put ───────────────────
@@ -330,6 +338,10 @@ impl RootFilesystem for AlwaysMismatchBackend {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 // ─── A backend whose `get` hangs forever ─────────────────────────────────────
@@ -371,6 +383,14 @@ impl RootFilesystem for HangingBackend {
 
     async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         unimplemented!("HangingBackend::stat is unreachable in this test")
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // In-memory test fixture with no OS path to narrow.
+        Ok(())
     }
 }
 
@@ -714,6 +734,14 @@ impl RootFilesystem for UnsupportedWriteBackend {
     async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         unimplemented!("UnsupportedWriteBackend::stat is unreachable in this test")
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // In-memory test fixture with no OS path to narrow.
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -807,6 +835,14 @@ impl RootFilesystem for MalformedBodyBackend {
     async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         unimplemented!("MalformedBodyBackend::stat is unreachable in this test")
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // In-memory test fixture with no OS path to narrow.
+        Ok(())
+    }
 }
 
 // ─── A CAS-capable backend that tracks whether `put` was invoked ──────────────
@@ -859,6 +895,14 @@ impl RootFilesystem for PutTrackingBackend {
 
     async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         unimplemented!("PutTrackingBackend::stat is unreachable in this test")
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // In-memory test fixture with no OS path to narrow.
+        Ok(())
     }
 }
 
@@ -1085,6 +1129,14 @@ impl RootFilesystem for KindGatedByteOnlyBackend {
 
     async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         unimplemented!("KindGatedByteOnlyBackend::stat is unreachable in this test")
+    }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // In-memory test fixture with no OS path to narrow.
+        Ok(())
     }
 }
 

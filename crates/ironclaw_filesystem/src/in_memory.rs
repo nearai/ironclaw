@@ -509,6 +509,16 @@ impl RootFilesystem for InMemoryBackend {
         );
         Ok(())
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // In-memory storage has no OS path to anchor an fd on; containment
+        // is enforced by key-prefix scoping in the entries map, not by a
+        // narrowable mount, so there is nothing to do here.
+        Ok(())
+    }
 }
 
 fn check_cas(

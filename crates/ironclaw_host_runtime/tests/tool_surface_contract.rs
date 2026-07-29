@@ -1996,6 +1996,14 @@ impl RootFilesystem for OversizedReadFilesystem {
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
         Ok(Some(vec![b'a'; max_bytes + 1]))
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Unit-struct test fixture with no storage to narrow.
+        Ok(())
+    }
 }
 
 fn runtime_with(

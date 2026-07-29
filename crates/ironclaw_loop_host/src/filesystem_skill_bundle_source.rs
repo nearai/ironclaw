@@ -649,6 +649,13 @@ mod tests {
             }
             self.inner.read_file_bounded(path, max_bytes).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     #[tokio::test]

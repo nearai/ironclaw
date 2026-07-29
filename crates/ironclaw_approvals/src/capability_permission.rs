@@ -653,6 +653,13 @@ mod tests {
         async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
             self.inner.delete(path).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     struct ClearRacingBackend {
@@ -744,6 +751,13 @@ mod tests {
 
         async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
             self.inner.delete(path).await
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
         }
     }
 

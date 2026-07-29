@@ -155,6 +155,7 @@ fn filesystem_error_kind(error: &FilesystemError) -> &'static str {
         FilesystemError::MountNotFound { .. } => "mount_not_found",
         FilesystemError::NotFound { .. } => "not_found",
         FilesystemError::PathOutsideMount { .. } => "path_outside_mount",
+        FilesystemError::PathTooDeep { .. } => "path_too_deep",
         FilesystemError::SymlinkEscape { .. } => "symlink_escape",
         FilesystemError::MountConflict { .. } => "mount_conflict",
         FilesystemError::Backend { .. } => "backend",
@@ -276,8 +277,9 @@ where
     ) -> Result<RecordVersion, FilesystemError> {
         let started_at = live_latency_started_at();
         let bytes = entry.body.len();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::WriteFile)
+            .await?;
         let result = self.root.put(&virtual_path, entry, cas).await;
         trace_fs_latency("put", path, started_at, &result, Some(bytes));
         result
@@ -290,8 +292,9 @@ where
         path: &ScopedPath,
     ) -> Result<Option<VersionedEntry>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::ReadFile)
+            .await?;
         let result = self.root.get(&virtual_path).await;
         trace_fs_latency("get", path, started_at, &result, None);
         result
@@ -306,8 +309,9 @@ where
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, prefix, FilesystemOperation::Query)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, prefix, FilesystemOperation::Query)
+            .await?;
         let result = self.root.query(&virtual_path, filter, page).await;
         trace_fs_latency("query", prefix, started_at, &result, None);
         result
@@ -321,8 +325,9 @@ where
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)
+            .await?;
         let result = self.root.ensure_index(&virtual_path, spec).await;
         trace_fs_latency("ensure_index", prefix, started_at, &result, None);
         result
@@ -342,8 +347,13 @@ where
     ) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         let started_at = live_latency_started_at();
         let view = self.mount_view(scope)?;
-        let virtual_path =
-            resolve_with_permission_view(&view, prefix, FilesystemOperation::BeginTxn)?;
+        let virtual_path = resolve_with_permission_view(
+            self.root.as_ref(),
+            &view,
+            prefix,
+            FilesystemOperation::BeginTxn,
+        )
+        .await?;
         let result = self.root.begin(&virtual_path).await;
         trace_fs_latency("begin", prefix, started_at, &result, None);
         let inner = result?;
@@ -366,8 +376,9 @@ where
     ) -> Result<SeqNo, FilesystemError> {
         let started_at = live_latency_started_at();
         let bytes = payload.len();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Append)
+            .await?;
         let result = self.root.append(&virtual_path, payload).await;
         trace_fs_latency("append", path, started_at, &result, Some(bytes));
         result
@@ -385,8 +396,9 @@ where
     ) -> Result<Vec<SeqNo>, FilesystemError> {
         let started_at = live_latency_started_at();
         let bytes = payloads.iter().map(Vec::len).sum();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Append)
+            .await?;
         let result = self.root.append_batch(&virtual_path, payloads).await;
         trace_fs_latency("append_batch", path, started_at, &result, Some(bytes));
         result
@@ -400,7 +412,9 @@ where
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Tail)
+            .await?;
         let result = self.root.tail(&virtual_path, from).await;
         trace_fs_latency("tail", path, started_at, &result, None);
         result
@@ -415,7 +429,9 @@ where
         max_records: usize,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Tail)
+            .await?;
         let result = self
             .root
             .tail_bounded(&virtual_path, from, max_records)
@@ -434,8 +450,9 @@ where
         from: SeqNo,
     ) -> Result<Option<SeqNo>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::HeadSeq)
+            .await?;
         let result = self.root.head_seq(&virtual_path, from).await;
         trace_fs_latency("head_seq", path, started_at, &result, None);
         result
@@ -448,8 +465,9 @@ where
         path: &ScopedPath,
     ) -> Result<SeqNo, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ReserveSeq)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::ReserveSeq)
+            .await?;
         let result = self.root.reserve_sequence(&virtual_path).await;
         trace_fs_latency("reserve_sequence", path, started_at, &result, None);
         result
@@ -465,8 +483,9 @@ where
         path: &ScopedPath,
     ) -> Result<Vec<u8>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::ReadFile)
+            .await?;
         let result = self.root.read_file(&virtual_path).await;
         trace_fs_latency("read_file", path, started_at, &result, None);
         result
@@ -481,8 +500,9 @@ where
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::WriteFile)
+            .await?;
         let result = self.root.write_file(&virtual_path, bytes).await;
         trace_fs_latency("write_file", path, started_at, &result, Some(bytes.len()));
         result
@@ -500,8 +520,13 @@ where
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
+        let virtual_path = resolve_with_permission_view(
+            self.root.as_ref(),
+            view,
+            path,
+            FilesystemOperation::WriteFile,
+        )
+        .await?;
         let result = self
             .root
             .put(
@@ -531,8 +556,9 @@ where
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::AppendFile)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::AppendFile)
+            .await?;
         let result = self.root.append_file(&virtual_path, bytes).await;
         trace_fs_latency("append_file", path, started_at, &result, Some(bytes.len()));
         result
@@ -544,8 +570,9 @@ where
         path: &ScopedPath,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::ListDir)
+            .await?;
         let result = self.root.list_dir(&virtual_path).await;
         trace_fs_latency("list_dir", path, started_at, &result, None);
         result
@@ -558,8 +585,9 @@ where
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::ListDir)
+            .await?;
         let result = self.root.list_dir_bounded(&virtual_path, max_entries).await;
         trace_fs_latency("list_dir_bounded", path, started_at, &result, None);
         result
@@ -571,7 +599,9 @@ where
         path: &ScopedPath,
     ) -> Result<FileStat, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Stat)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Stat)
+            .await?;
         let result = self.root.stat(&virtual_path).await;
         trace_fs_latency("stat", path, started_at, &result, None);
         result
@@ -583,8 +613,9 @@ where
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Delete)
+            .await?;
         let result = self.root.delete(&virtual_path).await;
         trace_fs_latency("delete", path, started_at, &result, None);
         result
@@ -599,8 +630,9 @@ where
         expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::Delete)
+            .await?;
         let result = self
             .root
             .delete_if_version(&virtual_path, expected_version)
@@ -617,8 +649,9 @@ where
         path: &ScopedPath,
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::CreateDirAll)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::CreateDirAll)
+            .await?;
         let result = self.root.create_dir_all(&virtual_path).await;
         trace_fs_latency("create_dir_all", path, started_at, &result, None);
         result
@@ -636,8 +669,9 @@ where
         match self.get(scope, path).await? {
             Some(versioned) => Ok(versioned.entry.body),
             None => {
-                let virtual_path =
-                    self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
+                let virtual_path = self
+                    .resolve_with_permission(scope, path, FilesystemOperation::ReadFile)
+                    .await?;
                 Err(FilesystemError::NotFound {
                     path: virtual_path,
                     operation: FilesystemOperation::ReadFile,
@@ -654,8 +688,9 @@ where
         path: &ScopedPath,
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
+        let virtual_path = self
+            .resolve_with_permission(scope, path, FilesystemOperation::ReadFile)
+            .await?;
         self.root.read_file_bounded(&virtual_path, max_bytes).await
     }
 
@@ -674,22 +709,41 @@ where
 
     // ─── Internals ────────────────────────────────────────────────────────
 
-    fn resolve_with_permission(
+    async fn resolve_with_permission(
         &self,
         scope: &ResourceScope,
         path: &ScopedPath,
         operation: FilesystemOperation,
     ) -> Result<VirtualPath, FilesystemError> {
         let view = self.mount_view(scope)?;
-        resolve_with_permission_view(&view, path, operation)
+        resolve_with_permission_view(self.root.as_ref(), &view, path, operation).await
     }
 }
 
-fn resolve_with_permission_view(
+/// Resolves `path` against `view` and checks the operation against the
+/// resolved grant's permissions — then, before returning the caller-facing
+/// `VirtualPath`, narrows `root`'s containment to exactly the grant's own
+/// `target` via [`RootFilesystem::ensure_scoped_mount`].
+///
+/// This is the chokepoint: every `ScopedFilesystem` operation resolves
+/// through here (directly, or via [`ScopedFilesystem::resolve_with_permission`]),
+/// so no consumer — the skill-management port, a future `MountGrant`-scoped
+/// store, anything holding a `ScopedFilesystem` — can reach the backend
+/// without the backend first anchoring to the caller's own granted subtree.
+/// `ensure_scoped_mount` has no default implementation — every
+/// `RootFilesystem` implementor, including backends without OS-level
+/// containment to narrow (Postgres, libSQL, in-memory), must supply its own
+/// (typically an explicit `Ok(())`), so this call is unconditional but free
+/// for those backends rather than silently inherited.
+async fn resolve_with_permission_view<F>(
+    root: &F,
     view: &MountView,
     path: &ScopedPath,
     operation: FilesystemOperation,
-) -> Result<VirtualPath, FilesystemError> {
+) -> Result<VirtualPath, FilesystemError>
+where
+    F: RootFilesystem + ?Sized,
+{
     let (virtual_path, grant) = view.resolve_with_grant(path)?;
     if !operation_allowed(&grant.permissions, operation) {
         return Err(FilesystemError::PermissionDenied {
@@ -697,6 +751,7 @@ fn resolve_with_permission_view(
             operation,
         });
     }
+    root.ensure_scoped_mount(&grant.target).await?;
     Ok(virtual_path)
 }
 

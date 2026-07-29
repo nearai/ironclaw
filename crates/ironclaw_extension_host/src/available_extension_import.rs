@@ -538,6 +538,14 @@ output_schema_ref = "schemas/search.output.json"
                 reason: "disk unavailable".to_string(),
             })
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
+        }
     }
 
     fn importable_tool_bundle_files(id: &str) -> Vec<(String, Vec<u8>)> {
@@ -776,6 +784,14 @@ output_schema_ref = "schemas/run.output.json"
 
         async fn read_file(&self, _path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
             Ok(b"asset".to_vec())
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Test fixture with no storage to narrow.
+            Ok(())
         }
     }
 }

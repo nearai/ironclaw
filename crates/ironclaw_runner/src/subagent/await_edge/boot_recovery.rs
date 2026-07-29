@@ -513,6 +513,13 @@ mod tests {
         ) -> Result<(), FilesystemError> {
             self.inner.delete_if_version(path, expected_version).await
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_scoped_mount(virtual_root).await
+        }
     }
 
     // External review finding on this PR: `check_scope_recovered`'s claim

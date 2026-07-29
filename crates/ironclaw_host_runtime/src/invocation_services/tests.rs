@@ -592,6 +592,114 @@ async fn hosted_scoped_virtual_filesystem_delete_if_version_delegates_to_inner_b
     assert_permission_denied(denied, FilesystemOperation::Delete);
 }
 
+/// Records every `ensure_scoped_mount` call it receives, delegating
+/// everything else to an inner `InMemoryBackend`. Used below to prove
+/// `MountScopedRootFilesystem::ensure_scoped_mount` actually forwards to the
+/// wrapped backend instead of silently no-op'ing — the fd-rooted-traversal
+/// gap this trait method exists to close.
+#[derive(Default)]
+struct EnsureScopedMountRecordingBackend {
+    inner: InMemoryBackend,
+    recorded: std::sync::Mutex<Vec<VirtualPath>>,
+}
+
+impl EnsureScopedMountRecordingBackend {
+    fn recorded_roots(&self) -> Vec<VirtualPath> {
+        self.recorded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for EnsureScopedMountRecordingBackend {
+    fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn list_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.recorded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(virtual_root.clone());
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
+}
+
+#[tokio::test]
+async fn hosted_scoped_virtual_filesystem_ensure_scoped_mount_delegates_to_inner_backend() {
+    // Proves the confirmed latent gap this task closes: MountScopedRootFilesystem
+    // wraps `Arc<dyn RootFilesystem>` and, before this change, inherited the
+    // trait's now-removed default no-op for `ensure_scoped_mount` instead of
+    // forwarding to `self.root`. It is non-exploitable in production only
+    // because every real caller routes a fixed constant grant target that
+    // already has a static DiskFilesystem mount pre-registered — not because
+    // this wrapper narrows anything itself. Drive it with an arbitrary,
+    // non-preregistered grant target and assert the call actually reaches
+    // the wrapped backend (recorded, not merely `Ok(())` from a stub).
+    let recording_backend = Arc::new(EnsureScopedMountRecordingBackend::default());
+    let resolver =
+        resolver_with_filesystem(Arc::clone(&recording_backend) as Arc<dyn RootFilesystem>);
+    let mut plan = plan(
+        ProcessBackendKind::None,
+        false,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::SecureDefault;
+    plan.requires_filesystem = true;
+    plan.filesystem_backend = FilesystemBackendKind::ScopedVirtual;
+
+    // An arbitrary tenant/agent-scoped grant target with no static mount
+    // registered anywhere — proving the forward is unconditional, not an
+    // artifact of a specific pre-wired path.
+    let dynamic_target = vpath("/tenants/acme/agents/agent_7/skills/scratch");
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/skills".to_string()).expect("mount alias"),
+        dynamic_target.clone(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+
+    let services = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: Some(&mounts),
+        })
+        .expect("hosted scoped virtual filesystem should resolve with explicit mounts");
+
+    services
+        .filesystem
+        .ensure_scoped_mount(&dynamic_target)
+        .await
+        .expect("ensure_scoped_mount must succeed against the inner in-memory backend");
+
+    assert_eq!(
+        recording_backend.recorded_roots(),
+        vec![dynamic_target],
+        "MountScopedRootFilesystem::ensure_scoped_mount must forward the exact \
+         virtual_root to the wrapped backend, not silently no-op"
+    );
+}
+
 #[tokio::test]
 async fn hosted_scoped_virtual_filesystem_delete_if_version_denies_when_delete_missing() {
     // Round-C review (PR #5749): the sibling `scoped/tests.rs` suite in

@@ -168,6 +168,10 @@ impl RootFilesystem for CountingFilesystem {
     ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
         self.inner.tail_bounded(path, from, max_records).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] that exposes the
@@ -516,6 +520,10 @@ where
     ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
         self.inner.tail_bounded(path, from, max_records).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[async_trait]
@@ -588,6 +596,10 @@ where
     ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
         self.inner.tail_bounded(path, from, max_records).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[async_trait]
@@ -658,6 +670,10 @@ where
     ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
         self.inner.tail_bounded(path, from, max_records).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 #[async_trait]
@@ -723,6 +739,10 @@ where
         max_records: usize,
     ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
         self.inner.tail_bounded(path, from, max_records).await
+    }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.ensure_scoped_mount(virtual_root).await
     }
 }
 

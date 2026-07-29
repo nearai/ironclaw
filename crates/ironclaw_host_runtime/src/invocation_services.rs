@@ -608,6 +608,15 @@ impl RootFilesystem for MountScopedRootFilesystem {
         let path = self.resolve(path, FilesystemOperation::CreateDirAll)?;
         self.root.create_dir_all(&path).await
     }
+
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        // This wrapper is a mount-permission view over `self.root`, not a
+        // distinct storage root — it must forward to the underlying
+        // filesystem so containment narrowing actually reaches whichever
+        // backend is doing the real work (e.g. DiskFilesystem's fd-anchored
+        // mount), instead of silently discarding it here.
+        self.root.ensure_scoped_mount(virtual_root).await
+    }
 }
 
 fn validate_network_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesError> {

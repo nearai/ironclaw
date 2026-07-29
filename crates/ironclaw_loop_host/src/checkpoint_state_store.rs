@@ -397,6 +397,14 @@ mod tests {
                 sensitive: false,
             })
         }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // In-memory test fixture with no OS path to narrow.
+            Ok(())
+        }
     }
 
     fn scoped_legacy_fs() -> ScopedFilesystem<LegacyBytesFilesystem> {
