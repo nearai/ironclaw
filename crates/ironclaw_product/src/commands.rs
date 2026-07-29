@@ -19,6 +19,13 @@ pub const PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID: &str = "product.lifecycle.comm
 pub const PRODUCT_MODEL_COMMAND_OPERATION_ID: &str = "product.model.command";
 pub const PRODUCT_STATUS_COMMAND_OPERATION_ID: &str = "product.status.command";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandAudience {
+    User,
+    Admin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductLifecycleCommandInput {
     pub action: LifecycleProductAction,
@@ -56,6 +63,7 @@ pub struct CommandResultField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductCommandDescriptor {
     pub name: &'static str,
+    pub audience: CommandAudience,
 }
 
 struct ProductCommandSpec {
@@ -65,11 +73,17 @@ struct ProductCommandSpec {
 
 const COMMAND_SPECS: &[ProductCommandSpec] = &[
     ProductCommandSpec {
-        descriptor: ProductCommandDescriptor { name: "model" },
+        descriptor: ProductCommandDescriptor {
+            name: "model",
+            audience: CommandAudience::User,
+        },
         parse: parse_model_command,
     },
     ProductCommandSpec {
-        descriptor: ProductCommandDescriptor { name: "status" },
+        descriptor: ProductCommandDescriptor {
+            name: "status",
+            audience: CommandAudience::User,
+        },
         parse: parse_status_command,
     },
 ];
@@ -82,6 +96,7 @@ pub fn product_command_descriptors() -> impl Iterator<Item = ProductCommandDescr
         .copied()
         .map(|kind| ProductCommandDescriptor {
             name: kind.command_name(),
+            audience: CommandAudience::Admin,
         })
         .chain(COMMAND_SPECS.iter().map(|spec| spec.descriptor.clone()))
 }
@@ -189,6 +204,22 @@ impl ProductCommand {
 
     pub fn descriptor(&self) -> Option<ProductCommandDescriptor> {
         product_command_descriptors().find(|descriptor| descriptor.name == self.name())
+    }
+}
+
+/// Execution audience, action-aware: `/model` bare is a user-safe read while
+/// its `set`/`set-provider` actions mutate operator-wide LLM configuration.
+/// `Unknown` is `User` — it never executes (admission rejects undeclared
+/// tokens before the audience step) and must not hide behind the admin gate.
+pub fn required_audience(command: &ProductCommand) -> CommandAudience {
+    match command {
+        ProductCommand::Model {
+            action: ProductModelCommand::Status,
+        } => CommandAudience::User,
+        ProductCommand::Model { .. } => CommandAudience::Admin,
+        ProductCommand::Status => CommandAudience::User,
+        ProductCommand::Lifecycle { .. } => CommandAudience::Admin,
+        ProductCommand::Unknown { .. } => CommandAudience::User,
     }
 }
 

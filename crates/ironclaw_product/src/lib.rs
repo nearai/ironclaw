@@ -110,12 +110,13 @@ pub use command_dispatch::{
     RejectingProductCommandAdmissionService,
 };
 pub use commands::{
-    CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
-    ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
-    ProductModelCommandInput, ProductStatusCommandInput, UnknownProductCommandName,
-    command_help_text, declared_command_help_text, product_command_descriptors,
-    render_command_result_text, validate_declared_product_command,
+    CommandAudience, CommandResultField, CommandResultView,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandDescriptor,
+    ProductLifecycleCommandInput, ProductModelCommand, ProductModelCommandInput,
+    ProductStatusCommandInput, UnknownProductCommandName, command_help_text,
+    declared_command_help_text, product_command_descriptors, render_command_result_text,
+    required_audience, validate_declared_product_command,
 };
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
