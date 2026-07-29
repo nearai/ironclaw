@@ -51,6 +51,8 @@ pub fn parse_product_adapter_manifest_record(
         host_port_catalog,
         manifest_hash,
         &contracts,
+        // Contract-projection helper: no package root is materialized here.
+        None,
     )
     .map_err(|error| match error {
         ExtensionInstallationError::Manifest(error) => RegistryError::Manifest(error),

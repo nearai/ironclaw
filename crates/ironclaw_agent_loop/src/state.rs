@@ -138,6 +138,15 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub goal_refresh_state: GoalRefreshStrategyState,
     pub recovery_state: RecoveryStrategyState,
+    /// Monotonic identity source for durable recovery evidence.
+    ///
+    /// The next recovery append uses this value, then advances it only after
+    /// the host accepts the event. Because the counter is checkpointed with
+    /// the recovery state, replay after an append/checkpoint interruption
+    /// reuses the same logical event identity instead of minting a second
+    /// recovery numerator.
+    #[serde(default)]
+    pub recovery_event_sequence: u64,
     #[serde(default)]
     pub reply_admission_state: ReplyAdmissionStrategyState,
     pub stop_state: StopStrategyState,
@@ -341,6 +350,7 @@ impl LoopExecutionState {
             post_capability_state: PostCapabilityStageState::default(),
             goal_refresh_state: GoalRefreshStrategyState::default(),
             recovery_state: RecoveryStrategyState::default(),
+            recovery_event_sequence: 0,
             reply_admission_state: ReplyAdmissionStrategyState::default(),
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),

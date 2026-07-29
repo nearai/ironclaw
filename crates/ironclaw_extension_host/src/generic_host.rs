@@ -305,8 +305,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
 
         let manifest = ExtensionManifest::try_from(manifest_v2)
             .map_err(|error| load_error(format!("manifest rebuild failed: {error}")))?;
-        let root = VirtualPath::new(format!("/system/extensions/{}", ctx.extension_id))
-            .map_err(|error| load_error(format!("extension root invalid: {error}")))?;
+        let root = resolve_package_root(ctx.resolved.root.as_ref(), &ctx.extension_id)?;
         let package = ExtensionPackage::from_manifest(manifest, root)
             .map_err(|error| load_error(format!("package rebuild failed: {error}")))?;
         let adapter = self
@@ -335,6 +334,22 @@ impl ExtensionLoader for CompositionExtensionLoader {
 
 fn load_error(reason: String) -> BindError {
     BindError::Load { reason }
+}
+
+/// Use the package root persisted with the resolved contract when one is
+/// present. Fall back to fabricating `/system/extensions/{id}` for rows
+/// persisted before `ResolvedExtensionManifest::root` existed (back-compat
+/// with pre-existing installations) — this is the ONLY reason the fallback
+/// exists; do not remove it.
+fn resolve_package_root(
+    resolved_root: Option<&VirtualPath>,
+    extension_id: &str,
+) -> Result<VirtualPath, BindError> {
+    match resolved_root {
+        Some(root) => Ok(root.clone()),
+        None => VirtualPath::new(format!("/system/extensions/{extension_id}"))
+            .map_err(|error| load_error(format!("extension root invalid: {error}"))),
+    }
 }
 
 /// Entrypoint over a lane-bound tool adapter (wasm / mcp / script /
@@ -596,6 +611,7 @@ input_schema_ref = "schemas/echo.input.json"
             &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest resolves");
         let extension_id = ExtensionId::new(id).expect("extension id");
@@ -626,6 +642,28 @@ input_schema_ref = "schemas/echo.input.json"
             CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
         )
         .extension_lane_tool_binder()
+    }
+
+    #[test]
+    fn resolve_package_root_uses_the_persisted_root_when_present() {
+        let persisted =
+            VirtualPath::new("/system/extensions/actually-persisted-root").expect("persisted root");
+        let resolved =
+            resolve_package_root(Some(&persisted), "foo").expect("persisted root resolves");
+        assert_eq!(
+            resolved, persisted,
+            "a persisted root must win over the fabricated fallback, even when \
+             it does not match the fabricated `/system/extensions/{{id}}` shape"
+        );
+    }
+
+    #[test]
+    fn resolve_package_root_fabricates_the_legacy_path_when_none() {
+        let resolved = resolve_package_root(None, "legacy-ext").expect("legacy fallback resolves");
+        assert_eq!(
+            resolved,
+            VirtualPath::new("/system/extensions/legacy-ext").expect("fabricated root")
+        );
     }
 
     /// H.5 / MIG-4: durable installation records hydrate into the generic

@@ -64,6 +64,37 @@ pytest scenarios/ --timeout=60
 HEADED=1 pytest scenarios/
 ```
 
+## Reborn Playwright diagnostics
+
+Set `IRONCLAW_E2E_ARTIFACT_DIR` to preserve diagnostics from the shared Reborn
+browser and server fixtures. Leave it unset for ordinary local runs, where the
+harness keeps logs under pytest's temporary directory and does not enable
+Playwright trace, screenshot, or video capture.
+
+```bash
+IRONCLAW_E2E_ARTIFACT_DIR=tests/e2e/artifacts/local-debug \
+  pytest scenarios/test_reborn_webui_v2_smoke.py
+```
+
+The harness writes server stdout/stderr beneath `server-logs/`. Each browser
+context gets a directory beneath `browser/` whose name is derived from the
+sanitized pytest node ID plus a short unique suffix. A context bundle contains
+final page screenshots, a screenshot-only Playwright trace (DOM snapshots and
+source capture are disabled), and 960×540 video. The nightly workflow uploads
+these diagnostics only when its shard fails.
+
+Browser artifacts have a 256 MiB per-shard default soft budget. Override it
+with a positive byte count in `IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Context
+bundles remain protected while their test outcome is pending. Once pytest
+reports the final outcome, the harness removes the oldest successful bundles
+first; if the newest successful bundle alone exceeds the remaining budget, its
+largest files are removed until it fits. Failed-test bundles remain protected
+until the workflow uploads them, so a shard with failures can temporarily
+exceed the soft budget rather than delete the traces needed to diagnose those
+failures. Server logs remain outside this browser budget so startup and process
+failures retain textual evidence even when successful browser bundles are
+pruned; nightly servers run at warn-level logging to limit that volume.
+
 ## Test Scenarios
 
 The suite has grown to ~65+ scenario files. The table below is a **representative
@@ -166,6 +197,44 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
+
+### Provider world isolation: why the fixtures are shaped this way
+
+Three questions come up every time someone touches these fixtures. The
+answers are measured, not assumed.
+
+**Why aren't the provider processes function-scoped?** Because the Reborn
+process under test is configured with the provider base URLs when it starts,
+and it outlives any one test. A function-scoped provider would hand each test
+a new port, leaving the running server pointed at a dead socket. The suite
+gets the same isolation a different way: module-scoped processes on *stable
+reserved ports*, restarting only the services a test actually mutated. That
+restart is a real process restart from the seed file, so it is as clean as a
+fresh process. `scenarios/test_provider_world_isolation.py` pins the URL
+stability directly -- if you convert these fixtures to `scope="function"`,
+that test is the one that will tell you why you cannot.
+
+**Is a reset/snapshot endpoint worth adding to Emulate?** No, on current
+numbers. Emulate starts in ~0.2s, and a full reset through
+`ResettableEmulateProviderWorld` (kill, restart from seed, re-bind the
+reserved port) measures ~0.55s. The provider-operation lane performs roughly
+one reset per case, so resets cost it about a minute in total. Revisit this
+only if that lane grows several-fold; process startup is not what makes the
+suite slow. (Measured on an M-series laptop against the pinned fork, three
+runs per service: slack 0.18s, google 0.19s, github 0.20s.)
+
+**How does a journey get a known baseline?** By declaring the provider worlds
+it mutates, which is what makes the fixture reset them afterwards. That
+declaration is derived, not written by hand: `journey_cases.py` reads the
+`external_write` effect from the shipped manifests
+(`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`), so a tool
+that writes to a provider is treated as mutating whether or not anyone
+remembered to list it. Two gates in
+`scenarios/test_journey_coverage.py` keep that honest: one fails when a
+production write belongs to no world the harness can reset, and one fails if
+the derivation stops finding the writes it replaced -- a manifest key rename
+would otherwise empty the mapping, skip every reset, and leave the suite
+green.
 
 ### Emulate provider coverage
 

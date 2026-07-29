@@ -117,13 +117,14 @@ use ironclaw_product::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornTraceHoldAuthorizeProductRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
+    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -2323,6 +2324,39 @@ async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
     assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(!error.retryable);
+}
+
+#[tokio::test]
+async fn trace_hold_authorize_capability_decodes_typed_product_input() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_host_api::ProductSurfaceInvokeRequest {
+            operation_id: TRACE_HOLD_AUTHORIZE_COMMAND
+                .capability_id()
+                .expect("trace hold capability id"),
+            input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
+                submission_id: "not-a-submission-id".to_string(),
+            })
+            .expect("trace hold input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("invalid submission id must fail validation");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.field.as_deref(), Some("submission_id"));
+    assert_eq!(
+        error.validation_code,
+        Some(ProductSurfaceValidationCode::InvalidId)
+    );
 }
 
 #[tokio::test]

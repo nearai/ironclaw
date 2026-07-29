@@ -5235,7 +5235,7 @@ async fn build_backend_production(
     let admin_configuration_resolver_for_generic = Arc::clone(&admin_configuration_resolver);
     let channel_pairing_registry;
     let channel_host_wiring = {
-        let reserved_capability_ids: std::collections::BTreeSet<_> = services
+        let mut reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
             .snapshot()
             .capabilities()
@@ -5244,6 +5244,8 @@ async fn build_backend_production(
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
+        reserved_capability_ids
+            .extend(ironclaw_runner::tool_disclosure_bridge::bridge_capability_ids());
         let channel_egress_credentials = Arc::new(
             ironclaw_extension_host::channel_egress::ChannelConfigEgressCredentials::new(
                 Arc::clone(&admin_configuration_resolver_for_generic),

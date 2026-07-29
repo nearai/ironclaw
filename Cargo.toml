@@ -188,6 +188,9 @@ ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0", features =
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
 ironclaw_events = { path = "crates/ironclaw_events", version = "0.1.0" }
+# Binary Reborn E2E recovery scenarios replay the milestone-backed durable log
+# through the production event projection service.
+ironclaw_event_projections = { path = "crates/ironclaw_event_projections", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT
 # harness seam) — cfg(test) does not propagate from an integration-test binary into its deps.
 ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
@@ -234,6 +237,10 @@ path = "tests/integration/group_multiuser/main.rs"
 [[test]]
 name = "reborn_group_skills"
 path = "tests/integration/group_skills/main.rs"
+
+[[test]]
+name = "reborn_generated_gate_sequences"
+path = "tests/integration/generated_gate_sequences.rs"
 
 [[test]]
 name = "reborn_group_journeys"

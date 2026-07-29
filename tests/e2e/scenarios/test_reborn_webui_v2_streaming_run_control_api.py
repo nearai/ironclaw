@@ -11,6 +11,7 @@ import json
 
 import aiohttp
 import httpx
+import pytest
 
 from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
@@ -21,6 +22,151 @@ from reborn_webui_harness import (
 )
 
 pytest_plugins = ["reborn_webui_harness"]
+
+
+async def _next_sse_event(response, *, timeout: float = 45) -> dict:
+    """Read one complete SSE event block from a served response."""
+    event_id = None
+    event_name = None
+    data_lines = []
+    async with asyncio.timeout(timeout):
+        while True:
+            raw_line = await response.content.readline()
+            if not raw_line:
+                raise AssertionError("SSE stream closed before an event arrived")
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line:
+                if data_lines:
+                    return {
+                        "id": event_id,
+                        "event": event_name,
+                        "data": json.loads("\n".join(data_lines)),
+                    }
+                continue
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if not separator:
+                value = ""
+            elif value.startswith(" "):
+                value = value[1:]
+            if field == "id":
+                event_id = value
+            elif field == "event":
+                event_name = value
+            elif field == "data":
+                data_lines.append(value)
+
+
+def _contains_field(value, field: str, expected: str) -> bool:
+    if isinstance(value, dict):
+        if value.get(field) == expected:
+            return True
+        return any(_contains_field(item, field, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_field(item, field, expected) for item in value)
+    return False
+
+
+def _event_matches_run_status(event: dict, run_id: str, status: str) -> bool:
+    def contains_run_status(value) -> bool:
+        if isinstance(value, dict):
+            if value.get("run_id") == run_id and value.get("status") == status:
+                return True
+            return any(contains_run_status(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_run_status(item) for item in value)
+        return False
+
+    return contains_run_status(event["data"])
+
+
+def _normalize_projection_value(value):
+    if isinstance(value, dict):
+        return {
+            key: _normalize_projection_value(item)
+            for key, item in value.items()
+            if key != "updated_at"
+        }
+    if isinstance(value, list):
+        return [_normalize_projection_value(item) for item in value]
+    return value
+
+
+def _latest_projection_items(events: list[dict]) -> dict[tuple[str, str], str]:
+    """Reduce a projection window by each item's stable product identity."""
+    latest = {}
+    identity_fields = {
+        "text": "id",
+        "thinking": "id",
+        "capability_activity": "invocation_id",
+        "work_summary": "id",
+        "run_status": "run_id",
+        "gate": "gate_ref",
+        "skill_activation": "id",
+    }
+    for event in events:
+        for item in event["data"].get("state", {}).get("items", []):
+            assert len(item) == 1, item
+            kind, value = next(iter(item.items()))
+            identity_field = identity_fields[kind]
+            identity = value[identity_field]
+            latest[(kind, identity)] = json.dumps(
+                _normalize_projection_value(item),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+    return latest
+
+
+def _durable_cursor_position(event: dict) -> tuple[int | None, int, int | None]:
+    """Return the durable resume position, excluding volatile live cursor state."""
+    cursor = json.loads(json.loads(event["id"]))
+    runtime = cursor.get("runtime")
+    runtime_position = cursor.get("runtime_item")
+    if runtime_position is None and runtime is not None:
+        runtime_position = runtime["runtime"]
+    turn = cursor.get("turn")
+    return (
+        runtime_position,
+        cursor.get("runtime_payloads_delivered", 0),
+        None if turn is None else turn["event"],
+    )
+
+
+async def _collect_sse_until_run_status(
+    response,
+    run_id: str,
+    status: str,
+    *,
+    timeout: float = 60,
+) -> list[dict]:
+    events = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            event = await _next_sse_event(response, timeout=remaining)
+        except TimeoutError:
+            break
+        events.append(event)
+        if _event_matches_run_status(event, run_id, status):
+            return events
+    recent = [
+        {
+            "event": event["event"],
+            "type": event["data"].get("type"),
+            "has_cursor": event["id"] is not None,
+        }
+        for event in events[-3:]
+    ]
+    raise AssertionError(
+        f"Timed out waiting for run {run_id} to reach {status}; "
+        f"observed={len(events)}, recent={recent}"
+    )
 
 
 async def _submit_message(
@@ -281,6 +427,150 @@ async def test_reborn_v2_sse_auth_scope_and_capacity_served(reborn_v2_server):
                 stream.close()
 
 
+async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
+    reborn_v2_server,
+):
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await create_thread(client, reborn_v2_server)
+        events_path = f"/api/webchat/v2/threads/{thread_id}/events"
+
+        async with sse_stream(
+            reborn_v2_server,
+            path=events_path,
+            token=REBORN_V2_AUTH_TOKEN,
+            timeout=65,
+        ) as initial_stream:
+            assert initial_stream.status == 200
+            submitted = await _submit_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+                "reborn builtin echo served-last-event-id-replay",
+            )
+            initial_events = await _collect_sse_until_run_status(
+                initial_stream,
+                submitted["run_id"],
+                "completed",
+            )
+
+        initial_cursor_events = [event for event in initial_events if event["id"]]
+        initial_ids = [event["id"] for event in initial_cursor_events]
+        assert len(initial_ids) >= 2, initial_events
+        assert len(initial_ids) == len(set(initial_ids)), initial_ids
+        replay_from = initial_ids[0]
+        expected_items = _latest_projection_items(initial_cursor_events[1:])
+        expected_kinds = {kind for kind, _ in expected_items}
+        assert {"text", "capability_activity", "run_status"} <= expected_kinds
+
+        async with sse_stream(
+            reborn_v2_server,
+            path=events_path,
+            token=REBORN_V2_AUTH_TOKEN,
+            headers={"Last-Event-ID": replay_from},
+            timeout=45,
+        ) as resumed_stream:
+            assert resumed_stream.status == 200
+            replayed_events = await _collect_sse_until_run_status(
+                resumed_stream,
+                submitted["run_id"],
+                "completed",
+                timeout=40,
+            )
+
+        replayed_cursor_events = [event for event in replayed_events if event["id"]]
+        replayed_ids = [event["id"] for event in replayed_cursor_events]
+        assert len(replayed_ids) == len(set(replayed_ids)), replayed_ids
+        assert replay_from not in replayed_ids
+        assert _durable_cursor_position(
+            replayed_cursor_events[-1]
+        ) == _durable_cursor_position(initial_cursor_events[-1])
+        # Live projection updates may compact by stable item identity during
+        # replay. Compare the complete reduced post-cursor state, not only the
+        # terminal run status: dropping intermediate durable state would omit
+        # the text or capability activity and fail this assertion.
+        assert _latest_projection_items(replayed_cursor_events) == expected_items
+
+
+async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
+    reborn_v2_server,
+):
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await create_thread(client, reborn_v2_server)
+
+    ws_base = reborn_v2_server.replace("http://", "ws://", 1).replace(
+        "https://", "wss://", 1
+    )
+    ws_url = f"{ws_base}/api/webchat/v2/threads/{thread_id}/ws"
+    events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
+    timeout = aiohttp.ClientTimeout(total=60, sock_read=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        with pytest.raises(aiohttp.WSServerHandshakeError) as rejected:
+            await session.ws_connect(
+                ws_url,
+                headers=headers,
+                origin="https://attacker.invalid",
+            )
+        assert rejected.value.status == 403
+
+        websocket = None
+        streams = []
+        try:
+            websocket = await session.ws_connect(
+                ws_url,
+                headers=headers,
+                origin=reborn_v2_server,
+            )
+            for _ in range(2):
+                response = await session.get(
+                    events_url,
+                    headers={
+                        **headers,
+                        "Accept": "text/event-stream",
+                    },
+                )
+                assert response.status == 200
+                streams.append(response)
+
+            exhausted = await session.get(
+                events_url,
+                headers={
+                    **headers,
+                    "Accept": "text/event-stream",
+                },
+            )
+            try:
+                assert exhausted.status == 429
+                exhausted_body = await exhausted.json()
+                assert exhausted_body["error"] == "rate_limited"
+                assert exhausted_body["retryable"] is True
+            finally:
+                exhausted.close()
+
+            async with httpx.AsyncClient(headers=headers) as client:
+                submitted = await _submit_message(
+                    client,
+                    reborn_v2_server,
+                    thread_id,
+                    "served WebSocket projection: what is 2+2?",
+                )
+
+            async with asyncio.timeout(45):
+                while True:
+                    message = await websocket.receive()
+                    assert message.type == aiohttp.WSMsgType.TEXT, message
+                    frame = json.loads(message.data)
+                    if _contains_field(frame, "run_id", submitted["run_id"]):
+                        assert frame.get("projection_cursor"), frame
+                        break
+        finally:
+            for stream in streams:
+                stream.close()
+            if websocket is not None:
+                await websocket.close()
+
+
 async def test_reborn_v2_cancel_and_gate_control_routes_served(reborn_v2_server):
     headers = reborn_bearer_headers()
     async with httpx.AsyncClient(headers=headers) as client:
@@ -451,3 +741,66 @@ async def test_reborn_v2_cancel_delayed_mock_llm_inference_releases_thread(
         )
 
     assert assistant["content"] == "The answer is 4."
+
+
+async def test_reborn_v2_protocol_error_and_limit_boundaries_served(
+    reborn_v2_server,
+):
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        malformed_thread = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/"
+            "__ironclaw_reserved/timeline",
+            timeout=15,
+        )
+        assert malformed_thread.status_code == 400
+        assert malformed_thread.json() == {
+            "error": "invalid_request",
+            "kind": "validation",
+            "retryable": False,
+            "field": "thread_id",
+            "validation_code": "invalid_id",
+        }
+
+        missing_action_id = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/threads",
+            json={},
+            timeout=15,
+        )
+        assert missing_action_id.status_code == 400
+        missing_body = missing_action_id.json()
+        assert missing_body["error"] == "invalid_request"
+        assert missing_body["field"] == "client_action_id"
+        assert missing_body["validation_code"] == "missing_field"
+
+        oversized_body = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/threads",
+            json={
+                "client_action_id": client_action_id(),
+                "padding": "x" * (16 * 1024),
+            },
+            timeout=15,
+        )
+        assert oversized_body.status_code == 413
+        assert oversized_body.text == "Request body exceeds the route's body limit."
+
+        retry_url = (
+            f"{reborn_v2_server}/api/webchat/v2/threads/thread-rate-limit/"
+            "runs/00000000-0000-0000-0000-000000000000/retry"
+        )
+        for _ in range(60):
+            accepted_by_limiter = await client.post(
+                retry_url,
+                json={"client_action_id": client_action_id()},
+                timeout=15,
+            )
+            assert accepted_by_limiter.status_code != 429
+            await asyncio.sleep(0.05)
+
+        rate_limited = await client.post(
+            retry_url,
+            json={"client_action_id": client_action_id()},
+            timeout=15,
+        )
+        assert rate_limited.status_code == 429
+        assert rate_limited.text == "Rate limit exceeded. Try again shortly."

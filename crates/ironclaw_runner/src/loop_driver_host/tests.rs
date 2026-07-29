@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use super::port_adapters::HostManagedLoopCheckpointPort;
+use super::port_adapters::{HostManagedLoopCheckpointPort, HostManagedLoopProgressPort};
 
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, FailureKind, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
 use ironclaw_turns::{
@@ -11,8 +11,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest,
-        StageCheckpointPayloadRequest,
+        LoopCheckpointRequest, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProgressEvent,
+        LoopProgressPort, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+        LoopRunContext, RunProfileResolutionRequest, StageCheckpointPayloadRequest,
     },
 };
 
@@ -27,6 +28,39 @@ async fn test_run_context() -> LoopRunContext {
         .await
         .unwrap();
     LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+}
+
+#[tokio::test]
+async fn recovery_progress_adapter_preserves_sequence_and_typed_labels() {
+    let context = test_run_context().await;
+    let sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = sink.clone();
+    let port = HostManagedLoopProgressPort::new(context.clone(), milestone_sink);
+
+    port.emit_loop_progress(LoopProgressEvent::FailureRecovered {
+        sequence: 7,
+        stage: LoopRecoveryStage::Capability,
+        class: LoopRecoveryClass::Capability(FailureKind::Backend),
+        disposition: LoopRecoveryDisposition::Retried,
+    })
+    .await
+    .expect("recovery progress must reach the durable milestone seam");
+
+    let milestones = sink.milestones();
+    assert_eq!(milestones.len(), 1);
+    let milestone = &milestones[0];
+    assert_eq!(milestone.scope, context.scope);
+    assert_eq!(milestone.turn_id, context.turn_id);
+    assert_eq!(milestone.run_id, context.run_id);
+    assert!(matches!(
+        milestone.kind,
+        LoopHostMilestoneKind::FailureRecovered {
+            sequence: 7,
+            stage: LoopRecoveryStage::Capability,
+            class: LoopRecoveryClass::Capability(FailureKind::Backend),
+            disposition: LoopRecoveryDisposition::Retried,
+        }
+    ));
 }
 
 fn test_checkpoint_port(

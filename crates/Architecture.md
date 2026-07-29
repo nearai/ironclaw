@@ -652,7 +652,7 @@ records before changing durable run state.
 
 ```text
 model call fails through LoopModelPort
-  -> host returns stable sanitized error category and optional diagnostic ref
+  -> host returns stable sanitized error category and bounded inline cause
   -> loop may retry or checkpoint according to strategy/profile budget
   -> terminal failure returns LoopExit::Failed with safe failure kind
   -> runner validates and records sanitized failure

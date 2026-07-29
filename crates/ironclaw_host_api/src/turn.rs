@@ -274,7 +274,6 @@ loop_ref!(LoopExitId, "loop_exit_id", "exit:");
 loop_ref!(LoopMessageRef, "loop_message_ref", "msg:");
 loop_ref!(LoopResultRef, "loop_result_ref", "result:");
 loop_ref!(LoopGateRef, "loop_gate_ref", "gate:");
-loop_ref!(LoopDiagnosticRef, "loop_diagnostic_ref", "diag:");
 
 impl PartialEq<LoopGateRef> for TurnGateRef {
     fn eq(&self, other: &LoopGateRef) -> bool {
