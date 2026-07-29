@@ -11,6 +11,7 @@ fi
 python3 - "$fixture_dir" <<'PY'
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import sys
@@ -61,6 +62,19 @@ checks = [
 findings: list[tuple[str, str, int, str]] = []
 for path in files:
     text = path.read_text(encoding="utf-8")
+    try:
+        document = json.loads(text)
+        if not isinstance(document, dict):
+            findings.append((str(path), "malformed JSON fixture", 1, "root must be an object"))
+    except json.JSONDecodeError as error:
+        findings.append(
+            (
+                str(path),
+                "malformed JSON fixture",
+                error.lineno,
+                f"{error.msg} at column {error.colno}",
+            )
+        )
     for label, pattern in checks:
         for match in pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1

@@ -105,6 +105,22 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "named critical product invariant" \
+  "crates/ironclaw_product/src/run_delivery/observer.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "named critical extension-host invariant" \
+  "crates/ironclaw_extension_host/src/channel_outbound_targets.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn root test runner script" \
   "scripts/ci/run-reborn-root-partition.sh" \
   "docs_only=false
@@ -238,6 +254,27 @@ has_reborn_tests=true"
 assert_scope \
   "Reborn coverage manifest" \
   "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn changed coverage, branch export, and critical mutation gates" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/check-reborn-branch-coverage-flags.py
+scripts/ci/test-check-reborn-branch-coverage-flags.sh
+scripts/ci/critical_mutation_gate.py
+scripts/ci/test-critical-mutation-gate.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn QA fixture checker and sabotage suite" \
+  "scripts/ci/check-reborn-qa-fixtures.sh
+scripts/ci/test-check-reborn-qa-fixtures.sh" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
