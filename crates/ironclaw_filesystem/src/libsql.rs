@@ -19,6 +19,7 @@ use crate::{
     IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
 };
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
+#[derive(Debug)]
 pub struct LibSqlRootFilesystem {
     runtime: Arc<LibSqlRuntime>,
 }

@@ -1322,6 +1322,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 async fn production_libsql_services_migrate_trigger_repository_before_runtime_injection() {
     let dir = tempfile::tempdir().unwrap();
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let legacy_event_db = dir.path().join("events.db");
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
@@ -1329,7 +1330,7 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
             RebornCompositionProfile::Production,
             "test-owner",
             Arc::clone(&db),
-            dir.path().join("events.db").to_string_lossy(),
+            legacy_event_db.to_string_lossy(),
             None,
             test_master_key(),
         )
@@ -1344,6 +1345,10 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
     handle.shutdown().await;
 
     assert!(services.host_runtime_for_test().is_some());
+    assert!(
+        !legacy_event_db.exists(),
+        "production event logs must reuse the state filesystem instead of reopening the target"
+    );
 
     let conn = db.connect().expect("connect libsql state db");
     let mut rows = conn

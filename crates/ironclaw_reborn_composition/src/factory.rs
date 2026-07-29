@@ -3580,7 +3580,6 @@ async fn build_production_shaped(
                 context,
                 db,
                 connection.path_or_url,
-                connection.auth_token,
                 secret_master_key,
                 process_local_resource_governor_singleton,
             )
@@ -3987,15 +3986,25 @@ where
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
     ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
+    let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(config.database));
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(runtime));
     filesystem.run_migrations().await?;
+    let event_store = match config.event_store {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql { path_or_url, .. } => {
+            ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem: Arc::clone(&filesystem),
+                path_or_url,
+            }
+        }
+        other => other,
+    };
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
             resource_governor,
-            event_store: ProductionEventStoresInput::Config(config.event_store),
+            event_store: ProductionEventStoresInput::Config(event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -5675,32 +5684,36 @@ async fn build_libsql_production(
     context: RebornProductionBuildContext,
     db: Arc<libsql::Database>,
     path_or_url: String,
-    auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
     ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
-    let database_filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+    let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db));
+    let database_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
     database_filesystem.run_migrations().await?;
-    let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
+    let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::from_runtime(
+        runtime,
+    ));
     trigger_repository
         .run_migrations()
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("libSQL trigger repository migrations failed: {error}"),
         })?;
-    let filesystem =
-        production_database_root_filesystem(database_filesystem, "production-libsql-reborn-state")?;
+    let filesystem = production_database_root_filesystem(
+        Arc::clone(&database_filesystem),
+        "production-libsql-reborn-state",
+    )?;
     finish_production_backend(
         context,
         filesystem,
         trigger_repository,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+            filesystem: database_filesystem,
             path_or_url,
-            auth_token,
         },
         ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
     )

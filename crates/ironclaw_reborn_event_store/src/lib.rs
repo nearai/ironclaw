@@ -155,6 +155,17 @@ pub enum RebornEventStoreConfig {
         path_or_url: String,
         auth_token: Option<SecretString>,
     },
+    /// libSQL backend using an already-opened filesystem.
+    ///
+    /// Hosted production uses this so event and audit logs participate in the
+    /// same process-local writer admission lane as every other libSQL-backed
+    /// adapter. The caller owns database construction and schema migration;
+    /// `path_or_url` is retained only for production durability/transport
+    /// policy validation and is never reopened.
+    LibsqlFilesystem {
+        filesystem: Arc<ironclaw_filesystem::LibSqlRootFilesystem>,
+        path_or_url: String,
+    },
 }
 
 /// Reborn composition profile controlling which fallbacks are legal.
@@ -260,6 +271,15 @@ pub async fn build_reborn_event_stores(
                 validate_production_libsql_target(&path_or_url)?;
             }
             libsql_backed::build(path_or_url, auth_token).await
+        }
+        RebornEventStoreConfig::LibsqlFilesystem {
+            filesystem,
+            path_or_url,
+        } => {
+            if profile == RebornProfile::Production {
+                validate_production_libsql_target(&path_or_url)?;
+            }
+            build_reborn_event_stores_from_root_filesystem(filesystem)
         }
     }
 }
@@ -1773,6 +1793,54 @@ mod tests {
         .await
         .expect("build jsonl event store")
         .events
+    }
+
+    /// Break caught: rebuilding the libSQL filesystem from a URL gives event
+    /// logs a second, independent writer pool instead of the production
+    /// composition's shared runtime.
+    #[tokio::test]
+    async fn prebuilt_libsql_filesystem_config_reuses_existing_backend() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("prebuilt-event-store.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let filesystem = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+        filesystem
+            .run_migrations()
+            .await
+            .expect("filesystem migrations");
+        let stores = build_reborn_event_stores(
+            RebornProfile::Production,
+            RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem: Arc::clone(&filesystem),
+                path_or_url: path.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("build stores from prebuilt filesystem");
+
+        let scope = jsonl_scope();
+        let stream = EventStreamKey::from_scope(&scope);
+        stores
+            .events
+            .append(RuntimeEvent::dispatch_requested(
+                scope,
+                CapabilityId::new("demo.prebuilt").expect("capability id"),
+            ))
+            .await
+            .expect("append through prebuilt filesystem");
+        assert_eq!(
+            stores
+                .events
+                .head_cursor(&stream, EventCursor::origin())
+                .await
+                .expect("event head"),
+            EventCursor::new(1)
+        );
     }
 
     #[tokio::test]

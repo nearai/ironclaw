@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_libsql_runtime::{LibSqlConnectionLease, LibSqlRuntime};
 use ironclaw_turns::TurnRunId;
 use libsql::params;
 use std::{collections::HashMap, sync::Arc};
@@ -66,15 +67,19 @@ const RUN_COMPLETED_AT_COL: usize = 7;
 
 /// Durable libSQL trigger repository.
 pub struct LibSqlTriggerRepository {
-    db: Arc<libsql::Database>,
+    runtime: Arc<LibSqlRuntime>,
 }
 impl LibSqlTriggerRepository {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self::from_runtime(Arc::new(LibSqlRuntime::new(db)))
+    }
+
+    pub fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {
+        Self { runtime }
     }
 
     pub async fn run_migrations(&self) -> Result<(), TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|error| backend_error("begin trigger migration", error))?;
@@ -350,22 +355,25 @@ impl LibSqlTriggerRepository {
         }
     }
 
-    async fn connect(&self) -> Result<libsql::Connection, TriggerError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|error| backend_error("connect trigger repository", error))?;
-        conn.execute_batch("PRAGMA busy_timeout = 5000;")
+    async fn read_connection(&self) -> Result<LibSqlConnectionLease, TriggerError> {
+        self.runtime
+            .read()
             .await
-            .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
-        Ok(conn)
+            .map_err(|error| backend_error("checkout trigger reader", error))
+    }
+
+    async fn write_connection(&self) -> Result<LibSqlConnectionLease, TriggerError> {
+        self.runtime
+            .write()
+            .await
+            .map_err(|error| backend_error("checkout trigger writer", error))
     }
 }
 #[async_trait]
 impl TriggerRepository for LibSqlTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
         record.validate()?;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         write_record(&conn, &record).await?;
         Ok(())
     }
@@ -375,7 +383,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -396,7 +404,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -433,7 +441,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let excluded_states_json: libsql::Value = if excluded_states.is_empty() {
@@ -489,7 +497,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -516,7 +524,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         project_id: Option<ProjectId>,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let mut rows = conn
@@ -560,7 +568,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         new_state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let mut rows = conn
@@ -604,7 +612,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         trigger_id: TriggerId,
         name: AutomationName,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let name = name.into_inner();
@@ -638,7 +646,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -683,7 +691,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = match after {
             Some(cursor) => {
                 conn.query(
@@ -738,7 +746,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: ClaimDueFireRequest,
     ) -> Result<ClaimDueFireOutcome, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let fire_slot = fmt_ts(&request.fire_slot);
         let now = fmt_ts(&request.now);
         begin_immediate(&conn, "begin trigger fire claim").await?;
@@ -827,7 +835,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: FireAcceptedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         mark_successful_fire_result(
             &conn,
             SuccessfulFireResultUpdate {
@@ -848,7 +856,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: FireReplayedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         mark_successful_fire_result(
             &conn,
             SuccessfulFireResultUpdate {
@@ -874,7 +882,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             trigger_id,
             fire_slot,
         } = request;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
             return Ok(None);
         };
@@ -960,7 +968,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             fire_slot,
             next_run_at,
         } = request;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
             return Ok(None);
         };
@@ -1043,7 +1051,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
         let completed = crate::state_text_codec(TriggerState::Completed);
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         begin_immediate(&conn, "begin terminal trigger fire failure").await?;
         let update_result = async {
             let mut rows = conn
@@ -1106,7 +1114,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         begin_immediate(&conn, "begin clear active trigger fire").await?;
         let clear_result = async {
             // Fetch the record inside the transaction to compute next state atomically.
@@ -1189,7 +1197,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         thread_id: &crate::ThreadId,
     ) -> Result<Option<(crate::TriggerRecord, crate::TriggerRunRecord)>, crate::TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         // Look up the run row by (tenant_id, thread_id) using the dedicated index.
         let mut run_rows = conn
             .query(
@@ -1241,7 +1249,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64;
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -1289,7 +1297,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
              WHERE row_rank <= ?3
              ORDER BY trigger_id, fire_slot DESC"
         );
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(&sql, params![tenant_id.as_str(), trigger_ids_json, limit])
             .await

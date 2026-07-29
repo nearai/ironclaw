@@ -272,10 +272,10 @@ pub(crate) enum PostgresPoolSource {
     Prebuilt(deadpool_postgres::Pool),
 }
 
-/// Declarative libSQL connection config (Phase B). `path_or_url` / `auth_token`
-/// flow to the durable event-store config regardless of whether the database
-/// handle is opened at build time or supplied pre-opened, so they live here
-/// rather than inside [`RebornStorageInput::Libsql`]'s handle.
+/// Declarative libSQL connection config (Phase B). `path_or_url` is retained
+/// after opening for production durability/transport validation; `auth_token`
+/// is used only to open a remote handle. The event store reuses that handle's
+/// shared filesystem rather than reopening this target.
 #[derive(Clone)]
 pub(crate) struct LibsqlConnectionConfig {
     pub(crate) path_or_url: String,

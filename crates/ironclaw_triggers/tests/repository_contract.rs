@@ -1,6 +1,8 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use ironclaw_common::AutomationName;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, SeqNo};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId, VirtualPath};
+use ironclaw_libsql_runtime::LibSqlRuntime;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
@@ -1139,6 +1141,81 @@ async fn build_libsql_repo() -> (tempfile::TempDir, LibSqlTriggerRepository) {
     let (dir, _db, repo) = build_libsql_repo_with_db().await;
     (dir, repo)
 }
+
+/// Break caught: independent adapter pools allow filesystem and trigger writes
+/// to contend inside one process instead of queuing on one admission lane.
+#[tokio::test]
+async fn libsql_filesystem_and_trigger_writes_share_one_runtime_lane() {
+    let dir = tempdir().expect("tempdir");
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("shared-runtime.db"))
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+    let runtime = Arc::new(LibSqlRuntime::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
+    let repository = Arc::new(LibSqlTriggerRepository::from_runtime(Arc::clone(&runtime)));
+    filesystem
+        .run_migrations()
+        .await
+        .expect("filesystem migrations");
+    repository
+        .run_migrations()
+        .await
+        .expect("trigger migrations");
+
+    let held_writer = runtime.write().await.expect("hold shared writer");
+    let event_path = VirtualPath::new("/engine/shared-writer-test/events").expect("valid path");
+    let filesystem_write = {
+        let filesystem = Arc::clone(&filesystem);
+        let event_path = event_path.clone();
+        tokio::spawn(async move { filesystem.append(&event_path, b"filesystem".to_vec()).await })
+    };
+    let trigger_write = {
+        let repository = Arc::clone(&repository);
+        tokio::spawn(async move {
+            repository
+                .upsert_trigger(sample_record(
+                    TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+                    tenant("tenant-shared-runtime"),
+                    ts(1_704_067_200),
+                ))
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !filesystem_write.is_finished(),
+        "filesystem write must wait for the shared writer lane"
+    );
+    assert!(
+        !trigger_write.is_finished(),
+        "trigger write must wait for the shared writer lane"
+    );
+    let read_while_writer_waits = tokio::time::timeout(
+        Duration::from_millis(250),
+        filesystem.tail(&event_path, SeqNo::ZERO),
+    )
+    .await
+    .expect("reader lane remains available")
+    .expect("read empty event log");
+    assert!(read_while_writer_waits.is_empty());
+
+    drop(held_writer);
+    tokio::time::timeout(Duration::from_secs(1), filesystem_write)
+        .await
+        .expect("filesystem write released")
+        .expect("filesystem task joined")
+        .expect("filesystem write succeeded");
+    tokio::time::timeout(Duration::from_secs(1), trigger_write)
+        .await
+        .expect("trigger write released")
+        .expect("trigger task joined")
+        .expect("trigger write succeeded");
+}
+
 #[tokio::test]
 async fn libsql_repository_contract_parity() {
     let (_dir, repo) = build_libsql_repo().await;
