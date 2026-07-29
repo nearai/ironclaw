@@ -39,6 +39,11 @@ export default defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         baseURL: `http://127.0.0.1:${STORYBOOK_PORT}`,
+        // Storybook has no static-motion kill rule (unlike the app), so the
+        // ~150ms interaction transitions run there. Forcing reduced motion
+        // makes computed-style assertions instant and deterministic — and
+        // exercises the tokens.css prefers-reduced-motion opt-out for real.
+        contextOptions: { reducedMotion: "reduce" },
       },
     },
     {
