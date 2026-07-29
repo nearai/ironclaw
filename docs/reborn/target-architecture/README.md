@@ -1,7 +1,7 @@
 # IronClaw Reborn — Target Crate Architecture (Executive Overview)
 
 **Status:** Proposal, under review · **Baseline:** `origin/main` @ `dde662d5a` (2026-07-29)
-**Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full evidence-backed specification) · [families/](families/) (one in-depth file per top-level family) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [PLAN.md](PLAN.md) (how to execute)
+**Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full evidence-backed specification) · [families/](families/) (one in-depth file per top-level family) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [PLAN.md](PLAN.md) (how to execute) · [explorer.html](explorer.html) (interactive map + dependency graph — self-contained, open in any browser)
 
 This is the north star for the architecture cleanup: a concrete crate/folder map with explicit security and authority boundaries, so that agents and humans can answer "where does this go?" without archaeology, and so the refactor train has a fixed destination instead of a direction.
 
