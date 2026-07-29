@@ -15,12 +15,11 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
-        LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityInputRef,
+        CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
+        LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::{Value, json};
@@ -1288,7 +1287,7 @@ fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Va
 
 fn failed_invalid_input(summary: &'static str) -> Resolution {
     resolution::failed(
-        CapabilityFailureKind::InvalidInput,
+        ironclaw_host_api::FailureKind::InputEncode,
         summary.to_string(),
         None,
     )
@@ -2757,7 +2756,13 @@ mod tests {
             matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ),
             "fallback must be a recoverable InvalidInput failure, not run death"
         );
@@ -2815,7 +2820,13 @@ mod tests {
             matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ),
             "recursive tool_call must be a recoverable InvalidInput failure, not run death"
         );
@@ -2889,7 +2900,13 @@ mod tests {
             matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ),
             "unknown-target tool_call must be a recoverable InvalidInput failure"
         );
@@ -3066,7 +3083,13 @@ mod tests {
             assert!(matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ));
         }
     }

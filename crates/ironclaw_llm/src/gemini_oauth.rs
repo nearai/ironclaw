@@ -15,7 +15,7 @@ use crate::config::GeminiOauthConfig;
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    ModelMetadata, Role, ToolCall, ToolDefinition,
+    ModelMetadata, Role, ToolCall, ToolDefinition, map_provider_finish_token,
 };
 
 // Official Gemini CLI OAuth credentials (public, from google/gemini-cli).
@@ -187,6 +187,15 @@ pub(crate) struct GeminiCredits {
     pub(crate) credit_type: String,
     #[serde(rename = "creditAmount")]
     pub(crate) credit_amount: String,
+}
+
+/// What one Cloud Code SSE stream amounted to.
+struct CloudCodeSseAggregate {
+    /// The Gemini-shaped body to parse, or `None` when the stream carried
+    /// neither content nor a terminal finish reason.
+    response: Option<serde_json::Value>,
+    /// Per-response metadata collected in the same pass.
+    meta: GeminiResponseMeta,
 }
 
 /// Extended response metadata parsed from Gemini API responses.
@@ -1271,172 +1280,15 @@ impl GeminiOauthProvider {
 
             let mut success = false;
             if self.uses_cloud_code_api() {
-                let mut combined_text = String::new();
-                let mut finish_reason = "STOP".to_string();
-                let mut prompt_tokens: i64 = 0;
-                let mut candidates_tokens: i64 = 0;
-                let mut tool_calls_parts = Vec::<serde_json::Value>::new();
-
-                // Metadata (collected in the same pass)
-                let mut model_version: Option<String> = None;
-                let mut prompt_feedback: Option<serde_json::Value> = None;
-                let mut grounding_metadata: Option<serde_json::Value> = None;
-                let mut citation_metadata: Option<serde_json::Value> = None;
-                let mut cached_content_token_count: Option<u32> = None;
-                let mut total_token_count: Option<u32> = None;
-                let mut consumed_credits: Vec<GeminiCredits> = Vec::new();
-                let mut remaining_credits: Vec<GeminiCredits> = Vec::new();
-
-                for line in body_str.lines() {
-                    let Some(json_str) = line.strip_prefix("data:") else {
-                        continue;
-                    };
-                    let json_str = json_str.trim();
-                    let chunk: serde_json::Value = match serde_json::from_str(json_str) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Credits from Cloud Code wrapper (top-level, outside "response")
-                    if let Some(cc) = chunk.get("consumedCredits").and_then(|c| c.as_array()) {
-                        for c in cc {
-                            if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
-                                consumed_credits.push(credit);
-                            }
-                        }
-                    }
-                    if let Some(rc) = chunk.get("remainingCredits").and_then(|c| c.as_array()) {
-                        for c in rc {
-                            if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
-                                remaining_credits.push(credit);
-                            }
-                        }
-                    }
-
-                    let resp = match chunk.get("response") {
-                        Some(r) => r,
-                        None => continue,
-                    };
-
-                    // Content extraction
-                    if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array())
-                        && let Some(first) = candidates.first()
-                    {
-                        if let Some(parts) = first
-                            .get("content")
-                            .and_then(|c| c.get("parts"))
-                            .and_then(|p| p.as_array())
-                        {
-                            for part in parts {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    let is_thought = part
-                                        .get("thought")
-                                        .and_then(|t| t.as_bool())
-                                        .unwrap_or(false);
-                                    if !is_thought {
-                                        combined_text.push_str(text);
-                                    }
-                                }
-                                if let Some(fc) = part.get("functionCall") {
-                                    tool_calls_parts.push(serde_json::json!({
-                                        "functionCall": fc
-                                    }));
-                                }
-                            }
-                        }
-                        if let Some(fr) = first.get("finishReason").and_then(|fr| fr.as_str()) {
-                            finish_reason = fr.to_string();
-                        }
-                        // Per-candidate metadata
-                        if grounding_metadata.is_none()
-                            && let Some(gm) = first.get("groundingMetadata")
-                        {
-                            grounding_metadata = Some(gm.clone());
-                        }
-                        if citation_metadata.is_none()
-                            && let Some(cm) = first.get("citationMetadata")
-                        {
-                            citation_metadata = Some(cm.clone());
-                        }
-                    }
-
-                    // Response-level metadata
-                    if model_version.is_none()
-                        && let Some(mv) = resp.get("modelVersion").and_then(|v| v.as_str())
-                    {
-                        model_version = Some(mv.to_string());
-                    }
-                    if prompt_feedback.is_none()
-                        && let Some(pf) = resp.get("promptFeedback")
-                    {
-                        prompt_feedback = Some(pf.clone());
-                    }
-                    if let Some(usage) = resp.get("usageMetadata") {
-                        if let Some(pt) = usage.get("promptTokenCount").and_then(|pt| pt.as_i64()) {
-                            prompt_tokens = pt;
-                        }
-                        if let Some(ct) =
-                            usage.get("candidatesTokenCount").and_then(|ct| ct.as_i64())
-                        {
-                            candidates_tokens = ct;
-                        }
-                        if let Some(ct) = usage
-                            .get("cachedContentTokenCount")
-                            .and_then(|t| t.as_u64())
-                        {
-                            cached_content_token_count = Some(ct as u32);
-                        }
-                        if let Some(tt) = usage.get("totalTokenCount").and_then(|t| t.as_u64()) {
-                            total_token_count = Some(tt as u32);
-                        }
-                    }
-                }
-
-                // Store metadata
+                let aggregate = Self::aggregate_cloud_code_sse(&body_str);
+                // silent-ok: caching `last_response_meta` is best-effort
+                // telemetry; a poisoned lock must not fail an otherwise-good
+                // response.
                 if let Ok(mut meta) = self.last_response_meta.lock() {
-                    *meta = GeminiResponseMeta {
-                        model_version,
-                        prompt_feedback: prompt_feedback.clone(),
-                        grounding_metadata,
-                        citation_metadata,
-                        consumed_credits,
-                        remaining_credits,
-                        cached_content_token_count,
-                        total_token_count,
-                    };
+                    *meta = aggregate.meta;
                 }
-
-                // Log prompt feedback if request was blocked
-                if let Some(ref pf) = prompt_feedback
-                    && let Some(reason) = pf.get("blockReason").and_then(|r| r.as_str())
-                {
-                    warn!(
-                        block_reason = reason,
-                        "Gemini API blocked the request via promptFeedback"
-                    );
-                }
-
-                let has_content = !combined_text.is_empty() || !tool_calls_parts.is_empty();
-
-                if has_content {
-                    let mut response_parts = Vec::new();
-                    if !combined_text.is_empty() {
-                        response_parts.push(serde_json::json!({"text": combined_text}));
-                    }
-                    response_parts.extend(tool_calls_parts);
-
-                    final_response = serde_json::json!({
-                        "candidates": [{
-                            "content": {
-                                "parts": response_parts
-                            },
-                            "finishReason": finish_reason
-                        }],
-                        "usageMetadata": {
-                            "promptTokenCount": prompt_tokens,
-                            "candidatesTokenCount": candidates_tokens
-                        }
-                    });
+                if let Some(response) = aggregate.response {
+                    final_response = response;
                     success = true;
                 }
             } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_str) {
@@ -1802,16 +1654,282 @@ impl GeminiOauthProvider {
         req
     }
 
+    /// Fold the Cloud Code SSE stream into one Gemini-shaped response body.
+    ///
+    /// Cloud Code answers a non-streaming request with an SSE stream of
+    /// partial candidates; this collapses them into the single body
+    /// [`Self::from_gemini_response`] parses, plus the per-response metadata.
+    ///
+    /// `response` is `None` only when the stream said nothing usable at all —
+    /// no content, no terminal finish reason, and no prompt-level block —
+    /// which the caller reports as an invalid response.
+    fn aggregate_cloud_code_sse(body_str: &str) -> CloudCodeSseAggregate {
+        let mut combined_text = String::new();
+        // Only what a candidate actually reported. Defaulting to
+        // "STOP" made a stream that never declared a finish reason
+        // look like a clean completion.
+        let mut finish_reason: Option<String> = None;
+        let mut prompt_tokens: i64 = 0;
+        let mut candidates_tokens: i64 = 0;
+        let mut tool_calls_parts = Vec::<serde_json::Value>::new();
+
+        // Metadata (collected in the same pass)
+        let mut model_version: Option<String> = None;
+        let mut prompt_feedback: Option<serde_json::Value> = None;
+        let mut grounding_metadata: Option<serde_json::Value> = None;
+        let mut citation_metadata: Option<serde_json::Value> = None;
+        let mut cached_content_token_count: Option<u32> = None;
+        let mut total_token_count: Option<u32> = None;
+        let mut consumed_credits: Vec<GeminiCredits> = Vec::new();
+        let mut remaining_credits: Vec<GeminiCredits> = Vec::new();
+
+        for line in body_str.lines() {
+            let Some(json_str) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let json_str = json_str.trim();
+            let chunk: serde_json::Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Credits from Cloud Code wrapper (top-level, outside "response")
+            if let Some(cc) = chunk.get("consumedCredits").and_then(|c| c.as_array()) {
+                for c in cc {
+                    if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
+                        consumed_credits.push(credit);
+                    }
+                }
+            }
+            if let Some(rc) = chunk.get("remainingCredits").and_then(|c| c.as_array()) {
+                for c in rc {
+                    if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
+                        remaining_credits.push(credit);
+                    }
+                }
+            }
+
+            let resp = match chunk.get("response") {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // Content extraction
+            if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array())
+                && let Some(first) = candidates.first()
+            {
+                if let Some(parts) = first
+                    .get("content")
+                    .and_then(|c| c.get("parts"))
+                    .and_then(|p| p.as_array())
+                {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                            let is_thought = part
+                                .get("thought")
+                                .and_then(|t| t.as_bool())
+                                .unwrap_or(false);
+                            if !is_thought {
+                                combined_text.push_str(text);
+                            }
+                        }
+                        if let Some(fc) = part.get("functionCall") {
+                            tool_calls_parts.push(serde_json::json!({
+                                "functionCall": fc
+                            }));
+                        }
+                    }
+                }
+                if let Some(fr) = first.get("finishReason").and_then(|fr| fr.as_str()) {
+                    finish_reason = Some(fr.to_string());
+                }
+                // Per-candidate metadata
+                if grounding_metadata.is_none()
+                    && let Some(gm) = first.get("groundingMetadata")
+                {
+                    grounding_metadata = Some(gm.clone());
+                }
+                if citation_metadata.is_none()
+                    && let Some(cm) = first.get("citationMetadata")
+                {
+                    citation_metadata = Some(cm.clone());
+                }
+            }
+
+            // Response-level metadata
+            if model_version.is_none()
+                && let Some(mv) = resp.get("modelVersion").and_then(|v| v.as_str())
+            {
+                model_version = Some(mv.to_string());
+            }
+            if prompt_feedback.is_none()
+                && let Some(pf) = resp.get("promptFeedback")
+            {
+                prompt_feedback = Some(pf.clone());
+            }
+            if let Some(usage) = resp.get("usageMetadata") {
+                if let Some(pt) = usage.get("promptTokenCount").and_then(|pt| pt.as_i64()) {
+                    prompt_tokens = pt;
+                }
+                if let Some(ct) = usage.get("candidatesTokenCount").and_then(|ct| ct.as_i64()) {
+                    candidates_tokens = ct;
+                }
+                if let Some(ct) = usage
+                    .get("cachedContentTokenCount")
+                    .and_then(|t| t.as_u64())
+                {
+                    cached_content_token_count = Some(ct as u32);
+                }
+                if let Some(tt) = usage.get("totalTokenCount").and_then(|t| t.as_u64()) {
+                    total_token_count = Some(tt as u32);
+                }
+            }
+        }
+        let meta = GeminiResponseMeta {
+            model_version,
+            prompt_feedback: prompt_feedback.clone(),
+            grounding_metadata,
+            citation_metadata,
+            consumed_credits,
+            remaining_credits,
+            cached_content_token_count,
+            total_token_count,
+        };
+
+        // Gemini blocks in two different places. `candidates[].finishReason`
+        // means the *output* was cut off mid-generation; `promptFeedback.
+        // blockReason` means the *input* was rejected before generation, and
+        // then the response carries no candidates at all — no content and no
+        // finish reason. Both are blocks and both must reach the caller.
+        let prompt_block_reason = prompt_feedback
+            .as_ref()
+            .and_then(|pf| pf.get("blockReason"))
+            .and_then(|r| r.as_str())
+            .map(|r| r.to_string());
+        if let Some(ref reason) = prompt_block_reason {
+            warn!(
+                block_reason = reason.as_str(),
+                "Gemini API blocked the request via promptFeedback"
+            );
+        }
+
+        let has_content = !combined_text.is_empty() || !tool_calls_parts.is_empty();
+        // A blocked Gemini candidate carries EMPTY content: the stream
+        // declares `finishReason: SAFETY` (or PROHIBITED_CONTENT, or
+        // MALFORMED_FUNCTION_CALL) and nothing else. Building a candidate only
+        // when content arrived made that stream indistinguishable from "the
+        // model answered nothing", and the caller reported `InvalidResponse`
+        // instead of the content block the provider actually stated. Any
+        // terminal reason that is not a plain STOP is therefore enough on its
+        // own to build a candidate, so `from_gemini_response` can report it.
+        //
+        // An empty STOP keeps the old invalid-response behavior: a clean stop
+        // with no content is an anomaly, and handing the agent an empty
+        // successful answer would hide it.
+        let terminal_failure = finish_reason
+            .as_deref()
+            .and_then(map_provider_finish_token)
+            .is_some_and(|reason| reason != FinishReason::Stop);
+
+        let response =
+            (has_content || terminal_failure || prompt_block_reason.is_some()).then(|| {
+                let mut response_parts = Vec::new();
+                if !combined_text.is_empty() {
+                    response_parts.push(serde_json::json!({"text": combined_text}));
+                }
+                response_parts.extend(tool_calls_parts);
+
+                let mut candidate = serde_json::json!({
+                    "content": { "parts": response_parts }
+                });
+                // Absent stays absent: `from_gemini_response` falls back to
+                // shape inference only when the provider said nothing. A
+                // candidate's own reason wins; a prompt-level block reason stands
+                // in only when no candidate reported one, and it speaks the same
+                // vocabulary (`SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`,
+                // `IMAGE_SAFETY`, `MODEL_ARMOR` → content filter; `OTHER` and
+                // `BLOCK_REASON_UNSPECIFIED` → unknown), so the shared table in
+                // `provider::map_provider_finish_token` classifies both.
+                if let Some(finish_reason) = finish_reason.or(prompt_block_reason) {
+                    candidate["finishReason"] = serde_json::Value::String(finish_reason);
+                }
+                serde_json::json!({
+                    "candidates": [candidate],
+                    "usageMetadata": {
+                        "promptTokenCount": prompt_tokens,
+                        "candidatesTokenCount": candidates_tokens
+                    }
+                })
+            });
+
+        CloudCodeSseAggregate { response, meta }
+    }
+
     /// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
     fn from_gemini_response(body: serde_json::Value) -> Result<GeminiParsedResponse, LlmError> {
+        let usage = body.get("usageMetadata");
+        let input_tokens = usage
+            .and_then(|u| u.get("promptTokenCount"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as u32;
+        let output_tokens = usage
+            .and_then(|u| u.get("candidatesTokenCount"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as u32;
+        let cached_content_tokens = usage
+            .and_then(|u| u.get("cachedContentTokenCount"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as u32;
+
+        // Gemini's *other* block mechanism: `promptFeedback.blockReason` means
+        // the input was rejected before generation, and the body then carries
+        // no candidates at all.
+        let prompt_block_reason = body
+            .get("promptFeedback")
+            .and_then(|pf| pf.get("blockReason"))
+            .and_then(|r| r.as_str());
+        if let Some(reason) = prompt_block_reason {
+            warn!(
+                block_reason = reason,
+                "Gemini API blocked the request via promptFeedback"
+            );
+        }
+
         let candidate = body
             .get("candidates")
             .and_then(|c| c.as_array())
-            .and_then(|c| c.first())
-            .ok_or_else(|| LlmError::RequestFailed {
+            .and_then(|c| c.first());
+
+        let Some(candidate) = candidate else {
+            // No candidates. If the prompt was blocked, that is the answer —
+            // report the block through the same shared table every other
+            // finish reason uses, rather than a generic request failure that
+            // hides which policy fired.
+            //
+            // Without a block reason this stays an error: a body with no
+            // candidates and nothing blocked is malformed, and turning it into
+            // an empty successful answer would hide the anomaly.
+            let reason = prompt_block_reason.ok_or_else(|| LlmError::RequestFailed {
                 provider: "gemini_oauth".to_string(),
                 reason: "Response missing 'candidates[0]'".to_string(),
             })?;
+            return Ok((
+                CompletionResponse {
+                    content: String::new(),
+                    finish_reason: crate::provider::resolve_finish_reason(
+                        map_provider_finish_token(reason),
+                        false,
+                    ),
+                    input_tokens,
+                    output_tokens,
+                    reasoning: None,
+                    cache_read_input_tokens: cached_content_tokens,
+                    cache_creation_input_tokens: 0,
+                },
+                Vec::new(),
+                HashMap::new(),
+            ));
+        };
 
         let parts = candidate
             .get("content")
@@ -1857,25 +1975,26 @@ impl GeminiOauthProvider {
             }
         }
 
-        let finish_reason = candidate
-            .get("finishReason")
-            .and_then(|r| r.as_str())
-            .unwrap_or("STOP");
+        // What Gemini itself said. `None` means the field was absent, which is
+        // NOT the same as "STOP" — the old default reported a response that
+        // never declared a finish reason as a clean success.
+        let finish_reason = candidate.get("finishReason").and_then(|r| r.as_str());
+        let reported = finish_reason.unwrap_or("<absent>");
 
         // Invalid content detection (mirrors Gemini CLI InvalidStreamError types).
         // Log warnings for known problematic finish reasons.
         match finish_reason {
-            "MALFORMED_FUNCTION_CALL" => {
+            Some("MALFORMED_FUNCTION_CALL") => {
                 warn!(
-                    finish_reason = finish_reason,
+                    finish_reason = reported,
                     "Gemini returned MALFORMED_FUNCTION_CALL — {} (type: {})",
                     "model stream ended with malformed function call",
                     InvalidStreamType::MalformedFunctionCall
                 );
             }
-            "UNEXPECTED_TOOL_CALL" => {
+            Some("UNEXPECTED_TOOL_CALL") => {
                 warn!(
-                    finish_reason = finish_reason,
+                    finish_reason = reported,
                     "Gemini returned UNEXPECTED_TOOL_CALL — {} (type: {})",
                     "model stream ended with unexpected tool call",
                     InvalidStreamType::UnexpectedToolCall
@@ -1885,67 +2004,31 @@ impl GeminiOauthProvider {
         }
 
         // Check for no response text when no tool calls (NO_RESPONSE_TEXT detection)
-        if tool_calls.is_empty() && text_content.is_empty() && finish_reason == "STOP" {
+        if tool_calls.is_empty() && text_content.is_empty() && finish_reason == Some("STOP") {
             debug!(
                 "Gemini response has no text and no tool calls (type: {})",
                 InvalidStreamType::NoResponseText
             );
         }
 
-        let stop_reason = match finish_reason {
-            "STOP" => {
-                if !tool_calls.is_empty() {
-                    FinishReason::ToolUse
-                } else {
-                    FinishReason::Stop
-                }
-            }
-            "MAX_TOKENS" => FinishReason::Length,
-            "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" => {
-                // Treat as Stop — the caller's retry layer will handle retries
-                FinishReason::Stop
-            }
-            _ => {
-                if !tool_calls.is_empty() {
-                    FinishReason::ToolUse
-                } else {
-                    FinishReason::Stop
-                }
-            }
-        };
-
-        let usage = body.get("usageMetadata");
-        let input_tokens = usage
-            .and_then(|u| u.get("promptTokenCount"))
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0) as u32;
-        let output_tokens = usage
-            .and_then(|u| u.get("candidatesTokenCount"))
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0) as u32;
-        let cached_content_tokens = usage
-            .and_then(|u| u.get("cachedContentTokenCount"))
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0) as u32;
+        // The token table is shared with the rig adapter, which fronts Gemini
+        // by API key and so speaks the same `SCREAMING_SNAKE_CASE` vocabulary
+        // (it matches case-insensitively). A second Gemini-only table here is
+        // how a token Google adds later ends up classified one way by OAuth
+        // and another way by API key. A reason we do not recognize is
+        // `Unknown` — never `Stop`.
+        let stop_reason = crate::provider::resolve_finish_reason(
+            finish_reason.and_then(map_provider_finish_token),
+            !tool_calls.is_empty(),
+        );
 
         // Extract additional metadata from non-SSE (legacy) responses.
         let _model_version = body
             .get("modelVersion")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let _prompt_feedback = body.get("promptFeedback").cloned();
         let _grounding_metadata = candidate.get("groundingMetadata").cloned();
         let _citation_metadata = candidate.get("citationMetadata").cloned();
-
-        // Log prompt feedback if present
-        if let Some(ref pf) = _prompt_feedback
-            && let Some(reason) = pf.get("blockReason").and_then(|r| r.as_str())
-        {
-            warn!(
-                block_reason = reason,
-                "Gemini API blocked the request via promptFeedback"
-            );
-        }
 
         Ok((
             CompletionResponse {
@@ -2292,6 +2375,232 @@ mod tests {
         assert_eq!(resp.input_tokens, 10);
         assert_eq!(resp.output_tokens, 5);
         assert!(tool_calls.is_empty());
+    }
+
+    /// Conformance matrix for the Gemini OAuth adapter — #6284 item 8,
+    /// contract clause (e).
+    ///
+    /// `SAFETY`, `RECITATION`, `PROHIBITED_CONTENT`, `BLOCKLIST` and
+    /// `MALFORMED_FUNCTION_CALL` all landed in the `_ =>` arm and were
+    /// reported as `Stop`, so a blocked response was indistinguishable from a
+    /// clean answer and `FinishReason::ContentFilter` was unreachable here.
+    /// An absent `finishReason` defaulted to the literal `"STOP"`.
+    ///
+    /// Each row is Gemini's own token, driven through the response parser.
+    #[test]
+    fn gemini_finish_reason_conformance_matrix() {
+        fn finish_for(finish_reason: serde_json::Value, with_tool_call: bool) -> FinishReason {
+            let part = if with_tool_call {
+                serde_json::json!({"functionCall": {"name": "read_file", "args": {}}})
+            } else {
+                serde_json::json!({"text": "some text"})
+            };
+            let mut candidate = serde_json::json!({"content": {"parts": [part]}});
+            if !finish_reason.is_null() {
+                candidate["finishReason"] = finish_reason;
+            }
+            let body = serde_json::json!({"candidates": [candidate]});
+            let (resp, _calls, _sigs) = GeminiOauthProvider::from_gemini_response(body)
+                .expect("parser accepts a well-formed candidate");
+            resp.finish_reason
+        }
+
+        // Clean stop, and the tool-call refinement of it.
+        assert_eq!(finish_for("STOP".into(), false), FinishReason::Stop);
+        assert_eq!(finish_for("STOP".into(), true), FinishReason::ToolUse);
+        // Truncated by the output token budget.
+        assert_eq!(finish_for("MAX_TOKENS".into(), false), FinishReason::Length);
+        assert_eq!(
+            finish_for("MAX_TOKENS".into(), true),
+            FinishReason::Length,
+            "a truncated tool call must not be laundered into ToolUse",
+        );
+        // Blocked by Gemini's content policy.
+        for blocked in [
+            "SAFETY",
+            "RECITATION",
+            "PROHIBITED_CONTENT",
+            "BLOCKLIST",
+            "SPII",
+            "IMAGE_SAFETY",
+            "LANGUAGE",
+            // Blocked by Model Armor, Google's separate policy screen.
+            "MODEL_ARMOR",
+        ] {
+            assert_eq!(
+                finish_for(blocked.into(), false),
+                FinishReason::ContentFilter,
+                "{blocked} is a content block, not a clean stop",
+            );
+        }
+        // Recognized failures that are neither a clean stop nor a policy block.
+        for unclear in [
+            "MALFORMED_FUNCTION_CALL",
+            "UNEXPECTED_TOOL_CALL",
+            "OTHER",
+            "FINISH_REASON_UNSPECIFIED",
+            "SOMETHING_NEW",
+        ] {
+            assert_eq!(
+                finish_for(unclear.into(), false),
+                FinishReason::Unknown,
+                "{unclear} must not be reported as a clean stop",
+            );
+            // …and the tool-call shape must not launder it into `ToolUse`.
+            // MALFORMED_FUNCTION_CALL / UNEXPECTED_TOOL_CALL are exactly the
+            // reasons that arrive *with* a `functionCall` part: the model
+            // emitted a call the provider rejected. Refining to `ToolUse`
+            // would let the model gateway dispatch it.
+            assert_eq!(
+                finish_for(unclear.into(), true),
+                FinishReason::Unknown,
+                "{unclear} carrying a functionCall part must stay Unknown",
+            );
+        }
+        // Absent: the documented fallback is shape inference, not a
+        // hardcoded "STOP".
+        assert_eq!(
+            finish_for(serde_json::Value::Null, false),
+            FinishReason::Stop
+        );
+        assert_eq!(
+            finish_for(serde_json::Value::Null, true),
+            FinishReason::ToolUse
+        );
+
+        // A prompt-level block on the plain-JSON path. Gemini rejects the
+        // *input* before generation, so the body carries
+        // `promptFeedback.blockReason` and no candidates at all — the parser
+        // used to bail with "missing 'candidates[0]'" and report a generic
+        // request failure instead of the block the provider stated.
+        fn parse(body: serde_json::Value) -> Result<FinishReason, LlmError> {
+            GeminiOauthProvider::from_gemini_response(body).map(|(resp, ..)| resp.finish_reason)
+        }
+
+        let blocked = parse(serde_json::json!({
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "usageMetadata": {"promptTokenCount": 11}
+        }))
+        .expect("a blocked prompt is a reportable outcome, not a parse failure");
+        assert_eq!(
+            blocked,
+            FinishReason::ContentFilter,
+            "a blocked prompt must report the block, not a generic request failure",
+        );
+
+        // A block reason we cannot classify is `Unknown`, never a clean stop.
+        assert_eq!(
+            parse(serde_json::json!({"promptFeedback": {"blockReason": "OTHER"}})).ok(),
+            Some(FinishReason::Unknown),
+        );
+
+        // Preserved: no candidates AND no block reason is still an error. It
+        // must not become a success, and it must not become a filter either.
+        assert!(
+            matches!(
+                parse(serde_json::json!({"usageMetadata": {"promptTokenCount": 3}})),
+                Err(LlmError::RequestFailed { .. })
+            ),
+            "an unblocked response with no candidates is still a failure",
+        );
+        // `promptFeedback` without a block reason blocks nothing.
+        assert!(matches!(
+            parse(serde_json::json!({"promptFeedback": {"safetyRatings": []}})),
+            Err(LlmError::RequestFailed { .. })
+        ));
+    }
+
+    /// A blocked Cloud Code stream carries a terminal `finishReason` and no
+    /// content at all. The SSE fold used to build a candidate only when text
+    /// or a tool call had arrived, so that stream produced no response body,
+    /// and the caller reported `InvalidResponse` — the block was invisible.
+    ///
+    /// Driven through the aggregator plus the parser the caller feeds it, so
+    /// the assertion is on the finish reason the turn actually sees.
+    #[test]
+    fn empty_blocked_sse_stream_reports_the_content_filter() {
+        fn finish_reason_for(sse: &str) -> Option<FinishReason> {
+            let aggregate = GeminiOauthProvider::aggregate_cloud_code_sse(sse);
+            let body = aggregate.response?;
+            let (resp, _calls, _sigs) = GeminiOauthProvider::from_gemini_response(body)
+                .expect("the aggregated body is a well-formed candidate");
+            Some(resp.finish_reason)
+        }
+
+        // Safety block: a terminal reason, empty parts, nothing else.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":0}}}"#
+            ),
+            Some(FinishReason::ContentFilter),
+            "an empty safety-blocked stream must report the block, not vanish",
+        );
+
+        // The candidate may omit `content` entirely.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"candidates":[{"finishReason":"PROHIBITED_CONTENT"}]}}"#
+            ),
+            Some(FinishReason::ContentFilter),
+        );
+
+        // A malformed function call is likewise empty and terminal.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}}"#
+            ),
+            Some(FinishReason::Unknown),
+        );
+
+        // Content still wins the usual way: text plus a terminal STOP.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}}"#
+            ),
+            Some(FinishReason::Stop),
+        );
+
+        // A prompt-level block is Gemini's *other* block mechanism: the input
+        // was rejected before generation, so the stream carries
+        // `promptFeedback.blockReason` and no candidates at all — no content
+        // and no candidate `finishReason`. That must still surface as the
+        // block it is, not as an invalid response.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":9}}}"#
+            ),
+            Some(FinishReason::ContentFilter),
+            "a blocked prompt must report the block, not vanish",
+        );
+        // …and a block reason we cannot classify is `Unknown`, never a
+        // silent clean stop.
+        assert_eq!(
+            finish_reason_for(r#"data: {"response":{"promptFeedback":{"blockReason":"OTHER"}}}"#),
+            Some(FinishReason::Unknown),
+        );
+        // `promptFeedback` without a block reason is ordinary safety-rating
+        // telemetry and blocks nothing.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"promptFeedback":{"safetyRatings":[]},"candidates":[]}}"#
+            ),
+            None,
+        );
+
+        // A stream with neither content nor a finish reason stays "nothing
+        // usable", so the caller keeps reporting an invalid response.
+        assert_eq!(
+            finish_reason_for(r#"data: {"response":{"candidates":[]}}"#),
+            None
+        );
+        // …and so does a clean STOP that produced no content at all: an empty
+        // successful answer would hide the anomaly.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}}"#
+            ),
+            None,
+        );
     }
 
     #[test]

@@ -1,40 +1,141 @@
 ---
 title: "Overview"
-description: "Set up messaging channels to interact with your agent"
+description: "Reach your agent from a messaging app"
 ---
 
-Channels define how people send messages to your agent. You can start local for development, then add messaging apps or webhooks as your integration needs grow.
-
-<Card title="Tunnel" icon="link" href="/tunnel" horizontal>
-  Configure a tunnel so webhook-based channels can receive incoming requests.
-</Card>
+Channels let people reach your agent from somewhere other than the web interface. IronClaw
+supports Slack and Telegram.
 
 <CardGroup cols={2}>
-  <Card title="Local" icon="terminal" href="/channels/local">
-    Built-in terminal UI and web gateway for local usage and testing.
+  <Card title="Slack" icon="slack" href="/channels/slack">
+    Talk to your agent in Slack channels and direct messages.
   </Card>
 
   <Card title="Telegram" icon="send" href="/channels/telegram">
     Talk to your agent in Telegram direct messages and group chats.
   </Card>
-
-  <Card title="Signal" icon="message" href="/channels/signal">
-    Connect IronClaw to Signal through a signal-cli HTTP daemon.
-  </Card>
-
-  <Card title="Discord" icon="discord" href="/channels/discord">
-    Integrate with Discord to chat in servers, channels, and DMs.
-  </Card>
-
-  <Card title="WeChat" icon="message" href="/channels/wechat">
-    Connect through a WeChat iLink bot account with QR login and long polling.
-  </Card>
-
-  <Card title="WeCom" icon="message" href="/channels/wecom">
-    Talk to your agent through a WeCom intelligent bot with a WebSocket long connection.
-  </Card>
-
-  <Card title="HTTP Webhook" icon="webhook" href="/channels/webhook">
-    Send messages from external systems using a REST endpoint.
-  </Card>
 </CardGroup>
+
+---
+
+## How Channels Work
+
+A channel is one capability surface of an extension. Installing the Slack or Telegram
+extension gives your agent the ability to receive and send messages there; the extension's
+manifest declares the channel surface alongside any tools it provides.
+
+Setup happens in the [web interface](/using/webui). Start the server, connect the channel,
+and the setup flow walks you through the credentials it needs and stores them encrypted.
+
+```bash
+ironclaw serve
+```
+
+<Note>
+Channel credentials are stored in the encrypted secret store, not in `config.toml`. Your
+configuration file names the environment variables that hold them, never the values
+themselves. See [Security](/security).
+</Note>
+
+---
+
+## Where Channel Setup Lives
+
+This is the single most common thing to get stuck on, so it's worth being precise.
+
+<Steps>
+
+<Step title="Open Extensions, then switch to the Channels tab">
+
+In the sidebar, open **Extensions**. It opens on the **Registry** tab.
+
+<Warning>
+Registry is *not* where channels are set up. Click across to the **Channels** tab. Using
+**Configure** on a channel from the Registry tab leads to a dead end — see below.
+</Warning>
+
+</Step>
+
+<Step title="Scroll to the bottom of the Built-in section">
+
+The Channels tab opens with a **Built-in** panel. The Slack and Telegram connect cards are
+at the **bottom of that panel**, below the rows for the web and terminal channels. They're
+easy to miss on a short window — scroll.
+
+</Step>
+
+<Step title="Use Configure on the channel's card">
+
+That card is the real setup surface. For Telegram it's where an operator enters the bot
+token; for Slack it's where the app credentials go.
+
+</Step>
+
+</Steps>
+
+### Two Dead Ends to Know About
+
+<AccordionGroup>
+
+<Accordion title="Configure on the Registry tab errors instead of setting up">
+
+Telegram appears in the Registry tab, and its **Configure** button opens the *pairing*
+panel. Pairing assumes the bot is already configured, so if it isn't, the only thing that
+surface can do is report:
+
+```
+An administrator must configure the Telegram bot first.
+```
+
+That message is accurate but misleading — it reads like you lack permission. Nothing is
+wrong with your account. Go to the **Channels** tab and use the card at the bottom of the
+Built-in section instead.
+
+</Accordion>
+
+<Accordion title="Asking the agent to connect a channel doesn't work">
+
+"Connect Slack" or "set up Telegram" in chat will not get you connected. The agent can
+install and use *tool* extensions on your behalf, but the channel connection is
+deliberately kept out of the tools it can drive — connecting a channel is an operator
+action, so it stays in the web interface where you can see what you're authorizing.
+
+The agent may tell you it can't help. Do it yourself using the path above.
+
+</Accordion>
+
+</AccordionGroup>
+
+<Info>
+Telegram has **two** setup steps that are easy to confuse: an operator configures the bot
+token once for the whole instance, and then each person pairs their own Telegram account
+to their IronClaw user. The "administrator must configure" error means step one hasn't
+happened yet.
+</Info>
+
+---
+
+## Receiving Messages
+
+Both channels deliver events by webhook, so the messaging platform needs to reach your
+IronClaw instance over HTTPS. On a laptop behind NAT that means either a public host or a
+forwarding service; a served deployment already has a reachable URL.
+
+Each channel's page covers the exact callback URL to register.
+
+---
+
+## Not Using a Channel?
+
+You don't need one. The [web interface](/using/webui) and the terminal both talk to the
+same agent:
+
+```bash
+ironclaw repl
+ironclaw run -m "What's on my calendar today?"
+```
+
+<Info>
+Discord, Signal, WeChat, and WeCom were available in IronClaw v1 and are not part of the
+1.0 release. If you depend on one of them, stay on v1 until it returns.
+</Info>

@@ -661,13 +661,13 @@ mod tests {
     };
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
-        ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
+        ExtensionId, FailureKind, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
         OriginGatePolicy, PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle,
         TrustClass, UNGATED_LOOP_RUN_CAPABILITIES, UserId,
     };
     use ironclaw_host_runtime::{
-        CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeFailureKind, SurfaceKind,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use std::{
@@ -1019,6 +1019,14 @@ mod tests {
         id: &str,
         strategy: RebornChannelConnectStrategy,
     ) -> LifecycleSearchExtensionSummary {
+        search_summary_with_phase(id, strategy, None)
+    }
+
+    fn search_summary_with_phase(
+        id: &str,
+        strategy: RebornChannelConnectStrategy,
+        installation_phase: Option<InstallationState>,
+    ) -> LifecycleSearchExtensionSummary {
         LifecycleSearchExtensionSummary {
             summary: LifecycleExtensionSummary {
                 package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)
@@ -1045,7 +1053,7 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            installation_phase: None,
+            installation_phase,
         }
     }
 
@@ -1289,7 +1297,7 @@ mod tests {
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("foreign caller must get the masked failure, not an auth gate: {outcome:?}");
         };
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
     }
 
     #[tokio::test]
@@ -1545,7 +1553,7 @@ mod tests {
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("expected corrupt configured account to fail, got {outcome:?}");
         };
-        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+        assert_eq!(failure.kind, FailureKind::Backend);
 
         let active = active_extension_capability_ids(&extension_management).await;
         assert!(!active.iter().any(|id| id == "github.search_issues"));
@@ -1650,7 +1658,7 @@ mod tests {
                 serde_json::json!({})
             )
             .await,
-            Err(RuntimeFailureKind::InvalidInput)
+            Err(FailureKind::InputEncode)
         );
         assert_eq!(
             invoke_json(
@@ -1659,7 +1667,7 @@ mod tests {
                 serde_json::json!({"extension_id": "unknown-extension"})
             )
             .await,
-            Err(RuntimeFailureKind::InvalidInput)
+            Err(FailureKind::InputEncode)
         );
         let outcome = invoke_outcome(
             &services,
@@ -1670,14 +1678,14 @@ mod tests {
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("expected uninstalled extension activation to fail, got {outcome:?}");
         };
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
     }
 
     async fn invoke_json(
         services: &ExtensionLifecycleTestServices,
         capability_id: &str,
         input: serde_json::Value,
-    ) -> Result<serde_json::Value, RuntimeFailureKind> {
+    ) -> Result<serde_json::Value, FailureKind> {
         invoke_json_with_local_dev_approval(
             services,
             capability_id,

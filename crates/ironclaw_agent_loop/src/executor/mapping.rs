@@ -1,17 +1,17 @@
-use ironclaw_host_api::{Resolution, ToolVerdict};
+use ironclaw_host_api::{FailureKind, Resolution, ToolVerdict};
 use ironclaw_turns::{
-    LoopBlockedKind, LoopFailureKind, SanitizedFailure,
+    LoopBlockedKind, SanitizedFailure,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        LoopCheckpointKind, LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopCheckpointKind,
+        LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
 use crate::{
     state::CheckpointKind,
     strategies::{
-        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelErrorSummary,
-        ModelPreference, RetryAlteration, SanitizedStrategySummary,
+        BatchPolicy, GateKind, ModelErrorClass, ModelErrorSummary, ModelPreference,
+        RetryAlteration, SanitizedStrategySummary,
     },
 };
 
@@ -127,11 +127,53 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // Deliberately unclassified (terminal with diagnostics): deterministic
         // request-invalid errors must not masquerade as stale/retryable, while
         // policy denial and scope mismatch remain host/config-shaped. The
-        // runner preserves the original kind when categorizing the failure.
+        // runner names each of these with its own failure category
+        // (`model_stage_request_invalid` / `_policy_denied` / `_scope_mismatch`
+        // in `ironclaw_runner::failure_categories`), none of which is
+        // auto-retriable.
+        //
+        // This comment previously claimed the runner "preserves the original
+        // kind" — it did not. All four fell through to
+        // `host_stage_unavailable_model`, which the runner lists as a transient
+        // outage that re-drives cleanly, so a permanently-failing call was
+        // silently retried and reported as a generic host outage.
         AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::PolicyDenied => None,
+    }
+}
+
+/// Whether a capability-stage port `Err` is a genuine host fault that must end
+/// the run (`capability_host_error`), as opposed to a caller-shaped failure the
+/// model can recover from (surfaced as a tool error via
+/// `handle_capability_error`, routed by `FailureKind::fate`).
+///
+/// Exhaustive on purpose — a new port kind must decide its dispatch
+/// disposition here instead of inheriting a wildcard bucket. Terminal kinds
+/// are cancellation plus the Internal/Resource-shaped host faults (the host's
+/// own machinery failed: budget accounting, checkpointing, transcript,
+/// availability); everything else describes the *call*, which the model can
+/// route around.
+pub(super) fn capability_port_error_is_terminal(kind: AgentLoopHostErrorKind) -> bool {
+    match kind {
+        AgentLoopHostErrorKind::Cancelled
+        | AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::Internal
+        | AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::BudgetApprovalRequired
+        | AgentLoopHostErrorKind::BudgetAccountingFailed
+        | AgentLoopHostErrorKind::CheckpointRejected
+        | AgentLoopHostErrorKind::TranscriptWriteFailed => true,
+        AgentLoopHostErrorKind::Unauthorized
+        | AgentLoopHostErrorKind::CredentialUnavailable
+        | AgentLoopHostErrorKind::ScopeMismatch
+        | AgentLoopHostErrorKind::StaleSurface
+        | AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::InvalidOutput
+        | AgentLoopHostErrorKind::ContentFiltered
+        | AgentLoopHostErrorKind::PolicyDenied => false,
     }
 }
 
@@ -175,87 +217,60 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     }
 }
 
-pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
-    // Runtime capability failures are first dispositioned in
-    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_host`.
-    // Keep this recovery class mapping aligned with that adapter: retryable
-    // runtime kinds must arrive here as Transient/Unavailable/Internal,
-    // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
-    // run-ending protocol/cancellation kinds as Permanent or Cancelled.
-    match kind {
-        CapabilityFailureKind::Network | CapabilityFailureKind::Transient => {
-            CapabilityErrorClass::Transient
-        }
-        CapabilityFailureKind::Backend | CapabilityFailureKind::Unavailable => {
-            CapabilityErrorClass::Unavailable
-        }
-        CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
-        CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::OperationFailed
-        | CapabilityFailureKind::OutputTooLarge
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
-        // Dispatcher/InvalidOutput/Unknown are dispositioned as model-visible
-        // (run-continuing) by the host_runtime layer
-        // (`capability_failure_disposition`). Map them to OperationFailed so the
-        // recovery strategy turns them into a model-visible ToolErrorResult
-        // instead of aborting the run — e.g. the model calling a nonexistent
-        // tool (UnknownCapability/UnknownProvider -> InvalidOutput) becomes a
-        // recoverable tool error the model can correct.
-        | CapabilityFailureKind::Dispatcher
-        | CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::OperationFailed,
-        CapabilityFailureKind::Authorization
-        | CapabilityFailureKind::GateDeclined
-        | CapabilityFailureKind::PolicyDenied => CapabilityErrorClass::PolicyDenied,
-        CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
-        // Cancelled is intercepted upstream as cancellation; Permanent is an
-        // explicit non-retryable signal. Both stay terminal.
-        CapabilityFailureKind::Cancelled | CapabilityFailureKind::Permanent => {
-            CapabilityErrorClass::Permanent
-        }
-    }
-}
-
-pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailureKind {
-    match kind {
-        CapabilityFailureKind::InvalidInput => LoopFailureKind::ModelError,
-        CapabilityFailureKind::Authorization
-        | CapabilityFailureKind::GateDeclined
-        | CapabilityFailureKind::PolicyDenied => LoopFailureKind::PolicyDenied,
-        // Every remaining kind maps to the protocol-error failure. Enumerated
-        // explicitly (no wildcard) so a new `CapabilityFailureKind` variant must
-        // be classified here deliberately rather than silently inheriting this
-        // terminal fate — `CapabilityFailureKind` is no longer `#[non_exhaustive]`.
-        CapabilityFailureKind::Backend
-        | CapabilityFailureKind::Cancelled
-        | CapabilityFailureKind::Dispatcher
-        | CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::Network
-        | CapabilityFailureKind::OperationFailed
-        | CapabilityFailureKind::OutputTooLarge
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
-        | CapabilityFailureKind::Transient
-        | CapabilityFailureKind::Unavailable
-        | CapabilityFailureKind::Internal
-        | CapabilityFailureKind::Permanent
-        | CapabilityFailureKind::Unknown(_) => LoopFailureKind::CapabilityProtocolError,
-    }
-}
-
+/// Sanitized failure-category wire strings for a terminal capability failure.
+///
+/// The seven output strings are a HARD cross-crate contract: the runner's
+/// failure lane (`failure_lane.rs`) and auto-retry disposition
+/// (`retry_disposition.rs`) and the product failure explanations match on them
+/// byte-for-byte. This bucketing preserves the retired `CapabilityErrorClass`
+/// membership for the retired kinds and assigns each precise kind to the
+/// bucket its coarse ancestor used:
+///
+/// - `capability_permanent` survives only for `Cancelled` (the retired
+///   `Permanent` *kind* merged into `OperationFailed`, so its old bucket is no
+///   longer reachable through that name — the string stays pinned for the
+///   cancellation abort path and for the runner's benefit).
+/// - `StaleSurface` keeps `capability_policy_denied`: the retired mint sites
+///   lied with `PolicyDenied` and the wire category must not change under the
+///   honest rename.
 pub(super) fn capability_error_failure_category(
-    class: CapabilityErrorClass,
+    kind: FailureKind,
 ) -> Result<SanitizedFailure, AgentLoopExecutorError> {
-    sanitized_failure_category(match class {
-        CapabilityErrorClass::Transient => "capability_transient",
-        CapabilityErrorClass::Permanent => "capability_permanent",
-        CapabilityErrorClass::InputInvalid => "capability_input_invalid",
-        CapabilityErrorClass::OperationFailed => "capability_operation_failed",
-        CapabilityErrorClass::PolicyDenied => "capability_policy_denied",
-        CapabilityErrorClass::Unavailable => "capability_unavailable",
-        CapabilityErrorClass::Internal => "capability_internal",
+    sanitized_failure_category(match kind {
+        FailureKind::Network | FailureKind::Transient => "capability_transient",
+        FailureKind::Backend | FailureKind::Unavailable => "capability_unavailable",
+        FailureKind::Internal => "capability_internal",
+        FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::Authorization
+        | FailureKind::GateDeclined
+        | FailureKind::AuthRequired
+        | FailureKind::StaleSurface => "capability_policy_denied",
+        FailureKind::InputEncode => "capability_input_invalid",
+        FailureKind::Cancelled => "capability_permanent",
+        FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider
+        | FailureKind::OperationFailed
+        | FailureKind::OutputTooLarge
+        | FailureKind::Resource
+        | FailureKind::Guest
+        | FailureKind::ExitFailure
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::Memory
+        | FailureKind::Manifest
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::RuntimeMismatch
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::MissingRuntime
+        | FailureKind::Client
+        | FailureKind::Executor
+        | FailureKind::Unclassified => "capability_operation_failed",
     })
 }
 
@@ -334,102 +349,111 @@ mod tests {
 
     #[test]
     fn invalid_capability_input_is_model_error_not_protocol_failure() {
+        use crate::strategies::capability_error_to_failure_kind;
+        use ironclaw_turns::LoopFailureKind;
+
         assert_eq!(
-            capability_error_class(&CapabilityFailureKind::InvalidInput),
-            CapabilityErrorClass::InputInvalid
-        );
-        assert_eq!(
-            capability_failure_kind(&CapabilityFailureKind::InvalidInput),
+            capability_error_to_failure_kind(FailureKind::InputEncode),
             LoopFailureKind::ModelError
         );
     }
 
     #[test]
     fn protocol_and_policy_failure_kinds_remain_distinct() {
+        use crate::strategies::capability_error_to_failure_kind;
+        use ironclaw_turns::LoopFailureKind;
+
         assert_eq!(
-            capability_failure_kind(&CapabilityFailureKind::InvalidOutput),
+            capability_error_to_failure_kind(FailureKind::OutputDecode),
             LoopFailureKind::CapabilityProtocolError
         );
         assert_eq!(
-            capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
+            capability_error_to_failure_kind(FailureKind::PolicyDenied),
             LoopFailureKind::PolicyDenied
         );
     }
 
-    /// Classification lock for `capability_error_class`: every
-    /// `CapabilityFailureKind` variant maps to a deliberate recovery class.
+    /// Classification lock for the seven-string failure-category contract:
+    /// every unified `FailureKind` maps to a deliberate wire category, and the
+    /// bucket set never grows — the runner's failure lane and auto-retry
+    /// disposition and the product failure explanations match these strings
+    /// byte-for-byte.
     ///
-    /// This complements the compile-time guarantee (the match is exhaustive with
-    /// no `_ =>` wildcard, since `CapabilityFailureKind` is no longer
-    /// `#[non_exhaustive]`, so a *new* variant fails to compile until classified)
-    /// by also catching a silent *re-bucketing* of an *existing* variant — e.g.
-    /// moving a recoverable kind into the run-aborting `Permanent` class, or vice
-    /// versa. Only the genuinely-terminal kinds (`Cancelled` and `Permanent`)
-    /// may map to `Permanent`; runtime-dispositioned tool failures such as
-    /// `Dispatcher`, `InvalidOutput`, and the open-set `Unknown` stay
-    /// model-visible. See
-    /// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
+    /// This complements the compile-time guarantee (the match is exhaustive
+    /// with no `_ =>` wildcard) by also catching a silent *re-bucketing* of an
+    /// *existing* kind. Notable pins:
+    /// - retry-fated kinds keep their retryable buckets
+    ///   (transient/unavailable/internal), matching their `fate()`;
+    /// - `StaleSurface` stays `capability_policy_denied` — the retired mint
+    ///   sites minted `PolicyDenied` there and the wire category must not
+    ///   change under the honest rename;
+    /// - `capability_permanent` is reachable only through `Cancelled`, the
+    ///   sole Terminal-fated kind.
     #[test]
-    fn every_capability_failure_kind_has_a_deliberate_recovery_class() {
-        use CapabilityErrorClass as C;
-        use CapabilityFailureKind as K;
+    fn every_failure_kind_has_a_deliberate_failure_category() {
+        use ironclaw_host_api::FailureFate;
 
-        let unknown = K::unknown("some_future_kind").expect("valid unknown kind");
-        let cases: &[(K, C)] = &[
-            (K::Network, C::Transient),
-            (K::Transient, C::Transient),
-            (K::Backend, C::Unavailable),
-            (K::Unavailable, C::Unavailable),
-            (K::InvalidInput, C::InputInvalid),
-            (K::MissingRuntime, C::OperationFailed),
-            (K::OperationFailed, C::OperationFailed),
-            (K::OutputTooLarge, C::OperationFailed),
-            (K::Process, C::OperationFailed),
-            (K::Resource, C::OperationFailed),
-            (K::Authorization, C::PolicyDenied),
-            (K::GateDeclined, C::PolicyDenied),
-            (K::PolicyDenied, C::PolicyDenied),
-            (K::Internal, C::Internal),
-            (K::Dispatcher, C::OperationFailed),
-            (K::Cancelled, C::Permanent),
-            (K::InvalidOutput, C::OperationFailed),
-            (K::Permanent, C::Permanent),
-            (unknown.clone(), C::OperationFailed),
+        const ALL_CATEGORIES: [&str; 7] = [
+            "capability_transient",
+            "capability_unavailable",
+            "capability_internal",
+            "capability_policy_denied",
+            "capability_input_invalid",
+            "capability_operation_failed",
+            "capability_permanent",
         ];
 
-        for (kind, expected) in cases {
+        let expected: &[(FailureKind, &str)] = &[
+            (FailureKind::Network, "capability_transient"),
+            (FailureKind::Transient, "capability_transient"),
+            (FailureKind::Backend, "capability_unavailable"),
+            (FailureKind::Unavailable, "capability_unavailable"),
+            (FailureKind::Internal, "capability_internal"),
+            (FailureKind::InputEncode, "capability_input_invalid"),
+            (FailureKind::PolicyDenied, "capability_policy_denied"),
+            (FailureKind::NetworkDenied, "capability_policy_denied"),
+            (FailureKind::FilesystemDenied, "capability_policy_denied"),
+            (FailureKind::SecretDenied, "capability_policy_denied"),
+            (FailureKind::Authorization, "capability_policy_denied"),
+            (FailureKind::GateDeclined, "capability_policy_denied"),
+            (FailureKind::AuthRequired, "capability_policy_denied"),
+            (FailureKind::StaleSurface, "capability_policy_denied"),
+            (FailureKind::Cancelled, "capability_permanent"),
+        ];
+        for (kind, category) in expected {
+            let failure = capability_error_failure_category(*kind).expect("valid category");
             assert_eq!(
-                capability_error_class(kind),
-                *expected,
-                "recovery class for {kind:?} changed — re-confirm it is deliberate \
-                 and does not silently abort a recoverable failure"
+                failure.category(),
+                *category,
+                "failure category for {kind:?} changed — the seven strings are a \
+                 cross-crate contract with the runner and product layers"
             );
         }
 
-        // Only these kinds may abort the run.
-        for (kind, class) in cases {
-            if *class == C::Permanent {
+        for &kind in FailureKind::ALL {
+            let failure = capability_error_failure_category(kind).expect("valid category");
+            let category = failure.category().to_string();
+            assert!(
+                ALL_CATEGORIES.contains(&category.as_str()),
+                "{kind:?} produced {category:?}, outside the pinned seven-string set"
+            );
+            if kind.fate() == FailureFate::Retry {
                 assert!(
-                    matches!(kind, K::Cancelled | K::Permanent),
-                    "{kind:?} maps to the run-aborting Permanent class but is not a \
-                     recognized terminal kind — a recoverable failure must not abort"
+                    matches!(
+                        category.as_str(),
+                        "capability_transient" | "capability_unavailable" | "capability_internal"
+                    ),
+                    "{kind:?} is Retry-fated but categorized {category:?}"
+                );
+            }
+            if category == "capability_permanent" {
+                assert_eq!(
+                    kind,
+                    FailureKind::Cancelled,
+                    "capability_permanent is reserved for the cancellation abort path"
                 );
             }
         }
-    }
-
-    #[test]
-    fn terminal_capability_failures_remain_permanent() {
-        // Cancelled is intercepted upstream as cancellation; Permanent is an
-        // explicit non-retryable signal. Both must stay terminal.
-        assert_eq!(
-            capability_error_class(&CapabilityFailureKind::Cancelled),
-            CapabilityErrorClass::Permanent
-        );
-        assert_eq!(
-            capability_error_class(&CapabilityFailureKind::Permanent),
-            CapabilityErrorClass::Permanent
-        );
     }
 
     /// Classification lock for `model_error_class`: every model-path

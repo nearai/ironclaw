@@ -126,6 +126,21 @@ pub type Timestamp = chrono::DateTime<chrono::Utc>;
 
 If the implementation prefers `time::OffsetDateTime`, choose it once in PR 1 and use it everywhere in `ironclaw_host_api`.
 
+### 4.1 Model-visible failure diagnostics
+
+`ModelFailureDiagnostic::Diagnostic` is the narrow exception to the
+single-line `SafeSummary` contract. It carries a producer-scrubbed failure cause
+to the model so a `LoopDiagnosticRef` is only a log correlation handle, not the
+only way to learn why an operation failed.
+
+The diagnostic value is bounded to 4096 bytes, rejects empty text, disallowed
+control characters, and known credential-token shapes, and revalidates on
+deserialize. It intentionally allows paths, URLs, payload delimiters, and
+credential vocabulary such as “password field” because those can be necessary
+recovery context. Producers remain responsible for applying the canonical
+secret-value scrubber and injection fence before construction. Public summaries,
+events, logs, and projections continue to use their stricter redacted contracts.
+
 ---
 
 ## 5. ID and name contracts
@@ -231,6 +246,7 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    Sandbox,
     FirstParty,
     System,
 }
@@ -250,6 +266,7 @@ Rules:
 - `RuntimeKind::FirstParty` and `RuntimeKind::System` are concrete host-lane markers for host-policy-selected services in the broader `Host | WASM | Script Runner` model.
 - `RuntimeKind::Mcp` is a capability adapter lane; local stdio MCP servers may still be process/sandbox-backed internally.
 - `RuntimeKind::Script` is the native CLI/script lane. Docker/container is the V1 backend selected by policy, not a distinct public host API runtime kind.
+- `RuntimeKind::Sandbox` is the sandboxed shell/process lane: a persistent, per-tenant OS-process sandbox. One invocation makes many outbound calls, so it shares the multi-call credential-reuse set with `Mcp`/`Wasm`.
 - `TrustClass` is an authority ceiling, not a permission grant and not a kernel bypass.
 - Shipped first-party code and bundled reference loops still need explicit grants, scoped mounts, resource reservations, leases, and obligation handling for privileged effects.
 - User-installed packages cannot self-declare `TrustClass::FirstParty` or `TrustClass::System`; those ceilings are assigned only by host policy, signed/bundled package metadata, or admin configuration.

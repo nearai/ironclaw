@@ -167,6 +167,44 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
 
+### Provider world isolation: why the fixtures are shaped this way
+
+Three questions come up every time someone touches these fixtures. The
+answers are measured, not assumed.
+
+**Why aren't the provider processes function-scoped?** Because the Reborn
+process under test is configured with the provider base URLs when it starts,
+and it outlives any one test. A function-scoped provider would hand each test
+a new port, leaving the running server pointed at a dead socket. The suite
+gets the same isolation a different way: module-scoped processes on *stable
+reserved ports*, restarting only the services a test actually mutated. That
+restart is a real process restart from the seed file, so it is as clean as a
+fresh process. `scenarios/test_provider_world_isolation.py` pins the URL
+stability directly -- if you convert these fixtures to `scope="function"`,
+that test is the one that will tell you why you cannot.
+
+**Is a reset/snapshot endpoint worth adding to Emulate?** No, on current
+numbers. Emulate starts in ~0.2s, and a full reset through
+`ResettableEmulateProviderWorld` (kill, restart from seed, re-bind the
+reserved port) measures ~0.55s. The provider-operation lane performs roughly
+one reset per case, so resets cost it about a minute in total. Revisit this
+only if that lane grows several-fold; process startup is not what makes the
+suite slow. (Measured on an M-series laptop against the pinned fork, three
+runs per service: slack 0.18s, google 0.19s, github 0.20s.)
+
+**How does a journey get a known baseline?** By declaring the provider worlds
+it mutates, which is what makes the fixture reset them afterwards. That
+declaration is derived, not written by hand: `journey_cases.py` reads the
+`external_write` effect from the shipped manifests
+(`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`), so a tool
+that writes to a provider is treated as mutating whether or not anyone
+remembered to list it. Two gates in
+`scenarios/test_journey_coverage.py` keep that honest: one fails when a
+production write belongs to no world the harness can reset, and one fails if
+the derivation stops finding the writes it replaced -- a manifest key rename
+would otherwise empty the mapping, skip every reset, and leave the suite
+green.
+
 ### Emulate provider coverage
 
 Use Emulate for provider APIs that map directly to Reborn features already in

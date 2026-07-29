@@ -10,6 +10,24 @@ pub const MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY: &str = "model_credentials_unav
 /// This must not be presented as a provider balance or configured-budget outcome.
 pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
 
+/// Model-stage failures that are PERMANENT for an identical retry.
+///
+/// These four kinds previously returned no category and fell through to
+/// `host_stage_unavailable_model`, which `is_auto_retriable_category` treats as
+/// a transient outage that re-drives cleanly. None of them can succeed on an
+/// identical retry — policy does not change between attempts and a malformed
+/// request stays malformed — so the run burned retries on a call that could not
+/// work and reported a generic host outage instead of the real cause.
+///
+/// Deliberately NOT in `is_auto_retriable_category`.
+pub const MODEL_STAGE_REQUEST_INVALID_CATEGORY: &str = "model_stage_request_invalid";
+/// Model-stage call refused by policy. Permanent; see
+/// [`MODEL_STAGE_REQUEST_INVALID_CATEGORY`].
+pub const MODEL_STAGE_POLICY_DENIED_CATEGORY: &str = "model_stage_policy_denied";
+/// Model-stage call outside the granted scope — configuration-shaped, not
+/// transient. See [`MODEL_STAGE_REQUEST_INVALID_CATEGORY`].
+pub const MODEL_STAGE_SCOPE_MISMATCH_CATEGORY: &str = "model_stage_scope_mismatch";
+
 pub const HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY: &str = "host_stage_unavailable_prompt";
 pub const HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY: &str = "host_stage_unavailable_model";
 pub const HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY: &str = "host_stage_unavailable_capability";

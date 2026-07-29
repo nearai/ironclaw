@@ -277,7 +277,9 @@ impl GroupSharedStorage {
                 scope.user_id = arc.user_id().clone();
                 Some(scope)
             }
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -296,7 +298,9 @@ impl GroupSharedStorage {
                 scope.user_id = owner.clone();
                 Some(scope)
             }
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 }
@@ -314,6 +318,10 @@ pub(crate) enum GroupCapability {
     Recording,
     /// Recording echo whose results deliberately report `NoChange`.
     RecordingNoProgress,
+    /// Recording echo whose port returns a caller-shaped `InvalidInvocation`
+    /// error instead of a resolution, projecting to `FailureKind::InputEncode`
+    /// (#6284 capability-stage contract).
+    RecordingRecoverablePortError,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
     /// `Arc` is cloned per thread.
@@ -334,6 +342,9 @@ impl GroupCapability {
             Self::RecordingNoProgress => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::no_progress())
             }
+            Self::RecordingRecoverablePortError => HarnessCapabilityMode::Recording(
+                RecordingTestCapabilityPort::recoverable_port_error(),
+            ),
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
     }
@@ -348,7 +359,9 @@ impl GroupCapability {
     ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
-            Self::Recording | Self::RecordingNoProgress => None,
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
         }
     }
 
@@ -365,7 +378,7 @@ impl GroupCapability {
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
-            Self::Recording | Self::RecordingNoProgress => {
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 return Err("no host-runtime capability backend for durable reopen".into());
             }
         };
@@ -439,6 +452,7 @@ impl RebornIntegrationGroup {
             planned_default_iteration_limit: None,
             real_gate_dispatch_services: false,
             channel_connection: None,
+            bound_memory: None,
         }
     }
 
@@ -563,7 +577,9 @@ impl RebornIntegrationGroup {
     pub fn capability_harness(&self) -> Option<&Arc<HostRuntimeCapabilityHarness>> {
         match &self.shared.capability {
             GroupCapability::HostRuntime(arc) => Some(arc),
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -740,6 +756,17 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
+    /// E-MEMORY: a bound memory provider + the lifecycle set its manifest
+    /// declares. When set, `into_group` derives the three memory consumers
+    /// (prompt-context service, after-turn writer, profile source) through
+    /// the PRODUCTION decision helper
+    /// (`ironclaw_reborn_composition::memory_lifecycle_consumers`), so the
+    /// integration tier drives the same lifecycle gating runtime assembly
+    /// wires. Default `None` (no memory consumers, today's behavior).
+    bound_memory: Option<(
+        Arc<dyn ironclaw_memory::MemoryService>,
+        ironclaw_host_api::MemoryDescriptor,
+    )>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -997,6 +1024,33 @@ impl RebornIntegrationGroupBuilder {
         // struct value exists before `build_default_planned_runtime` takes it
         // by value.
         let milestone_sink_for_assertions = Arc::clone(&milestone_sink);
+        // E-MEMORY: derive the memory consumers through the production
+        // decision helper so an undeclared lifecycle hook is never wired here
+        // either — the same gate `build_reborn_runtime` applies.
+        let memory_consumers = self.bound_memory.as_ref().map(|(provider, lifecycle)| {
+            ironclaw_reborn_composition::memory_lifecycle_consumers(
+                Some(Arc::clone(provider)),
+                lifecycle,
+            )
+        });
+        // E-PROFILE / E-MEMORY: resolve ONE effective profile source and wire
+        // the SAME `Arc` into the runtime parts and `GroupSharedStorage` (so
+        // `user_profile_source_for_test()` reads what the runtime uses). A
+        // bound provider's declaration is authoritative, mirroring production
+        // (`runtime.rs`): ProfileRead → the provider-backed adapter; bound
+        // WITHOUT ProfileRead → `EmptyUserProfileSource` — never the group's
+        // local-dev filesystem source, which would fabricate profile reads
+        // production skips. No bound provider → the group default (HostRuntime
+        // mode: local-dev memory filesystem so `profile_set` writes read back;
+        // other backends: Empty).
+        let effective_user_profile_source: Arc<dyn HostUserProfileSource> =
+            match memory_consumers.as_ref() {
+                Some(consumers) => consumers.user_profile_source.clone().unwrap_or_else(|| {
+                    Arc::new(ironclaw_loop_host::EmptyUserProfileSource)
+                        as Arc<dyn HostUserProfileSource>
+                }),
+                None => Arc::clone(&user_profile_source),
+            };
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -1061,18 +1115,22 @@ impl RebornIntegrationGroupBuilder {
             skill_context_source: capability_recorder.skill_context_source(),
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
-            // E-PROFILE: HostRuntime mode backs this with the local-dev memory
-            // filesystem so `profile_set` writes read back; other backends fall
-            // back to `EmptyUserProfileSource`. Built as a local (not inline) so
-            // the SAME `Arc` is also stashed on `GroupSharedStorage` for a
-            // profile-round-trip test to read directly.
-            user_profile_source: Arc::clone(&user_profile_source),
-            // E-MEMORY: group tests do not yet replay the production memory
-            // context/after-turn writer lanes; wiring_parity.rs carries the
-            // explicit divergence while focused memory tests cover the runtime
-            // path directly.
-            memory_context_service: None,
-            after_turn_memory_writer: None,
+            // E-PROFILE / E-MEMORY: the ONE effective profile source (also
+            // stashed on `GroupSharedStorage`, so
+            // `user_profile_source_for_test()` reads exactly what the runtime
+            // wires).
+            user_profile_source: Arc::clone(&effective_user_profile_source),
+            // E-MEMORY: derived through the PRODUCTION lifecycle-gating helper
+            // when a bound memory provider is opted in
+            // (`with_bound_memory_provider`); `None` for every other group, so
+            // existing tests are behavior-identical. wiring_parity.rs carries
+            // the explicit divergence for the un-opted default.
+            memory_context_service: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.memory_context_service.clone()),
+            after_turn_memory_writer: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.after_turn_memory_writer.clone()),
             model_policy_guard: None,
             // C-BUDGET: production `build_default_budget_accountant` (Some only
             // for `budget_accounting()` groups; `None` otherwise, so all existing
@@ -1117,7 +1175,7 @@ impl RebornIntegrationGroupBuilder {
                 turn_store,
                 canonical_binding: base.canonical_binding,
                 capability_recorder,
-                user_profile_source,
+                user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
@@ -1420,7 +1478,9 @@ impl<'g> RebornThreadBuilder<'g> {
         if shared.real_gate_dispatch_services {
             let harness = match &shared.capability {
                 GroupCapability::HostRuntime(arc) => arc,
-                GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+                GroupCapability::Recording
+                | GroupCapability::RecordingNoProgress
+                | GroupCapability::RecordingRecoverablePortError => {
                     return Err(
                         "with_real_gate_dispatch_services requires a HostRuntime capability backend"
                             .into(),

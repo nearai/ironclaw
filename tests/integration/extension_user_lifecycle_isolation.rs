@@ -22,8 +22,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
+use ironclaw_filesystem::{Filter, Page};
 use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_host_api::{ProductSurface, ProductSurfaceCaller};
+use ironclaw_host_api::{ProductSurface, ProductSurfaceCaller, VirtualPath};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
@@ -129,6 +130,106 @@ async fn users_install_and_remove_the_same_extension_independently() {
     assert_eq!(slack["complete"], true, "admin config response: {body}");
 
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn normalized_user_memberships_survive_runtime_restart_and_soft_removal() {
+    let fixture = LifecycleIsolationFixture::new("normalized-restart").await;
+    fixture.import_fixture_extension().await;
+
+    for (name, caller) in [("Alice", fixture.alice()), ("Bob", fixture.bob())] {
+        let (status, body) = post_json(
+            fixture.member_router(caller),
+            "/api/webchat/v2/extensions/install",
+            serde_json::json!({
+                "package_ref": {"kind": "extension", "id": EXTENSION_ID},
+                "client_action_id": format!("normalized-restart-install-{name}")
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
+    }
+
+    let (status, body) = post_json(
+        fixture.member_router(fixture.alice()),
+        &format!("/api/webchat/v2/extensions/{EXTENSION_ID}/remove"),
+        serde_json::json!({"client_action_id": "normalized-restart-remove-alice"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Alice remove response: {body}");
+
+    let LifecycleIsolationFixture {
+        root,
+        runtime,
+        webui,
+        storage_root,
+        tenant_id,
+        agent_id,
+        operator_id,
+        ..
+    } = fixture;
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+
+    let rebuilt =
+        LifecycleIsolationFixture::reopen(root, storage_root, tenant_id, agent_id, operator_id)
+            .await;
+    rebuilt.assert_user_absent(rebuilt.alice()).await;
+    rebuilt.assert_user_phase(rebuilt.bob(), "active").await;
+
+    let (status, body) = post_json(
+        rebuilt.member_router(rebuilt.alice()),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": EXTENSION_ID},
+            "client_action_id": "normalized-restart-reinstall-alice"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Alice reinstall response: {body}");
+    rebuilt.assert_user_phase(rebuilt.alice(), "active").await;
+    rebuilt.assert_user_phase(rebuilt.bob(), "active").await;
+
+    let (status, body) = post_json(
+        rebuilt.member_router(rebuilt.bob()),
+        &format!("/api/webchat/v2/extensions/{EXTENSION_ID}/remove"),
+        serde_json::json!({"client_action_id": "normalized-restart-remove-bob"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Bob remove response: {body}");
+    rebuilt.assert_user_absent(rebuilt.bob()).await;
+    rebuilt.assert_user_phase(rebuilt.alice(), "active").await;
+
+    let (status, body) = post_json(
+        rebuilt.member_router(rebuilt.alice()),
+        &format!("/api/webchat/v2/extensions/{EXTENSION_ID}/remove"),
+        serde_json::json!({"client_action_id": "normalized-restart-remove-alice-final"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Alice remove response: {body}");
+    rebuilt.assert_user_absent(rebuilt.alice()).await;
+
+    let filesystem = rebuilt
+        .runtime
+        .local_dev_profile_filesystem_for_test()
+        .expect("local-dev profile filesystem");
+    for collection in ["installations", "memberships"] {
+        let rows = filesystem
+            .query(
+                &VirtualPath::new(format!("/system/extensions/.installations/v2/{collection}"))
+                    .expect("valid collection path"),
+                &Filter::All,
+                Page::first(10),
+            )
+            .await
+            .expect("normalized collection query");
+        assert!(
+            !rows.is_empty(),
+            "normalized {collection} records must remain queryable after soft removal"
+        );
+    }
+
+    rebuilt.shutdown().await;
 }
 
 #[tokio::test]

@@ -1307,14 +1307,16 @@ mod tests {
 
         match outcome {
             Resolution::Denied(denial) => {
-                // Flip consequence (§5.2.9 collapse, confirmed) — the fail-closed
-                // `hook_gate_ref_unavailable` reason_kind collapses to
-                // `DenyReason::PolicyDenied` (`deny_reason_from_kind` buckets
-                // every loop-originated reason string that is not a DenyReason
-                // tag into `PolicyDenied`), so it is no longer distinguishable
-                // from a plain hook deny. The original test's purpose — pinning
-                // the specific fail-closed reason — can no longer be met.
-                assert_eq!(denial.reason_kind, Some(DenyReason::PolicyDenied));
+                // The fail-closed gate-ref failure is an internal fault, not a
+                // policy refusal, and must not read to the model as one: there
+                // is no permission for the caller to obtain here. (This pinning
+                // was lost while `deny_reason_from_kind` bucketed every
+                // non-DenyReason-tag string into `PolicyDenied`; the explicit
+                // mapping table restores it.)
+                assert_eq!(
+                    denial.reason_kind,
+                    Some(DenyReason::InternalInvariantViolation)
+                );
                 // Sanitized hook reason is preserved on the Denial summary
                 // channel; underlying error text ("no router") must not leak.
                 assert_eq!(
@@ -1348,14 +1350,16 @@ mod tests {
 
         match outcome {
             Resolution::Denied(denial) => {
-                // Flip consequence (§5.2.9 collapse, confirmed) — the fail-closed
-                // `hook_gate_ref_unavailable` reason_kind collapses to
-                // `DenyReason::PolicyDenied` (`deny_reason_from_kind` buckets
-                // every loop-originated reason string that is not a DenyReason
-                // tag into `PolicyDenied`), so it is no longer distinguishable
-                // from a plain hook deny. The original test's purpose — pinning
-                // the specific fail-closed reason — can no longer be met.
-                assert_eq!(denial.reason_kind, Some(DenyReason::PolicyDenied));
+                // The fail-closed gate-ref failure is an internal fault, not a
+                // policy refusal, and must not read to the model as one: there
+                // is no permission for the caller to obtain here. (This pinning
+                // was lost while `deny_reason_from_kind` bucketed every
+                // non-DenyReason-tag string into `PolicyDenied`; the explicit
+                // mapping table restores it.)
+                assert_eq!(
+                    denial.reason_kind,
+                    Some(DenyReason::InternalInvariantViolation)
+                );
                 // Sanitized hook reason is preserved on the Denial summary
                 // channel; underlying error text ("no router") must not leak.
                 assert_eq!(

@@ -3,8 +3,8 @@
  *
  * All styling via Tailwind + CSS variables — no app.css classes.
  * Sizes and focus ring match the reference AppInput exactly:
- *   mobile  h-[44px] rounded-[14px] px-3.5 text-[13px]
- *   desktop h-[50px] rounded-[16px] px-4   text-sm
+ *   mobile  h-[44px] rounded-[14px] px-3.5 text-ui
+ *   desktop h-[50px] rounded-[16px] px-4   text-ui
  *
  * Exports
  *   Input       — <input> wrapper
@@ -28,9 +28,9 @@ const INPUT_BASE =
 
 /* Sizes mirroring reference AppInput */
 const INPUT_SIZES = {
-  sm: "h-9 rounded-[10px] px-3 text-[12px]",
-  md: "h-[44px] rounded-[14px] px-3.5 text-[13px] md:h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
-  lg: "h-[54px] rounded-[18px] px-4 text-base",
+  sm: "h-9 rounded-[10px] px-3 text-ui-sm",
+  md: "h-[44px] rounded-[14px] px-3.5 text-ui md:h-[50px] md:rounded-[16px] md:px-4",
+  lg: "h-[54px] rounded-[18px] px-4 text-ui-lg",
 };
 
 /* ─── Input ───────────────────────────────────────────────────────── */
@@ -67,7 +67,7 @@ export function Textarea({
       rows={rows}
       className={cn(
         INPUT_BASE,
-        "rounded-[14px] px-3.5 py-3 text-[13px] md:rounded-[16px] md:px-4 md:text-sm",
+        "rounded-[14px] px-3.5 py-3 text-ui md:rounded-[16px] md:px-4",
         "resize-y min-h-[80px]",
         error && "border-[var(--v2-danger-text)] focus:ring-[color-mix(in_srgb,var(--v2-danger-text)_28%,transparent)]",
         className
@@ -120,7 +120,7 @@ export function Label({ children, className = "", required = false, ...rest }) {
   return (
     <label
       className={cn(
-        "block text-[13px] font-medium text-[var(--v2-text-strong)] md:text-sm",
+        "block text-ui font-medium text-[var(--v2-text-strong)]",
         className
       )}
       {...rest}

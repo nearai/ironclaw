@@ -139,10 +139,16 @@ export WASM_MEMORY_LIMIT=16777216
 安装示例：
 
 ```bash
-ironclaw tool install ./my-tool.wasm
-ironclaw tool install https://example.com/tools/my-tool.wasm
-ironclaw tool list
+# 查看运行时可见的包
+ironclaw extension search
+
+# 按 id 安装
+ironclaw extension install my-tool
 ```
+
+`extension install` 只接受来自 `extension search` 的**扩展 id**，不接受文件路径或 URL。传入 `./my-tool.wasm` 或 `https://` 链接会失败。
+
+若要添加自行构建的包，请在 [Web 界面](/using/webui)的 **Extensions** 中导入打包好的归档；导入后 `extension search` 便能列出它，再按 id 安装。
 
 ---
 

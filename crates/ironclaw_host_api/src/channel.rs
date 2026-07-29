@@ -12,6 +12,9 @@ use crate::{
     VendorId,
 };
 
+const MAX_CHANNEL_COMMANDS: usize = 32;
+const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
+
 /// How external conversations map to IronClaw conversations
 /// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
 /// internal channel uses the same enum, so the workflow reasons about every
@@ -99,6 +102,10 @@ pub struct ChannelDescriptor {
     pub outbound: bool,
     /// Required: how external conversations bind (checklist MAN-10).
     pub conversation_model: ConversationModel,
+    /// Exact product command tokens exposed by this channel, without a leading
+    /// slash. Missing and empty declarations expose no product commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<ChannelIngressDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -120,6 +127,22 @@ impl ChannelDescriptor {
         }
         if self.display_name.trim().is_empty() {
             return Err(ChannelDescriptorError::EmptyDisplayName);
+        }
+        if self.commands.len() > MAX_CHANNEL_COMMANDS {
+            return Err(ChannelDescriptorError::InvalidCommands);
+        }
+        let mut seen_commands: Vec<&str> = Vec::with_capacity(self.commands.len());
+        for command in &self.commands {
+            if command.is_empty()
+                || command.len() > MAX_CHANNEL_COMMAND_NAME_BYTES
+                || !command
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                || seen_commands.contains(&command.as_str())
+            {
+                return Err(ChannelDescriptorError::InvalidCommands);
+            }
+            seen_commands.push(command);
         }
         if self.inbound && self.ingress.is_none() {
             return Err(ChannelDescriptorError::InboundWithoutIngress);
@@ -389,6 +412,10 @@ pub enum ChannelDescriptorError {
     EmptyId,
     #[error("channel display_name must not be empty")]
     EmptyDisplayName,
+    #[error(
+        "channel commands must contain at most 32 unique tokens of at most 64 bytes using lowercase ASCII letters, digits, '-', or '_'"
+    )]
+    InvalidCommands,
     #[error("an inbound channel must declare [channel.ingress]")]
     InboundWithoutIngress,
     #[error("[channel.connection] requires inbound = true")]
@@ -463,6 +490,61 @@ max_message_chars = 40000
             "{}\n\n[connection]\nprovider = \"vendor\"\nstrategy = \"web_generated_code\"\ninstructions = \"Send the displayed code.\"\nsubmit_label = \"Connect\"\nerror_message = \"Pairing failed.\"\nconnection_success_message = \"Connected.\"\ndeep_link_template = \"https://vendor.example/connect?code={{code}}\"\ninbound_code_prefixes = {prefixes}\n\n[connection.notices]\nconnect_required = \"Connect first.\"\npaired = \"Connected.\"\nalready_paired_same_user = \"Already connected.\"\nalready_bound_to_other_user = \"Connected elsewhere.\"\nexpired_or_unknown = \"Invalid code.\"\n",
             documented_channel_toml()
         )
+    }
+
+    fn channel_toml_with_commands(commands: &str) -> String {
+        documented_channel_toml().replace(
+            "conversation_model = \"continuous\"\n",
+            &format!("conversation_model = \"continuous\"\ncommands = {commands}\n"),
+        )
+    }
+
+    #[test]
+    fn channel_commands_are_exact_and_fail_closed_by_default() {
+        let missing: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        assert!(missing.commands.is_empty());
+        missing.validate().unwrap();
+
+        let explicit_empty: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_commands("[]")).unwrap();
+        assert!(explicit_empty.commands.is_empty());
+        explicit_empty.validate().unwrap();
+
+        let declared: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_commands("[\"status\"]")).unwrap();
+        assert_eq!(declared.commands, ["status"]);
+        declared.validate().unwrap();
+
+        let json = serde_json::to_string(&declared).unwrap();
+        let round_trip: ChannelDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.commands, ["status"]);
+    }
+
+    #[test]
+    fn channel_commands_validate_shape_bounds_and_uniqueness() {
+        let excessive = (0..33)
+            .map(|index| format!("command_{index}"))
+            .collect::<Vec<_>>();
+        let excessive = serde_json::to_string(&excessive).unwrap();
+        let oversized = format!("[\"{}\"]", "a".repeat(65));
+
+        for commands in [
+            "[\"status\", \"status\"]",
+            "[\"\"]",
+            "[\"/status\"]",
+            "[\"has space\"]",
+            "[\"Status\"]",
+            oversized.as_str(),
+            excessive.as_str(),
+        ] {
+            let channel: ChannelDescriptor =
+                toml::from_str(&channel_toml_with_commands(commands)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidCommands,
+                "expected invalid commands: {commands}"
+            );
+        }
     }
 
     #[test]

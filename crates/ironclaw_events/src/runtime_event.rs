@@ -209,8 +209,11 @@ struct TrustedRuntimeEventWire {
     capability_id: CapabilityId,
     #[serde(default)]
     provider: Option<ExtensionId>,
-    #[serde(default)]
-    runtime: Option<TrustedRuntimeKindWire>,
+    #[serde(
+        default,
+        deserialize_with = "ironclaw_host_api::deserialize_trusted_optional_runtime_kind"
+    )]
+    runtime: Option<RuntimeKind>,
     #[serde(default)]
     process_id: Option<ProcessId>,
     #[serde(default)]
@@ -231,28 +234,6 @@ struct TrustedRuntimeEventWire {
     hook_failure_category: Option<String>,
     #[serde(default)]
     hook_failure_disposition: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TrustedRuntimeKindWire {
-    Wasm,
-    Mcp,
-    Script,
-    FirstParty,
-    System,
-}
-
-impl From<TrustedRuntimeKindWire> for RuntimeKind {
-    fn from(value: TrustedRuntimeKindWire) -> Self {
-        match value {
-            TrustedRuntimeKindWire::Wasm => Self::Wasm,
-            TrustedRuntimeKindWire::Mcp => Self::Mcp,
-            TrustedRuntimeKindWire::Script => Self::Script,
-            TrustedRuntimeKindWire::FirstParty => Self::FirstParty,
-            TrustedRuntimeKindWire::System => Self::System,
-        }
-    }
 }
 
 impl RuntimeEventWire {
@@ -298,7 +279,7 @@ impl TrustedRuntimeEventWire {
             parent_invocation_id: self.parent_invocation_id,
             capability_id: self.capability_id,
             provider: self.provider,
-            runtime: self.runtime.map(Into::into),
+            runtime: self.runtime,
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
@@ -1439,14 +1420,22 @@ mod tests {
         );
         event.runtime = Some(RuntimeKind::System);
 
-        for runtime in ["first_party", "system"] {
+        // `Sandbox` (the container-execution lane) is folded into this table
+        // alongside `first_party`/`system`: all three are host-assigned-only
+        // runtime kinds, so the untrusted path must reject them and the
+        // trusted (durable-log replay) path must still accept them. `Sandbox`
+        // used to be its own standalone round-trip test asserting the
+        // *opposite* — that untrusted decode accepted it — back when it
+        // wasn't gated; that was the open security question this table now
+        // closes.
+        for runtime in ["first_party", "system", "sandbox"] {
             let mut wire =
                 serde_json::to_value(&event).expect("runtime event should serialize to json");
             wire["runtime"] = serde_json::Value::String(runtime.to_string());
 
             assert!(
                 serde_json::from_value::<RuntimeEvent>(wire.clone()).is_err(),
-                "untrusted runtime event serde must not accept privileged runtime kind"
+                "untrusted runtime event serde must not accept privileged runtime kind {runtime}"
             );
             let decoded =
                 runtime_event_from_trusted_json_str(&serde_json::to_string(&wire).unwrap())
@@ -1456,6 +1445,7 @@ mod tests {
                 Some(match runtime {
                     "first_party" => RuntimeKind::FirstParty,
                     "system" => RuntimeKind::System,
+                    "sandbox" => RuntimeKind::Sandbox,
                     _ => unreachable!("test table only contains privileged runtime kinds"),
                 })
             );

@@ -14,8 +14,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ConversationModel, EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    HostPortCatalog, HostPortCatalogEntry, HostPortId, PermissionMode,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorAuthRecipe,
+    HostPortCatalog, HostPortCatalogEntry, HostPortId, MemoryLifecycleHook, OriginGatePolicy,
+    PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+    VendorAuthRecipe,
 };
 
 const ACME_MANIFEST: &str =
@@ -866,12 +867,12 @@ fn resolved_contract_round_trips_through_serde() {
 }
 
 // ---------------------------------------------------------------------------
-// [memory] surface validation (#3537)
+// [memory] surface validation (#3537, lifecycle-capability contract)
 // ---------------------------------------------------------------------------
 
-/// Minimal well-formed `[memory]` manifest (the mem0-style provider-only
-/// shape: no tools, first_party runtime). Each rejection test perturbs one
-/// axis of this baseline.
+/// Minimal well-formed `[memory]` manifest (a provider-only shape: no tools,
+/// first_party runtime, the full lifecycle set). Each test perturbs one axis
+/// of this baseline.
 const MEMORY_PROVIDER_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "acme.memory"
@@ -885,18 +886,42 @@ kind = "first_party"
 service = "acme_memory_provider"
 
 [memory]
-operations = ["document_store"]
+lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]
 "#;
 
+const FULL_LIFECYCLE_LINE: &str =
+    r#"lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]"#;
+
+/// Replace the baseline's full-lifecycle line, failing loudly if the needle
+/// ever drifts from the baseline — `str::replace` with an unmatched needle is
+/// a no-op that would silently run the test against the unmodified manifest.
+fn manifest_with_lifecycle_replaced(replacement: &str) -> String {
+    assert!(
+        MEMORY_PROVIDER_MANIFEST.contains(FULL_LIFECYCLE_LINE),
+        "FULL_LIFECYCLE_LINE drifted from MEMORY_PROVIDER_MANIFEST"
+    );
+    MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, replacement)
+}
+
 #[test]
-fn memory_provider_manifest_baseline_parses() {
+fn memory_provider_manifest_baseline_parses_with_full_lifecycle() {
     let record = parse_v3(MEMORY_PROVIDER_MANIFEST).expect("memory provider manifest parses");
     let memory = record
         .resolved()
         .memory
         .as_ref()
         .expect("resolved manifest carries the [memory] descriptor");
-    assert!(!memory.operations.is_empty());
+    for hook in [
+        MemoryLifecycleHook::ReadLongTerm,
+        MemoryLifecycleHook::ReadShortTerm,
+        MemoryLifecycleHook::RecordInteraction,
+        MemoryLifecycleHook::ProfileRead,
+    ] {
+        assert!(
+            memory.declares(hook),
+            "baseline manifest must declare {hook:?}"
+        );
+    }
 }
 
 #[test]
@@ -912,26 +937,167 @@ fn memory_surface_on_non_first_party_runtime_fails_closed() {
     );
 }
 
+/// F2 regression: a provider truthfully declaring only the hooks it
+/// implements is a legal manifest. Undeclared hooks resolve as not declared.
 #[test]
-fn memory_surface_with_empty_operations_fails_closed() {
+fn memory_surface_accepts_a_lifecycle_subset() {
     let toml =
-        MEMORY_PROVIDER_MANIFEST.replace("operations = [\"document_store\"]", "operations = []");
-    let error = parse_v3(&toml).expect_err("[memory] with no operations must fail closed");
-    assert!(
-        error.contains("[memory]") && error.contains("must not be empty"),
-        "{error}"
-    );
+        manifest_with_lifecycle_replaced(r#"lifecycle = ["read_long_term", "record_interaction"]"#);
+    let record = parse_v3(&toml).expect("a lifecycle subset must parse");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(memory.declares(MemoryLifecycleHook::ReadLongTerm));
+    assert!(memory.declares(MemoryLifecycleHook::RecordInteraction));
+    assert!(!memory.declares(MemoryLifecycleHook::ReadShortTerm));
+    assert!(!memory.declares(MemoryLifecycleHook::ProfileRead));
 }
 
+/// A `[memory]` section with an empty lifecycle is a tools-only memory
+/// backend: it contributes its declared tools and participates in no
+/// host-initiated hook.
 #[test]
-fn memory_surface_without_document_store_fails_closed() {
-    let toml = MEMORY_PROVIDER_MANIFEST.replace(
-        "operations = [\"document_store\"]",
-        "operations = [\"context_retrieval\"]",
-    );
-    let error = parse_v3(&toml).expect_err("[memory] without document_store must fail closed");
+fn memory_surface_with_empty_lifecycle_is_tools_only() {
+    let toml = manifest_with_lifecycle_replaced("lifecycle = []");
+    let record = parse_v3(&toml).expect("[memory] with an empty lifecycle must parse");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(memory.lifecycle.is_empty());
+}
+
+/// `lifecycle` may be absent entirely — equivalent to an empty declaration.
+#[test]
+fn memory_surface_with_absent_lifecycle_is_tools_only() {
+    let toml = manifest_with_lifecycle_replaced("");
+    let record = parse_v3(&toml).expect("[memory] with no lifecycle key must parse");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(memory.lifecycle.is_empty());
+}
+
+/// Unknown lifecycle tokens fail closed: the vocabulary is exactly
+/// `read_long_term | read_short_term | record_interaction | profile_read`.
+#[test]
+fn memory_surface_rejects_an_unknown_lifecycle_token() {
+    let toml = manifest_with_lifecycle_replaced(r#"lifecycle = ["on_boot"]"#);
+    parse_v3(&toml).expect_err("an unknown lifecycle token must fail closed");
+}
+
+/// A memory-tool declaration under the reserved stable namespace, requesting
+/// gating the host must clamp: `ungated` on a write-effect tool that is NOT in
+/// the reviewed Ungated allowlist, plus an `ungated` product cell.
+const RESERVED_NAMESPACE_WRITE_TOOL: &str = r#"
+[[tools]]
+id = "ironclaw.memory.write"
+description = "Write persistent memory documents."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "ungated", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-write.input.v1.json"
+"#;
+
+const RESERVED_NAMESPACE_SEARCH_TOOL: &str = r#"
+[[tools]]
+id = "ironclaw.memory.search"
+description = "Search persistent memory documents."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/search.input.v1.json"
+"#;
+
+/// A `[memory]`-declaring manifest may declare tools under the reserved stable
+/// `ironclaw.memory.*` namespace even when its own extension id differs, so
+/// swapping the bound backend does not rename the model's tools. Trust-safe:
+/// `[memory]` requires a first_party runtime, which requires a host-bundled
+/// source.
+#[test]
+fn memory_provider_declares_tools_under_the_reserved_namespace() {
+    let toml = format!("{MEMORY_PROVIDER_MANIFEST}{RESERVED_NAMESPACE_SEARCH_TOOL}");
+    let record = parse_v3(&toml).expect("a [memory] manifest may declare reserved-namespace tools");
+    let ids: Vec<&str> = record
+        .manifest()
+        .capabilities
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["ironclaw.memory.search"]);
+}
+
+/// Without a `[memory]` surface the reserved namespace stays closed: the
+/// ordinary provider-prefix rule rejects a foreign `ironclaw.memory.*` id.
+#[test]
+fn reserved_memory_namespace_requires_a_memory_surface() {
+    let memory_section = format!("[memory]\n{FULL_LIFECYCLE_LINE}\n");
     assert!(
-        error.contains("[memory]") && error.contains("document_store"),
-        "{error}"
+        MEMORY_PROVIDER_MANIFEST.contains(&memory_section),
+        "[memory] section drifted from MEMORY_PROVIDER_MANIFEST"
     );
+    let toml = format!(
+        "{}{RESERVED_NAMESPACE_SEARCH_TOOL}",
+        MEMORY_PROVIDER_MANIFEST.replace(&memory_section, "")
+    );
+    let error = parse_v3(&toml)
+        .expect_err("a non-memory manifest must not declare reserved-namespace tools");
+    assert!(error.contains("provider-prefixed"), "{error}");
+}
+
+/// Requested tool gating is requested, not granted: `ungated` is a reviewed
+/// host allowlist decision, so a memory provider requesting `ungated` on a
+/// write tool (off-allowlist) — or on the product column — is clamped to
+/// `gated_unless_granted`. Declared non-`ungated` cells pass through.
+#[test]
+fn memory_tool_requesting_ungated_write_is_clamped() {
+    let toml = format!("{MEMORY_PROVIDER_MANIFEST}{RESERVED_NAMESPACE_WRITE_TOOL}");
+    let record = parse_v3(&toml).expect("the clamped manifest still parses");
+    let write = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "ironclaw.memory.write")
+        .expect("write tool declared");
+    let matrix = write
+        .origin_gate_matrix
+        .as_ref()
+        .expect("write tool carries a matrix");
+    assert_eq!(
+        matrix.loop_run,
+        OriginGatePolicy::GatedUnlessGranted,
+        "off-allowlist ungated loop_run must be clamped"
+    );
+    assert_eq!(
+        matrix.product,
+        OriginGatePolicy::GatedUnlessGranted,
+        "ungated product must be clamped (no reviewed product allowlist)"
+    );
+    assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+}
+
+/// The reviewed Ungated allowlist still applies: an allowlisted read-only
+/// memory tool keeps its requested `ungated` loop_run.
+#[test]
+fn allowlisted_memory_read_tool_keeps_ungated_loop_run() {
+    let toml = format!("{MEMORY_PROVIDER_MANIFEST}{RESERVED_NAMESPACE_SEARCH_TOOL}");
+    let record = parse_v3(&toml).expect("manifest parses");
+    let search = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "ironclaw.memory.search")
+        .expect("search tool declared");
+    let matrix = search
+        .origin_gate_matrix
+        .as_ref()
+        .expect("search tool carries a matrix");
+    assert_eq!(matrix.loop_run, OriginGatePolicy::Ungated);
 }

@@ -133,10 +133,26 @@ Now that the instance is set up and secured, install IronClaw:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 
-Then start IronClaw and follow the instructions to complete the setup:
+Run the one-time setup, then start the agent:
 
 ```bash
-ironclaw
+ironclaw onboard
+ironclaw serve
+```
+
+`onboard` prints a login link for the web interface. On a remote host, forward the port
+from your own machine rather than exposing it:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 <user>@<IP_ADDRESS>
+```
+
+Once you've confirmed it works, stop the foreground server (Ctrl-C) and run it as a
+service instead so it survives disconnects — the service runs `serve` itself, so the two
+cannot share the port:
+
+```bash
+ironclaw service install && ironclaw service start
 ```
 
 <Tip>

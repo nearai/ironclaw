@@ -18,14 +18,15 @@ use serde_json::Value;
 use super::wasm_blocking::run_wasm_prepare_blocking;
 use super::wasm_execution::{ReservationGuard, execute_prepared_wasm};
 use super::{
-    CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
-    PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
-    RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane,
-    ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress,
-    WasmError, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WitToolHost, WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    CapabilityId, DenyWasmHostHttp, DispatchError, DispatchErrorLane, ExtensionRuntime,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, InvocationServicesResolutionRequest,
+    InvocationServicesResolver, McpError, McpExecutionRequest, McpExecutor, McpInvocation,
+    NetworkObligationPolicyStore, PlannerError, PreparedWitTool, ResourceGovernor,
+    ResourceReservationId, ResourceScope, RootFilesystem, RuntimeAdapterResult,
+    RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane, ScriptError, ScriptExecutionRequest,
+    ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
+    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
+    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -1070,20 +1071,20 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
     cause: Option<String>,
 ) -> DispatchError {
-    match runtime {
-        RuntimeKind::Mcp => DispatchError::Mcp {
+    match runtime.dispatch_error_lane() {
+        DispatchErrorLane::Mcp => DispatchError::Mcp {
             kind,
             model_visible_cause: cause,
         },
-        RuntimeKind::Script => DispatchError::Script {
+        DispatchErrorLane::Script => DispatchError::Script {
             kind,
             model_visible_cause: cause,
         },
-        RuntimeKind::Wasm => DispatchError::Wasm {
+        DispatchErrorLane::Wasm => DispatchError::Wasm {
             kind,
             model_visible_cause: cause,
         },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
             kind,
             safe_summary: cause,
             detail: None,

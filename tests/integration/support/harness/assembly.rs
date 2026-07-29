@@ -87,6 +87,19 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     egress: Arc<RecordingRuntimeHttpEgress>,
     process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    // Mirror the production rule (`factory.rs`): the bound memory provider's
+    // guarded tool handler is registered exactly when its package is in the
+    // registry — `without_memory_package` (the Disabled-binding shape) gets
+    // neither the surface nor the dispatch route.
+    let mut first_party_handlers = builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?;
+    let native_memory_id = ExtensionId::new(
+        ironclaw_host_runtime::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID,
+    )?;
+    if registry.get_extension(&native_memory_id).is_some() {
+        ironclaw_host_runtime::register_native_memory_tools(&mut first_party_handlers)?;
+    }
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),
         local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
@@ -102,9 +115,7 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
         result: Ok(SecretHandle::new("github_manual_access")?),
     }))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
-        ironclaw_triggers::InMemoryTriggerRepository::default(),
-    ))?))
+    .with_first_party_capabilities(Arc::new(first_party_handlers))
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
@@ -329,6 +340,13 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
     registry.insert(builtin_first_party_package()?)?;
     registry.insert(native_memory_first_party_package()?)?;
 
+    // Package inserted above ⇒ its guarded tool handler is registered too
+    // (the production pairing from `factory.rs`).
+    let mut first_party_handlers = builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?;
+    ironclaw_host_runtime::register_native_memory_tools(&mut first_party_handlers)?;
+
     let services = HostRuntimeServices::new(
         Arc::new(registry),
         local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
@@ -338,9 +356,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_secret_store(Arc::new(SecretStore::ephemeral()))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
-        ironclaw_triggers::InMemoryTriggerRepository::default(),
-    ))?))
+    .with_first_party_capabilities(Arc::new(first_party_handlers))
     .try_with_host_http_egress(PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
         Duration::from_secs(2),
     )))

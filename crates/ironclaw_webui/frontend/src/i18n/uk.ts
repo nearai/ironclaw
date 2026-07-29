@@ -527,7 +527,7 @@ registerPack("uk", {
   "tools.description.builtin.trace_commons.credits": "Повідомити стан кредитів Trace Commons поточного користувача, баланси, кількість подань і нещодавні пояснення.",
   "tools.description.builtin.trace_commons.profile_token": "Створити короткочасне значення керування профілем Trace Commons для браузерного або ручного налаштування.",
   "tools.description.builtin.trace_commons.profile_set": "Створити або оновити публічний профіль спільноти Trace Commons поточного користувача після явної згоди.",
-  "tools.description.builtin.profile_set": "Записати приватний локальний факт про контекст агента користувача: часовий пояс, локаль або місце.",
+  "tools.description.ironclaw.memory.profile_set": "Записати приватний локальний факт про контекст агента користувача: часовий пояс, локаль або місце.",
   "tools.description.builtin.memory_search": "Шукати постійні документи памʼяті Reborn у поточній області",
   "tools.description.builtin.memory_write": "Записувати, додавати або патчити постійні документи памʼяті Reborn у поточній області",
   "tools.description.builtin.memory_read": "Читати постійний документ памʼяті Reborn у поточній області",
