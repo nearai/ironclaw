@@ -26,7 +26,15 @@ AgentLoopDriver
   -> TurnStateStore transition
 ```
 
-`LoopExit` contains references only. It must not carry raw prompts, assistant text, tool inputs, approval payloads, secrets, host paths, provider errors, stack traces, or raw runtime output. Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`, `result:`, `gate:`, `usage:`) to avoid accepting free-form payload text as evidence.
+`LoopExit` carries typed metadata, bounded host-minted references, and
+sanitized summaries; it never carries raw payloads. For example, `LoopFailed`
+contains a typed `reason_kind`, optional checkpoint and model-usage metadata,
+bounded exit/explanation references, and an optional sanitized `safe_summary`.
+It must not carry raw prompts, assistant text, tool inputs, approval payloads,
+secrets, host paths, provider errors, stack traces, or raw runtime output.
+Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`,
+`result:`, `gate:`, `usage:`) to avoid accepting free-form payload text as
+evidence.
 
 For rolling compatibility, `LoopFailed` still accepts and ignores the retired
 `diagnostic_ref` JSON field (including the historical `null` form), but never
@@ -39,7 +47,7 @@ owns this rolling-compatibility assertion, including both the historical string
 and `null` forms. Run:
 
 ```bash
-cargo test -p ironclaw_turns --lib loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
+cargo test -p ironclaw_turns --lib loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it -- --exact
 ```
 
 ---

@@ -443,8 +443,17 @@ fn recoverable_failure(
 
 fn model_diagnostic(cause: &str) -> ModelFailureDiagnostic {
     let scrubbed = ironclaw_loop_host::scrub_model_visible_detail(cause);
-    let text =
-        ModelDiagnostic::truncating(scrubbed).unwrap_or_else(|_| ModelDiagnostic::unavailable());
+    let text = ModelDiagnostic::truncating(scrubbed).unwrap_or_else(|error| {
+        // silent-ok: the model-visible diagnostic boundary fails closed to a
+        // fixed sentence rather than failing the turn. Reaching this arm means
+        // the scrub upstream did not fully sanitize, which an operator wants
+        // to see; `debug!` avoids corrupting the REPL/TUI.
+        tracing::debug!(
+            %error,
+            "model-visible diagnostic rejected after scrubbing; substituting the fixed fallback"
+        );
+        ModelDiagnostic::unavailable()
+    });
     ModelFailureDiagnostic::Diagnostic { text }
 }
 

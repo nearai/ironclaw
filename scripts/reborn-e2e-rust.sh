@@ -23,12 +23,31 @@ run_test() {
   echo "::endgroup::"
 }
 
+run_test_exact() {
+  local package="$1"
+  local test_target="$2"
+  local test_name="$3"
+  echo "::group::cargo test -p ${package} --test ${test_target} ${test_name} ${extra_args} --exact"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --test "${test_target}" "${test_name}" ${extra_args} --exact
+  echo "::endgroup::"
+}
+
 run_lib_test() {
   local package="$1"
   local test_filter="$2"
   echo "::group::cargo test -p ${package} --lib ${test_filter}"
   # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
   cargo test -p "${package}" --lib "${test_filter}" ${extra_args}
+  echo "::endgroup::"
+}
+
+run_lib_test_exact() {
+  local package="$1"
+  local test_name="$2"
+  echo "::group::cargo test -p ${package} --lib ${test_name} ${extra_args} --exact"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --lib "${test_name}" ${extra_args} --exact
   echo "::endgroup::"
 }
 
@@ -39,11 +58,11 @@ run_architecture() {
   run_test ironclaw_architecture telegram_extension_gates
   # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
   # an inline model diagnostic, and legacy omissions upgrade explicitly.
-  run_lib_test ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
-  run_lib_test ironclaw_turns run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
+  run_lib_test_exact ironclaw_turns run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
   # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
   # payloads remain readable but the retired field is never written again.
-  run_lib_test ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
+  run_lib_test_exact ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
@@ -81,7 +100,7 @@ run_runtimes() {
   run_test ironclaw_mcp mcp_dispatch_integration
   # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
   # turn: the scrubbed, bounded MCP cause reaches the next model request.
-  run_test ironclaw_reborn_integration_tests reborn_integration_mcp
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
   run_test ironclaw_processes process_dispatch_integration
   run_test ironclaw_processes process_host_contract
   run_test ironclaw_processes process_services_contract
