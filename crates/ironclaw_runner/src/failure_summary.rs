@@ -41,7 +41,13 @@ pub fn checkpoint_rejection_host_explanation_from_detail(detail: Option<&str>) -
     ) {
         return None;
     }
-    LoopSafeSummary::new(cause.to_string()).ok()?;
+    if let Err(validation_error) = LoopSafeSummary::new(cause.to_string()) {
+        tracing::debug!(
+            validation_error = %validation_error,
+            "persisted checkpoint rejection cause failed validation; using pinned fallback"
+        );
+        return None;
+    }
     Some(detail.to_string())
 }
 

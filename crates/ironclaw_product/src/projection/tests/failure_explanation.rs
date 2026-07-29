@@ -216,10 +216,6 @@ fn failure_summary_covers_reborn_failure_category_constants() {
             "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
         ),
         (
-            MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
-            "The run stopped because its configured model spend budget was exhausted. Increase the budget or start a new run.",
-        ),
-        (
             CHECKPOINT_REJECTED_CATEGORY,
             "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
