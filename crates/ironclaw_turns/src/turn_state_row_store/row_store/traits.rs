@@ -482,7 +482,7 @@ where
                 let mut pending_window = if checkpoint_critical {
                     None
                 } else {
-                    Some(self.reserve_write_behind_slot().await?)
+                    Some(self.reserve_write_behind_slot(&mut guard).await?)
                 };
                 let mut ack = self.enqueue_delta(row_store_durable_delta(delta.clone()))?;
                 if let Some(window) = pending_window.as_mut()

@@ -76,6 +76,10 @@ use ironclaw_turns::{
         BlockRunRequest, ClaimRunRequest, ClaimRunsRequest, CompleteRunRequest, FailRunRequest,
         HeartbeatRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
+    test_support::{
+        turn_state_row_store_snapshot_cache_is_initialized,
+        turn_state_row_store_snapshot_state_is_locked,
+    },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3233,6 +3237,93 @@ async fn write_behind_backpressure_bounds_the_unacked_window() {
          {surviving}/{K} durably Running"
     );
     check_internal_invariants(&snapshot).unwrap();
+}
+
+/// A fatal acknowledgement observed while reserving a full write-behind window
+/// must invalidate the accepted hot snapshot before the mutation returns. The
+/// reservation path already owns `snapshot_state`, so this also proves cleanup
+/// happens through that guard rather than deadlocking on a second lock attempt.
+#[tokio::test]
+async fn write_behind_fatal_ack_during_backpressure_clears_hot_cache() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let first_scope = scope_bp(200);
+    let second_scope = scope_bp(201);
+    let first_run = TurnRunId::new();
+    let second_run = TurnRunId::new();
+
+    {
+        let setup = open_row_store(Arc::clone(&scoped));
+        for (scope, run_id, key) in [
+            (&first_scope, first_run, "idem-fatal-reserve-first"),
+            (&second_scope, second_run, "idem-fatal-reserve-second"),
+        ] {
+            setup
+                .submit_turn(
+                    submit_request(scope.clone(), run_id, key),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+                .expect("submit setup run");
+        }
+        setup.drain().await.expect("durable setup");
+    }
+
+    let store = Arc::new(
+        TurnStateRowStore::new(Arc::clone(&scoped))
+            .with_limits(limits().set_max_pending_write_behind_deltas(1))
+            .with_apply_timeout(std::time::Duration::from_secs(2)),
+    );
+    let stall = backend.append_gate().lock_owned().await;
+    backend.fail_next_appends(1);
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(first_scope),
+        })
+        .await
+        .expect("first claim query")
+        .expect("first claim fills the pending write-behind window");
+    assert!(
+        turn_state_row_store_snapshot_cache_is_initialized(store.as_ref()).await,
+        "the accepted non-critical claim must be present in the hot cache"
+    );
+
+    let waiting_store = Arc::clone(&store);
+    let waiting = tokio::spawn(async move {
+        waiting_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(second_scope),
+            })
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !turn_state_row_store_snapshot_state_is_locked(store.as_ref()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second mutation reaches backpressure while owning snapshot state");
+
+    drop(stall);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("fatal acknowledgement unblocks the waiting mutation")
+        .expect("waiting mutation task does not panic");
+    assert!(
+        result.is_err(),
+        "the mutation reserving behind a fatal acknowledgement must fail"
+    );
+    assert!(
+        !turn_state_row_store_snapshot_cache_is_initialized(store.as_ref()).await,
+        "fatal reservation failure must invalidate the hot cache before returning"
+    );
 }
 
 /// A mutation cancelled while waiting for a full cap-one write-behind window

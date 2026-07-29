@@ -290,7 +290,7 @@ where
                 let mut pending_window = if delta_critical {
                     None
                 } else {
-                    Some(self.reserve_write_behind_slot().await?)
+                    Some(self.reserve_write_behind_slot(&mut guard).await?)
                 };
                 let mut ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
@@ -443,7 +443,7 @@ where
                 let mut pending_window = if delta_critical {
                     None
                 } else {
-                    Some(self.reserve_write_behind_slot().await?)
+                    Some(self.reserve_write_behind_slot(&mut guard).await?)
                 };
                 let mut ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,

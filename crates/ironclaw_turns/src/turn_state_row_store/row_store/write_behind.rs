@@ -11,7 +11,7 @@ use crate::TurnError;
 
 use super::{
     PendingRowCommit, TurnStateRowStore,
-    delta::SnapshotDelta,
+    delta::{RowSnapshotState, SnapshotDelta},
     journal::{DeltaAck, DeltaJournal, DeltaJournalHealth},
 };
 
@@ -117,9 +117,10 @@ where
     /// the acknowledgement pending until the retained batch succeeds. The
     /// returned guard reserves the slot through enqueue and synchronous ack
     /// tracking, so cancellation cannot lose an accepted acknowledgement.
-    pub(super) async fn reserve_write_behind_slot(
-        &self,
-    ) -> Result<MutexGuard<'_, std::collections::VecDeque<DeltaAck>>, TurnError> {
+    pub(super) async fn reserve_write_behind_slot<'a>(
+        &'a self,
+        snapshot_state: &mut Option<RowSnapshotState>,
+    ) -> Result<MutexGuard<'a, std::collections::VecDeque<DeltaAck>>, TurnError> {
         let cap = self.limits.max_pending_write_behind_deltas.max(1);
         let mut window = self.pending_write_behind.lock().await;
         while window.len() >= cap {
@@ -135,7 +136,15 @@ where
             };
             let result = DeltaJournal::await_ack_ref(front).await;
             window.pop_front();
-            result?;
+            if let Err(error) = result {
+                // Reservation runs while the caller owns `snapshot_state`.
+                // Invalidate through that existing guard: reacquiring the
+                // snapshot mutex here would self-deadlock. Retryable storage
+                // contention never resolves the retained ack with an error,
+                // so only a fatal journal generation reaches this branch.
+                self.drop_cache_if_failed_fatal(snapshot_state);
+                return Err(error);
+            }
         }
         Ok(window)
     }

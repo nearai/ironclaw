@@ -136,7 +136,12 @@ fn map_runtime_connection_error(
     error: ironclaw_libsql_runtime::LibSqlRuntimeError,
 ) -> FilesystemError {
     let reason = error.to_string();
-    tracing::debug!(%reason, "libSQL root filesystem connection checkout failed");
+    let source = format_error_source_chain(&error);
+    tracing::debug!(
+        %reason,
+        source = source.as_deref().unwrap_or("none"),
+        "libSQL root filesystem connection checkout failed"
+    );
     crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
 }
 
@@ -153,9 +158,11 @@ fn map_runtime_write_connection_error(
         }
     );
     let reason = error.to_string();
+    let source = format_error_source_chain(&error);
     tracing::debug!(
         %operation,
         %reason,
+        source = source.as_deref().unwrap_or("none"),
         retryable_admission_timeout,
         "libSQL root filesystem writer checkout failed"
     );
@@ -165,6 +172,19 @@ fn map_runtime_write_connection_error(
         crate::db::infrastructure_error(operation, reason)
     }
 }
+
+fn format_error_source_chain(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut source = error.source();
+    let mut reason = source.map(ToString::to_string)?;
+    source = source.and_then(std::error::Error::source);
+    while let Some(error) = source {
+        reason.push_str(": ");
+        reason.push_str(&error.to_string());
+        source = error.source();
+    }
+    Some(reason)
+}
+
 #[async_trait]
 impl RootFilesystem for LibSqlRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
@@ -2715,6 +2735,54 @@ mod tests {
                 operation: FilesystemOperation::Append,
             } if error_path == path
         ));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn runtime_connection_error_logs_source_but_returns_redacted_reason() {
+        const SOURCE_MARKER: &str = "connection-source-marker";
+        let error = map_runtime_connection_error(LibSqlRuntimeError::Connection {
+            operation: "open test database",
+            source: libsql::Error::SqliteFailure(14, SOURCE_MARKER.to_string()),
+        });
+
+        let FilesystemError::BackendInfrastructure { reason, .. } = error else {
+            panic!("connection failures must map to backend infrastructure errors");
+        };
+        assert!(
+            !reason.contains(SOURCE_MARKER),
+            "public filesystem errors must keep the libSQL source redacted"
+        );
+        assert!(
+            logs_contain(SOURCE_MARKER),
+            "debug diagnostics must retain the underlying libSQL source"
+        );
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn runtime_writer_error_logs_source_but_returns_redacted_reason() {
+        const SOURCE_MARKER: &str = "writer-source-marker";
+        let error = map_runtime_write_connection_error(
+            VirtualPath::new("/resources/deltas/log").unwrap(),
+            FilesystemOperation::Append,
+            LibSqlRuntimeError::Connection {
+                operation: "checkout writer",
+                source: libsql::Error::SqliteFailure(14, SOURCE_MARKER.to_string()),
+            },
+        );
+
+        let FilesystemError::BackendInfrastructure { reason, .. } = error else {
+            panic!("writer connection failures must map to backend infrastructure errors");
+        };
+        assert!(
+            !reason.contains(SOURCE_MARKER),
+            "public filesystem errors must keep the libSQL source redacted"
+        );
+        assert!(
+            logs_contain(SOURCE_MARKER),
+            "debug diagnostics must retain the underlying libSQL source"
+        );
     }
 
     /// Break caught: deleting the entry row before a later event-log cleanup

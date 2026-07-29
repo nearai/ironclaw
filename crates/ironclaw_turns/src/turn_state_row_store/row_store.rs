@@ -123,6 +123,22 @@ where
     events_index_ready: tokio::sync::OnceCell<bool>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn snapshot_cache_is_initialized_for_test<F>(store: &TurnStateRowStore<F>) -> bool
+where
+    F: RootFilesystem,
+{
+    store.snapshot_state.lock().await.is_some()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn snapshot_state_is_locked_for_test<F>(store: &TurnStateRowStore<F>) -> bool
+where
+    F: RootFilesystem,
+{
+    store.snapshot_state.try_lock().is_err()
+}
+
 struct PendingRowCommit<T> {
     value: T,
     /// `Some` only for a critical write-behind barrier that `commit_pending`
