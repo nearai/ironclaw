@@ -2162,6 +2162,78 @@ async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
 }
 
 #[tokio::test]
+async fn prompt_stage_maps_cancelled_prompt_bundle_error_to_cancelled() {
+    let host =
+        MockHost::new(Vec::new()).with_prompt_bundle_failure(AgentLoopHostErrorKind::Cancelled);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
+}
+
+#[tokio::test]
+async fn prompt_stage_redacts_rejected_prompt_error_summary() {
+    let secret = concat!("ghp_", "012345678901234567890123456789012345");
+    let host = MockHost::new(Vec::new()).with_prompt_bundle_error(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        format!("prompt construction rejected token {secret}"),
+    ));
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("rejected prompt error summary should propagate safely"),
+        Err(error) => error,
+    };
+
+    match error {
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary,
+            detail: Some(detail),
+            ..
+        } => {
+            assert_eq!(
+                safe_summary,
+                ironclaw_turns::run_profile::LoopSafeSummary::tool_failure_details_redacted()
+            );
+            assert!(detail.contains("prompt construction rejected token"));
+            assert!(detail.contains("[redacted]"));
+            assert!(!detail.contains(secret));
+        }
+        other => panic!("expected sanitized prompt diagnostics, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn capability_stage_returns_after_batch_summary() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");
     let host =

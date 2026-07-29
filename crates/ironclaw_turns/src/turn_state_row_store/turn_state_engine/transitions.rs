@@ -968,10 +968,7 @@ impl Inner {
                     let transition = record.status.set(TurnStatus::Cancelled);
                     self.apply_status_transition(transition, &record);
                     record.failure = None;
-                    clear_runner_lease(&mut record);
-                    record.event_cursor = self.next_cursor();
-                    self.release_active_lock(&record);
-                    self.remove_queued_run(record.run_id);
+                    self.release_terminal_lease(&mut record);
                     let state = record.state();
                     self.push_event(&record, TurnEventKind::Cancelled, None, None);
                     self.mark_terminal(record.run_id);

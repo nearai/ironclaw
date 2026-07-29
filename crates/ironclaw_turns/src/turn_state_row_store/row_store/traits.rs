@@ -752,16 +752,11 @@ where
         &self,
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let retired_status = match request.recovery {
-            crate::runner::RunnerFailureRecovery::Terminal => TurnStatus::Failed,
-            crate::runner::RunnerFailureRecovery::RedriveIfCheckpointless => TurnStatus::Queued,
-        };
-        self.apply_run_state_transition(
+        self.apply_run_state_transition_with_resolved_status(
             "record_runner_failure",
             request.run_id,
             request.runner_id,
             request.lease_token,
-            retired_status,
             |store| {
                 let request = request.clone();
                 async move { store.record_runner_failure(request).await }

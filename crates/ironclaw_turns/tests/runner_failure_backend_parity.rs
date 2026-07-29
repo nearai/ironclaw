@@ -11,10 +11,13 @@ use ironclaw_host_api::{
     UserId, VirtualPath,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnLeaseToken,
-    TurnRunnerId, TurnScope, TurnStateRowStore, TurnStateStore, TurnStateStoreLimits, TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CancelRunRequest, CheckpointSchemaId,
+    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnLeaseToken, TurnRunnerId, TurnScope, TurnStateRowStore,
+    TurnStateStore, TurnStateStoreLimits, TurnStatus,
+    run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ClaimRunRequest, RecordRunnerFailureRequest, RunnerFailureRecovery, TurnRunTransitionPort,
     },
@@ -52,43 +55,48 @@ async fn build_postgres_scoped() -> Option<Arc<ScopedFilesystem<PostgresRootFile
     let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .ok()?;
-    let config = url.parse::<tokio_postgres::Config>().ok()?;
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .expect("configured postgres URL must be valid");
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     let pool = deadpool_postgres::Pool::builder(manager)
         .max_size(4)
         .build()
-        .ok()?;
+        .expect("configured postgres pool must build");
     let root = Arc::new(PostgresRootFilesystem::new(pool));
-    root.run_migrations().await.ok()?;
+    root.run_migrations()
+        .await
+        .expect("configured postgres migrations must succeed");
     let unique_root = format!("/turn-redrive-test/{}", uuid::Uuid::new_v4().simple());
     let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").ok()?,
-        VirtualPath::new(unique_root).ok()?,
+        MountAlias::new("/turns").expect("static mount alias is valid"),
+        VirtualPath::new(unique_root).expect("uuid-based mount path is valid"),
         MountPermissions::read_write_list_delete(),
     )])
-    .ok()?;
+    .expect("postgres test mount view must be valid");
     Some(Arc::new(ScopedFilesystem::with_fixed_view(root, mounts)))
 }
 
-fn scope() -> TurnScope {
+fn scope(case: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("redrive-parity-tenant").unwrap(),
         Some(AgentId::new("redrive-parity-agent").unwrap()),
         Some(ProjectId::new("redrive-parity-project").unwrap()),
-        ThreadId::new("redrive-parity-thread").unwrap(),
+        ThreadId::new(format!("redrive-parity-{case}")).unwrap(),
     )
 }
 
-fn submit_request() -> SubmitTurnRequest {
+fn submit_request(case: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
-        scope: scope(),
+        scope: scope(case),
         actor: TurnActor::new(UserId::new("redrive-parity-user").unwrap()),
-        accepted_message_ref: AcceptedMessageRef::new("message-redrive-parity").unwrap(),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-redrive-parity-{case}"))
+            .unwrap(),
         source_binding_ref: SourceBindingRef::new("source-redrive-parity").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-redrive-parity").unwrap(),
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         requested_model: None,
-        idempotency_key: IdempotencyKey::new("idem-redrive-parity").unwrap(),
+        idempotency_key: IdempotencyKey::new(format!("idem-redrive-parity-{case}")).unwrap(),
         received_at: Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap(),
         requested_run_id: None,
         parent_run_id: None,
@@ -106,7 +114,7 @@ where
     let store = TurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let response = store
         .submit_turn(
-            submit_request(),
+            submit_request("bounded"),
             &AllowAllTurnAdmissionPolicy,
             &InMemoryRunProfileResolver::default(),
         )
@@ -124,7 +132,7 @@ where
         .claim_next_run(ClaimRunRequest {
             runner_id: first_runner_id,
             lease_token: first_lease_token,
-            scope_filter: Some(scope()),
+            scope_filter: Some(scope("bounded")),
         })
         .await
         .unwrap()
@@ -149,7 +157,7 @@ where
     let reopened = TurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let reopened_state = reopened
         .get_run_state(GetRunStateRequest {
-            scope: scope(),
+            scope: scope("bounded"),
             run_id,
         })
         .await
@@ -163,7 +171,7 @@ where
         .claim_next_run(ClaimRunRequest {
             runner_id: second_runner_id,
             lease_token: second_lease_token,
-            scope_filter: Some(scope()),
+            scope_filter: Some(scope("bounded")),
         })
         .await
         .unwrap()
@@ -186,10 +194,10 @@ where
     reopened.drain().await.unwrap();
     drop(reopened);
 
-    let terminal = TurnStateRowStore::new(scoped).with_limits(limits);
+    let terminal = TurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let terminal_state = terminal
         .get_run_state(GetRunStateRequest {
-            scope: scope(),
+            scope: scope("bounded"),
             run_id,
         })
         .await
@@ -201,12 +209,137 @@ where
             .claim_next_run(ClaimRunRequest {
                 runner_id: TurnRunnerId::new(),
                 lease_token: TurnLeaseToken::new(),
-                scope_filter: Some(scope()),
+                scope_filter: Some(scope("bounded")),
             })
             .await
             .unwrap()
             .is_none()
     );
+
+    let checkpointed = terminal
+        .submit_turn(
+            submit_request("checkpointed"),
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .unwrap();
+    let SubmitTurnResponse::Accepted {
+        turn_id: checkpointed_turn_id,
+        run_id: checkpointed_run_id,
+        ..
+    } = checkpointed;
+    let checkpointed_runner_id = TurnRunnerId::new();
+    let checkpointed_lease_token = TurnLeaseToken::new();
+    terminal
+        .claim_next_run(ClaimRunRequest {
+            runner_id: checkpointed_runner_id,
+            lease_token: checkpointed_lease_token,
+            scope_filter: Some(scope("checkpointed")),
+        })
+        .await
+        .unwrap()
+        .expect("checkpointed claim");
+    terminal
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: scope("checkpointed"),
+            turn_id: checkpointed_turn_id,
+            run_id: checkpointed_run_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:redrive-parity").unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(1),
+            kind: LoopCheckpointKind::BeforeModel,
+            gate_ref: None,
+        })
+        .await
+        .unwrap();
+    let checkpointed_failure = SanitizedFailure::new("host_stage_unavailable_prompt")
+        .unwrap()
+        .with_detail("safe prompt construction detail");
+    let checkpointed_state = terminal
+        .record_runner_failure(RecordRunnerFailureRequest {
+            run_id: checkpointed_run_id,
+            runner_id: checkpointed_runner_id,
+            lease_token: checkpointed_lease_token,
+            failure: checkpointed_failure.clone(),
+            recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+        })
+        .await
+        .unwrap();
+    assert_eq!(checkpointed_state.status, TurnStatus::Failed);
+    assert_eq!(
+        checkpointed_state.failure,
+        Some(checkpointed_failure.clone())
+    );
+
+    let cancelling = terminal
+        .submit_turn(
+            submit_request("cancel-requested"),
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .unwrap();
+    let SubmitTurnResponse::Accepted {
+        run_id: cancelling_run_id,
+        ..
+    } = cancelling;
+    let cancelling_runner_id = TurnRunnerId::new();
+    let cancelling_lease_token = TurnLeaseToken::new();
+    terminal
+        .claim_next_run(ClaimRunRequest {
+            runner_id: cancelling_runner_id,
+            lease_token: cancelling_lease_token,
+            scope_filter: Some(scope("cancel-requested")),
+        })
+        .await
+        .unwrap()
+        .expect("cancelling claim");
+    terminal
+        .request_cancel(CancelRunRequest {
+            scope: scope("cancel-requested"),
+            actor: TurnActor::new(UserId::new("redrive-parity-user").unwrap()),
+            run_id: cancelling_run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-redrive-parity-cancel").unwrap(),
+        })
+        .await
+        .unwrap();
+    let cancelled_state = terminal
+        .record_runner_failure(RecordRunnerFailureRequest {
+            run_id: cancelling_run_id,
+            runner_id: cancelling_runner_id,
+            lease_token: cancelling_lease_token,
+            failure: SanitizedFailure::new("host_stage_unavailable_input").unwrap(),
+            recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled_state.status, TurnStatus::Cancelled);
+    assert_eq!(cancelled_state.failure, None);
+
+    terminal.drain().await.unwrap();
+    drop(terminal);
+
+    let final_reopen = TurnStateRowStore::new(scoped).with_limits(limits);
+    let checkpointed_reopened = final_reopen
+        .get_run_state(GetRunStateRequest {
+            scope: scope("checkpointed"),
+            run_id: checkpointed_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(checkpointed_reopened.status, TurnStatus::Failed);
+    assert_eq!(checkpointed_reopened.failure, Some(checkpointed_failure));
+    let cancelled_reopened = final_reopen
+        .get_run_state(GetRunStateRequest {
+            scope: scope("cancel-requested"),
+            run_id: cancelling_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled_reopened.status, TurnStatus::Cancelled);
+    assert_eq!(cancelled_reopened.failure, None);
 }
 
 #[tokio::test]
