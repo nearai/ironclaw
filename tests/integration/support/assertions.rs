@@ -18,14 +18,60 @@
 #![allow(dead_code)]
 
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::ProcessId;
+use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_resources::ResourceGovernor;
+use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
+use ironclaw_turns::TurnRunId;
 use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+pub(crate) fn validate_process_ownership(
+    processes: &[(ProcessId, ProcessKind, Option<ProcessId>)],
+    expected_process_ids: &[ProcessId],
+) -> HarnessResult<()> {
+    for (process_id, _, _) in processes
+        .iter()
+        .filter(|(_, process_kind, _)| process_kind == &ProcessKind::AgentTurn)
+    {
+        if !expected_process_ids.contains(process_id) {
+            return Err(format!(
+                "orphan agent-turn process {process_id}; expected only {expected_process_ids:?}"
+            )
+            .into());
+        }
+    }
+
+    for expected in expected_process_ids {
+        if !processes
+            .iter()
+            .any(|(process_id, _, _)| process_id == expected)
+        {
+            return Err(format!(
+                "expected agent-turn process {expected} is missing from the process journal"
+            )
+            .into());
+        }
+    }
+
+    for (process_id, _, parent_process_id) in processes {
+        if let Some(parent_process_id) = parent_process_id
+            && !processes
+                .iter()
+                .any(|(candidate_id, _, _)| candidate_id == parent_process_id)
+        {
+            return Err(format!(
+                "orphan process {process_id} names missing parent {parent_process_id}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
 
 /// The two model-visible tool-error outcome classes a capability can surface
 /// (`CapabilityOutcome::Failed` vs `Denied`). A `Failed` and a `Denied` outcome
@@ -53,6 +99,66 @@ impl ToolErrorClass {
 }
 
 impl RebornIntegrationHarness {
+    /// Assert the process journal and capability-path resource governor agree
+    /// that every agent-turn process belongs to `expected_run_ids`, every
+    /// process parent is present, and no resource hold remains.
+    ///
+    /// Since #6696, admission/active-lock state is updated atomically with the
+    /// process snapshot rather than stored as a second reservation record.
+    /// Exact process ownership therefore replaces the retired dual-store
+    /// orphan check; capability resource holds remain a separate authority and
+    /// are read back below.
+    ///
+    /// This deliberately reads the production-composed governor rather than a
+    /// test-owned imitation. A harness that cannot expose that authority fails
+    /// loudly instead of silently weakening the invariant.
+    pub async fn assert_no_orphan_runs_or_reservations(
+        &self,
+        expected_run_ids: &[TurnRunId],
+    ) -> HarnessResult<()> {
+        let snapshots = self
+            ._shared
+            .process_system
+            .runtime()
+            .process_snapshots(&self.turn_scope.to_resource_scope())
+            .await
+            .map_err(|err| format!("read process journal snapshots: {err}"))?;
+        let expected_process_ids: Vec<_> = expected_run_ids
+            .iter()
+            .copied()
+            .map(ironclaw_turns::process_projection::process_id_from_turn_run_id)
+            .collect();
+        let process_ownership: Vec<_> = snapshots
+            .iter()
+            .map(|process| {
+                (
+                    process.process_id,
+                    process.process_kind.clone(),
+                    process.parent_process_id,
+                )
+            })
+            .collect();
+        validate_process_ownership(&process_ownership, &expected_process_ids)?;
+
+        let governor = self.capability_recorder.resource_governor().ok_or(
+            "harness does not expose its production-composed capability resource governor",
+        )?;
+        let tenant_account = ResourceAccount::tenant(self.binding.tenant_id.clone());
+        if let Some(account) = governor
+            .account_snapshot(&tenant_account)
+            .map_err(|err| format!("read capability resource account: {err}"))?
+            && account.ledger.reserved != ResourceTally::default()
+        {
+            return Err(format!(
+                "orphan capability resource reservation remains for {tenant_account:?}: {:?}",
+                account.ledger.reserved
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.
     pub async fn assert_egress_count(&self, expected: usize) -> HarnessResult<()> {
         let actual = self.captured_egress_requests().len();
