@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopExit,
     run_profile::{
-        CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopInlineMessage, LoopModelCapabilityView,
-        LoopModelMessage, LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, CompactionInitiator,
+        LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionRequest,
+        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInlineMessage,
+        LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, LoopSafeSummary,
+        SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing::debug;
@@ -756,9 +756,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
         .await
         .map_err(|error| {
             debug_host_unavailable(HostStage::Prompt, &error);
-            AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Prompt,
-            }
+            prompt_host_error(error)
         })?;
     CheckpointStage
         .emit_progress(
@@ -782,6 +780,38 @@ pub(super) async fn build_prompt_bundle_for_surface(
         rendered_reply_admission_control,
         rendered_repeated_call_warning,
     })
+}
+
+fn prompt_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return AgentLoopExecutorError::Cancelled;
+    }
+
+    let raw_summary = error.safe_summary;
+    let (safe_summary, rejected_summary_detail) = match LoopSafeSummary::new(raw_summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            debug!(
+                validation_error = %validation_error,
+                "prompt host error summary rejected; using fallback"
+            );
+            (
+                LoopSafeSummary::tool_failure_details_redacted(),
+                Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+                    raw_summary,
+                )),
+            )
+        }
+    };
+
+    AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+        stage: HostStage::Prompt,
+        kind: error.kind,
+        safe_summary,
+        reason_kind: error.reason_kind,
+        diagnostic_ref: error.diagnostic_ref,
+        detail: error.detail.or(rejected_summary_detail),
+    }
 }
 
 /// Consumes a completed compaction's pending effectiveness baseline against

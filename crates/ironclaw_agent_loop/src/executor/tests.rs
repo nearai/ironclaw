@@ -2118,8 +2118,45 @@ async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error()
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Prompt
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
+    let host =
+        MockHost::new(Vec::new()).with_prompt_bundle_failure(AgentLoopHostErrorKind::PolicyDenied);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("policy denial must stop prompt construction"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::PolicyDenied,
+            ..
         }
     ));
 }

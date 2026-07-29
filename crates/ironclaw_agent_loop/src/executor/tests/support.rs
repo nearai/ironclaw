@@ -83,7 +83,7 @@ pub(super) struct MockHost {
     fail_checkpoint_on_occurrence: Arc<Mutex<Option<(LoopCheckpointKind, usize)>>>,
     fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
-    fail_prompt_bundle: bool,
+    prompt_bundle_failure: Option<AgentLoopHostErrorKind>,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     extra_capability_descriptors: Vec<CapabilityDescriptorView>,
@@ -131,7 +131,7 @@ impl MockHost {
             fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
-            fail_prompt_bundle: false,
+            prompt_bundle_failure: None,
             fail_batch_with: Arc::new(Mutex::new(None)),
             fail_transcript_with: Arc::new(Mutex::new(None)),
             extra_capability_descriptors: Vec::new(),
@@ -213,7 +213,12 @@ impl MockHost {
     }
 
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
-        self.fail_prompt_bundle = true;
+        self.prompt_bundle_failure = Some(AgentLoopHostErrorKind::Unavailable);
+        self
+    }
+
+    pub(super) fn with_prompt_bundle_failure(mut self, kind: AgentLoopHostErrorKind) -> Self {
+        self.prompt_bundle_failure = Some(kind);
         self
     }
 
@@ -668,11 +673,8 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
         request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.prompt_requests.lock().expect("lock").push(request);
-        if self.fail_prompt_bundle {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "prompt bundle unavailable",
-            ));
+        if let Some(kind) = self.prompt_bundle_failure {
+            return Err(AgentLoopHostError::new(kind, "prompt bundle unavailable"));
         }
         let bundle = LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::for_run(&self.context, "bundle").expect("valid"),

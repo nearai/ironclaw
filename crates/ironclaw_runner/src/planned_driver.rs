@@ -22,7 +22,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
-        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId, LoopRunContext,
+        AgentLoopHostErrorKind, LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId,
+        LoopRunContext,
     },
 };
 
@@ -344,6 +345,15 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                     detail,
                 };
             }
+            if let Some(category) = permanent_host_stage_failure_category(stage, kind) {
+                let detail = detail
+                    .or_else(|| Some(safe_summary.as_str().to_string()))
+                    .map(ironclaw_loop_host::scrub_model_visible_detail);
+                return AgentLoopDriverError::Failed {
+                    reason_kind: category.to_string(),
+                    detail,
+                };
+            }
             AgentLoopDriverError::Unavailable {
                 reason: format!("{}: {safe_summary}", host_stage_name(stage)),
             }
@@ -366,6 +376,23 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             reason_kind: "interrupted_unexpectedly".to_string(),
             detail: None,
         },
+    }
+}
+
+fn permanent_host_stage_failure_category(
+    stage: HostStage,
+    kind: AgentLoopHostErrorKind,
+) -> Option<&'static str> {
+    if stage == HostStage::Model {
+        return None;
+    }
+
+    match kind {
+        AgentLoopHostErrorKind::PolicyDenied => Some(LoopFailureKind::PolicyDenied.as_str()),
+        AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::ScopeMismatch => Some("driver_invalid_request"),
+        _ => None,
     }
 }
 
@@ -727,6 +754,26 @@ mod tests {
             mapped,
             AgentLoopDriverError::Unavailable {
                 reason: format!("Prompt: {CREDENTIAL_SUMMARY}")
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_policy_denial_is_not_mapped_to_transient_unavailable() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::PolicyDenied,
+            safe_summary: LoopSafeSummary::new("explicit skill is ambiguous").expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "policy_denied".to_string(),
+                detail: Some("explicit skill is ambiguous".to_string()),
             }
         );
     }
