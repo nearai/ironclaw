@@ -179,6 +179,11 @@ where
             output_bytes: execution.output_bytes,
         })
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn bound_package_root_for_test(&self) -> Option<ironclaw_host_api::VirtualPath> {
+        Some(self.package.root.clone())
+    }
 }
 
 /// Map a lane failure onto the tool ABI. Lane errors are already redacted to

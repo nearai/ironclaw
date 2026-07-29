@@ -29,6 +29,7 @@ fn parse(toml: &str) -> ExtensionManifestRecord {
         &default_host_port_catalog().expect("default host port catalog"),
         None,
         &default_host_api_contract_registry().expect("default host api contracts"),
+        None,
     )
     .expect("first-party manifest must parse")
 }

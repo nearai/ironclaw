@@ -507,6 +507,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
         &product_extension_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
+        None,
     )
     .expect("bundled channel manifest resolves"); // safety: compile-time bundled manifest is valid.
     let admin_configuration = record.resolved().admin_configuration.clone();
@@ -660,6 +661,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
             &host_ports,
             None,
             &contracts,
+            None,
         )
         .expect("bundled channel manifest resolves") // safety: compile-time bundled manifest is valid.
         .resolved()

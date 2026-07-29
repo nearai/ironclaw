@@ -901,6 +901,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(id).expect("extension id");

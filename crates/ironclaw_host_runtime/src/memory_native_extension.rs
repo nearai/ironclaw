@@ -76,7 +76,9 @@ pub const MEM0_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_mem0/
 /// surface, schema refs, and provider-prefixed tool ids are validated by the
 /// parser.
 pub fn native_memory_manifest() -> Result<ExtensionManifestV2, ExtensionInstallationError> {
-    Ok(memory_manifest_record(NATIVE_MEMORY_MANIFEST_TOML)?
+    // No package root is being materialized here — this accessor only
+    // needs the validated manifest shape, not a bound package.
+    Ok(memory_manifest_record(NATIVE_MEMORY_MANIFEST_TOML, None)?
         .manifest()
         .clone())
 }
@@ -86,6 +88,7 @@ pub fn native_memory_manifest() -> Result<ExtensionManifestV2, ExtensionInstalla
 /// dispatches on `schema_version` (v2 or v3) and normalizes into one model.
 fn memory_manifest_record(
     toml: &str,
+    root: Option<VirtualPath>,
 ) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
     let host_ports = default_host_port_catalog().map_err(|error| {
         ExtensionInstallationError::InvalidManifest {
@@ -103,6 +106,7 @@ fn memory_manifest_record(
         &host_ports,
         None,
         &contracts,
+        root,
     )
 }
 
@@ -152,7 +156,9 @@ fn memory_provider_bundle(
     let invalid = |error: &dyn std::fmt::Display| ExtensionError::InvalidManifest {
         reason: format!("{label} memory provider package is invalid: {error}"),
     };
-    let record = memory_manifest_record(toml).map_err(|error| invalid(&error))?;
+    let root = VirtualPath::new(package_root)?;
+    let record =
+        memory_manifest_record(toml, Some(root.clone())).map_err(|error| invalid(&error))?;
     // The manifest is the single source of truth for the provider's surface:
     // a bundled provider manifest without `[memory]` is a contract break, not
     // an empty lifecycle.
@@ -166,7 +172,6 @@ fn memory_provider_bundle(
         .clone()
         .try_into()
         .map_err(|error: ExtensionError| invalid(&error))?;
-    let root = VirtualPath::new(package_root)?;
     let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())?;
     Ok(BundledMemoryProvider { package, lifecycle })
 }
@@ -328,7 +333,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn mem0_backend_manifest_is_a_valid_v3_memory_provider() {
-        let record = memory_manifest_record(MEM0_MEMORY_MANIFEST_TOML)
+        let record = memory_manifest_record(MEM0_MEMORY_MANIFEST_TOML, None)
             .expect("mem0 backend manifest must parse");
         assert_eq!(record.manifest().id.as_str(), MEM0_MEMORY_EXTENSION_ID);
         match &record.manifest().runtime {

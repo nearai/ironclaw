@@ -47,7 +47,7 @@ fn parse_v3_with_source(
     toml: &str,
     source: ManifestSource,
 ) -> Result<ExtensionManifestRecord, String> {
-    ExtensionManifestRecord::from_toml(toml, source, &catalog(), None, &contracts())
+    ExtensionManifestRecord::from_toml(toml, source, &catalog(), None, &contracts(), None)
         .map_err(|error| error.to_string())
 }
 

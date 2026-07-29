@@ -173,13 +173,16 @@ pub fn imported_extension_package(
         }
     })?;
     // Uploads are always validated as InstalledLocal. Only binary-compiled
-    // packages may claim the HostBundled trust/runtime tier.
+    // packages may claim the HostBundled trust/runtime tier. The extension id
+    // (and so the package root) is only known once the manifest is parsed,
+    // so this first pass carries no root.
     let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::InstalledLocal,
         &host_ports,
         None,
         &contracts,
+        None,
     )
     .map_err(map_binding_error)?;
     let runtime_kind = record.manifest().runtime.kind();
@@ -197,6 +200,18 @@ pub fn imported_extension_package(
     }
     let id = extension_id.as_str();
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
+    // Attach the now-known root to the resolved contract without reparsing
+    // the TOML (REC-2: `from_resolved` rebuilds from the already-validated
+    // contract).
+    let mut resolved_with_root = record.resolved().clone();
+    resolved_with_root.root = Some(root.clone());
+    let record = ExtensionManifestRecord::from_resolved(
+        record.raw_toml(),
+        ManifestSource::InstalledLocal,
+        resolved_with_root,
+        record.manifest_hash().cloned(),
+    )
+    .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, id)?;
     let manifest = record
         .manifest()
@@ -623,6 +638,7 @@ prompt_doc_ref = "prompts/run.md"
                 &host_ports,
                 None,
                 &contracts,
+                None,
             )
             .unwrap_or_else(|error| panic!("test-tools/{label} manifest must validate: {error}"));
             assert_eq!(record.manifest().runtime.kind(), RuntimeKind::Wasm);

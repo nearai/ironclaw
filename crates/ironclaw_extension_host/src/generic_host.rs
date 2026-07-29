@@ -305,8 +305,16 @@ impl ExtensionLoader for CompositionExtensionLoader {
 
         let manifest = ExtensionManifest::try_from(manifest_v2)
             .map_err(|error| load_error(format!("manifest rebuild failed: {error}")))?;
-        let root = VirtualPath::new(format!("/system/extensions/{}", ctx.extension_id))
-            .map_err(|error| load_error(format!("extension root invalid: {error}")))?;
+        // Use the package root persisted with the resolved contract when one
+        // is present. Fall back to fabricating `/system/extensions/{id}` for
+        // rows persisted before `ResolvedExtensionManifest::root` existed
+        // (back-compat with pre-existing installations) — this is the ONLY
+        // reason the fallback exists; do not remove it.
+        let root = match &ctx.resolved.root {
+            Some(root) => root.clone(),
+            None => VirtualPath::new(format!("/system/extensions/{}", ctx.extension_id))
+                .map_err(|error| load_error(format!("extension root invalid: {error}")))?,
+        };
         let package = ExtensionPackage::from_manifest(manifest, root)
             .map_err(|error| load_error(format!("package rebuild failed: {error}")))?;
         let adapter = self
@@ -421,6 +429,11 @@ impl ToolAdapter for SettlingToolAdapter {
                 Err(error)
             }
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn bound_package_root_for_test(&self) -> Option<VirtualPath> {
+        self.inner.bound_package_root_for_test()
     }
 }
 
@@ -596,6 +609,7 @@ input_schema_ref = "schemas/echo.input.json"
             &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest resolves");
         let extension_id = ExtensionId::new(id).expect("extension id");

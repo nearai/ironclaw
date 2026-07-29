@@ -1478,6 +1478,20 @@ impl RebornRuntime {
         Some(self.extension_management.installation_store_for_test())
     }
 
+    /// The package root actually bound into the active tool adapter for
+    /// `extension_id` — reads through the live `ExtensionHost` snapshot
+    /// rather than re-deriving anything, so it proves what the loader used,
+    /// not what a test expects it to have used.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn extension_bound_package_root_for_test(
+        &self,
+        extension_id: &str,
+    ) -> Option<ironclaw_host_api::VirtualPath> {
+        let host = self.extension_management.generic_host()?;
+        let active = host.snapshot_watch().current().extension(extension_id)?;
+        active.tools.as_ref()?.bound_package_root_for_test()
+    }
+
     /// Test-only caller for the production lifecycle install path used by the
     /// WebUI/product facade. This keeps whole-runtime channel tests on the real
     /// catalog, installation store, and generic-host publication path.
