@@ -20,7 +20,7 @@ use ironclaw_turns::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecoverExpiredLeasesResponse, RunnerFailureRecovery, TurnRunTransitionPort,
     },
 };
 
@@ -644,6 +644,7 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
                     runner_id: request.runner_id,
                     lease_token: request.lease_token,
                     failure,
+                    recovery: RunnerFailureRecovery::Terminal,
                 })
                 .await
             }

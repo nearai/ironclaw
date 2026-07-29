@@ -2291,7 +2291,7 @@ pub(crate) async fn build_libsql_root(
             .await
             .map_err(display_err)?,
     );
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).map_err(display_err)?);
     filesystem.run_migrations().await.map_err(display_err)?;
     Ok((filesystem, redact_libsql_path(&path)))
 }

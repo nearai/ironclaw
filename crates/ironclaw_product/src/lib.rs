@@ -104,18 +104,18 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
-pub use command_admission::DirectConversationCommandAdmission;
+pub use command_admission::{CommandActorRoleResolver, DirectConversationCommandAdmission};
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     RejectingProductCommandAdmissionService,
 };
 pub use commands::{
-    CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    CommandAudience, CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
     ProductModelCommandInput, ProductStatusCommandInput, UnknownProductCommandName,
-    command_help_text, declared_command_help_text, product_command_descriptors,
-    render_command_result_text, validate_declared_product_command,
+    declared_command_help_text, product_command_descriptors, render_command_result_text,
+    required_audience, validate_declared_product_command,
 };
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,

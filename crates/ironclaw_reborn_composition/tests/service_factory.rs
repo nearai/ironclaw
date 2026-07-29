@@ -26,6 +26,9 @@ use ironclaw_host_runtime::{
     SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
+use ironclaw_reborn_composition::test_support::{
+    libsql_host_bindings_for_test, libsql_host_bindings_with_resolved_secret_master_key_for_test,
+};
 use ironclaw_reborn_composition::{
     RebornBuildError, RebornCompositionProfile, RebornRuntime, RebornRuntimeError,
     RebornRuntimeInput,
@@ -829,14 +832,15 @@ async fn production_defaults_first_party_trust_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
         .with_runtime_process_binding(test_sandbox_process_binding()),
@@ -859,14 +863,15 @@ async fn production_requires_process_binding_for_defaulted_first_party_trust_pol
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
@@ -890,14 +895,15 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_vendor_oauth_client(
             "google",
             ironclaw_reborn_composition::OAuthClientConfig {
@@ -927,14 +933,15 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -991,14 +998,15 @@ async fn production_rejects_empty_trust_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(empty_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1023,14 +1031,15 @@ async fn production_self_mints_turn_wake_wiring() {
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_runtime_process_binding(test_sandbox_process_binding()),
@@ -1051,14 +1060,15 @@ async fn production_requires_runtime_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_turn_run_wake_notifier(notifier),
     )
@@ -1082,14 +1092,15 @@ async fn production_rejects_local_only_runtime_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(local_only_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1167,7 +1178,7 @@ async fn production_rejects_memory_libsql_event_store() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1175,6 +1186,7 @@ async fn production_rejects_memory_libsql_event_store() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1204,13 +1216,14 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql_with_resolved_secret_master_key(
+        libsql_host_bindings_with_resolved_secret_master_key_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1290,18 +1303,20 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     let dir = tempfile::tempdir().unwrap();
-    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let database_path = dir.path().join("reborn.db");
+    let db = libsql_db_at(database_path.clone()).await;
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            database_path.to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1321,18 +1336,20 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 #[tokio::test]
 async fn production_libsql_services_migrate_trigger_repository_before_runtime_injection() {
     let dir = tempfile::tempdir().unwrap();
-    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let database_path = dir.path().join("reborn.db");
+    let db = libsql_db_at(database_path.clone()).await;
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             Arc::clone(&db),
-            dir.path().join("events.db").to_string_lossy(),
+            database_path.to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1548,14 +1565,15 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(hosted_secure_default_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1582,14 +1600,15 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1650,14 +1669,15 @@ async fn migration_dry_run_validates_libsql_shape() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1692,14 +1712,15 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),

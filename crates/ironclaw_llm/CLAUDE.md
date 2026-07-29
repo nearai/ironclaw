@@ -244,6 +244,12 @@ Raw provider
   → RecordingLlm            (trace capture; only when IRONCLAW_RECORD_TRACE is set)
 ```
 
+Host-managed requests with an explicit fallback index dispatch through the
+same routing/failover stack but use the equivalent single-attempt provider for
+that selected route. The agent loop owns retry and fallback advancement for
+those requests, preventing an inner `RetryProvider` from duplicating a vendor
+call before recovery can advance the ordered chain.
+
 `build_provider_chain()` also returns a separate standalone cheap LLM provider (for heartbeat/evaluation tasks — not part of the decorator chain).
 
 ## reasoning.rs Contents

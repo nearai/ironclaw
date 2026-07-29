@@ -51,6 +51,110 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
 }
 
 #[tokio::test]
+async fn local_dev_libsql_trigger_repository_uses_the_filesystem_writer_lane() {
+    let root = tempfile::tempdir().expect("local-dev root");
+    let mut composite = CompositeRootFilesystem::new();
+    let backend = build_default_local_dev_database_roots(root.path(), &mut composite)
+        .await
+        .expect("build local-dev libsql roots");
+    let DurableBackend::LibSql {
+        runtime,
+        filesystem,
+    } = backend
+    else {
+        panic!("local-dev default backend must be libsql");
+    };
+
+    let held_writer = runtime.write().await.expect("hold shared writer lane");
+    let repository_runtime = Arc::clone(&runtime);
+    let repository_filesystem = Arc::clone(&filesystem);
+    let mut repository_build = tokio::spawn(async move {
+        local_dev_trigger_repository(&DurableBackend::LibSql {
+            runtime: repository_runtime,
+            filesystem: repository_filesystem,
+        })
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut repository_build)
+            .await
+            .is_err(),
+        "trigger migrations must queue behind the filesystem's sole writer lane"
+    );
+    drop(held_writer);
+    tokio::time::timeout(std::time::Duration::from_secs(1), repository_build)
+        .await
+        .expect("trigger repository resumes after writer release")
+        .expect("trigger repository task")
+        .expect("trigger repository build");
+}
+
+#[tokio::test]
+async fn production_libsql_event_log_uses_the_composition_runtime_writer_lane() {
+    let dir = tempfile::tempdir().expect("production libsql root");
+    let database_path = dir.path().join("reborn.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(database_path.display().to_string())
+            .build()
+            .await
+            .expect("build production libsql database"),
+    );
+    let runtime =
+        Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
+    let services = build_runtime_substrate(
+        crate::test_support::libsql_host_bindings_from_runtime_for_test(
+            RebornCompositionProfile::Production,
+            "shared-runtime-owner",
+            Arc::clone(&runtime),
+            database_path.display().to_string(),
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::AuditMode::Standard,
+        }),
+    )
+    .await
+    .expect("build production libsql services");
+
+    let held_writer = runtime.write().await.expect("hold composition writer lane");
+    let event_log = Arc::clone(&services.event_log);
+    let mut event_append = Box::pin(
+        event_log.append(ironclaw_events::RuntimeEvent::dispatch_requested(
+            ResourceScope::local_default(
+                UserId::new("shared-runtime-owner").expect("event owner"),
+                InvocationId::new(),
+            )
+            .expect("event resource scope"),
+            CapabilityId::new("test.shared-runtime").expect("event capability"),
+        )),
+    );
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut event_append)
+            .await
+            .is_err(),
+        "production event append must queue behind the composition runtime's writer lane"
+    );
+    drop(held_writer);
+    tokio::time::timeout(std::time::Duration::from_secs(1), event_append)
+        .await
+        .expect("event append resumes after writer release")
+        .expect("event append succeeds");
+}
+
+#[tokio::test]
 async fn production_store_bundle_new_validates_runtime_storage_before_store_assembly() {
     let filesystem = empty_composite_filesystem();
     let error = match ProductionStoreBundle::new(
@@ -1564,19 +1668,21 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
             .await
             .expect("build libsql database"),
     );
-    let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+    let assertion_filesystem =
+        LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("configured-owner").expect("owner");
     let tenant = TenantId::new("configured-tenant").expect("tenant");
     let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
     let services = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_local_runtime_identity(tenant.clone(), agent.clone())
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
@@ -1679,17 +1785,19 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
             .await
             .expect("build libsql database"),
     );
-    let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+    let assertion_filesystem =
+        LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("default-owner").expect("owner");
     let services = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
@@ -1798,14 +1906,15 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
     );
 
     let result = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "",
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
