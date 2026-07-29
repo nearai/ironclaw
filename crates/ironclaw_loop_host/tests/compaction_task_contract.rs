@@ -679,6 +679,47 @@ async fn compaction_port_rejects_private_key_begin_delimiter_split_across_messag
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_private_key_end_delimiter_split_across_messages() {
+    let fixture = CompactionFixture::new().await;
+    fixture
+        .append_user(concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "FIRST_PRIVATE_KEY_FRAGMENT\n",
+            "-----END RSA"
+        ))
+        .await;
+    fixture.append_user(" PRIVATE KEY-----\nafter").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect_err("private-key END delimiters spanning messages must fail closed");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(inference.last_input().is_empty());
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
+}
+
+#[tokio::test]
 async fn compaction_port_redacts_unterminated_private_key_span_across_later_messages() {
     let fixture = CompactionFixture::new().await;
     fixture

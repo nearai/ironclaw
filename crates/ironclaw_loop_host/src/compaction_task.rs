@@ -956,9 +956,14 @@ fn is_unterminated_private_key_boundary_match(
     }
 
     !matched.match_indices("-----END").any(|(offset, _)| {
-        offset >= boundary_offset
-            && parse_private_key_label(&matched[offset..], "-----END")
-                .is_some_and(|(end_label, _)| end_label == begin_label)
+        parse_private_key_label(&matched[offset..], "-----END").is_some_and(
+            |(end_label, end_marker_end)| {
+                end_label == begin_label
+                    && offset
+                        .checked_add(end_marker_end)
+                        .is_some_and(|end| end > boundary_offset)
+            },
+        )
     })
 }
 
