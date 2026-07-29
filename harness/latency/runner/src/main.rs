@@ -344,10 +344,16 @@ async fn open_backend(
         BackendName::Libsql => {
             let dir = tempfile::tempdir()?;
             let db_path = dir.path().join("latency-libsql.db");
-            let db = Arc::new(libsql::Builder::new_local(db_path).build().await?);
-            let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+            let runtime = Arc::new(
+                ironclaw_libsql_runtime::LibSqlRuntime::open(
+                    db_path.display().to_string(),
+                    None,
+                )
+                .await?,
+            );
+            let fs = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
             fs.run_migrations().await?;
-            let trigger_repository = LibSqlTriggerRepository::new(db);
+            let trigger_repository = LibSqlTriggerRepository::from_runtime(runtime);
             trigger_repository.run_migrations().await?;
             let turn_state = filesystem_turn_state_store(Arc::clone(&fs), backend, None)?;
             let control_plane = control_plane_stores(Arc::clone(&fs));

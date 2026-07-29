@@ -2173,10 +2173,119 @@ async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error()
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Prompt
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            ..
         }
     ));
+}
+
+#[tokio::test]
+async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
+    let host =
+        MockHost::new(Vec::new()).with_prompt_bundle_failure(AgentLoopHostErrorKind::PolicyDenied);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("policy denial must stop prompt construction"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::PolicyDenied,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn prompt_stage_maps_cancelled_prompt_bundle_error_to_cancelled() {
+    let host =
+        MockHost::new(Vec::new()).with_prompt_bundle_failure(AgentLoopHostErrorKind::Cancelled);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
+}
+
+#[tokio::test]
+async fn prompt_stage_redacts_rejected_prompt_error_summary() {
+    let secret = concat!("ghp_", "012345678901234567890123456789012345");
+    let host = MockHost::new(Vec::new()).with_prompt_bundle_error(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        format!("prompt construction rejected token {secret}"),
+    ));
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("rejected prompt error summary should propagate safely"),
+        Err(error) => error,
+    };
+
+    match error {
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary,
+            detail: Some(detail),
+            ..
+        } => {
+            assert_eq!(
+                safe_summary,
+                ironclaw_turns::run_profile::LoopSafeSummary::tool_failure_details_redacted()
+            );
+            assert!(detail.contains("prompt construction rejected token"));
+            assert!(detail.contains("[redacted]"));
+            assert!(!detail.contains(secret));
+        }
+        other => panic!("expected sanitized prompt diagnostics, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -4192,6 +4301,54 @@ async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
 }
 
 #[tokio::test]
+async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evidence() {
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(1),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("fallback retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 1);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 1);
+}
+
+#[tokio::test]
+async fn model_unavailable_without_fallback_evidence_retries_the_current_route() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("same-route availability retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 0);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 0);
+}
+
+#[tokio::test]
 async fn failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first() {
     // Vehicle: iteration-limit abort. The retired capability `Permanent` kind
     // merged into model-visible `OperationFailed` under the unified
@@ -5237,10 +5394,18 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    executor
-        .execute_family(&crate::families::default(), &host, state)
+    let exit = executor
+        .execute_family(
+            &family_requiring_structured_capability_observation(),
+            &host,
+            state,
+        )
         .await
         .expect("execute");
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the real caller must feed the strategy the same structured observation it appends"
+    );
 
     let appended = host.appended_result_refs();
     assert_eq!(appended.len(), 1);

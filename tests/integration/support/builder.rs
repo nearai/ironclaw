@@ -29,7 +29,7 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
     RuntimeHttpEgressRequest, UserId, VirtualPath,
 };
 use ironclaw_llm::Role;
@@ -156,6 +156,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
     /// today's behavior byte-for-byte.
     tool_disclosure: Option<ToolDisclosureMode>,
+    /// #5647 RED-pin seam: pass-through to
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
+    narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -279,6 +282,13 @@ impl RebornIntegrationHarnessBuilder {
     /// provider-error mapping (E-GATEWAY seam, C-ERRORS).
     pub fn fail_model_auth(mut self) -> Self {
         self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
+        self
+    }
+
+    /// Fail the primary vendor route as unavailable and let the real loop
+    /// recovery and provider chain advance to scripted fallback index one.
+    pub fn advance_fallback_after_unavailable(mut self) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvance;
         self
     }
 
@@ -413,6 +423,22 @@ impl RebornIntegrationHarnessBuilder {
     /// env-resolution path alone is not control-safe.
     pub fn with_tool_disclosure_off(mut self) -> Self {
         self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self
+    }
+
+    /// #5647 RED-pin seam: pass-through to
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`.
+    /// Only takes effect when paired with `.with_tool_disclosure_bridged()` —
+    /// see that method's docs for the fail-fast guard on misuse.
+    pub fn with_narrowed_capability_allow_set_for_bridged_test(
+        mut self,
+        ids: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.narrowed_bridged_allow_set = Some(
+            ids.into_iter()
+                .map(|id| CapabilityId::new(id).expect("test capability id must be valid"))
+                .collect(),
+        );
         self
     }
 
@@ -639,6 +665,9 @@ impl RebornIntegrationHarnessBuilder {
             }
             None => {}
         }
+        if let Some(ids) = self.narrowed_bridged_allow_set {
+            group_builder = group_builder.with_narrowed_capability_allow_set_for_bridged_test(ids);
+        }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
         }
@@ -711,6 +740,9 @@ pub struct RebornIntegrationHarness {
     /// Requests captured by the recoverable-failure provider wrapper before it
     /// either injects a failure or delegates to `scripted_llm`.
     pub(crate) model_provider_call_probe: Option<ModelProviderCallProbe>,
+    /// Primary/fallback route calls captured at the two scripted vendor seams.
+    pub(crate) fallback_provider_call_probe:
+        Option<super::scripted_provider::FallbackProviderCallProbe>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -767,6 +799,7 @@ impl RebornIntegrationHarness {
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
             tool_disclosure: None,
+            narrowed_bridged_allow_set: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -2121,7 +2154,10 @@ async fn reopen_fresh_libsql_composite(
             .await
             .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(
+        LibSqlRootFilesystem::new(db)
+            .map_err(|e| format!("failed to build libsql runtime for reopen: {e}"))?,
+    );
     // Migrations are idempotent — the schema already exists from `build()`.
     fresh_fs
         .run_migrations()

@@ -78,17 +78,19 @@ pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, 
 
 pub(super) fn model_preference_to_host(
     preference: ModelPreference,
-) -> Result<Option<ironclaw_turns::ModelProfileId>, AgentLoopExecutorError> {
+) -> Result<(Option<ironclaw_turns::ModelProfileId>, u32), AgentLoopExecutorError> {
     match preference {
-        ModelPreference::Primary => Ok(None),
+        ModelPreference::Primary => Ok((None, 0)),
+        ModelPreference::Fallback { index } if index > 0 => Ok((None, index)),
         ModelPreference::Fallback { .. } => Err(AgentLoopExecutorError::PlannerContract {
-            detail: "fallback model preference requires model route chain support",
+            detail: "fallback model preference index must be nonzero",
         }),
     }
 }
 
 pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
     match error.kind {
+        AgentLoopHostErrorKind::RateLimited => Some(ModelErrorClass::Transient),
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
@@ -181,6 +183,7 @@ pub(super) fn model_recovery_class(class: ModelErrorClass) -> LoopRecoveryClass 
 pub(super) fn capability_port_error_is_terminal(kind: AgentLoopHostErrorKind) -> bool {
     match kind {
         AgentLoopHostErrorKind::Cancelled
+        | AgentLoopHostErrorKind::RateLimited
         | AgentLoopHostErrorKind::Unavailable
         | AgentLoopHostErrorKind::Internal
         | AgentLoopHostErrorKind::BudgetExceeded
@@ -357,12 +360,12 @@ pub(super) fn sanitized_strategy_summary_or_fallback(
     }
 }
 
-pub(super) fn honor_retry_alteration(
+pub(super) fn honor_capability_retry_alteration(
     alteration: Option<&RetryAlteration>,
 ) -> Result<(), AgentLoopExecutorError> {
     if matches!(alteration, Some(RetryAlteration::AdvanceFallback)) {
         return Err(AgentLoopExecutorError::PlannerContract {
-            detail: "fallback model route alteration requires model route chain support",
+            detail: "fallback advancement is valid only for model recovery",
         });
     }
     Ok(())
@@ -380,6 +383,23 @@ mod tests {
         assert_eq!(
             capability_error_to_failure_kind(FailureKind::InputEncode),
             LoopFailureKind::ModelError
+        );
+    }
+
+    #[test]
+    fn fallback_model_preference_maps_to_ordered_host_index() {
+        assert_eq!(
+            model_preference_to_host(ModelPreference::Primary).expect("primary"),
+            (None, 0)
+        );
+        assert_eq!(
+            model_preference_to_host(ModelPreference::Fallback { index: 2 })
+                .expect("configured fallback"),
+            (None, 2)
+        );
+        assert!(
+            model_preference_to_host(ModelPreference::Fallback { index: 0 }).is_err(),
+            "fallback zero aliases primary and must be rejected as a planner bug"
         );
     }
 
@@ -497,6 +517,7 @@ mod tests {
 
         let class_for = |kind: K| model_error_class(&AgentLoopHostError::new(kind, "test"));
         let cases: &[(K, Option<C>)] = &[
+            (K::RateLimited, Some(C::Transient)),
             (K::Unavailable, Some(C::Unavailable)),
             (K::Internal, Some(C::Internal)),
             (K::InvalidOutput, Some(C::InvalidOutput)),

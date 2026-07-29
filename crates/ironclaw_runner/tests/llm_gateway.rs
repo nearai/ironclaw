@@ -11,8 +11,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
-    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
+    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
@@ -2941,6 +2941,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             }],
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2990,6 +2991,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3053,6 +3055,46 @@ async fn gateway_sanitizes_provider_errors() {
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
     assert!(!error.safe_summary.contains("RAW_PROVIDER_SECRET"));
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
+}
+
+#[tokio::test]
+async fn gateway_preserves_exhausted_fallback_as_unavailable_without_provider_call() {
+    let provider = Arc::new(RecordingLlmProvider::reply("must not be called"));
+    let failover = Arc::new(
+        FailoverProvider::new(vec![provider.clone() as Arc<dyn LlmProvider>])
+            .expect("single-provider failover chain"),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        failover,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.fallback_index = 1;
+
+    let error = gateway
+        .stream_model(request)
+        .await
+        .expect_err("fallback index one is absent");
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "configured model fallback route is unavailable"
+    );
+    assert!(
+        error
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("host-selected-model")),
+        "the typed route failure must retain its safe model identity"
+    );
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        0,
+        "fallback exhaustion must be decided before provider dispatch"
+    );
 }
 
 #[tokio::test]
@@ -3742,6 +3784,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
         inline_messages,
         surface_version: None,
         model_preference,
+        fallback_index: 0,
         capability_view: None,
     }
 }
@@ -3865,6 +3908,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
             },
         ],
         surface_version: None,
+        fallback_index: 0,
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),

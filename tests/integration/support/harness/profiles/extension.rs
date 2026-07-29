@@ -203,19 +203,18 @@ fn visibility_probe_package() -> HarnessResult<(
     ironclaw_extensions::ExtensionPackage,
     ironclaw_extensions::ResolvedExtensionManifest,
 )> {
+    let root = ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
+        Some(root.clone()),
     )?;
     let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
     Ok((
-        ironclaw_extensions::ExtensionPackage::from_manifest(
-            manifest,
-            ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
-        )?,
+        ironclaw_extensions::ExtensionPackage::from_manifest(manifest, root)?,
         record.resolved().clone(),
     ))
 }

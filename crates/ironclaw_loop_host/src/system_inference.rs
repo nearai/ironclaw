@@ -151,6 +151,7 @@ where
                 },
             ],
             surface_version: None,
+            fallback_index: 0,
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,

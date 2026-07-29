@@ -176,6 +176,7 @@ prompt_doc_ref = "prompts/do.md"
         &ironclaw_host_api::HostPortCatalog::empty(),
         Some(manifest_hash("sha256:plain")),
         &contracts,
+        None,
     )
     .unwrap();
     let plain_install = ExtensionInstallation::new(

@@ -89,12 +89,25 @@ pub struct CancelRunCompletionRequest {
     pub lease_token: TurnLeaseToken,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerFailureRecovery {
+    /// Preserve the existing runner-failure behavior and terminalize the run.
+    #[default]
+    Terminal,
+    /// Re-queue the same run only when it has not recorded any loop checkpoint
+    /// and remains below the store's bounded crash-recovery claim limit.
+    RedriveIfCheckpointless,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordRunnerFailureRequest {
     pub run_id: TurnRunId,
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
     pub failure: SanitizedFailure,
+    #[serde(default)]
+    pub recovery: RunnerFailureRecovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

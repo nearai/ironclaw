@@ -940,15 +940,16 @@ async fn build_admin_harness_production() -> AdminHarness {
             .await
             .expect("libsql db"),
     );
-    let events = root.path().join("events.db").to_string_lossy().to_string();
-    let build_input = RebornHostBindings::libsql(
+    let database_path = root.path().join("reborn.db").to_string_lossy().to_string();
+    let build_input = ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
         RebornCompositionProfile::Production,
         OPERATOR_USER,
         db,
-        events,
+        database_path,
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )
+    .expect("libSQL bindings")
     .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
     .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(

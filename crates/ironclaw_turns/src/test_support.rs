@@ -55,3 +55,25 @@ pub fn scoped_turns_filesystem<F: RootFilesystem>(backend: Arc<F>) -> Arc<Scoped
     .expect("turns mount view");
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
+
+/// Whether a row store currently retains an initialized hot snapshot.
+///
+/// This is test-only observability for cache invalidation regressions.
+pub async fn turn_state_row_store_snapshot_cache_is_initialized<F>(
+    store: &TurnStateRowStore<F>,
+) -> bool
+where
+    F: RootFilesystem,
+{
+    crate::turn_state_row_store::snapshot_cache_is_initialized_for_test(store).await
+}
+
+/// Whether a row-store mutation currently owns the snapshot-state lock.
+///
+/// This is test-only synchronization for deterministic backpressure tests.
+pub fn turn_state_row_store_snapshot_state_is_locked<F>(store: &TurnStateRowStore<F>) -> bool
+where
+    F: RootFilesystem,
+{
+    crate::turn_state_row_store::snapshot_state_is_locked_for_test(store)
+}

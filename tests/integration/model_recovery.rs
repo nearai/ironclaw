@@ -10,9 +10,43 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
+use ironclaw_turns::TurnEventKind;
+use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
+
+#[tokio::test]
+async fn provider_outage_advances_real_fallback_chain_and_persists_reply() {
+    let harness = RebornIntegrationHarness::test_default()
+        .storage(StorageMode::LibSql)
+        .with_turn_event_sink()
+        .advance_fallback_after_unavailable()
+        .script([RebornScriptedReply::text("fallback recovered the turn")])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("recover through the configured provider fallback")
+        .await
+        .expect("whole turn completes through fallback index one");
+    harness
+        .assert_ordered_fallback_vendor_calls()
+        .await
+        .expect("primary is called once and fallback index one is authoritative");
+    harness
+        .assert_reply_persists_after_reopen("fallback recovered the turn")
+        .await
+        .expect("final fallback reply survives a fresh libSQL connection");
+    harness
+        .assert_turn_event_recorded(TurnEventKind::Completed)
+        .await
+        .expect("the recovered turn emits its durable completed event");
+    harness
+        .assert_no_turn_event_recorded(TurnEventKind::Failed)
+        .await
+        .expect("the recoverable primary outage emits no false terminal failure");
+}
 
 #[tokio::test]
 async fn content_filtered_completion_recovers_with_model_visible_observation() {

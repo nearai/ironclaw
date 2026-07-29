@@ -493,6 +493,7 @@ app_id = "/app_id"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new("acmechat").expect("extension id");
