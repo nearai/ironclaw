@@ -41,7 +41,7 @@ pub(super) struct RunSlotInfo<'a> {
 ///
 /// `Inner` holds exactly one `ConcurrencyLimiter` field instead of the two
 /// scattered maps (`running_by_user`, `running_by_origin_class`) plus helpers.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(super) struct ConcurrencyLimiter {
     limits: Option<ConcurrencyLimits>,
     running_by_user: HashMap<(TenantId, UserId), u32>,

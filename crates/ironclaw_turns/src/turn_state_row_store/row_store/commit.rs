@@ -59,14 +59,11 @@ where
         Ok(false)
     }
 
-    /// Capture an isolated mutation baseline and any targeted runner-lease
-    /// overlay input from the last accepted hot state.
+    /// Capture runner-lease overlay inputs from the accepted hot state.
     ///
-    /// Mutations must never receive the accepted cached engine itself: an
-    /// outer timeout can cancel the future after it has changed that engine
-    /// but before the mutation is accepted, allowing a queued waiter to
-    /// observe speculative state. The targeted-delta path still avoids a full
-    /// post-mutation snapshot diff; only the mutation engine is forked.
+    /// The common `None`/`Run` cases preserve the O(1) cached-engine path. The
+    /// caller retains `snapshot_state` across timeout cancellation and cache
+    /// repair, so a queued waiter cannot observe speculative in-place state.
     fn overlay_inputs(
         state: &RowSnapshotState,
         overlay: RunnerLeaseOverlay,
@@ -94,7 +91,7 @@ where
                 .await?;
             Ok(Arc::new(self.build_in_memory_store(overlaid_snapshot)?))
         } else {
-            let store = Arc::new(cached_store.fork_for_speculative_mutation());
+            let store = cached_store;
             if let Some(run) = overlay_run {
                 let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
                 store.overlay_runner_lease_record(overlaid)?;
@@ -114,8 +111,16 @@ where
         T: Send,
     {
         self.ensure_mutation_admitted().await?;
+        let deadline = tokio::time::Instant::now() + self.apply_timeout;
+        let mut guard = match tokio::time::timeout_at(deadline, self.snapshot_state.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(TurnError::Unavailable {
+                    reason: "turn state row-store apply timed out".to_string(),
+                });
+            }
+        };
         let critical = async {
-            let mut guard = self.snapshot_state.lock().await;
             let mut refreshed_after_stale_error = false;
             loop {
                 self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
@@ -216,14 +221,16 @@ where
             }
         };
 
-        let outcome = match tokio::time::timeout(self.apply_timeout, critical).await {
+        let outcome = match tokio::time::timeout_at(deadline, critical).await {
             Ok(result) => result?,
             Err(_) => {
+                self.reset_cache_after_rejected_mutation(&mut guard)?;
                 return Err(TurnError::Unavailable {
                     reason: "turn state row-store apply timed out".to_string(),
                 });
             }
         };
+        drop(guard);
         match outcome {
             RowApplyOutcome::Ready(value) => Ok(value),
             RowApplyOutcome::Pending(pending) => {
@@ -252,8 +259,16 @@ where
         T: Send,
     {
         self.ensure_mutation_admitted().await?;
+        let deadline = tokio::time::Instant::now() + self.apply_timeout;
+        let mut guard = match tokio::time::timeout_at(deadline, self.snapshot_state.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(TurnError::Unavailable {
+                    reason: "turn state row-store targeted apply timed out".to_string(),
+                });
+            }
+        };
         let critical = async {
-            let mut guard = self.snapshot_state.lock().await;
             let mut build_delta = Some(build_delta);
             let mut refreshed_after_stale_error = false;
             loop {
@@ -371,14 +386,16 @@ where
             }
         };
 
-        let pending = match tokio::time::timeout(self.apply_timeout, critical).await {
+        let pending = match tokio::time::timeout_at(deadline, critical).await {
             Ok(result) => result?,
             Err(_) => {
+                self.reset_cache_after_rejected_mutation(&mut guard)?;
                 return Err(TurnError::Unavailable {
                     reason: "turn state row-store targeted apply timed out".to_string(),
                 });
             }
         };
+        drop(guard);
         self.commit_pending(
             pending,
             "turn state row-store targeted append ack timed out",
