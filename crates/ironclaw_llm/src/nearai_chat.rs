@@ -528,6 +528,7 @@ impl NearAiChatProvider {
             .eventsource();
         let mut parsed = NearAiStreamingResponse::default();
         let mut stream_completed = false;
+        let mut finish_reason_received = false;
         let mut tool_calls: HashMap<usize, NearAiStreamingToolCallState> = HashMap::new();
 
         loop {
@@ -583,6 +584,7 @@ impl NearAiChatProvider {
             for choice in chunk.choices {
                 if let Some(reason) = choice.finish_reason.as_deref() {
                     stream_completed = true;
+                    finish_reason_received = true;
                     parsed.finish_reason = map_finish_reason(reason);
                 }
                 if let Some(delta) = choice.delta.content.filter(|s| !s.is_empty()) {
@@ -630,6 +632,15 @@ impl NearAiChatProvider {
             }
         }
         parsed.tool_calls = parsed_tool_calls;
+        if !finish_reason_received {
+            parsed.finish_reason = if !parsed.tool_calls.is_empty() {
+                FinishReason::ToolUse
+            } else if !parsed.content.trim().is_empty() || !parsed.reasoning.trim().is_empty() {
+                FinishReason::Stop
+            } else {
+                FinishReason::Unknown
+            };
+        }
         Ok(parsed)
     }
 
@@ -2003,6 +2014,35 @@ data: [DONE]
         assert_eq!(response.finish_reason, FinishReason::Stop);
         assert_eq!(response.input_tokens, 3);
         assert_eq!(response.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_treats_done_after_text_as_stop() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"complete answer\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .expect("write terminal text stream");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let response = complete_search_tool_streaming(provider)
+            .await
+            .expect("terminal text stream");
+
+        server_task.await.expect("server task");
+        assert_eq!(response.content.as_deref(), Some("complete answer"));
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.finish_reason, FinishReason::Stop);
     }
 
     #[tokio::test]
