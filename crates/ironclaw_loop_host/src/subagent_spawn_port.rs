@@ -25,11 +25,12 @@ use ironclaw_turns::{
     TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint,
-        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary,
-        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
+        CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -963,10 +964,13 @@ impl SubagentSpawnCapabilityPort {
             .check_scope_recovered(&child_turn_scope)
             .await
         {
+            let cause = format!("subagent spawn scope recovery in progress: {error}");
             return Ok(resolution::failed(
                 FailureKind::Transient,
-                format!("subagent spawn scope recovery in progress: {error}"),
-                None,
+                cause.clone(),
+                CapabilityFailureDetail::Diagnostic {
+                    text: crate::scrub_model_visible_detail(cause),
+                },
             ));
         }
         self.deps

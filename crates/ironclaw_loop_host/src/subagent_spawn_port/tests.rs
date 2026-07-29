@@ -2274,6 +2274,16 @@ async fn invoke_spawn_surfaces_scope_recovery_in_progress_as_retryable_capabilit
         "summary should explain the retryable condition: {}",
         done.summary.as_str()
     );
+    assert_eq!(
+        done.verdict
+            .diagnostic()
+            .and_then(|diagnostic| diagnostic.model_visible_text()),
+        Some(
+            "subagent spawn scope recovery in progress: subagent await-edge scope recovery in \
+             progress, retry after 50ms"
+        ),
+        "the retryable outcome must preserve the scrubbed cause for the model"
+    );
 }
 
 #[tokio::test]

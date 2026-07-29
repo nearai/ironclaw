@@ -15,11 +15,12 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityInputRef,
-        CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
-        LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        resolution,
     },
 };
 use serde_json::{Value, json};
@@ -1289,7 +1290,9 @@ fn failed_invalid_input(summary: &'static str) -> Resolution {
     resolution::failed(
         ironclaw_host_api::FailureKind::InputEncode,
         summary.to_string(),
-        None,
+        CapabilityFailureDetail::Diagnostic {
+            text: summary.to_string(),
+        },
     )
 }
 

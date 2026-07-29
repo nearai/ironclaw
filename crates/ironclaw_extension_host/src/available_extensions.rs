@@ -518,7 +518,7 @@ impl AvailableExtensionCatalog {
         fs: &F,
         root: &VirtualPath,
         reserved_bundled_ids: &[String],
-        manifest_sources: &BTreeMap<String, ManifestSource>,
+        manifest_sources: &BTreeMap<ExtensionId, ManifestSource>,
     ) -> Result<Self, ProductSurfaceFailure>
     where
         F: RootFilesystem + ?Sized,
@@ -984,7 +984,7 @@ async fn load_filesystem_packages<F>(
     root: &VirtualPath,
     default_stamp: ManifestSource,
     reserved_bundled_ids: &[String],
-    manifest_sources: &BTreeMap<String, ManifestSource>,
+    manifest_sources: &BTreeMap<ExtensionId, ManifestSource>,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductSurfaceFailure>
 where
     F: RootFilesystem + ?Sized,
@@ -1024,7 +1024,7 @@ where
         if reserved_host_bundled_extension_id(&extension_id, reserved_bundled_ids) {
             continue;
         }
-        let package = match manifest_sources.get(extension_id.as_str()) {
+        let package = match manifest_sources.get(&extension_id) {
             Some(ManifestSource::HostBundled) => {
                 Err(ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!(
@@ -2425,8 +2425,10 @@ handle = "web_token"
             let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content;
             fs.write_file(&path, bytes).await.unwrap();
         }
-        let manifest_sources =
-            BTreeMap::from([("fixture".to_string(), ManifestSource::RegistryInstalled)]);
+        let manifest_sources = BTreeMap::from([(
+            ExtensionId::new("fixture").expect("fixture id"),
+            ManifestSource::RegistryInstalled,
+        )]);
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
             &fs,
@@ -2450,8 +2452,10 @@ handle = "web_token"
         let fs = InMemoryBackend::default();
         write_valid_filesystem_extension(&fs, "forged-bundled").await;
         write_valid_filesystem_extension(&fs, "valid-installed").await;
-        let manifest_sources =
-            BTreeMap::from([("forged-bundled".to_string(), ManifestSource::HostBundled)]);
+        let manifest_sources = BTreeMap::from([(
+            ExtensionId::new("forged-bundled").expect("fixture id"),
+            ManifestSource::HostBundled,
+        )]);
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
             &fs,

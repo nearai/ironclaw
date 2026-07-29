@@ -326,7 +326,9 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             return Ok(resolution::failed(
                 ironclaw_host_api::FailureKind::InputEncode,
                 "capability input failed validation".to_string(),
-                None,
+                ironclaw_turns::run_profile::CapabilityFailureDetail::Diagnostic {
+                    text: "capability input failed validation".to_string(),
+                },
             ));
         }
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)

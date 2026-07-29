@@ -47,7 +47,8 @@ pub use model::{
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,
-    LoopDriverNoteKind, LoopGateKind, LoopProgressEvent, LoopProgressPort,
+    LoopDriverNoteKind, LoopGateKind, LoopProgressEvent, LoopProgressPort, LoopRecoveryClass,
+    LoopRecoveryDisposition, LoopRecoveryStage,
 };
 pub use refs::{
     CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion, LoopCheckpointStateRef,

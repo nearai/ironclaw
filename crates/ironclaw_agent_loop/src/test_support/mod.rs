@@ -18,9 +18,10 @@ use ironclaw_turns::{
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
-        CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView,
+        CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+        ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
@@ -1199,9 +1200,13 @@ fn scripted_capability_outcome(
             byte_len,
             None,
         )),
-        ScriptedCapabilityOutcome::Failed { error_kind } => {
-            Ok(resolution::failed(error_kind, "failed".to_string(), None))
-        }
+        ScriptedCapabilityOutcome::Failed { error_kind } => Ok(resolution::failed(
+            error_kind,
+            "failed".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "failed".to_string(),
+            },
+        )),
     }
 }
 

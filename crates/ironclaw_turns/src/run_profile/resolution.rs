@@ -165,7 +165,7 @@ pub fn completed(
 pub fn failed(
     error_kind: FailureKind,
     safe_summary: String,
-    detail: Option<CapabilityFailureDetail>,
+    detail: CapabilityFailureDetail,
 ) -> Resolution {
     Resolution::Done(Outcome {
         refs: OutcomeRefs {
@@ -179,12 +179,10 @@ pub fn failed(
             origin: None,
             output_digest: None,
         },
-        verdict: match model_failure_diagnostic(detail) {
-            Some(diagnostic) => {
-                ToolVerdict::recoverable_failure_with_diagnostic(error_kind, diagnostic)
-            }
-            None => ToolVerdict::recoverable_failure(error_kind),
-        },
+        verdict: ToolVerdict::recoverable_failure_with_diagnostic(
+            error_kind,
+            model_failure_diagnostic(detail),
+        ),
         summary: safe_summary_or_placeholder(safe_summary),
         progress: ResultProgress::default(),
         terminate_hint: TerminateHint::default(),
@@ -370,14 +368,12 @@ pub fn denied(reason_kind: CapabilityDeniedReasonKind, safe_summary: String) -> 
 /// contract (a field that fails is dropped; an issue whose required `path` fails
 /// is dropped whole). The loop's producer-scrubbed free-text `Diagnostic` keeps
 /// paths and payload delimiters in a bounded [`ModelDiagnostic`].
-fn model_failure_diagnostic(
-    detail: Option<CapabilityFailureDetail>,
-) -> Option<ModelFailureDiagnostic> {
-    match detail? {
+fn model_failure_diagnostic(detail: CapabilityFailureDetail) -> ModelFailureDiagnostic {
+    match detail {
         CapabilityFailureDetail::InvalidInput { issues } => {
             let issues =
                 ModelInputIssues::truncating(issues.into_iter().filter_map(model_input_issue));
-            Some(ModelFailureDiagnostic::InvalidInput { issues })
+            ModelFailureDiagnostic::InvalidInput { issues }
         }
         CapabilityFailureDetail::Diagnostic { text } => {
             let text = match ModelDiagnostic::truncating(text) {
@@ -397,7 +393,7 @@ fn model_failure_diagnostic(
                     ModelDiagnostic::unavailable()
                 }
             };
-            Some(ModelFailureDiagnostic::Diagnostic { text })
+            ModelFailureDiagnostic::Diagnostic { text }
         }
         // The TRUSTED channel: the payload is already a validated
         // `HostRemediation`, so it crosses the charter as-is. Deliberately NOT
@@ -408,7 +404,7 @@ fn model_failure_diagnostic(
         // code constructs `HostRemediation`, and its value guard rejects
         // credential shapes), not a second redaction pass here.
         CapabilityFailureDetail::HostRemediation { text } => {
-            Some(ModelFailureDiagnostic::HostRemediation { text })
+            ModelFailureDiagnostic::HostRemediation { text }
         }
     }
 }
@@ -1003,7 +999,9 @@ mod tests {
                 resolution: failed(
                     FailureKind::InputEncode,
                     "tool input rejected".to_string(),
-                    None,
+                    CapabilityFailureDetail::Diagnostic {
+                        text: "tool input rejected".to_string(),
+                    },
                 ),
                 suspends: false,
                 gate_record: None,
@@ -1201,7 +1199,7 @@ mod tests {
     /// schema issues (path, code, expected/received) onto the verdict.
     #[test]
     fn failed_invalid_input_diagnostic_round_trips_structured_issues() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "schedule.kind".to_string(),
                 code: DispatchInputIssueCode::TypeMismatch,
@@ -1209,7 +1207,7 @@ mod tests {
                 received: Some("string".to_string()),
                 schema_path: Some("properties.schedule".to_string()),
             }],
-        });
+        };
         match failed(
             FailureKind::InputEncode,
             "tool input rejected".to_string(),
@@ -1242,9 +1240,9 @@ mod tests {
         match failed(
             FailureKind::Backend,
             "tool failed".to_string(),
-            Some(CapabilityFailureDetail::Diagnostic {
+            CapabilityFailureDetail::Diagnostic {
                 text: "backend returned an error".to_string(),
-            }),
+            },
         ) {
             Resolution::Done(done) => match done.verdict.diagnostic() {
                 Some(ModelFailureDiagnostic::Diagnostic { text }) => {
@@ -1260,9 +1258,9 @@ mod tests {
         match failed(
             FailureKind::Backend,
             "tool failed".to_string(),
-            Some(CapabilityFailureDetail::Diagnostic {
+            CapabilityFailureDetail::Diagnostic {
                 text: "failed reading /etc/passwd".to_string(),
-            }),
+            },
         ) {
             Resolution::Done(done) => match done.verdict.diagnostic() {
                 Some(ModelFailureDiagnostic::Diagnostic { text }) => {
@@ -1278,9 +1276,9 @@ mod tests {
         match failed(
             FailureKind::Backend,
             "tool failed".to_string(),
-            Some(CapabilityFailureDetail::Diagnostic {
+            CapabilityFailureDetail::Diagnostic {
                 text: "provider returned ghp_0123456789abcdef".to_string(),
-            }),
+            },
         ) {
             Resolution::Done(done) => match done.verdict.diagnostic() {
                 Some(ModelFailureDiagnostic::Diagnostic { text }) => {
@@ -1295,7 +1293,7 @@ mod tests {
         match failed(
             FailureKind::InputEncode,
             "tool input rejected".to_string(),
-            Some(CapabilityFailureDetail::InvalidInput {
+            CapabilityFailureDetail::InvalidInput {
                 issues: vec![CapabilityInputIssue {
                     path: "token".to_string(),
                     code: DispatchInputIssueCode::InvalidValue,
@@ -1303,7 +1301,7 @@ mod tests {
                     received: Some("sk-ant-abc123def456".to_string()),
                     schema_path: None,
                 }],
-            }),
+            },
         ) {
             Resolution::Done(done) => match done.verdict.diagnostic() {
                 Some(ModelFailureDiagnostic::InvalidInput { issues }) => {

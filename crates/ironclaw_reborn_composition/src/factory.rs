@@ -4969,12 +4969,12 @@ async fn build_backend_production(
         })?
         .into_iter()
         .map(|record| {
-            (
-                record.manifest().id.as_str().to_string(),
-                record.manifest().source,
-            )
+            // Keep the persisted identity typed: the record already carries a
+            // validated ExtensionId, and downgrading it to String let an
+            // unnormalized key silently miss every lookup (types.md).
+            (record.manifest().id.clone(), record.manifest().source)
         })
-        .collect::<BTreeMap<String, ManifestSource>>();
+        .collect::<BTreeMap<ExtensionId, ManifestSource>>();
     let extensions_root = VirtualPath::new("/system/extensions")?;
     #[cfg(any(test, feature = "test-support"))]
     let filesystem_catalog = if trust_fixture_extensions_for_test {

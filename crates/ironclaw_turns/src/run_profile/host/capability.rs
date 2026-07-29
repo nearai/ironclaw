@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, FailureKind, HostApiError,
-    ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    ModelDiagnostic, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -457,8 +457,17 @@ pub struct CapabilityResultMessage {
 pub struct CapabilityFailure {
     pub error_kind: FailureKind,
     pub safe_summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<CapabilityFailureDetail>,
+    #[serde(default = "legacy_unavailable_capability_failure_detail")]
+    pub detail: CapabilityFailureDetail,
+}
+
+/// Read compatibility for checkpoint payloads written before capability
+/// failure detail became structurally required. New producers cannot use this
+/// fallback because constructing [`CapabilityFailure`] requires a detail.
+fn legacy_unavailable_capability_failure_detail() -> CapabilityFailureDetail {
+    CapabilityFailureDetail::Diagnostic {
+        text: ModelDiagnostic::unavailable().into_inner(),
+    }
 }
 
 #[non_exhaustive]
@@ -649,5 +658,29 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn legacy_capability_failure_without_detail_rehydrates_explicit_fallback() {
+        let legacy = serde_json::json!({
+            "error_kind": "backend",
+            "safe_summary": "capability invocation failed"
+        });
+        let failure: CapabilityFailure =
+            serde_json::from_value(legacy).expect("legacy capability failure");
+
+        assert_eq!(
+            failure.detail,
+            CapabilityFailureDetail::Diagnostic {
+                text: ModelDiagnostic::unavailable().into_inner(),
+            }
+        );
+        assert!(
+            serde_json::to_value(failure)
+                .expect("serialize upgraded failure")
+                .get("detail")
+                .is_some(),
+            "legacy omissions must become explicit on the next write"
+        );
     }
 }
