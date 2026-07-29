@@ -120,7 +120,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
   return (
     <div
       className={cn(
-        "group flex w-full items-stretch rounded-[8px] border-l-2",
+        "group flex w-full items-stretch rounded-[8px] border-l-2 transition-colors duration-150",
         presentation
           ? presentation.borderClass
           : isActive
@@ -128,7 +128,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
           : "border-transparent",
         isActive
           ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-          : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+          : "text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)]"
       )}
     >
       <button
@@ -205,7 +205,7 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   if (items.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
-      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--v2-text-faint)]">
         {label}
       </span>
       {items.map(
@@ -287,17 +287,17 @@ export function SidebarThreads({
     <div className="flex min-h-0 flex-1 flex-col px-2">
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 hover:bg-[var(--v2-surface-muted)]"
+        className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 transition-colors duration-150 hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)]"
       >
         <span
-          className="flex-1 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]"
+          className="flex-1 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--v2-text-faint)]"
         >
           {t("chat.conversations")}
         </span>
         <Icon
           name="chevron"
           className={cn(
-            "h-3.5 w-3.5 text-[var(--v2-text-faint)]",
+            "h-3.5 w-3.5 text-[var(--v2-text-faint)] transition-transform duration-150",
             collapsed ? "-rotate-90" : ""
           )}
           strokeWidth={2.2}

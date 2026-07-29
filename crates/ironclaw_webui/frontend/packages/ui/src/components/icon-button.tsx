@@ -20,7 +20,8 @@
 import type { ComponentProps, ElementType, ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
-const BASE = "grid h-8 w-8 shrink-0 place-items-center rounded-[8px]";
+const BASE =
+  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-150";
 
 const VARIANTS = {
   ghost:

@@ -64,15 +64,10 @@ export function PageHeader({
         "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_88%,transparent)] backdrop-blur-xl"
       )}
     >
-      {/*
-       * Main's exact toggle: unlike the seven IconButton siblings, this one
-       * has no hover text-color change, so the shared ghost variant is not a
-       * 1:1 replacement here.
-       */}
       <button
         type="button"
         onClick={onToggleSidebar}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)]"
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] transition-colors duration-150 hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
         aria-label={toggleSidebarLabel}
         aria-controls="gateway-sidebar"
         aria-expanded={sidebarOpen ? "true" : "false"}
@@ -83,7 +78,7 @@ export function PageHeader({
 
       {breadcrumb
         ? (
-            <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold">
+            <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold tracking-[-0.01em]">
               <span className="shrink-0 text-[var(--v2-text-muted)]">
                 {breadcrumb.parent}
               </span>
@@ -98,7 +93,7 @@ export function PageHeader({
           )
         : (
             <span
-              className="truncate text-[14px] font-semibold text-[var(--v2-text-strong)]"
+              className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[var(--v2-text-strong)]"
             >
               {title}
             </span>
