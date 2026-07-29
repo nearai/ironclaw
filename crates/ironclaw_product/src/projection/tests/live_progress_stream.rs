@@ -285,65 +285,7 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
 }
 
 #[tokio::test]
-async fn live_assistant_text_coalescer_flushes_latest_update_on_timer() {
-    let fixture = live_projection_fixture("webui-text-timer");
-    let scope = fixture.scope.clone();
-    let run_id = TurnRunId::new();
-    let mut subscription = fixture
-        .services
-        .product_event_stream()
-        .subscribe(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(fixture.user_id.clone()),
-            scope: scope.clone(),
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-    let milestone = |safe_text| LoopHostMilestone {
-        scope: scope.clone(),
-        actor: None,
-        turn_id: TurnId::new(),
-        run_id,
-        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
-        kind: LoopHostMilestoneKind::ModelTextDelta { safe_text },
-    };
-
-    fixture
-        .sink
-        .publish_loop_milestone(milestone("first".to_string()))
-        .await
-        .unwrap();
-    fixture
-        .sink
-        .publish_loop_milestone(milestone("latest".to_string()))
-        .await
-        .unwrap();
-
-    let mut text_bodies = Vec::new();
-    for _ in 0..2 {
-        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
-            .await
-            .expect("coalesced live projection event")
-            .expect("live projection subscription remains open")
-            .expect("live projection event remains valid");
-        let ProductOutboundPayload::ProjectionUpdate { state } = envelope.payload() else {
-            continue;
-        };
-        text_bodies.extend(state.items.iter().filter_map(|item| match item {
-            ProductProjectionItem::Text {
-                run_id: observed_run_id,
-                body,
-                ..
-            } if *observed_run_id == Some(run_id) => Some(body.clone()),
-            _ => None,
-        }));
-    }
-
-    assert_eq!(text_bodies, vec!["first", "latest"]);
-}
-
-#[tokio::test]
-async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity() {
+async fn provider_rate_live_text_stays_smooth_and_precedes_tool_activity() {
     let fixture = live_projection_fixture("webui-text-burst");
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
@@ -390,7 +332,7 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
     let mut text_bodies = Vec::new();
     let mut saw_tool = false;
     let mut latest_text_preceded_tool = false;
-    for _ in 0..8 {
+    for _ in 0..70 {
         let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
             .await
             .expect("live projection event")
@@ -433,11 +375,12 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
     assert_eq!(
         text_bodies.last().map(String::as_str),
         Some("partial answer 63"),
-        "the tool boundary must flush the latest cumulative assistant text"
+        "the latest cumulative assistant text must precede tool activity"
     );
-    assert!(
-        text_bodies.len() <= 3,
-        "the 64-update burst should be coalesced before delivery: {text_bodies:#?}"
+    assert_eq!(
+        text_bodies.len(),
+        64,
+        "the bounded WebUI stream should preserve provider-rate text updates: {text_bodies:#?}"
     );
 }
 
