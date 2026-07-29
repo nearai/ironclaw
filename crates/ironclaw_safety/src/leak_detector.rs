@@ -1171,22 +1171,24 @@ mod tests {
 
     #[test]
     fn redact_all_matches_rejects_invalid_scanner_ranges() {
-        let scan = LeakScanResult {
-            matches: vec![LeakMatch {
-                pattern_name: "synthetic".to_string(),
-                severity: LeakSeverity::High,
-                action: LeakAction::Redact,
-                location: 0..usize::MAX,
-                masked_preview: "[masked]".to_string(),
-            }],
-            should_block: false,
-            redacted_content: None,
-        };
+        for location in [0..usize::MAX, 2..2, 3..2] {
+            let scan = LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "synthetic".to_string(),
+                    severity: LeakSeverity::High,
+                    action: LeakAction::Redact,
+                    location,
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: false,
+                redacted_content: None,
+            };
 
-        assert_eq!(
-            scan.redact_all_matches("safe"),
-            Err(LeakRedactionError::InvalidMatchRange)
-        );
+            assert_eq!(
+                scan.redact_all_matches("safe"),
+                Err(LeakRedactionError::InvalidMatchRange)
+            );
+        }
     }
 
     #[test]
