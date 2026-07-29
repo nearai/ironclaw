@@ -152,15 +152,23 @@ pub fn sandbox_extra_allowed_domains() -> Result<Vec<NetworkTargetPattern>, Netw
 /// discarding it and rebuilding the struct from a bare string would let the
 /// two drift apart.
 pub fn sandbox_allowed_domains() -> Result<Vec<NetworkTargetPattern>, NetworkPolicyError> {
-    Ok(DEFAULT_SANDBOX_ALLOWED_DOMAINS
-        .iter()
-        .map(|domain| NetworkTargetPattern {
-            scheme: None,
-            host_pattern: (*domain).to_string(),
-            port: None,
-        })
+    Ok(parse_host_patterns(DEFAULT_SANDBOX_ALLOWED_DOMAINS)?
+        .into_iter()
         .chain(sandbox_extra_allowed_domains()?)
         .collect())
+}
+
+/// Applies [`ironclaw_network::parse_host_pattern`] to each `domain`, so
+/// [`sandbox_allowed_domains`]'s hardcoded defaults validate through the
+/// identical chokepoint operator-supplied extras already go through in
+/// [`sandbox_extra_allowed_domains`] — see that function's doc comment for
+/// why hand-building [`NetworkTargetPattern`] here instead would let the two
+/// drift apart.
+fn parse_host_patterns(domains: &[&str]) -> Result<Vec<NetworkTargetPattern>, NetworkPolicyError> {
+    domains
+        .iter()
+        .map(|domain| ironclaw_network::parse_host_pattern(domain))
+        .collect()
 }
 
 /// Reads [`SANDBOX_MAX_EGRESS_BYTES_ENV`] and returns the operator's
@@ -288,6 +296,26 @@ mod tests {
         assert!(sandbox_max_egress_bytes().is_err());
 
         remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
+    }
+
+    // Defaults must fail the same way operator-supplied extras do when an
+    // entry doesn't pass `parse_host_pattern` — pins that `sandbox_allowed_
+    // domains` routes `DEFAULT_SANDBOX_ALLOWED_DOMAINS` through the same
+    // validator instead of hand-building `NetworkTargetPattern` for them
+    // (coderabbitai review on PR #6746: the round-trip through `String` and
+    // back left a second construction site where `scheme`/`port` could
+    // drift from the validator's contract, and defaults could ship
+    // unvalidated where extras could not).
+    #[test]
+    fn parse_host_patterns_rejects_a_malformed_entry_like_extras_do() {
+        assert!(parse_host_patterns(&["github.com", "not a host!"]).is_err());
+    }
+
+    #[test]
+    fn parse_host_patterns_matches_the_real_default_list() {
+        let parsed = parse_host_patterns(DEFAULT_SANDBOX_ALLOWED_DOMAINS).unwrap();
+        let hosts: Vec<&str> = parsed.iter().map(|p| p.host_pattern.as_str()).collect();
+        assert_eq!(hosts, DEFAULT_SANDBOX_ALLOWED_DOMAINS);
     }
 
     #[test]
