@@ -233,10 +233,11 @@ subject to fail-closed prompt-injection scanning. Every leak match action
 (`Block`, `Redact`, or `Warn`) is deterministically replaced in place so safe
 surrounding context can continue through compaction; transformed input and
 output are rescanned before inference or persistence. Invalid match ranges,
-matches that cross serialized message boundaries, injection introduced by
-transformation, or any residual leak match fail closed. Private-key patterns
-cover the complete bounded block (or the bounded remainder when the matching end
-sentinel is missing or mislabeled), never only the begin sentinel.
+matches that cross message-body or serialized structural boundaries, injection
+introduced by transformation, or any residual leak match fail closed.
+Private-key patterns cover the complete bounded block (or, within one message,
+the bounded remainder when the matching end sentinel is missing or mislabeled),
+never only the begin sentinel.
 
 Successful persistence returns an additive `redacted_leak_count`. The field is
 defaulted and omitted at zero so legacy checkpoint and wire shapes remain

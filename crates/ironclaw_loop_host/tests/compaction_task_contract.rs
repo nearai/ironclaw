@@ -797,7 +797,7 @@ async fn compaction_port_rejects_private_key_end_delimiter_split_across_messages
 }
 
 #[tokio::test]
-async fn compaction_port_redacts_unterminated_private_key_span_across_later_messages() {
+async fn compaction_port_rejects_unterminated_private_key_span_across_later_messages() {
     let fixture = CompactionFixture::new().await;
     fixture
         .append_user(concat!(
@@ -815,24 +815,29 @@ async fn compaction_port_redacts_unterminated_private_key_span_across_later_mess
         fixture.scope.clone(),
     );
 
-    let outcome = port
+    let error = port
         .compact_loop_context(fixture.request(2))
         .await
-        .expect("an unterminated key span must redact without failing compaction");
-    let LoopCompactionOutcome::Compacted(response) = outcome else {
-        panic!("expected compacted outcome")
-    };
+        .expect_err("an unterminated key must not erase later message bodies");
 
-    let input = inference.last_input();
-    assert_eq!(input.matches("<message ").count(), 2);
-    assert_eq!(input.matches("[REDACTED]").count(), 2);
-    assert_eq!(response.redacted_leak_count, 1);
-    assert!(!input.contains("later safe context"));
-    assert!(!input.contains("TRUNCATED_PRIVATE_KEY_FRAGMENT"));
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(inference.last_input().is_empty());
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
 }
 
 #[tokio::test]
-async fn compaction_port_redacts_cross_message_private_key_with_mismatched_end() {
+async fn compaction_port_rejects_cross_message_private_key_with_mismatched_end() {
     let fixture = CompactionFixture::new().await;
     fixture
         .append_user(concat!(
@@ -856,21 +861,25 @@ async fn compaction_port_redacts_cross_message_private_key_with_mismatched_end()
         fixture.scope.clone(),
     );
 
-    let outcome = port
+    let error = port
         .compact_loop_context(fixture.request(2))
         .await
-        .expect("a mismatched cross-message key span must redact without leaking");
-    let LoopCompactionOutcome::Compacted(response) = outcome else {
-        panic!("expected compacted outcome")
-    };
+        .expect_err("a mismatched private key must not erase later message bodies");
 
-    let input = inference.last_input();
-    assert_eq!(input.matches("<message ").count(), 2);
-    assert_eq!(input.matches("[REDACTED]").count(), 2);
-    assert_eq!(response.redacted_leak_count, 1);
-    assert!(!input.contains("FIRST_PRIVATE_KEY_FRAGMENT"));
-    assert!(!input.contains("TRAILING_PRIVATE_KEY_FRAGMENT"));
-    assert!(!input.contains("-----END PRIVATE KEY-----"));
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(inference.last_input().is_empty());
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
 }
 
 #[tokio::test]

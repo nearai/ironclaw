@@ -40,8 +40,8 @@ pub use display_redaction::{
     sanitize_url_for_display, shell_command_display_text,
 };
 pub use leak_detector::{
-    CrossBoundaryLeakDisposition, LeakAction, LeakDetectionError, LeakDetector, LeakMatch,
-    LeakPattern, LeakRedactionError, LeakScanResult, LeakSeverity,
+    LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakRedactionError,
+    LeakScanResult, LeakSeverity,
 };
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use prompt_validation::{PromptSafetyRejection, validate_trusted_trigger_prompt};

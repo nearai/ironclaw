@@ -766,7 +766,7 @@ CLAUDE.md for the full mapping + gap catalog.
 | Media URL validation | ✅ | ❌ | Reject non-HTTP(S) inbound attachment URLs; reject remote-host `file://` URLs in webchat embedding path |
 | Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization; OpenClaw added chat-template special-token stripping (Qwen/ChatML, Llama, Gemma, Mistral, Phi, GPT-OSS) |
 | Internal scaffolding stripping | ✅ | ❌ | `<system-reminder>`/`<previous_response>` stripped at final delivery boundary |
-| Leak detection | ✅ | ✅ | Secret exfiltration; complete and malformed private-key blocks are bounded for safe value redaction |
+| Leak detection | ✅ | ✅ | Secret exfiltration; complete and malformed private-key blocks within one message are bounded for safe value redaction, while cross-message matches fail closed |
 | Dangerous tool re-enable warning | ✅ | ❌ | Warn when gateway.tools.allow re-enables HTTP tools |
 | OpenGrep static analysis | ✅ | ❌ | Bundled rulepack + source-rule compiler + provenance check; PR/full scan workflows + SARIF upload to GitHub Code Scanning |
 | Logging redaction expansion | ✅ | ❌ | Tencent/Alibaba/HuggingFace/Replicate API keys; payment credential field names; `sk-*`/Bearer/Authorization tokens at console + file sinks |

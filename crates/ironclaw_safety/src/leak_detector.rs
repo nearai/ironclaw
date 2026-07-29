@@ -107,68 +107,6 @@ pub struct LeakMatch {
     pub masked_preview: String,
 }
 
-/// Safety-owned decision for a leak match that crosses a consumer boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrossBoundaryLeakDisposition {
-    /// The match must be rejected because redacting it would erase or merge a
-    /// structural boundary.
-    Reject,
-    /// An unterminated private key consumed the bounded remainder of the scan.
-    /// Consumers may redact every covered body while preserving their own
-    /// structural wrappers.
-    RedactUnterminatedPrivateKey,
-}
-
-impl LeakMatch {
-    /// Classify a match that extends past a structural boundary.
-    ///
-    /// Private-key range grammar belongs to the safety crate. Consumers pass
-    /// the end of the body containing the match start and receive a typed
-    /// disposition instead of depending on detector pattern names or parsing
-    /// key delimiters independently.
-    pub fn cross_boundary_disposition(
-        &self,
-        content: &str,
-        origin_body_end: usize,
-    ) -> CrossBoundaryLeakDisposition {
-        if !matches!(
-            self.pattern_name.as_str(),
-            "pem_private_key" | "ssh_private_key"
-        ) {
-            return CrossBoundaryLeakDisposition::Reject;
-        }
-        let Some(matched) = content.get(self.location.clone()) else {
-            return CrossBoundaryLeakDisposition::Reject;
-        };
-        let Some((begin_label, begin_marker_end)) = parse_private_key_label(matched, "-----BEGIN")
-        else {
-            return CrossBoundaryLeakDisposition::Reject;
-        };
-        let Some(boundary_offset) = origin_body_end.checked_sub(self.location.start) else {
-            return CrossBoundaryLeakDisposition::Reject;
-        };
-        if begin_marker_end > boundary_offset {
-            return CrossBoundaryLeakDisposition::Reject;
-        }
-
-        let matching_end_crosses_boundary = matched.match_indices("-----END").any(|(offset, _)| {
-            parse_private_key_label(&matched[offset..], "-----END").is_some_and(
-                |(end_label, end_marker_end)| {
-                    end_label == begin_label
-                        && offset
-                            .checked_add(end_marker_end)
-                            .is_some_and(|end| end > boundary_offset)
-                },
-            )
-        });
-        if matching_end_crosses_boundary {
-            CrossBoundaryLeakDisposition::Reject
-        } else {
-            CrossBoundaryLeakDisposition::RedactUnterminatedPrivateKey
-        }
-    }
-}
-
 /// Result of scanning content for leaks.
 #[derive(Debug)]
 pub struct LeakScanResult {
@@ -620,37 +558,6 @@ fn decode_base64url_no_pad(input: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(output)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PrivateKeyLabel {
-    Generic,
-    Rsa,
-    OpenSsh,
-    Ec,
-    Dsa,
-}
-
-fn parse_private_key_label(content: &str, marker: &str) -> Option<(PrivateKeyLabel, usize)> {
-    let remainder = content.strip_prefix(marker)?;
-    if !remainder.chars().next()?.is_whitespace() {
-        return None;
-    }
-    let delimiter_end = remainder.find("-----")?;
-    let mut words = remainder[..delimiter_end].split_whitespace();
-    let label = match (words.next(), words.next(), words.next(), words.next()) {
-        (Some("PRIVATE"), Some("KEY"), None, None) => PrivateKeyLabel::Generic,
-        (Some("RSA"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::Rsa,
-        (Some("OPENSSH"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::OpenSsh,
-        (Some("EC"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::Ec,
-        (Some("DSA"), Some("PRIVATE"), Some("KEY"), None) => PrivateKeyLabel::Dsa,
-        _ => return None,
-    };
-    let marker_end = marker
-        .len()
-        .checked_add(delimiter_end)?
-        .checked_add("-----".len())?;
-    Some((label, marker_end))
 }
 
 /// Default leak detection patterns.

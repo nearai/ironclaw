@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Redact complete bounded PEM and SSH private-key blocks instead of only their
-  begin sentinels, and keep private-key diagnostic previews constant.
+  begin sentinels, keep private-key diagnostic previews constant, and reject
+  matches that cross message boundaries.
 
 ## [0.2.2](https://github.com/nearai/ironclaw/compare/ironclaw_safety-v0.2.1...ironclaw_safety-v0.2.2) - 2026-04-29
 

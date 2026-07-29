@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::ThreadId;
-use ironclaw_safety::{
-    CrossBoundaryLeakDisposition, InjectionScanner, LeakDetector, LeakScanner, Sanitizer,
-};
+use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
     SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
@@ -406,16 +404,13 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
-        let fully_redacted_messages = self.validate_unredacted_message_boundaries(range)?;
+        self.validate_unredacted_message_boundaries(range)?;
 
         let mut text = String::new();
         let mut redacted_leak_count = 0_u32;
-        for (index, message) in range.messages.iter().enumerate() {
-            let sanitized = self.sanitize_retained_fragment(
-                &message.body,
-                Some(self.max_input_bytes),
-                fully_redacted_messages[index],
-            )?;
+        for message in &range.messages {
+            let sanitized =
+                self.sanitize_retained_fragment(&message.body, Some(self.max_input_bytes))?;
             redacted_leak_count = redacted_leak_count
                 .checked_add(sanitized.redacted_leak_count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
@@ -445,7 +440,7 @@ where
     fn validate_unredacted_message_boundaries(
         &self,
         range: &ValidatedCompactionRange,
-    ) -> Result<Vec<bool>, CompactionError> {
+    ) -> Result<(), CompactionError> {
         // Boundary validation must inspect the unredacted representation, but
         // its worst-case XML expansion is larger than the final model-input
         // cap. The actual sanitized serialization is still bounded separately
@@ -457,7 +452,6 @@ where
             .ok_or(CompactionError::LeakRedactionFailed)?;
         let mut text = String::new();
         let mut body_ranges = Vec::with_capacity(range.messages.len());
-        let mut fully_redacted_messages = vec![false; range.messages.len()];
         for message in &range.messages {
             if !text.is_empty() {
                 push_checked(&mut text, "\n", validation_cap)?;
@@ -491,20 +485,9 @@ where
             if location.end <= origin_body.end {
                 continue;
             }
-            if leak_match.cross_boundary_disposition(&text, origin_body.end)
-                == CrossBoundaryLeakDisposition::RedactUnterminatedPrivateKey
-            {
-                for (index, body) in body_ranges.iter().enumerate().skip(candidate + 1) {
-                    if body.start >= location.end {
-                        break;
-                    }
-                    fully_redacted_messages[index] = true;
-                }
-                continue;
-            }
             return Err(CompactionError::LeakRedactionFailed);
         }
-        Ok(fully_redacted_messages)
+        Ok(())
     }
 
     async fn run_inference(
@@ -535,7 +518,7 @@ where
         response: &SystemInferenceResponse,
         input_bytes: usize,
     ) -> Result<SanitizedSummary, CompactionError> {
-        let sanitized = self.sanitize_retained_fragment(&response.output_text, None, false)?;
+        let sanitized = self.sanitize_retained_fragment(&response.output_text, None)?;
         let content = format!(
             "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
             sanitized.content
@@ -558,7 +541,6 @@ where
         &self,
         content: &str,
         max_escaped_bytes: Option<usize>,
-        force_full_redaction: bool,
     ) -> Result<SanitizedFragment, CompactionError> {
         if !self.injection_scanner.scan_injection(content).is_empty() {
             return Err(CompactionError::InjectionDetected);
@@ -574,24 +556,6 @@ where
         {
             return Err(CompactionError::InjectionDetected);
         }
-        if force_full_redaction {
-            let forced_content = "[REDACTED]".to_string();
-            if !self
-                .injection_scanner
-                .scan_injection(&forced_content)
-                .is_empty()
-            {
-                return Err(CompactionError::InjectionDetected);
-            }
-            if !self.leak_detector.scan_leaks(&forced_content).is_clean() {
-                return Err(CompactionError::LeakRedactionFailed);
-            }
-            return Ok(SanitizedFragment {
-                content: forced_content,
-                redacted_leak_count: redaction.count,
-            });
-        }
-
         let escaped = match max_escaped_bytes {
             Some(max_bytes) => escape_xml_checked(redacted_content, max_bytes)?,
             None => escape_xml(redacted_content),
