@@ -945,13 +945,33 @@ where
 {
     let route = provider
         .fallback_route(fallback_index, Some(requested_model))
-        .map_err(map_provider_error)?;
+        .map_err(|error| map_fallback_route_error(error, fallback_index))?;
     debug!(
         fallback_index = route.fallback_index,
         effective_model = %route.model,
         "reborn model gateway selected ordered fallback route"
     );
     Ok(route)
+}
+
+fn map_fallback_route_error(error: LlmError, fallback_index: u32) -> HostManagedModelError {
+    if fallback_index > 0 && matches!(&error, LlmError::ModelNotAvailable { .. }) {
+        let provider_detail = error.to_string();
+        let safe_log_detail = ironclaw_loop_host::scrub_model_visible_detail(&provider_detail);
+        tracing::warn!(
+            component = "model_provider",
+            operation = "fallback_route",
+            fallback_index,
+            error = %ironclaw_common::truncate_for_preview(&safe_log_detail, 512),
+            "configured model fallback route is unavailable"
+        );
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "configured model fallback route is unavailable",
+        )
+        .safe_with_detail(provider_detail);
+    }
+    map_provider_error(error)
 }
 
 fn prepare_fallback_completion<P>(
