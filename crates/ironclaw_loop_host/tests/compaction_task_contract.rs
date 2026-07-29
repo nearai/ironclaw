@@ -179,6 +179,29 @@ async fn compaction_port_redacts_leaked_inference_output_before_persistence() {
 }
 
 #[tokio::test]
+async fn compaction_port_skips_escape_rescan_when_xml_is_unchanged() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("plain input").await;
+    let scanner = Arc::new(ExactContentScanCounter::new("plain summary"));
+    let leak_scanner: Arc<dyn LeakScanner> = scanner.clone();
+    let port = fixture.port(
+        "plain summary",
+        Arc::new(CleanInjectionScanner),
+        leak_scanner,
+    );
+
+    port.compact_loop_context(fixture.request(1))
+        .await
+        .expect("compaction should succeed");
+
+    assert_eq!(
+        scanner.matching_scans(),
+        1,
+        "an unchanged inference fragment should not be rescanned after XML escaping"
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_redacts_registry_secret_output_before_persistence() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("summarize me").await;
@@ -2085,6 +2108,37 @@ struct CleanLeakScanner;
 
 impl LeakScanner for CleanLeakScanner {
     fn scan_leaks(&self, _content: &str) -> LeakScanResult {
+        LeakScanResult {
+            matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
+struct ExactContentScanCounter {
+    expected_content: &'static str,
+    matching_scans: AtomicUsize,
+}
+
+impl ExactContentScanCounter {
+    fn new(expected_content: &'static str) -> Self {
+        Self {
+            expected_content,
+            matching_scans: AtomicUsize::new(0),
+        }
+    }
+
+    fn matching_scans(&self) -> usize {
+        self.matching_scans.load(Ordering::SeqCst)
+    }
+}
+
+impl LeakScanner for ExactContentScanCounter {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        if content == self.expected_content {
+            self.matching_scans.fetch_add(1, Ordering::SeqCst);
+        }
         LeakScanResult {
             matches: Vec::new(),
             should_block: false,
