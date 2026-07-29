@@ -4521,6 +4521,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_embeddings",
+ "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extension_host",
  "ironclaw_extensions",
