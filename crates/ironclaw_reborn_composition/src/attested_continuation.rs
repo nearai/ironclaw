@@ -51,14 +51,12 @@ use ironclaw_wallet_external::{
 };
 use serde::Deserialize;
 
-use crate::attested::{InMemoryAttestedComposition, InMemoryContinuationDriver};
-
 /// Composition-layer [`AttestedGateContinuationPort`].
 ///
 /// Holds the assembled signer-continuation driver shared with the reborn
 /// runtime (the same driver + binding store + ledger the resume port reads).
 pub struct RebornAttestedContinuation {
-    driver: Arc<InMemoryContinuationDriver>,
+    driver: Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver>,
     /// The same authoritative gate-binding store the driver reads. Held here so
     /// this port can assert the caller-supplied turn scope / run / gate_ref
     /// against the persisted `binding.context` BEFORE claiming the grant /
@@ -119,9 +117,13 @@ impl RebornAttestedContinuation {
     }
 
     /// Build the port over the runtime's attested-signing composition.
-    pub fn new(composition: &InMemoryAttestedComposition) -> Self {
+    ///
+    /// Takes the composition erased, so this port works over the in-memory
+    /// graph and the durable PostgreSQL / libSQL ones alike -- the persistence
+    /// backend is not something the resume path should be able to observe.
+    pub fn new(composition: &Arc<dyn crate::attested::AttestedComposition>) -> Self {
         Self {
-            driver: Arc::clone(composition.driver()),
+            driver: composition.driver(),
             bindings: Arc::clone(composition.bindings()),
             intents: None,
         }

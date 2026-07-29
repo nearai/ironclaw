@@ -97,7 +97,7 @@ pub use device_signature::{DeviceSignatureError, signable_digest, verify_device_
 pub use driver::{
     AttestedSignerContinuationDriver, BindingOwner, BroadcastDisposition, BroadcastOutcome,
     Broadcaster, ContinuationError, CustodialSignerLike, EvmSignable, ProviderRegistry,
-    RebuildError, SignerContinuationOutcome, VerifiedContinuation,
+    RebuildError, SignerContinuationDriver, SignerContinuationOutcome, VerifiedContinuation,
 };
 pub use intent_signer::{
     InMemorySealedAgentKeyStore, SealedAgentKey, SealedAgentKeyStore, SecretsIntentSigner,

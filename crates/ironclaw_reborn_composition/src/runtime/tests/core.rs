@@ -5965,6 +5965,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
             resolution: Some("approved".to_string()),
             always: None,
             credential_ref: None,
+            attested_proof_kind: None,
+            attested_approved_tx_hash: None,
+            attested_proof: None,
         },
     )
     .await
@@ -6035,6 +6038,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
             resolution: Some("declined".to_string()),
             always: None,
             credential_ref: None,
+            attested_proof_kind: None,
+            attested_approved_tx_hash: None,
+            attested_proof: None,
         },
     )
     .await

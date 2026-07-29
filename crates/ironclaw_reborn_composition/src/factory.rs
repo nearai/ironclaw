@@ -1008,7 +1008,7 @@ pub(crate) struct RebornRuntimeStores {
     /// binding store plus the assembled driver, dispatched by the gate/resolve
     /// ingress once a turn reaches `AttestedResolved`. `None` on production
     /// profiles until the durable attested backends are wired.
-    pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
+    pub(crate) attested_signing: Option<Arc<dyn crate::attested::AttestedComposition>>,
     /// The intent store the raise hook mints into, shared with the continuation
     /// port so the lifecycle projection settles the very record the raise wrote.
     /// `None` on production until the durable attested backends are wired.
@@ -1580,6 +1580,246 @@ where
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         filesystem, view,
     )))
+}
+
+/// Assemble the attested-signing signer-continuation composition.
+///
+/// Self-contained: mints a custodial keystore, reads the mainnet ship-gate from
+/// the environment, and registers the external-wallet providers over the SAME
+/// sealed-grant store the custodial signer claims from, so the one-shot CAS is
+/// authoritative across every path (threat #1). `bindings` is shared with the
+/// resume port injected into the turn state store, so a raised gate's binding
+/// is visible to the continuation driver.
+///
+/// The stores are in-memory, which is fail-closed rather than merely
+/// non-durable: grants, claims, and bindings share a lifetime, so a restart
+/// drops a pending gate entirely (it can no longer be resolved) instead of
+/// leaving a resolvable grant whose claim record was lost.
+///
+/// This is the fallback shape. When the deployment configured a durable
+/// backend AND chain RPC endpoints, [`build_attested_graph`] selects the
+/// durable composition instead.
+///
+/// Present-but-invalid provider config is a hard startup error, not a weakened
+/// verifier; absent config leaves a provider unregistered and therefore
+/// fail-closed (`ProviderMismatch`).
+/// The assembled attested-signing graph plus the two things the runtime wires
+/// off it.
+///
+/// Bundled because the raise hook can only be built where the composition's
+/// CONCRETE backend types are still known — the erased
+/// [`AttestedComposition`](crate::attested::AttestedComposition) deliberately
+/// does not expose `register_attested_gate`, so nothing downstream of backend
+/// selection could construct the hook. Selecting the backend and building the
+/// hook therefore happen in the same place.
+struct AttestedGraph {
+    /// The graph, erased over its persistence backends.
+    composition: Arc<dyn crate::attested::AttestedComposition>,
+    /// Routes `request_signature` to the raise path.
+    raise_hook: Arc<dyn ironclaw_host_runtime::AttestedRaiseHook>,
+    /// The intent store the raise hook mints review links into. The SAME
+    /// instance, so the continuation port's lifecycle projection finds the
+    /// intent it settles.
+    intents: Arc<dyn ironclaw_attestation::IntentStore>,
+}
+
+/// Finish a graph from a concrete composition: erase it, build the raise hook
+/// against it, and surface the intent store.
+fn finish_attested_graph<B, G, L>(
+    composition: crate::attested::RebornAttestedComposition<B, G, L>,
+    minting: crate::attested_raise::IntentMinting,
+) -> AttestedGraph
+where
+    B: ironclaw_attested_runtime::Broadcaster + Send + Sync + 'static,
+    G: ironclaw_attestation::SealedGrantStore + Send + Sync + 'static,
+    L: ironclaw_attestation::SigningLedger + Send + Sync + 'static,
+    crate::attested::RebornAttestedComposition<B, G, L>: crate::attested::AttestedComposition,
+{
+    let intents = Arc::clone(minting.intents());
+    let composition = Arc::new(composition);
+    let raise_hook: Arc<dyn ironclaw_host_runtime::AttestedRaiseHook> = Arc::new(
+        crate::attested_raise::RebornAttestedRaiseHook::new(Arc::clone(&composition))
+            .with_intent_minting(minting),
+    );
+    AttestedGraph {
+        composition: composition as Arc<dyn crate::attested::AttestedComposition>,
+        raise_hook,
+        intents,
+    }
+}
+
+/// Dispatch durable assembly on the configured database backend.
+///
+/// Mirrors every other reborn store: backend choice follows the configured
+/// database, and both arms build the identical security envelope (shared
+/// sealed-grant store for the one-shot CAS, shared signing ledger for the
+/// broadcast-idempotency guard) — only the persistence differs.
+#[cfg(all(
+    feature = "attested-broadcast",
+    any(feature = "libsql", feature = "postgres")
+))]
+async fn assemble_durable_attested(
+    backend: &DurableBackend,
+    custody: crate::attested_durable::DurableCustody,
+    endpoints: ironclaw_attested_store::ChainRpcEndpoints,
+    providers: crate::attested_config::AttestedProvidersConfig,
+    minting: crate::attested_raise::IntentMinting,
+) -> Result<AttestedGraph, RebornBuildError> {
+    let to_build_error =
+        |error: ironclaw_attested_runtime::ContinuationError| RebornBuildError::InvalidConfig {
+            reason: format!("durable attested composition: {error}"),
+        };
+    match backend {
+        #[cfg(feature = "libsql")]
+        DurableBackend::LibSql(db) => {
+            let composition = crate::attested_durable::assemble_libsql(
+                Arc::clone(db),
+                custody,
+                endpoints,
+                providers,
+            )
+            .await
+            .map_err(to_build_error)?;
+            Ok(finish_attested_graph(composition, minting))
+        }
+        #[cfg(feature = "postgres")]
+        DurableBackend::Postgres(pool) => {
+            let composition = crate::attested_durable::assemble_postgres(
+                pool.clone(),
+                custody,
+                endpoints,
+                providers,
+            )
+            .await
+            .map_err(to_build_error)?;
+            Ok(finish_attested_graph(composition, minting))
+        }
+        // Reachable only when the build carries `attested-broadcast` but not the
+        // matching backend feature. Fail closed rather than silently composing a
+        // different graph than the deployment configured.
+        #[allow(unreachable_patterns)]
+        _ => Err(RebornBuildError::InvalidConfig {
+            reason: "durable attested signing requires the matching database backend feature"
+                .to_string(),
+        }),
+    }
+}
+
+/// Select and assemble the attested-signing graph for this deployment.
+///
+/// Durable when the deployment supplies a database handle AND the build carries
+/// the `attested-broadcast` feature AND at least one chain RPC endpoint is
+/// configured; in-memory otherwise. All three are required together because a
+/// durable graph without a broadcaster would persist grants for signatures it
+/// can never submit — durable bookkeeping around a dead end.
+///
+/// Selection is fail-closed in the direction that matters: an unconfigured
+/// chain family cannot broadcast (the `MultiChainBroadcaster` errors) and an
+/// unconfigured provider stays unregistered (`ProviderMismatch`). Falling back
+/// to in-memory never *weakens* a check — it narrows durability, and a restart
+/// then drops pending gates entirely rather than leaving them half-resolvable.
+///
+/// ## Custodial keys are process-scoped even on the durable path
+///
+/// The durable path takes the same freshly-minted custodial keystore as the
+/// in-memory one, so custodial keys do not survive a restart while grants,
+/// ledger rows, and bindings do. That is deliberate rather than overlooked:
+/// custodial mainnet signing is already refused without a KMS backend
+/// (threat #18), so the durable path exists for the **external-wallet**
+/// ceremonies (Ledger and friends), which hold no key here at all. Wiring a
+/// durable custodial keystore means wiring KMS, which is its own change.
+async fn build_attested_graph(
+    backend: &Option<DurableBackend>,
+) -> Result<AttestedGraph, RebornBuildError> {
+    let minting = build_intent_minting()?;
+
+    // A build without `attested-broadcast` (or without a database backend
+    // feature) has no durable graph to select, so the handle goes unread.
+    #[cfg(not(all(
+        feature = "attested-broadcast",
+        any(feature = "libsql", feature = "postgres")
+    )))]
+    let _ = backend;
+
+    #[cfg(all(
+        feature = "attested-broadcast",
+        any(feature = "libsql", feature = "postgres")
+    ))]
+    if let Some(backend) = backend.as_ref() {
+        use ironclaw_chain_signing::SecretsKeyStore;
+        use ironclaw_secrets::SecretsCrypto;
+
+        let endpoints = crate::attested_durable::chain_rpc_endpoints_from_env();
+        // At least one chain family must be reachable. With none configured a
+        // durable graph could seal grants it can never broadcast, so fall
+        // through to in-memory rather than persist a dead end.
+        if endpoints.evm.is_some() || endpoints.solana.is_some() || endpoints.near.is_some() {
+            let custody = crate::attested_durable::DurableCustody::from_keystore(Arc::new(
+                SecretsKeyStore::new(SecretsCrypto::generate()),
+            ));
+            let providers =
+                crate::attested_config::AttestedProvidersConfig::from_env().map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("attested provider config: {error}"),
+                    }
+                })?;
+            return assemble_durable_attested(backend, custody, endpoints, providers, minting)
+                .await;
+        }
+    }
+
+    let bindings = Arc::new(ironclaw_attested_runtime::InMemoryAttestedGateBindingStore::new());
+    Ok(finish_attested_graph(
+        build_attested_composition(bindings)?,
+        minting,
+    ))
+}
+
+fn build_attested_composition(
+    bindings: Arc<ironclaw_attested_runtime::InMemoryAttestedGateBindingStore>,
+) -> Result<crate::attested::InMemoryAttestedComposition, RebornBuildError> {
+    use ironclaw_attestation::{InMemorySealedGrantStore, SealedGrantStore};
+    use ironclaw_attested_runtime::CustodialMainnetShipGate;
+    use ironclaw_chain_signing::SecretsKeyStore;
+    use ironclaw_secrets::SecretsCrypto;
+
+    let keystore = Arc::new(SecretsKeyStore::new(SecretsCrypto::generate()));
+    // No KMS backend here, so custodial mainnet signing stays refused
+    // (threat #18) regardless of what the environment asks for.
+    let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let providers = crate::attested_config::AttestedProvidersConfig::from_env()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("attested provider config: {error}"),
+        })?
+        .build_provider_registry(Arc::clone(&grants) as Arc<dyn SealedGrantStore>);
+    Ok(crate::attested::InMemoryAttestedComposition::new_in_memory(
+        bindings, keystore, ship_gate, grants, providers,
+    ))
+}
+
+/// Assemble the signed-intent minting used by the raise hook to mint the
+/// review link a human opens to approve a signature.
+fn build_intent_minting() -> Result<crate::attested_raise::IntentMinting, RebornBuildError> {
+    use ironclaw_attestation::{
+        DEFAULT_INTENT_TTL_MS, InMemoryAgentSigningKeyStore, InMemoryIntentStore,
+    };
+    use ironclaw_attested_runtime::{InMemorySealedAgentKeyStore, SecretsIntentSigner};
+    use ironclaw_secrets::SecretsCrypto;
+
+    let signer = Arc::new(SecretsIntentSigner::new(
+        Arc::new(SecretsCrypto::generate()),
+        Arc::new(InMemorySealedAgentKeyStore::new()),
+        Arc::new(InMemoryAgentSigningKeyStore::new()),
+    ));
+    let review_url_base = std::env::var(crate::attested_raise::INTENT_REVIEW_URL_BASE_ENV)
+        .unwrap_or_else(|_| "http://127.0.0.1:8080/intent".to_string());
+    Ok(crate::attested_raise::IntentMinting::new(
+        signer,
+        Arc::new(InMemoryIntentStore::new()),
+        DEFAULT_INTENT_TTL_MS,
+        review_url_base,
+    ))
 }
 
 fn production_turn_state_store<F>(
@@ -3784,6 +4024,10 @@ async fn build_local_storage_production_shaped(
             ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool: pool.clone() }
         }
     };
+    // Captured before the bundle is partially moved below. The attested graph
+    // rides the SAME database handle as every other reborn store rather than
+    // opening a second one to the same file.
+    let attested_backend = Some(filesystem_bundle.durable_backend);
     let filesystem = filesystem_bundle.filesystem;
     context.workspace_filesystems = Some(build_workspace_filesystems(
         Arc::clone(&filesystem),
@@ -3815,6 +4059,7 @@ async fn build_local_storage_production_shaped(
         context,
         stores,
         trigger_repository,
+        attested_backend,
         match refresh_lock_pool {
             Some(pool) => ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool),
             None => ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
@@ -4456,6 +4701,10 @@ async fn build_backend_production(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
+    // The deployment's database handle, when it has one, so the attested graph
+    // can persist grants / ledger / bindings on the same backend as every other
+    // reborn store. `None` composes the in-memory graph.
+    attested_backend: Option<DurableBackend>,
     // Leader lock for the background credential keepalive worker. The worker
     // uses this to elect one process per tick as the sweep leader. `None`
     // pool → always-leader (libsql / single-process). Stays private.
@@ -4636,10 +4885,21 @@ async fn build_backend_production(
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
+    // Attested-signing graph. Durable when the deployment configured one,
+    // in-memory otherwise; either way the resume port is built FROM the
+    // composition, so it reads the very binding store the driver verifies
+    // against. A separately-constructed store could let a gate be resumed that
+    // the driver cannot verify.
+    let attested_graph = build_attested_graph(&attested_backend).await?;
+    let attested_resume_port: Arc<dyn AttestedResumePort> =
+        Arc::new(ironclaw_attested_runtime::RuntimeAttestedResumePort::new(
+            attested_graph.composition.sync_bindings(),
+            Arc::new(ironclaw_attested_runtime::InMemoryResumeGuard::new()),
+        ));
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
         turn_state_store_limits,
-        None,
+        Some(attested_resume_port),
     ));
     // Rebindable source-turn-state slot for the trigger delivery-target
     // service — same repoint seam as the sibling snapshot slot below.
@@ -5555,18 +5815,27 @@ async fn build_backend_production(
     #[cfg(test)]
     let local_dev_wasm_runtime_credential_provider_captured =
         services.wasm_runtime_credential_provider_captured_for_test();
+    // Routes `request_signature` to the composition-owned raise hook. Without
+    // it the invocation falls through to the deliberately fail-closed handler
+    // in `first_party_tools::request_signature`, so no gate is ever raised and
+    // the entire attested path is unreachable from the agent loop.
+    let attested_raise_hook = Arc::clone(&attested_graph.raise_hook);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> = if uses_local_host_runtime {
         Arc::new(services.host_runtime_for_local_testing())
     } else {
-        Arc::new(services.host_runtime_for_production(&wiring_config)?)
+        Arc::new(
+            services
+                .host_runtime_for_production(&wiring_config)?
+                .with_attested_raise_hook(attested_raise_hook),
+        )
     };
 
     Ok(RebornRuntimeStores {
-        // Production composes no attested backend yet: the durable stores are a
-        // later group, and `None` means the gate ingress has nothing to
-        // dispatch to and refuses, rather than half-resolving a signature.
-        attested_signing: None,
-        intent_store: None,
+        // The attested graph and its intent store are handed over together:
+        // `product_surface` registers the attested continuation only when both
+        // are present, so a half-wired pair yields no attested surface at all.
+        intent_store: Some(Arc::clone(&attested_graph.intents)),
+        attested_signing: Some(Arc::clone(&attested_graph.composition)),
         host_runtime,
         #[cfg(test)]
         turn_coordinator,
@@ -5658,6 +5927,7 @@ async fn finish_production_backend(
     context: RebornProductionBuildContext,
     filesystem: Arc<CompositeRootFilesystem>,
     trigger_repository: Arc<dyn TriggerRepository>,
+    attested_backend: Option<DurableBackend>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_reborn_event_store::RebornEventStoreConfig,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
@@ -5670,7 +5940,14 @@ async fn finish_production_backend(
         event_store_config,
     )
     .await?;
-    build_backend_production(context, stores, trigger_repository, leader_lock).await
+    build_backend_production(
+        context,
+        stores,
+        trigger_repository,
+        attested_backend,
+        leader_lock,
+    )
+    .await
 }
 
 async fn build_libsql_production(
@@ -5686,6 +5963,9 @@ async fn build_libsql_production(
     ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
     let database_filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     database_filesystem.run_migrations().await?;
+    // Cloned before `db` is moved into the trigger repository: the attested
+    // graph shares the deployment's libSQL handle.
+    let attested_backend = Some(DurableBackend::LibSql(Arc::clone(&db)));
     let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
     trigger_repository
         .run_migrations()
@@ -5699,6 +5979,7 @@ async fn build_libsql_production(
         context,
         filesystem,
         trigger_repository,
+        attested_backend,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
             path_or_url,
@@ -5744,6 +6025,7 @@ async fn build_postgres_production(
         context,
         filesystem,
         trigger_repository,
+        Some(DurableBackend::Postgres(pool.clone())),
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
         ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
@@ -5782,3 +6064,136 @@ mod tests;
 mod auth_tests;
 #[cfg(test)]
 mod local_dev_host_tests;
+
+/// Backend selection for the attested-signing graph.
+///
+/// Gated on the durable feature set: without it there is no durable graph to
+/// select, so the selection these cases pin does not exist to be tested.
+///
+/// Selection reads process env, so each case takes the shared env lock. The
+/// cases are sync and `block_on` the build: holding the env guard across an
+/// `.await` in an async test would pin it across scheduler yields.
+#[cfg(all(test, feature = "libsql", feature = "attested-broadcast"))]
+mod attested_backend_selection_tests {
+    use super::*;
+
+    /// Override `key` for the guard's lifetime, restoring the prior value.
+    ///
+    /// Goes through the runtime-env override seam rather than `set_var`: this
+    /// crate forbids unsafe, and `present_env` reads that same seam.
+    struct EnvVarGuard {
+        snapshot: ironclaw_common::env_helpers::RuntimeEnvSnapshot,
+    }
+
+    impl EnvVarGuard {
+        // env-hermetic: callers hold `ironclaw_common::env_helpers::lock_env()`
+        // for the whole scope in which this guard lives.
+        fn set(key: &'static str, value: &str) -> Self {
+            let snapshot = ironclaw_common::env_helpers::snapshot_runtime_env(key);
+            ironclaw_common::env_helpers::set_runtime_env(key, value);
+            Self { snapshot }
+        }
+
+        // env-hermetic: as above.
+        fn clear(key: &'static str) -> Self {
+            let snapshot = ironclaw_common::env_helpers::snapshot_runtime_env(key);
+            ironclaw_common::env_helpers::mask_runtime_env(key);
+            Self { snapshot }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            ironclaw_common::env_helpers::restore_runtime_env(self.snapshot.clone());
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    async fn libsql_backend(dir: &std::path::Path, name: &str) -> DurableBackend {
+        DurableBackend::LibSql(Arc::new(
+            libsql::Builder::new_local(dir.join(name))
+                .build()
+                .await
+                .expect("libsql db"),
+        ))
+    }
+
+    /// With no database handle there is nothing durable to select, so the graph
+    /// falls back to in-memory — and `broadcasts()` is `false`, which is what
+    /// stops a dry run from being mistaken for a real broadcast.
+    #[test]
+    fn without_a_database_handle_the_graph_is_in_memory_and_does_not_broadcast() {
+        let _env = ironclaw_common::env_helpers::lock_env();
+        // Endpoints ARE configured, isolating the handle as the missing piece.
+        let _rpc = EnvVarGuard::set(
+            crate::attested_durable::EVM_RPC_URL_ENV,
+            "https://rpc.invalid/evm",
+        );
+
+        let graph = block_on(build_attested_graph(&None)).expect("in-memory graph assembles");
+
+        assert!(
+            !graph.composition.broadcasts(),
+            "with no durable backend the graph must wire the non-submitting \
+             broadcaster; `true` here would mean a dry-run path could report a \
+             successful broadcast"
+        );
+    }
+
+    /// A database handle is NOT on its own enough: with no chain RPC endpoint a
+    /// durable graph would persist grants for signatures it could never submit,
+    /// so selection falls back rather than build that.
+    #[test]
+    fn a_database_handle_without_rpc_endpoints_still_falls_back_to_in_memory() {
+        let _env = ironclaw_common::env_helpers::lock_env();
+        let _evm = EnvVarGuard::clear(crate::attested_durable::EVM_RPC_URL_ENV);
+        let _sol = EnvVarGuard::clear(crate::attested_durable::SOLANA_RPC_URL_ENV);
+        let _near = EnvVarGuard::clear(crate::attested_durable::NEAR_RPC_URL_ENV);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = block_on(async {
+            let backend = libsql_backend(dir.path(), "attested-selection.db").await;
+            build_attested_graph(&Some(backend)).await
+        })
+        .expect("graph assembles");
+
+        assert!(
+            !graph.composition.broadcasts(),
+            "a durable backend with no reachable chain must not select the \
+             durable graph: it would seal grants for signatures it can never \
+             broadcast"
+        );
+    }
+
+    /// The payoff: a database handle AND a configured chain endpoint select the
+    /// durable graph, whose real broadcaster submits. Paired with the two cases
+    /// above, this pins the discriminator in both directions.
+    #[test]
+    fn a_database_handle_with_an_rpc_endpoint_selects_the_durable_graph() {
+        let _env = ironclaw_common::env_helpers::lock_env();
+        let _rpc = EnvVarGuard::set(
+            crate::attested_durable::EVM_RPC_URL_ENV,
+            "https://rpc.invalid/evm",
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = block_on(async {
+            let backend = libsql_backend(dir.path(), "attested-durable.db").await;
+            build_attested_graph(&Some(backend)).await
+        })
+        .expect("durable graph assembles");
+
+        assert!(
+            graph.composition.broadcasts(),
+            "a configured durable backend must select the durable graph and its \
+             real per-chain broadcaster"
+        );
+    }
+}

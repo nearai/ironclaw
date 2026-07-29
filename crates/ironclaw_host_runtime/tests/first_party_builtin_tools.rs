@@ -87,6 +87,9 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             HTTP_CAPABILITY_ID
             | HTTP_SAVE_CAPABILITY_ID
             | SHELL_CAPABILITY_ID
+            // The raise ceremony is itself the human-in-the-loop boundary, so
+            // the capability asks before it runs.
+            | REQUEST_SIGNATURE_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_UPDATE_CAPABILITY_ID
@@ -9527,6 +9530,9 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
+        // Declared by the builtin package in registry order (right after
+        // `shell`), so the expected list must name it here.
+        REQUEST_SIGNATURE_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
         TRACE_COMMONS_STATUS_CAPABILITY_ID,
@@ -10265,10 +10271,30 @@ impl ironclaw_host_runtime::AttestedRaiseHook for RecordingAttestedRaiseHook {
     }
 }
 
-/// `request_signature` is routed to the injected raise hook instead of being
-/// dispatched to its (fail-closed) first-party handler.
+/// A wired raise hook is NOT dispatched from `invoke_capability`, even for an
+/// authorized caller — raising is currently unavailable by design.
+///
+/// This test used to assert the opposite. `invoke_capability` intercepted
+/// `request_signature` and called the hook directly, BEFORE `invoke_json` ran
+/// the kernel `authorize()` fold. That skipped trust classification, capability
+/// grants, runtime policy, credential pre-flight, persistent approval, and the
+/// sealed `Authorized` witness, so a caller with an empty grant set could reach
+/// the hook and mint a human-facing approval prompt for a transaction of its
+/// choosing. The intercept was removed and `request_signature` now flows
+/// through the fold like every other capability, reaching only the
+/// deliberately-refusing first-party handler.
+///
+/// The caller here IS granted the capability, which is what makes the assertion
+/// meaningful: the hook stays untouched because nothing dispatches it, not
+/// because authorization refused.
+///
+/// WHEN THE AUTHORIZED-DISPATCH REWORK LANDS, THIS TEST MUST FLIP: the hook
+/// should then be invoked from the dispatcher (which already receives the
+/// sealed `Authorized`) and this should assert `AttestedSigningRequired` plus
+/// exactly one recorded call with the params unmodified. Until then, a passing
+/// assertion here means the bypass has not returned.
 #[tokio::test]
-async fn request_signature_routes_to_the_attested_raise_hook() {
+async fn request_signature_does_not_reach_the_raise_hook_before_authorization() {
     let hook = Arc::new(RecordingAttestedRaiseHook::default());
     let runtime = HostRuntimeServices::new(
         Arc::new(registry()),
@@ -10297,17 +10323,22 @@ async fn request_signature_routes_to_the_attested_raise_hook() {
         .await
         .unwrap();
 
-    let RuntimeCapabilityOutcome::AttestedSigningRequired(gate) = outcome else {
-        panic!("expected AttestedSigningRequired, got {outcome:?}");
-    };
-    assert_eq!(gate.capability_id.as_str(), REQUEST_SIGNATURE_CAPABILITY_ID);
-    assert_eq!(gate.expected_tx_hash, "deadbeef");
+    assert!(
+        !matches!(
+            outcome,
+            RuntimeCapabilityOutcome::AttestedSigningRequired(_)
+        ),
+        "no gate may be raised from `invoke_capability`: reaching the hook here \
+         means it ran ahead of the kernel authorization fold, got {outcome:?}"
+    );
 
-    // The hook saw the raw params, unmodified, under the request_signature id.
     let seen = hook.seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1, "the hook is called exactly once");
-    assert_eq!(seen[0].0.as_str(), REQUEST_SIGNATURE_CAPABILITY_ID);
-    assert_eq!(seen[0].1, input);
+    assert!(
+        seen.is_empty(),
+        "the raise hook must not be dispatched ahead of authorization; it was \
+         called {} time(s)",
+        seen.len()
+    );
 }
 
 /// With NO raise hook wired, `request_signature` must NOT silently succeed: it

@@ -93,7 +93,7 @@ pub use attested_durable::{
     DurableCustody, EVM_RPC_URL_ENV, NEAR_RPC_URL_ENV, SOLANA_RPC_URL_ENV,
     chain_rpc_endpoints_from_env,
 };
-pub use attested_raise::{IntentMinting, RebornAttestedRaiseHook};
+pub use attested_raise::{INTENT_REVIEW_URL_BASE_ENV, IntentMinting, RebornAttestedRaiseHook};
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;

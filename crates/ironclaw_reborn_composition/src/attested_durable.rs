@@ -259,7 +259,7 @@ mod libsql_assembly {
         );
 
         Ok(RebornAttestedComposition::assemble(
-            bindings as Arc<dyn ironclaw_attested_runtime::AttestedGateBindingStore>,
+            bindings,
             custody.keystore,
             custody.ship_gate,
             grants,
@@ -330,7 +330,7 @@ mod postgres_assembly {
         );
 
         Ok(RebornAttestedComposition::assemble(
-            bindings as Arc<dyn ironclaw_attested_runtime::AttestedGateBindingStore>,
+            bindings,
             custody.keystore,
             custody.ship_gate,
             grants,

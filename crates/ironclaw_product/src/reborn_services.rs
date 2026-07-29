@@ -1134,6 +1134,10 @@ impl AutomationProductService for UnsupportedAutomationProductService {
 enum GateResolutionRoute {
     Approval,
     Auth,
+    /// Attested-signing ceremony. Folded into this one resolver rather than a
+    /// parallel dispatch branch, so every gate family is classified in exactly
+    /// one place.
+    Attested,
     Generic,
 }
 
@@ -1161,6 +1165,14 @@ impl GateResolutionRoute {
                 )?;
                 Ok(Self::Auth)
             }
+            TurnStatus::BlockedAttested => {
+                validate_current_gate_ref(
+                    parked_gate_ref,
+                    requested_gate_ref,
+                    ProductSurfaceErrorKind::Conflict,
+                )?;
+                Ok(Self::Attested)
+            }
             status if status.is_terminal() => Err(ProductSurfaceError::from_status_kind(
                 ProductSurfaceErrorCode::Conflict,
                 ProductSurfaceErrorKind::Conflict,
@@ -1172,6 +1184,17 @@ impl GateResolutionRoute {
     }
 
     fn from_gate_shape(gate_ref: &GateRef, resolution: &ProductGateResolution) -> Self {
+        // An attested resolution routes to the attested resolver even when the
+        // run could not be read (e.g. a cross-user `ScopeNotFound`): that
+        // resolver performs its own owner-scoped verify-and-claim and fails
+        // closed indistinguishably from a missing gate. Falling through to
+        // `Generic` would instead reject the resolution SHAPE with a 400 and so
+        // leak that the request was attested-shaped at all — the cross-user
+        // IDOR contract.
+        if matches!(resolution, ProductGateResolution::Attested { .. }) {
+            return Self::Attested;
+        }
+
         match (
             is_approval_gate_ref(gate_ref.as_str()),
             is_auth_gate_ref(gate_ref.as_str()),
@@ -2282,6 +2305,10 @@ pub struct RebornServices<
     view_provider: V,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Injected, crypto-free attested-signing continuation port. When wired, an
+    /// `attested` gate resolution verifies + claims BEFORE the turn resumes,
+    /// then drives the deterministic sign + broadcast continuation.
+    attested_continuation: Option<Arc<dyn crate::AttestedGateContinuationPort>>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
@@ -2358,6 +2385,7 @@ where
             view_provider,
             thread_service,
             turn_coordinator,
+            attested_continuation: None,
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
@@ -4356,6 +4384,17 @@ where
             )
             .await?
         {
+            GateResolutionRoute::Attested => {
+                self.resolve_attested_gate(
+                    access.scope,
+                    access.run_actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
+            }
             GateResolutionRoute::Approval => {
                 self.resolve_approval_gate(
                     access.scope,
@@ -5754,6 +5793,11 @@ where
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         let decision = match resolution {
+            ProductGateResolution::Attested { .. } => {
+                // An attested proof presented against an approval gate is a
+                // wiring fault; the attested resolver owns that family.
+                return Err(blocked_authentication_unavailable());
+            }
             ProductGateResolution::Approved { always } => {
                 if always {
                     ApprovalInteractionDecision::AlwaysAllow
@@ -5823,6 +5867,112 @@ where
         )
     }
 
+    /// Inject the attested-signing continuation port.
+    ///
+    /// Without it an `attested` resolution has nothing to verify against and is
+    /// refused — the fail-closed default, since resuming a signing turn on an
+    /// unverified proof is the one outcome this whole path exists to prevent.
+    pub fn with_attested_continuation(
+        mut self,
+        port: Arc<dyn crate::AttestedGateContinuationPort>,
+    ) -> Self {
+        self.attested_continuation = Some(port);
+        self
+    }
+
+    /// Resolve a `BlockedAttested` gate.
+    ///
+    /// Order is the contract: verify + claim the one-shot grant BEFORE the turn
+    /// transitions, resume only on success, then broadcast. A rejected proof
+    /// leaves the turn `BlockedAttested` with no state-machine mutation, so the
+    /// gate stays cleanly retryable and an unverified proof never advances a
+    /// signing turn.
+    async fn resolve_attested_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        resolution: ProductGateResolution,
+    ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
+        let ProductGateResolution::Attested {
+            kind,
+            approved_tx_hash_hex,
+            proof_json,
+        } = resolution
+        else {
+            return Err(blocked_authentication_unavailable());
+        };
+        let Some(port) = self.attested_continuation.as_ref() else {
+            return Err(blocked_authentication_unavailable());
+        };
+        let kind = match kind.as_str() {
+            "injected_wallet" => crate::AttestedProofKind::InjectedWallet,
+            "near_redirect" => crate::AttestedProofKind::NearRedirect,
+            "wallet_connect" => crate::AttestedProofKind::WalletConnect,
+            _ => {
+                return Err(ProductSurfaceError::validation(
+                    "attested_proof_kind",
+                    ProductSurfaceValidationCode::InvalidValue,
+                ));
+            }
+        };
+        let claim = crate::AttestedProofClaim {
+            kind,
+            approved_tx_hash_hex: approved_tx_hash_hex.clone(),
+            proof_json,
+        };
+
+        // Verify + claim BEFORE any turn transition.
+        let verified = port
+            .verify_and_claim(&scope, &actor, run_id, &gate_ref, &claim)
+            .await
+            .map_err(map_attested_continuation_rejection)?;
+
+        let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
+        let response = self
+            .turn_coordinator
+            .resume_turn(ResumeTurnRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                run_id,
+                gate_resolution_ref: gate_ref.clone(),
+                source_binding_ref: webui_source_binding_ref_from_raw(
+                    "webui-gate-src",
+                    &binding_id,
+                )?,
+                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                    "webui-gate-reply",
+                    &binding_id,
+                )?,
+                idempotency_key: client_action_id,
+                precondition: ResumeTurnPrecondition::default(),
+                resume_disposition: None,
+                // The untrusted claim the synchronous resume-port re-check binds
+                // against the authoritative approved hash.
+                attestation: Some(
+                    ironclaw_turns::AttestationClaimRef::new(&approved_tx_hash_hex).map_err(
+                        |_| {
+                            ProductSurfaceError::validation(
+                                "attested_approved_tx_hash",
+                                ProductSurfaceValidationCode::InvalidValue,
+                            )
+                        },
+                    )?,
+                ),
+            })
+            .await
+            .map_err(map_turn_error)?;
+
+        // Signed and claimed; now broadcast. No re-verification, no re-claim.
+        port.broadcast_resolved(&scope, run_id, &gate_ref, verified)
+            .await
+            .map_err(map_attested_continuation_rejection)?;
+
+        Ok(RebornResolveGateResponse::Resumed(response.into()))
+    }
+
     async fn resolve_auth_gate(
         &self,
         scope: TurnScope,
@@ -5841,6 +5991,11 @@ where
             }
             ProductGateResolution::Declined => AuthInteractionDecision::Deny,
             ProductGateResolution::Approved { .. } => {
+                return Err(blocked_authentication_unavailable());
+            }
+            ProductGateResolution::Attested { .. } => {
+                // An attested proof presented against an auth gate is a wiring
+                // fault, not a caller-resolvable state.
                 return Err(blocked_authentication_unavailable());
             }
         };
@@ -5876,6 +6031,13 @@ where
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         match resolution {
+            ProductGateResolution::Attested { .. } => {
+                // The generic fallback has only one-shot `resume_turn`; an
+                // attested gate needs verify-and-claim BEFORE the turn moves.
+                // Refusing here rather than resuming is what stops an
+                // unverified proof advancing a signing turn.
+                Err(blocked_authentication_unavailable())
+            }
             ProductGateResolution::Approved { always } => {
                 reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
                     .await?;
@@ -6511,6 +6673,30 @@ fn blocked_approval_unavailable() -> ProductSurfaceError {
     persistent_approval_unavailable()
 }
 
+/// Map a sanitized continuation rejection onto the product error surface.
+///
+/// Every rejection collapses to one of two shapes on purpose. A caller must not
+/// be able to tell a missing binding from a forged proof from an
+/// already-claimed grant — that distinction is an oracle for which gates exist
+/// and which have been driven. Backend unavailability is the one case that is
+/// genuinely the server's fault and is reported as such.
+fn map_attested_continuation_rejection(
+    rejection: crate::AttestedContinuationRejection,
+) -> ProductSurfaceError {
+    use crate::AttestedContinuationRejection as R;
+    match rejection {
+        R::Unavailable | R::BackendUnavailable => {
+            ProductSurfaceError::internal_from("attested-signing continuation is unavailable")
+        }
+        R::MissingBinding
+        | R::ProviderMismatch
+        | R::ProofRejected
+        | R::LedgerGuard
+        | R::MalformedProof
+        | R::ContextMismatch => blocked_authentication_unavailable(),
+    }
+}
+
 fn blocked_authentication_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::from_status_kind(
         ProductSurfaceErrorCode::Unavailable,
@@ -7006,5 +7192,80 @@ mod tests {
             !unavailable.retryable,
             "false-arg sentinel is non-retryable"
         );
+    }
+}
+
+#[cfg(test)]
+mod attested_route_tests {
+    use super::*;
+
+    fn attested() -> ProductGateResolution {
+        ProductGateResolution::Attested {
+            kind: "injected_wallet".to_string(),
+            approved_tx_hash_hex: "ab".repeat(32),
+            proof_json: serde_json::json!({}),
+        }
+    }
+
+    /// The cross-user IDOR contract. When the run cannot be read — which is
+    /// what a cross-user request looks like — an attested resolution must still
+    /// route to the attested resolver, because that resolver runs its own
+    /// owner-scoped check and fails closed indistinguishably from a missing
+    /// gate. Falling through to `Generic` would reject the resolution SHAPE and
+    /// so confirm the request was attested-shaped at all.
+    #[test]
+    fn an_attested_resolution_routes_to_the_attested_resolver_even_without_run_state() {
+        let gate = GateRef::new("gate:not-an-approval-or-auth-shape").expect("gate ref");
+        assert!(matches!(
+            GateResolutionRoute::from_gate_shape(&gate, &attested()),
+            GateResolutionRoute::Attested
+        ));
+    }
+
+    /// Even a gate ref shaped like an approval gate must not divert an attested
+    /// resolution into the approval resolver, which would resume the turn
+    /// without verifying the proof.
+    #[test]
+    fn gate_ref_shape_cannot_divert_an_attested_resolution() {
+        for raw in ["gate:approval-abc", "gate:auth-abc", "gate:whatever"] {
+            let gate = GateRef::new(raw).expect("gate ref");
+            assert!(
+                matches!(
+                    GateResolutionRoute::from_gate_shape(&gate, &attested()),
+                    GateResolutionRoute::Attested
+                ),
+                "{raw} must not divert an attested resolution"
+            );
+        }
+    }
+
+    /// A BlockedAttested turn classifies to the attested resolver.
+    #[test]
+    fn a_blocked_attested_turn_routes_to_the_attested_resolver() {
+        let gate = GateRef::new("gate:attested-1").expect("gate ref");
+        let route = GateResolutionRoute::from_run_state(
+            TurnStatus::BlockedAttested,
+            Some(&gate),
+            &gate,
+            &attested(),
+        )
+        .expect("classifies");
+        assert!(matches!(route, GateResolutionRoute::Attested));
+    }
+
+    /// Non-attested resolutions keep their existing routes — the new variant
+    /// must not capture traffic that belongs elsewhere.
+    #[test]
+    fn non_attested_resolutions_keep_their_routes() {
+        let approval = GateRef::new("gate:approval-abc").expect("gate ref");
+        assert!(matches!(
+            GateResolutionRoute::from_gate_shape(&approval, &ProductGateResolution::Declined),
+            GateResolutionRoute::Approval
+        ));
+        let auth = GateRef::new("gate:auth-abc").expect("gate ref");
+        assert!(matches!(
+            GateResolutionRoute::from_gate_shape(&auth, &ProductGateResolution::Declined),
+            GateResolutionRoute::Auth
+        ));
     }
 }

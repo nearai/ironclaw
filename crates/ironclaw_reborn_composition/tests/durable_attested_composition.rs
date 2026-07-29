@@ -11,8 +11,7 @@
 use std::sync::Arc;
 
 use ironclaw_attested_runtime::{
-    AttestedGateBindingStore, CustodialMainnetShipGate, InMemoryAttestedGateBindingStore,
-    ProviderRegistry,
+    CustodialMainnetShipGate, InMemoryAttestedGateBindingStore, ProviderRegistry,
 };
 use ironclaw_attested_store::{
     ChainRpcEndpoints, LibSqlSealedGrantStore, LibSqlSigningLedger, MultiChainBroadcaster,
@@ -53,8 +52,12 @@ async fn durable_libsql_attested_composition_assembles() {
     .expect("master key");
     let keystore = Arc::new(SecretsKeyStore::new(crypto));
     let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
-    let bindings: Arc<dyn AttestedGateBindingStore> =
-        Arc::new(InMemoryAttestedGateBindingStore::new());
+    // Typed, not erased: `assemble` needs the concrete store so it can derive
+    // both the async and sync views from ONE value. This test covers the
+    // durable grant/ledger/broadcaster monomorphization; the durable *binding*
+    // store is covered by `assemble_libsql`, which builds it internally and is
+    // the path production takes.
+    let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
 
     let composition: LibSqlAttestedComposition = RebornAttestedComposition::assemble(
         bindings,

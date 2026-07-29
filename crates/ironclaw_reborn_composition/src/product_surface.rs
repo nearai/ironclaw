@@ -84,6 +84,17 @@ pub(crate) fn build_product_surface_with_channel_connection(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+
+    // Attested-signing continuation: wired only when this runtime composed an
+    // attested signing graph AND an intent store. Without it an `attested`
+    // resolution is refused rather than resumed — resuming a signing turn on an
+    // unverified proof is the one outcome the whole path exists to prevent.
+    if let (Some(attested), Some(intents)) = (runtime.attested_signing(), runtime.intent_store()) {
+        api = api.with_attested_continuation(Arc::new(
+            crate::attested_continuation::RebornAttestedContinuation::new(attested)
+                .with_intent_store(Arc::clone(intents)),
+        ));
+    }
     // Admin user-management surface: the directory and secret provisioner are
     // core runtime handles; only token minting is deployment-supplied.
     if let Some(minter) = runtime.reborn_admin_token_minter() {

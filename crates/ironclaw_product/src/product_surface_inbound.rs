@@ -325,6 +325,19 @@ pub struct ProductResolveGateRequest {
     pub always: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
+    /// Attested-signing proof family for `resolution = "attested"`: one of
+    /// `injected_wallet`, `near_redirect`, `wallet_connect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_proof_kind: Option<String>,
+    /// Lowercase hex of the approved-tx hash the wallet attests to. Carried as
+    /// an untrusted claim; the authoritative binding persisted at gate raise is
+    /// what the proof is actually verified against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_approved_tx_hash: Option<String>,
+    /// Opaque, provider-specific proof payload. Re-decoded by the continuation
+    /// port; never interpreted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_proof: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,7 +362,9 @@ impl From<ProductCancelReason> for SanitizedCancelReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Attested` carries an opaque `serde_json::Value` proof payload, which is
+// `PartialEq` but not `Eq`; the enum therefore drops the `Eq` derive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "resolution", rename_all = "snake_case")]
 pub enum ProductGateResolution {
     Approved {
@@ -361,10 +376,21 @@ pub enum ProductGateResolution {
     Declined,
     /// A host-stored credential reference, not a raw secret/token.
     CredentialProvided { credential_ref: String },
+    /// An external-wallet / custodial attested-signing proof for a
+    /// `BlockedAttested` gate. Validated-shape strings and JSON only — no trust
+    /// is conferred here; the continuation port verifies against the
+    /// authoritative binding.
+    Attested {
+        kind: String,
+        approved_tx_hash_hex: String,
+        proof_json: serde_json::Value,
+    },
 }
 
 /// Canonical route-independent WebUI command produced after validation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `ResolveGate` carries a `ProductGateResolution`, whose `Attested` variant
+// holds a non-`Eq` proof payload, so this enum drops `Eq` as well.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ProductInboundCommand {
     CreateThread {
@@ -496,7 +522,14 @@ impl ProductResolveGateRequest {
         let thread_id = parse_thread_id(self.thread_id)?;
         let run_id = parse_run_id(self.run_id)?;
         let gate_ref = parse_gate_ref(self.gate_ref)?;
-        let resolution = parse_gate_resolution(self.resolution, self.always, self.credential_ref)?;
+        let resolution = parse_gate_resolution(
+            self.resolution,
+            self.always,
+            self.credential_ref,
+            self.attested_proof_kind,
+            self.attested_approved_tx_hash,
+            self.attested_proof,
+        )?;
 
         Ok(ProductInboundCommand::ResolveGate {
             scope: caller.turn_scope(thread_id),
@@ -577,6 +610,9 @@ fn parse_gate_resolution(
     resolution: Option<String>,
     always: Option<bool>,
     credential_ref: Option<String>,
+    attested_proof_kind: Option<String>,
+    attested_approved_tx_hash: Option<String>,
+    attested_proof: Option<serde_json::Value>,
 ) -> Result<ProductGateResolution, ProductSurfaceError> {
     let resolution = required_text("resolution", resolution, 64, TextMode::Token)?;
     match resolution.as_str() {
@@ -591,6 +627,23 @@ fn parse_gate_resolution(
                 CREDENTIAL_REF_MAX_BYTES,
                 TextMode::Token,
             )?,
+        }),
+        "attested" => Ok(ProductGateResolution::Attested {
+            kind: required_text(
+                "attested_proof_kind",
+                attested_proof_kind,
+                64,
+                TextMode::Token,
+            )?,
+            approved_tx_hash_hex: required_text(
+                "attested_approved_tx_hash",
+                attested_approved_tx_hash,
+                128,
+                TextMode::Token,
+            )?,
+            proof_json: attested_proof.ok_or_else(|| {
+                validation_error("attested_proof", ProductSurfaceValidationCode::MissingField)
+            })?,
         }),
         _ => Err(validation_error(
             "resolution",
@@ -643,4 +696,111 @@ fn validate_text_value(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod attested_resolution_tests {
+    use super::*;
+
+    fn request(resolution: &str) -> ProductResolveGateRequest {
+        ProductResolveGateRequest {
+            client_action_id: Some("client-1".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            run_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            gate_ref: Some("gate:attested-1".to_string()),
+            resolution: Some(resolution.to_string()),
+            always: None,
+            credential_ref: None,
+            attested_proof_kind: Some("injected_wallet".to_string()),
+            attested_approved_tx_hash: Some("ab".repeat(32)),
+            attested_proof: Some(serde_json::json!({ "signature": "0xdead" })),
+        }
+    }
+
+    #[test]
+    fn an_attested_resolution_parses_into_the_attested_variant() {
+        let parsed = parse_gate_resolution(
+            Some("attested".to_string()),
+            None,
+            None,
+            Some("injected_wallet".to_string()),
+            Some("ab".repeat(32)),
+            Some(serde_json::json!({ "signature": "0xdead" })),
+        )
+        .expect("attested resolution parses");
+        let ProductGateResolution::Attested {
+            kind,
+            approved_tx_hash_hex,
+            proof_json,
+        } = parsed
+        else {
+            panic!("expected the attested variant");
+        };
+        assert_eq!(kind, "injected_wallet");
+        assert_eq!(approved_tx_hash_hex, "ab".repeat(32));
+        assert_eq!(proof_json["signature"], "0xdead");
+    }
+
+    /// Every attested field is required. A partially-specified proof must be a
+    /// validation error, never a silently-defaulted claim the resolver would
+    /// then carry to the device path.
+    #[test]
+    fn a_partial_attested_resolution_is_refused() {
+        for (kind, hash, proof) in [
+            (None, Some("ab".repeat(32)), Some(serde_json::json!({}))),
+            (
+                Some("injected_wallet".to_string()),
+                None,
+                Some(serde_json::json!({})),
+            ),
+            (
+                Some("injected_wallet".to_string()),
+                Some("ab".repeat(32)),
+                None,
+            ),
+        ] {
+            assert!(
+                parse_gate_resolution(Some("attested".to_string()), None, None, kind, hash, proof)
+                    .is_err(),
+                "a partial attested resolution must fail validation"
+            );
+        }
+    }
+
+    /// The proof payload is opaque: this layer must not interpret it, so an
+    /// arbitrary JSON shape passes through untouched to the continuation port.
+    #[test]
+    fn the_proof_payload_passes_through_uninterpreted() {
+        let odd = serde_json::json!({ "nested": { "a": [1, 2, 3] }, "unknown_field": true });
+        let parsed = parse_gate_resolution(
+            Some("attested".to_string()),
+            None,
+            None,
+            Some("wallet_connect".to_string()),
+            Some("cd".repeat(32)),
+            Some(odd.clone()),
+        )
+        .expect("parses");
+        let ProductGateResolution::Attested { proof_json, .. } = parsed else {
+            panic!("expected attested");
+        };
+        assert_eq!(proof_json, odd, "the payload must not be reshaped here");
+    }
+
+    #[test]
+    fn a_non_attested_resolution_ignores_the_attested_fields() {
+        let mut req = request("declined");
+        req.resolution = Some("declined".to_string());
+        let caller = ProductSurfaceCaller::new(
+            ironclaw_host_api::TenantId::new("tenant-a").expect("tenant"),
+            ironclaw_host_api::UserId::new("alice").expect("user"),
+            None,
+            None,
+        );
+        let command = req.into_command(caller).expect("declined parses");
+        let ProductInboundCommand::ResolveGate { resolution, .. } = command else {
+            panic!("expected ResolveGate");
+        };
+        assert_eq!(resolution, ProductGateResolution::Declined);
+    }
 }

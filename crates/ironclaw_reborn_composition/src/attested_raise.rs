@@ -60,6 +60,13 @@ use ironclaw_attestation::{
 
 use crate::attested::RebornAttestedComposition;
 
+/// Env var holding the base URL the signature-review link is built on.
+///
+/// Server-fixed config, never a request value: the minted token is appended to
+/// this base, so an attacker who could influence it would control where an
+/// approver is sent to authorize a signature.
+pub const INTENT_REVIEW_URL_BASE_ENV: &str = "ATTESTED_INTENT_REVIEW_URL_BASE";
+
 /// Everything the raise needs to mint, sign, and persist a [`SignedIntent`]
 /// alongside the gate (§B3).
 ///

@@ -33,7 +33,7 @@ use ironclaw_attestation::{
 use ironclaw_attested_runtime::{
     AttestedGateBinding, AttestedGateBindingStore, AttestedSignerContinuationDriver, BindingError,
     BindingKey, BroadcastOutcome, Broadcaster, ContinuationError, InMemoryAttestedGateBindingStore,
-    ProviderRegistry,
+    ProviderRegistry, SyncBindingRead,
 };
 use ironclaw_chain_signing::{CustodialSigner, DenyFirstCustodyPolicy, SecretsKeyStore, ShipGate};
 use ironclaw_signing_provider::{GateRef, SigningContext};
@@ -79,11 +79,6 @@ pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore,
 /// The continuation driver type, generic over broadcaster / ledger / signer.
 pub(crate) type ComposedContinuationDriver<B, G, L> =
     AttestedSignerContinuationDriver<B, L, ComposedCustodialSigner<G, L>>;
-
-/// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
-/// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
-pub(crate) type InMemoryContinuationDriver =
-    ComposedContinuationDriver<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 
 pub type InMemoryAttestedComposition =
     RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
@@ -135,6 +130,72 @@ impl Broadcaster for NoopBroadcaster {
 ///
 /// Generic over the durable-vs-in-memory grant store `G`, ledger `L`, and
 /// broadcaster `B`.
+/// The attested-signing graph, erased over its persistence backends.
+///
+/// [`RebornAttestedComposition`] is generic over broadcaster / grant store /
+/// ledger, so naming it concretely pins a holder to exactly one backend shape.
+/// That is why `RebornRuntime` could only ever hold the in-memory
+/// monomorphization, leaving the durable PostgreSQL and libSQL compositions
+/// assembled-but-unreachable. Holding this trait instead lets the runtime carry
+/// whichever backend the deployment configured.
+///
+/// The surface is the two handles the product layer needs — the authoritative
+/// bindings and the continuation driver — and nothing else. Raise-path methods
+/// stay off it deliberately: the raise hook holds the concrete composition, so
+/// widening this to `register_attested_gate` would hand every holder of the
+/// erased graph the ability to seal grants.
+#[async_trait::async_trait]
+pub trait AttestedComposition: Send + Sync {
+    /// The authoritative gate-binding store. The same store the driver reads,
+    /// so a caller-supplied identity can be checked against what the raiser
+    /// recorded.
+    fn bindings(&self) -> &Arc<dyn AttestedGateBindingStore>;
+
+    /// The signer-continuation driver, itself erased over its backends.
+    fn driver(&self) -> Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver>;
+
+    /// Whether this graph's broadcaster actually submits to a chain.
+    ///
+    /// The in-memory fallback wires the [`NoopBroadcaster`], which signs and
+    /// deliberately never submits (the driver then leaves the ledger at
+    /// `Signed` and reports `NotBroadcast`, so a dry run can never be mistaken
+    /// for a real broadcast). A durable deployment wires the real per-chain
+    /// broadcaster. Exposed because "signed but silently never broadcast" is
+    /// the one failure this path cannot detect from the outside.
+    fn broadcasts(&self) -> bool;
+
+    /// The sync view of the SAME binding store, for the resume port. Exposed
+    /// here so the port is built from the composition rather than from a
+    /// separately-constructed store -- which is what keeps the port from
+    /// admitting a resume the driver cannot verify.
+    fn sync_bindings(&self) -> Arc<dyn SyncBindingRead>;
+}
+
+#[async_trait::async_trait]
+impl<B, G, L> AttestedComposition for RebornAttestedComposition<B, G, L>
+where
+    B: Broadcaster + Send + Sync + 'static,
+    G: SealedGrantStore + Send + Sync + 'static,
+    L: SigningLedger + Send + Sync + 'static,
+    ComposedCustodialSigner<G, L>: ironclaw_attested_runtime::CustodialSignerLike,
+{
+    fn bindings(&self) -> &Arc<dyn AttestedGateBindingStore> {
+        &self.bindings
+    }
+
+    fn driver(&self) -> Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver> {
+        Arc::clone(&self.driver) as Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver>
+    }
+
+    fn sync_bindings(&self) -> Arc<dyn SyncBindingRead> {
+        Arc::clone(&self.sync_bindings)
+    }
+
+    fn broadcasts(&self) -> bool {
+        self.broadcasts
+    }
+}
+
 pub struct RebornAttestedComposition<B, G, L>
 where
     B: Broadcaster + 'static,
@@ -142,6 +203,13 @@ where
     L: SigningLedger + 'static,
 {
     bindings: Arc<dyn AttestedGateBindingStore>,
+    /// The SAME binding store as `bindings`, kept as its sync view so the
+    /// resume port can read inside the turn store's non-blocking critical
+    /// section. Never a second store -- `assemble` derives both from one value.
+    sync_bindings: Arc<dyn SyncBindingRead>,
+    /// Captured from the broadcaster at assembly time, so the selected backend
+    /// is observable without reaching into the driver.
+    broadcasts: bool,
     /// Shared sealed-grant store. Held so `register_attested_gate` (the raise
     /// path) seals into the SAME store the driver's custodial signer claims from
     /// — the one-shot CAS is authoritative across raise and continuation.
@@ -169,15 +237,29 @@ where
     // driver; needs an AttestedSigningServices bundle,
     // plan docs/plans/2026-05-23-attested-signing-substrate.md
     #[allow(clippy::too_many_arguments)]
-    pub fn assemble(
-        bindings: Arc<dyn AttestedGateBindingStore>,
+    /// Takes the binding store **typed** rather than as two erased handles.
+    ///
+    /// The composition needs two views of it: the async
+    /// [`AttestedGateBindingStore`] the driver reads, and the sync
+    /// [`SyncBindingRead`] the resume port reads inside the turn store's
+    /// non-blocking critical section. Deriving both from one concrete value
+    /// makes them the same object by construction — two parameters could be
+    /// handed different stores, and a resume port that admits a gate the driver
+    /// cannot verify is exactly the divergence this path must not have.
+    pub fn assemble<Bind>(
+        bindings: Arc<Bind>,
         keystore: Arc<SecretsKeyStore>,
         ship_gate: ShipGate,
         grants: Arc<G>,
         ledger: Arc<L>,
         broadcaster: Arc<B>,
         providers: ProviderRegistry,
-    ) -> Self {
+    ) -> Self
+    where
+        Bind: AttestedGateBindingStore + SyncBindingRead + 'static,
+    {
+        let sync_bindings = Arc::clone(&bindings) as Arc<dyn SyncBindingRead>;
+        let bindings = bindings as Arc<dyn AttestedGateBindingStore>;
         let custodial_signer = Arc::new(CustodialSigner::new(
             keystore,
             Arc::clone(&grants),
@@ -185,6 +267,7 @@ where
             ship_gate,
             Arc::new(DenyFirstCustodyPolicy),
         ));
+        let broadcasts = broadcaster.submits();
         let driver = Arc::new(AttestedSignerContinuationDriver::new(
             Arc::clone(&bindings),
             providers,
@@ -194,6 +277,8 @@ where
         ));
         Self {
             bindings,
+            sync_bindings,
+            broadcasts,
             grants,
             driver,
         }
@@ -299,7 +384,7 @@ impl RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemo
     ) -> Self {
         let ledger = Arc::new(InMemorySigningLedger::new());
         Self::assemble(
-            bindings as Arc<dyn AttestedGateBindingStore>,
+            bindings,
             keystore,
             ship_gate,
             grants,

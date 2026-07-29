@@ -325,6 +325,75 @@ pub struct BindingOwner<'a> {
     pub user_id: &'a str,
 }
 
+/// The continuation surface the resume path drives, erased over the
+/// broadcaster / ledger / signer monomorphization.
+///
+/// [`AttestedSignerContinuationDriver`] is generic over its persistence
+/// backends, so a composition that holds it concretely can only ever hold ONE
+/// backend shape — which is what pinned the runtime to the in-memory stores and
+/// kept the durable PostgreSQL / libSQL compositions unreachable. This trait is
+/// the seam that lets the runtime hold any of them behind one type.
+///
+/// Deliberately narrow: exactly the three calls the resume path makes, in the
+/// order it makes them. It is not a general handle on the driver — widening it
+/// would let callers reach past the ownership assertion into verify/broadcast.
+#[async_trait::async_trait]
+pub trait SignerContinuationDriver: Send + Sync {
+    /// Assert the caller owns the binding, BEFORE any verify / claim /
+    /// broadcast. Fails closed indistinguishably from a missing binding.
+    async fn assert_binding_owner(
+        &self,
+        gate_ref: &GateRef,
+        caller: BindingOwner<'_>,
+    ) -> Result<(), ContinuationError>;
+
+    /// Verify the proof, claim the one-shot grant, and sign. Runs BEFORE the
+    /// turn transitions, so a forged proof never reaches `AttestedResolved`.
+    async fn verify_and_sign(
+        &self,
+        gate_ref: &GateRef,
+        proof: &SigningProof,
+    ) -> Result<VerifiedContinuation, ContinuationError>;
+
+    /// Broadcast an already-verified continuation. Never re-verifies and never
+    /// re-claims — the [`VerifiedContinuation`] is the only way in.
+    async fn broadcast_signed_continuation(
+        &self,
+        verified: VerifiedContinuation,
+    ) -> Result<SignerContinuationOutcome, ContinuationError>;
+}
+
+#[async_trait::async_trait]
+impl<B, L, S> SignerContinuationDriver for AttestedSignerContinuationDriver<B, L, S>
+where
+    B: Broadcaster + Send + Sync + 'static,
+    L: SigningLedger + Send + Sync + 'static,
+    S: CustodialSignerLike + Send + Sync + 'static,
+{
+    async fn assert_binding_owner(
+        &self,
+        gate_ref: &GateRef,
+        caller: BindingOwner<'_>,
+    ) -> Result<(), ContinuationError> {
+        AttestedSignerContinuationDriver::assert_binding_owner(self, gate_ref, caller).await
+    }
+
+    async fn verify_and_sign(
+        &self,
+        gate_ref: &GateRef,
+        proof: &SigningProof,
+    ) -> Result<VerifiedContinuation, ContinuationError> {
+        AttestedSignerContinuationDriver::verify_and_sign(self, gate_ref, proof).await
+    }
+
+    async fn broadcast_signed_continuation(
+        &self,
+        verified: VerifiedContinuation,
+    ) -> Result<SignerContinuationOutcome, ContinuationError> {
+        AttestedSignerContinuationDriver::broadcast_signed_continuation(self, verified).await
+    }
+}
+
 impl<B, L, S> AttestedSignerContinuationDriver<B, L, S>
 where
     B: Broadcaster,

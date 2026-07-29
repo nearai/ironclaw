@@ -95,14 +95,14 @@ fn trace_capability_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    AttestedRaiseHook, AttestedRaiseRequest, BuiltinObligationHandler, BuiltinObligationServices,
+    AttestedRaiseHook, BuiltinObligationHandler, BuiltinObligationServices,
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, REQUEST_SIGNATURE_CAPABILITY_ID,
-    RuntimeApprovalGate, RuntimeApprovalResume, RuntimeAuthGate, RuntimeAuthResume,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId, RuntimeInvocation,
-    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate,
+    RuntimeApprovalResume, RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth,
+    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest,
+    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -462,40 +462,35 @@ impl HostRuntime for DefaultHostRuntime {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
 
-        // Attested-signing raise (attested-signing PR14): a `request_signature`
-        // invocation does not sign — it routes to the composition-owned raise
-        // hook, which builds + binds + seals the gate and returns
-        // `AttestedSigningRequired` (or `Failed`, fail-closed), short-circuiting
-        // before the kernel dispatch below. The capability declares
-        // `PermissionMode::Ask` and the attested gate it raises IS the
-        // human-in-the-loop boundary; the capability-surface authorization layer
-        // gates the `request_signature` dispatch before this runtime is invoked.
-        // NOTE (rebase): main moved trust/policy/credential authorization into
-        // the kernel `authorize()` fold inside `host.invoke_json`; this intercept
-        // sits before that fold, so `request_signature` does not pass the kernel
-        // authorization path — acceptable because the raise only persists a gate
-        // and seals a one-shot grant (no signing/broadcast) and fails closed.
-        if capability_id.as_str() == REQUEST_SIGNATURE_CAPABILITY_ID
-            && let Some(hook) = self.attested_raise_hook.clone()
-        {
-            let outcome = hook
-                .raise(AttestedRaiseRequest::new(
-                    capability_id.clone(),
-                    context.clone(),
-                    input.clone(),
-                ))
-                .await;
-            trace_capability_latency_ok(
-                "invoke_capability",
-                &capability_id,
-                &scope,
-                total_started_at,
-            );
-            return Ok(outcome);
-        }
-        // When `request_signature` has no raise hook wired, fall through to the
-        // fail-closed first-party handler, which refuses (never silently
-        // succeeds).
+        // NO `request_signature` INTERCEPT HERE — deliberately.
+        //
+        // An earlier revision short-circuited `request_signature` to the
+        // composition-owned raise hook at this point, before `invoke_json`
+        // below. That was a rebase artifact: authorization used to run before
+        // `invoke_capability`, and it since moved into the kernel's
+        // `authorize()` fold *inside* `invoke_json`. An intercept here
+        // therefore skipped trust classification, capability grants, runtime
+        // policy, credential pre-flight, persistent approval, and the sealed
+        // `Authorized` witness — a caller with an EMPTY grant set reached the
+        // raise hook and could mint a human-facing approval prompt for a
+        // transaction of its choosing (prompt-injection reachable). The human
+        // approval boundary still stood, but a signing capability must not
+        // depend on it as its only gate.
+        //
+        // Fail-closed for now: with no intercept, `request_signature` flows
+        // through the fold like every other capability and reaches the
+        // deliberately-refusing handler in `first_party_tools::request_signature`
+        // only if authorized. Raising is therefore unavailable rather than
+        // unauthorized.
+        //
+        // The fix is to raise as an AUTHORIZED DISPATCH RESULT: invoke the hook
+        // from the dispatcher, which already receives the sealed `Authorized`,
+        // and carry the gate back through a neutral typed "deferred" channel
+        // that `DefaultHostRuntime` maps to `AttestedSigningRequired` — the
+        // same shape `ApprovalRequired` / `AuthRequired` already use (authority
+        // first, typed suspension after). The kernel stays free of any
+        // attested/chain/crypto types. Tracked in nearai/ironclaw#6860; until it lands,
+        // `attested_raise_hook` is held but intentionally not dispatched.
 
         // Credential pre-flight and the persistent-approval re-authorize fold now
         // run inside the capability kernel's `authorize()` fold (§5.2.7/§5.3.2),

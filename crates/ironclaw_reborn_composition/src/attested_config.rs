@@ -487,8 +487,12 @@ impl AttestedProvidersConfig {
 /// returned string is the raw (un-trimmed) value so the validated constructors
 /// can apply their own trimming + checks.
 pub(crate) fn present_env(key: &str) -> Option<String> {
-    match std::env::var(key) {
-        Ok(value) if !value.trim().is_empty() => Some(value),
+    // Reads through the shared runtime-env seam rather than `std::env::var`
+    // directly, so attested config honours the same override mechanism as the
+    // rest of the composition — and so tests can drive backend selection
+    // without `set_var` (this crate forbids unsafe).
+    match ironclaw_common::env_helpers::env_or_override(key) {
+        Some(value) if !value.trim().is_empty() => Some(value),
         _ => None,
     }
 }

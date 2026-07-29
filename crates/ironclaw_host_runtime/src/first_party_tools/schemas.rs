@@ -105,6 +105,35 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        // Mirrors `RequestSignatureParams` in the composition raise hook
+        // (`ironclaw_reborn_composition::attested_raise`), which is the only
+        // consumer of this body. `decoded` is left as a free-form object on
+        // purpose: it is the chain-tagged `DecodedTransaction` projection the
+        // host decoder produced upstream, and pinning its shape here would
+        // duplicate a chain-aware schema into a chain-free layer. The hook
+        // parses it strictly and fails closed (`InputEncode`) on any mismatch,
+        // so this schema guides the model without becoming a second source of
+        // truth about transaction shape.
+        "schemas/builtin/request_signature.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "provider_hint": {
+                    "type": "string",
+                    "enum": ["custodial", "injected", "near_redirect", "wallet_connect"],
+                    "description": "Which signing trust model to raise the gate for."
+                },
+                "signer_account": {
+                    "type": "string",
+                    "description": "Account the signature is requested for (lowercase hex without 0x for EVM)."
+                },
+                "decoded": {
+                    "type": "object",
+                    "description": "The server-decoded, chain-tagged transaction to be signed."
+                }
+            },
+            "required": ["provider_hint", "signer_account", "decoded"],
+            "additionalProperties": false
+        }),
         // NOTE: this schema is published by the host_runtime first-party
         // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
         // The decorator path (`ironclaw_loop_host::build_spawn_subagent_parameters_schema`)

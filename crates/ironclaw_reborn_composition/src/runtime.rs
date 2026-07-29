@@ -695,7 +695,7 @@ pub struct RebornRuntime {
     /// `None` on production profiles until the durable attested backends are
     /// wired — the gate ingress then has nothing to dispatch to and fails
     /// closed, rather than half-resolving a signature.
-    pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
+    pub(crate) attested_signing: Option<Arc<dyn crate::attested::AttestedComposition>>,
     /// The intent store the raise hook mints into; the review routes read it.
     pub(crate) intent_store: Option<Arc<dyn ironclaw_attestation::IntentStore>>,
     /// Lazily-built clear-signing descriptor cache (see `clear_signing_source`).
@@ -1456,7 +1456,7 @@ impl RebornRuntime {
     /// authoritative binding store through this one handle, rather than
     /// assembling them from runtime internals — so there is exactly one place a
     /// signing continuation can be obtained.
-    pub fn attested_signing(&self) -> Option<&Arc<crate::attested::InMemoryAttestedComposition>> {
+    pub fn attested_signing(&self) -> Option<&Arc<dyn crate::attested::AttestedComposition>> {
         self.attested_signing.as_ref()
     }
 
