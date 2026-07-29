@@ -722,6 +722,15 @@ pub struct ModelFallbackRoute {
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Stable provider identity used in typed errors and routing evidence.
+    ///
+    /// Production adapters and decorators override this; the default keeps
+    /// external test doubles source-compatible without pretending a model slug
+    /// is a provider identity.
+    fn provider_id(&self) -> String {
+        "unknown".to_string()
+    }
+
     /// Get the model name.
     fn model_name(&self) -> &str;
 
@@ -801,7 +810,7 @@ pub trait LlmProvider: Send + Sync {
             });
         }
         Err(LlmError::ModelNotAvailable {
-            provider: self.model_name().to_string(),
+            provider: self.provider_id(),
             model: normalized_model_override(requested_model)
                 .map(str::to_string)
                 .unwrap_or_else(|| self.active_model_name()),
@@ -914,6 +923,19 @@ mod model_override_tests {
             provider.effective_model_name(Some("  DEFAULT  ")),
             "stub-model"
         );
+    }
+
+    #[test]
+    fn default_missing_fallback_does_not_mislabel_the_model_as_provider() {
+        let error = StubProvider
+            .fallback_route(1, Some("requested-model"))
+            .expect_err("leaf providers expose only fallback index zero");
+
+        assert!(matches!(
+            error,
+            LlmError::ModelNotAvailable { provider, model }
+                if provider == "unknown" && model == "requested-model"
+        ));
     }
 
     #[test]

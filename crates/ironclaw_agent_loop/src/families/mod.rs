@@ -224,7 +224,7 @@ mod tests {
             class: ModelErrorClass::Unavailable,
             safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
             retry_after_ms: None,
-            diagnostic_ref: None,
+            next_fallback_index: Some(1),
         };
 
         let state = LoopExecutionState::initial_for_run(&context);

@@ -84,6 +84,10 @@ impl BedrockProvider {
 
 #[async_trait]
 impl LlmProvider for BedrockProvider {
+    fn provider_id(&self) -> String {
+        "bedrock".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.display_model
     }

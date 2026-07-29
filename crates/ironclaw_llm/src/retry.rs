@@ -352,6 +352,10 @@ impl CompletionStreamSink for StreamingAttemptSink {
 
 #[async_trait]
 impl LlmProvider for RetryProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }

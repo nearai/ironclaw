@@ -178,7 +178,6 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         stage,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
-        diagnostic_ref = ?error.diagnostic_ref,
         safe_summary = %error.safe_summary,
         "loop host port returned sanitized error"
     );

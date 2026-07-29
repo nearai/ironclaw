@@ -377,6 +377,10 @@ impl FailoverProvider {
 
 #[async_trait]
 impl LlmProvider for FailoverProvider {
+    fn provider_id(&self) -> String {
+        "failover".to_string()
+    }
+
     fn model_name(&self) -> &str {
         self.providers[self.last_used.load(Ordering::Relaxed)].model_name()
     }
@@ -491,6 +495,9 @@ impl LlmProvider for FailoverProvider {
             .ok_or_else(|| self.missing_fallback_error(fallback_index, requested_model))?;
         Ok(ModelFallbackRoute {
             fallback_index,
+            // Index zero is the caller-selected primary route and therefore
+            // honors its model override. Later indices are independently
+            // configured providers and use their own active model.
             model: if fallback_index == 0 {
                 provider.effective_model_name(requested_model)
             } else {

@@ -704,6 +704,10 @@ impl NearAiChatProvider {
 
 #[async_trait]
 impl LlmProvider for NearAiChatProvider {
+    fn provider_id(&self) -> String {
+        "nearai_chat".to_string()
+    }
+
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req
             .take_model_override()
@@ -2549,29 +2553,50 @@ data: [DONE]
         let status = status.to_string();
         let body = body.to_string();
         let retry_after = retry_after.map(str::to_string);
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let (headers, _) = read_http_request_body(&mut socket).await;
-            assert!(headers.starts_with("POST /v1/chat/completions "));
-            let retry_after_header = retry_after
-                .map(|value| format!("retry-after: {value}\r\n"))
-                .unwrap_or_default();
-            let response = format!(
-                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
-                 {retry_after_header}content-length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write error response");
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let (headers, _) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("POST /v1/chat/completions ") {
+                    let retry_after_header = retry_after
+                        .map(|value| format!("retry-after: {value}\r\n"))
+                        .unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                         {retry_after_header}content-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write error response");
+                    break;
+                }
+
+                assert!(
+                    headers.starts_with("GET /v1/model/list "),
+                    "unexpected startup request: {headers}"
+                );
+                let pricing_body = r#"{"models":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\n\r\n{pricing_body}",
+                    pricing_body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write pricing response");
+            }
         });
 
-        NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+        let error = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
             .expect("provider")
             .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
             .await
-            .expect_err("scripted HTTP error must reach the adapter mapper")
+            .expect_err("scripted HTTP error must reach the adapter mapper");
+        server.await.expect("loopback server");
+        error
     }
 
     #[tokio::test]
@@ -2630,6 +2655,24 @@ data: [DONE]
                 retry_after: Some(delay),
             } if provider == "nearai_chat" && delay == Duration::from_secs(17)
         ));
+
+        let upstream_body = "gateway exploded with secret response details";
+        let unavailable = complete_with_http_error("502 Bad Gateway", upstream_body, None).await;
+        assert!(
+            matches!(
+                unavailable,
+                LlmError::BadGateway {
+                    ref provider,
+                    status: 502,
+                    retry_after: None,
+                } if provider == "nearai_chat"
+            ),
+            "{unavailable:?}"
+        );
+        assert!(
+            !unavailable.to_string().contains(upstream_body),
+            "adapter must not leak an upstream 5xx body"
+        );
     }
 
     #[tokio::test]

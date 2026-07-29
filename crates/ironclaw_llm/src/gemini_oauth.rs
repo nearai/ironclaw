@@ -224,6 +224,19 @@ pub(crate) struct GeminiResponseMeta {
     pub(crate) total_token_count: Option<u32>,
 }
 
+impl GeminiResponseMeta {
+    fn is_empty(&self) -> bool {
+        self.model_version.is_none()
+            && self.prompt_feedback.is_none()
+            && self.grounding_metadata.is_none()
+            && self.citation_metadata.is_none()
+            && self.consumed_credits.is_empty()
+            && self.remaining_credits.is_empty()
+            && self.cached_content_token_count.is_none()
+            && self.total_token_count.is_none()
+    }
+}
+
 /// Token representation matching Node.js `Credentials` format from `google-auth-library`
 /// usually stored in `~/.gemini/oauth_creds.json`
 #[derive(Clone, Serialize, Deserialize)]
@@ -983,8 +996,10 @@ impl GeminiOauthProvider {
         let body = String::from_utf8_lossy(&body_bytes);
         let parsed_body = if self.uses_cloud_code_api() {
             let aggregate = Self::aggregate_cloud_code_sse(&body);
-            if let Ok(mut meta) = self.last_response_meta.lock() {
-                *meta = aggregate.meta;
+            if !aggregate.meta.is_empty()
+                && let Ok(mut meta) = self.last_response_meta.lock()
+            {
+                *meta = aggregate.meta.clone();
             }
             aggregate.response.unwrap_or_else(|| serde_json::json!({}))
         } else {
@@ -2088,6 +2103,10 @@ impl GeminiOauthProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for GeminiOauthProvider {
+    fn provider_id(&self) -> String {
+        "gemini_oauth".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.config.model
     }
@@ -2250,6 +2269,62 @@ mod tests {
             error,
             LlmError::ContextLengthExceeded { used: 0, limit: 0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn non_sse_error_does_not_erase_last_cloud_code_response_metadata() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let provider = GeminiOauthProvider::new(GeminiOauthConfig {
+            model: "gemini-2.5-flash".to_string(),
+            credentials_path: PathBuf::from("unused-test-credentials.json"),
+        })
+        .expect("Gemini provider");
+        provider
+            .last_response_meta
+            .lock()
+            .expect("metadata lock")
+            .model_version = Some("gemini-2.5-flash-001".to_string());
+
+        let body = r#"{"error":{"message":"permission denied"}}"#;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write error response");
+        });
+
+        let response = reqwest::get(url).await.expect("loopback response");
+        let error = provider
+            .error_from_http_response(response)
+            .await
+            .expect("adapter reads error response");
+        server.await.expect("loopback server");
+
+        assert!(matches!(error, LlmError::AuthFailed { .. }));
+        assert_eq!(
+            provider
+                .last_response_meta
+                .lock()
+                .expect("metadata lock")
+                .model_version
+                .as_deref(),
+            Some("gemini-2.5-flash-001")
+        );
     }
 
     #[test]

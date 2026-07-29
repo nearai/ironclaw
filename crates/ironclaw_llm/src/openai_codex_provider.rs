@@ -242,6 +242,10 @@ impl OpenAiCodexProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiCodexProvider {
+    fn provider_id(&self) -> String {
+        "openai_codex".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.model
     }

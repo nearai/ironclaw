@@ -866,7 +866,6 @@ where
         {
             tracing::debug!(
                 kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
                 "loop assistant_reply_finalized milestone failed after finalized transcript write"
             );
             return Ok(());
@@ -1326,7 +1325,6 @@ where
             if let Err(error) = milestones.model_started(requested_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_started milestone failed before model request"
                 );
             }
@@ -1340,7 +1338,6 @@ where
             if let Err(error) = milestones.model_completed(effective_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_completed milestone failed after successful model response"
                 );
             }
@@ -1354,7 +1351,6 @@ where
             if let Err(error) = milestones.model_failed(reason_kind).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_failed milestone failed after model error"
                 );
             }
@@ -1944,6 +1940,9 @@ pub struct HostManagedModelError {
     /// Provider-supplied retry delay. Typed so the recovery strategy does not
     /// have to parse model-visible detail text.
     pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that the provider chain has another configured
+    /// route. Recovery may advance only when this is present.
+    pub next_fallback_index: Option<u32>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -1961,6 +1960,7 @@ impl HostManagedModelError {
             reason_kind: None,
             gate_ref: None,
             retry_after_ms: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -1972,6 +1972,7 @@ impl HostManagedModelError {
             reason_kind: None,
             gate_ref: None,
             retry_after_ms: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -2012,6 +2013,11 @@ impl HostManagedModelError {
                 .try_into()
                 .unwrap_or(u64::MAX),
         );
+        self
+    }
+
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
         self
     }
 }
@@ -2339,6 +2345,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(retry_after_ms) = error.retry_after_ms {
         host_error = host_error.with_retry_after_ms(retry_after_ms);
     }
+    if let Some(next_fallback_index) = error.next_fallback_index {
+        host_error = host_error.with_next_fallback_index(next_fallback_index);
+    }
     // `error.detail` is already producer-scrubbed; fall back to the scrubbed
     // rejected summary only when there is no structured detail.
     if let Some(detail) = error.detail.or(rejected_summary_detail) {
@@ -2413,10 +2422,12 @@ mod tests {
                 AgentLoopHostErrorKind::Unavailable,
             ),
         ] {
-            let mapped = model_gateway_error(
-                HostManagedModelError::safe(kind, safe_model_summary(kind))
-                    .with_retry_after(std::time::Duration::from_millis(1_750)),
-            );
+            let mut error = HostManagedModelError::safe(kind, safe_model_summary(kind))
+                .with_retry_after(std::time::Duration::from_millis(1_750));
+            if kind == HostManagedModelErrorKind::ProviderUnavailable {
+                error = error.with_next_fallback_index(1);
+            }
+            let mapped = model_gateway_error(error);
 
             assert_eq!(
                 mapped.kind, expected,
@@ -2426,6 +2437,11 @@ mod tests {
                 mapped.retry_after_ms,
                 Some(1_750),
                 "{kind:?} must preserve its typed provider retry hint"
+            );
+            assert_eq!(
+                mapped.next_fallback_index,
+                (kind == HostManagedModelErrorKind::ProviderUnavailable).then_some(1),
+                "{kind:?} must preserve only applicable fallback route evidence"
             );
         }
     }

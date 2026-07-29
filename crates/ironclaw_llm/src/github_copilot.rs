@@ -233,6 +233,10 @@ impl GithubCopilotProvider {
 
 #[async_trait]
 impl LlmProvider for GithubCopilotProvider {
+    fn provider_id(&self) -> String {
+        "github_copilot".to_string()
+    }
+
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req
             .take_model_override()

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{LoopDiagnosticRef, LoopGateRef};
+use crate::LoopGateRef;
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
@@ -135,8 +135,10 @@ pub struct LoopModelGatewayError {
     pub gate_ref: Option<LoopGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that recovery can advance to this ordered
+    /// provider fallback index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    pub next_fallback_index: Option<u32>,
     /// Secret-value-scrubbed cause text for model recovery and failure
     /// explanation. Unlike `safe_summary`, path and payload delimiters are
     /// allowed.
@@ -155,7 +157,7 @@ impl LoopModelGatewayError {
             reason_kind: None,
             gate_ref: None,
             retry_after_ms: None,
-            diagnostic_ref: None,
+            next_fallback_index: None,
             detail: None,
         })
     }
@@ -172,7 +174,7 @@ impl LoopModelGatewayError {
             reason_kind: None,
             gate_ref: None,
             retry_after_ms: None,
-            diagnostic_ref: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -192,8 +194,8 @@ impl LoopModelGatewayError {
         self
     }
 
-    pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
-        self.diagnostic_ref = Some(diagnostic_ref);
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
         self
     }
 
@@ -213,8 +215,8 @@ impl LoopModelGatewayError {
         if let Some(retry_after_ms) = self.retry_after_ms {
             error = error.with_retry_after_ms(retry_after_ms);
         }
-        if let Some(diagnostic_ref) = self.diagnostic_ref {
-            error = error.with_diagnostic_ref(diagnostic_ref);
+        if let Some(next_fallback_index) = self.next_fallback_index {
+            error = error.with_next_fallback_index(next_fallback_index);
         }
         if let Some(detail) = self.detail {
             error = error.with_detail(detail);
@@ -651,14 +653,13 @@ fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bo
 }
 
 /// Milestone emission is best-effort: a failed emit must never abort the model
-/// call, only leave a diagnostic. Every `stream_model` milestone site shares
-/// this "log kind + diagnostic_ref on error, otherwise ignore" shape, so it
-/// lives here once.
+/// call, only leave a diagnostic log. Every `stream_model` milestone site
+/// shares this "log the kind on error, otherwise ignore" shape, so it lives
+/// here once.
 fn log_milestone_failure(result: Result<(), AgentLoopHostError>, message: &'static str) {
     if let Err(error) = result {
         tracing::debug!(
             kind = ?error.kind,
-            diagnostic_ref = ?error.diagnostic_ref,
             "{}",
             message
         );

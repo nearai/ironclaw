@@ -413,7 +413,6 @@ async fn cancellation_after_pending_input_ack_permissive_profile_propagates_chec
             kind: AgentLoopHostErrorKind::Unavailable,
             safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -543,7 +542,7 @@ async fn capability_cancelled_returns_cancelled_exit_without_retry() {
             resolutions: vec![resolution::failed(
                 FailureKind::Cancelled,
                 "capability cancelled".to_string(),
-                None,
+                super::diagnostic_failure_detail("capability cancelled"),
             )],
             stopped_on_suspension: false,
         },
@@ -741,7 +740,6 @@ async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_p
             kind: AgentLoopHostErrorKind::Unavailable,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some(raw_summary.to_string()),
         }
     );

@@ -2,12 +2,12 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, DispatchInputIssueCode, FailureKind,
-    ProviderToolName, SameCallRetryConstraint,
+    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, Denial, DenyReason, DenyRef,
+    DispatchInputIssueCode, FailureKind, ProviderToolName, SameCallRetryConstraint,
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
-    LoopDiagnosticRef, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
+    LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
@@ -59,6 +59,12 @@ use support::*;
 
 mod cancellation;
 mod failure_matrix;
+
+fn diagnostic_failure_detail(text: &str) -> CapabilityFailureDetail {
+    CapabilityFailureDetail::Diagnostic {
+        text: text.to_string(),
+    }
+}
 
 fn continuation_observation(
     result_ref: &LoopResultRef,
@@ -1571,7 +1577,6 @@ async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_r
             kind: AgentLoopHostErrorKind::BudgetApprovalRequired,
             safe_summary: LoopSafeSummary::new("budget approval required").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -3388,14 +3393,14 @@ async fn model_retry_success_clears_recovery_state() {
 }
 
 #[tokio::test]
-async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
-    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-credentials").expect("valid");
+async fn model_unrecoverable_host_error_preserves_inline_sanitized_cause() {
+    let cause = "credential provider refused the configured model identity";
     let host = MockHost::new(Vec::new()).with_model_errors(vec![
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::CredentialUnavailable,
             "model credentials are unavailable",
         )
-        .with_diagnostic_ref(diagnostic_ref),
+        .with_detail(cause),
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -3412,8 +3417,7 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
-            detail: None,
+            detail: Some(cause.to_string()),
         }
     );
 }
@@ -3448,7 +3452,6 @@ async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -4053,11 +4056,13 @@ async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
 
 #[tokio::test]
 async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evidence() {
-    let host =
-        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
             "model provider is temporarily unavailable",
-        )]);
+        )
+        .with_next_fallback_index(1),
+    ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -4072,6 +4077,29 @@ async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evi
     assert_eq!(requests[0].fallback_index, 0);
     assert_eq!(requests[1].fallback_index, 1);
     assert_eq!(final_staged_state(&host).model_state.fallback_index, 1);
+}
+
+#[tokio::test]
+async fn model_unavailable_without_fallback_evidence_retries_the_current_route() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("same-route availability retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 0);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 0);
 }
 
 #[tokio::test]
@@ -4284,7 +4312,7 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     let family = crate::families::default_with_overrides(
         crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
     );
-    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-outage").expect("valid");
+    let cause = "provider connection timed out before a response arrived";
     // Exactly attempts+1 scripted failures: the final one is the call where
     // the strategy's budget is exhausted and it aborts. Any extra call would
     // hit the mock's script-exhausted Internal fallback and change the
@@ -4293,7 +4321,7 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
         (0..=attempts)
             .map(|_| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
-                    .with_diagnostic_ref(diagnostic_ref.clone())
+                    .with_detail(cause)
             })
             .collect(),
     );
@@ -4317,9 +4345,12 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
                 "abort must carry the strategy's failure category"
             );
             assert_eq!(
-                failed.diagnostic_ref,
-                Some(diagnostic_ref),
-                "abort must carry the model error's diagnostic ref"
+                failed
+                    .safe_summary
+                    .as_ref()
+                    .and_then(|summary| summary.detail()),
+                Some(cause),
+                "abort must inline the model error's bounded cause"
             );
         }
         other => panic!("expected failed exit, got {other:?}"),
@@ -4559,7 +4590,7 @@ async fn retry_uses_single_call_invocation() {
                 resolutions: vec![resolution::failed(
                     error_kind,
                     "temporary failure".to_string(),
-                    None,
+                    diagnostic_failure_detail("temporary failure"),
                 )],
                 stopped_on_suspension: false,
             }])
@@ -4656,6 +4687,45 @@ async fn a_denial_tells_the_model_what_would_unlock_it() {
         "the denial hint must name a concrete next move"
     );
     assert_eq!(recovery.same_call_retry, SameCallRetryConstraint::Forbidden);
+}
+
+#[tokio::test]
+async fn denial_without_summary_emits_actionable_detail() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![ironclaw_host_api::Resolution::Denied(
+                Denial::new(DenyRef::new()).with_reason_kind(DenyReason::PolicyDenied),
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    let observation = appended
+        .first()
+        .and_then(|result| result.model_observation.as_ref())
+        .expect("summary-less denial must append a model-visible observation");
+    let ToolObservationDetail::GenericFailure {
+        failure_kind,
+        detail,
+    } = &observation.detail
+    else {
+        panic!("summary-less denial must carry generic failure detail");
+    };
+    assert_eq!(*failure_kind, FailureKind::PolicyDenied);
+    assert_eq!(
+        detail.as_deref(),
+        Some(
+            "The host denied this capability with reason policy_denied; follow the recovery \
+             guidance before choosing the next action."
+        )
+    );
 }
 
 #[tokio::test]
@@ -4964,7 +5034,7 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
             resolutions: vec![resolution::failed(
                 FailureKind::InputEncode,
                 "provider arguments failed schema validation".to_string(),
-                Some(CapabilityFailureDetail::InvalidInput {
+                CapabilityFailureDetail::InvalidInput {
                     issues: vec![CapabilityInputIssue {
                         path: "file_path".to_string(),
                         code: DispatchInputIssueCode::MissingRequired,
@@ -4972,7 +5042,7 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
                         received: None,
                         schema_path: Some("required".to_string()),
                     }],
-                }),
+                },
             )],
             stopped_on_suspension: false,
         }]);
@@ -5037,7 +5107,7 @@ async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recove
                 resolutions: vec![resolution::failed(
                     FailureKind::OperationFailed,
                     "filesystem discovery failed".to_string(),
-                    None,
+                    diagnostic_failure_detail("filesystem discovery failed"),
                 )],
                 stopped_on_suspension: false,
             })
@@ -5094,12 +5164,12 @@ async fn repeated_multi_call_failures_do_not_trip_no_progress_and_run_can_recove
                     resolution::failed(
                         FailureKind::OperationFailed,
                         "first discovery failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("first discovery failed"),
                     ),
                     resolution::failed(
                         FailureKind::OperationFailed,
                         "second discovery failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("second discovery failed"),
                     ),
                 ],
                 stopped_on_suspension: false,
@@ -5195,7 +5265,7 @@ async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_st
                     resolutions: vec![resolution::failed(
                         FailureKind::OperationFailed,
                         "non-replayable capability failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("non-replayable capability failed"),
                     )],
                     stopped_on_suspension: false,
                 })
@@ -5270,7 +5340,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
                 resolutions: vec![resolution::failed(
                     error_kind,
                     safe_summary.to_string(),
-                    None,
+                    diagnostic_failure_detail(safe_summary),
                 )],
                 stopped_on_suspension: false,
             }]);
@@ -5319,7 +5389,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             resolutions: vec![resolution::failed(
                 FailureKind::OutputTooLarge,
                 long_summary,
-                None,
+                diagnostic_failure_detail("capability output exceeded the allowed size"),
             )],
             stopped_on_suspension: false,
         }]);
@@ -7280,8 +7350,16 @@ async fn recoverable_batch_port_error_surfaces_as_model_visible_tool_error() {
         .expect("a tool-error observation must be appended for the failed call");
     assert_eq!(observation.status, ToolObservationStatus::Error);
     match &observation.detail {
-        ToolObservationDetail::GenericFailure { failure_kind, .. } => {
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail,
+        } => {
             assert_eq!(*failure_kind, FailureKind::Authorization);
+            assert_eq!(
+                detail.as_deref(),
+                Some("scripted batch failure"),
+                "the caller-shaped host cause must survive the persistence/model observation seam"
+            );
         }
         other => panic!("expected GenericFailure observation detail, got {other:?}"),
     }
@@ -7959,7 +8037,7 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
             resolutions: vec![resolution::failed(
                 FailureKind::Backend,
                 "transient backend error during cap1 resume".to_string(),
-                None,
+                diagnostic_failure_detail("transient backend error during cap1 resume"),
             )],
             stopped_on_suspension: false,
         },
@@ -8129,7 +8207,7 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
             resolutions: vec![resolution::failed(
                 FailureKind::Backend,
                 "transient backend error during cap1 auth-resume".to_string(),
-                None,
+                diagnostic_failure_detail("transient backend error during cap1 auth-resume"),
             )],
             stopped_on_suspension: false,
         },
@@ -8327,6 +8405,15 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         observation.summary, "Capability declined by user.",
         "observation summary must describe the gate-declined failure"
     );
+    let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+        panic!("gate-declined observation must carry generic failure detail");
+    };
+    assert!(
+        detail
+            .as_deref()
+            .is_some_and(|text| text.contains("user declined its approval request")),
+        "gate-declined observation must tell the model why the capability did not run"
+    );
     let recovery = observation
         .recovery
         .as_ref()
@@ -8344,7 +8431,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
             resolutions: vec![resolution::failed(
                 FailureKind::GateDeclined,
                 "auth gate denied by user".to_string(),
-                None,
+                diagnostic_failure_detail("auth gate denied by user"),
             )],
             stopped_on_suspension: false,
         }]);
@@ -8493,7 +8580,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
             resolutions: vec![resolution::failed(
                 FailureKind::GateDeclined,
                 "auth gate denied by user".to_string(),
-                None,
+                diagnostic_failure_detail("auth gate denied by user"),
             )],
             stopped_on_suspension: false,
         },
@@ -8634,7 +8721,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 resolution::failed(
                     FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -8857,7 +8944,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 resolution::failed(
                     FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -9045,7 +9132,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 resolution::failed(
                     FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),

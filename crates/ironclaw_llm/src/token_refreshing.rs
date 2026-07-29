@@ -68,6 +68,10 @@ impl TokenRefreshingProvider {
 
 #[async_trait]
 impl LlmProvider for TokenRefreshingProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }

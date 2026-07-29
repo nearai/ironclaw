@@ -1123,6 +1123,10 @@ where
     M: CompletionModel + Send + Sync + 'static,
     M::Response: Send + Sync + Serialize + DeserializeOwned,
 {
+    fn provider_id(&self) -> String {
+        self.provider_id.clone()
+    }
+
     fn model_name(&self) -> &str {
         &self.model_name
     }

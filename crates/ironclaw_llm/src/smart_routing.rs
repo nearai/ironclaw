@@ -896,6 +896,10 @@ impl SmartRoutingProvider {
 
 #[async_trait]
 impl LlmProvider for SmartRoutingProvider {
+    fn provider_id(&self) -> String {
+        self.primary.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.primary.model_name()
     }

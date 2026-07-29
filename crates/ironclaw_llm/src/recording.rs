@@ -1195,6 +1195,10 @@ impl RecordingLlm {
 
 #[async_trait]
 impl LlmProvider for RecordingLlm {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }

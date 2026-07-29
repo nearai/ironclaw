@@ -181,6 +181,10 @@ impl SwappableLlmProvider {
 
 #[async_trait]
 impl LlmProvider for SwappableLlmProvider {
+    fn provider_id(&self) -> String {
+        self.current().provider_id()
+    }
+
     fn model_name(&self) -> &str {
         read(&self.state).model_name
     }

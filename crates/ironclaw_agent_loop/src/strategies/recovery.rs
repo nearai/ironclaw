@@ -13,8 +13,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{FailureFate, FailureKind};
 use ironclaw_turns::{
-    LoopDiagnosticRef, LoopFailureKind, ModelInvalidOutputDetailReason,
-    run_profile::LoopSafeSummary,
+    LoopFailureKind, ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary,
 };
 
 use crate::state::{
@@ -101,7 +100,7 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 }
 
 /// Sanitized capability error — the unified [`FailureKind`] plus a safe
-/// summary string and an opaque diagnostic ref. Strategies never see raw
+/// summary string. Strategies never see raw
 /// provider errors, host paths, or secrets; sanitization happens at the host
 /// port boundary before recovery strategy code runs.
 ///
@@ -112,16 +111,15 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 pub(crate) struct CapabilityErrorSummary {
     pub(crate) kind: FailureKind,
     pub(crate) safe_summary: SanitizedStrategySummary,
-    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
-/// Sanitized model error — class + safe summary + opaque diagnostic ref.
+/// Sanitized model error — class + safe summary.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelErrorSummary {
     pub(crate) class: ModelErrorClass,
     pub(crate) safe_summary: SanitizedStrategySummary,
     pub(crate) retry_after_ms: Option<u64>,
-    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
+    pub(crate) next_fallback_index: Option<u32>,
 }
 
 /// Wire-stable model error classification.
@@ -377,6 +375,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                 )
             }
             ModelErrorClass::Unavailable => {
+                let next_fallback_index = err.next_fallback_index;
                 let Some(attempt_class) = model_retry_attempt_class(err.class) else {
                     return RecoveryOutcome::Abort {
                         recovery: state.recovery_state.cleared_attempts(),
@@ -389,7 +388,15 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     self.max_model_availability_attempts,
                     kind,
                     RetryScope::Call,
-                    |_| Some(RetryAlteration::AdvanceFallback),
+                    |attempts| {
+                        if next_fallback_index.is_some() {
+                            Some(RetryAlteration::AdvanceFallback)
+                        } else {
+                            Some(RetryAlteration::Backoff {
+                                delay_ms: availability_backoff_for(attempts),
+                            })
+                        }
+                    },
                 )
             }
             ModelErrorClass::Transient | ModelErrorClass::Internal => {
@@ -855,7 +862,6 @@ mod tests {
         let summary = CapabilityErrorSummary {
             kind: FailureKind::Transient,
             safe_summary: SanitizedStrategySummary::new("upstream timed out").expect("valid"),
-            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:cap-1").expect("valid")),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -873,7 +879,7 @@ mod tests {
             class: ModelErrorClass::ContextOverflow,
             safe_summary: SanitizedStrategySummary::new("context window exceeded").expect("valid"),
             retry_after_ms: None,
-            diagnostic_ref: None,
+            next_fallback_index: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -1147,7 +1153,6 @@ mod tests {
             CapabilityErrorSummary {
                 kind,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
-                diagnostic_ref: None,
             }
         }
 
@@ -1156,7 +1161,7 @@ mod tests {
                 class,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
                 retry_after_ms: None,
-                diagnostic_ref: None,
+                next_fallback_index: (class == ModelErrorClass::Unavailable).then_some(1),
             }
         }
 
@@ -1537,6 +1542,24 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn provider_unavailable_without_a_proven_fallback_retries_the_same_route() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Unavailable);
+            error.next_fallback_index = None;
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff { .. }),
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
         async fn model_stale_request_retries_at_iteration_scope_then_aborts_at_budget() {
             let strategy = DefaultRecoveryStrategy::default();
 
@@ -1672,7 +1695,7 @@ mod tests {
                     ModelInvalidOutputDetailReason::OutsideCapabilitySurface.safe_summary(),
                 ),
                 retry_after_ms: None,
-                diagnostic_ref: None,
+                next_fallback_index: None,
             };
 
             let outcome = strategy

@@ -213,7 +213,7 @@ pub(crate) fn map_provider_message_error(
     ) {
         return LlmError::QuotaExceeded {
             provider: provider.to_string(),
-            reason: message,
+            reason: bounded_provider_message_reason(&message),
         };
     }
     if is_auth_error_message(&lower) {
@@ -245,13 +245,17 @@ pub(crate) fn map_provider_message_error(
     if first_standalone_http_status(&lower) == Some(400) {
         return LlmError::InvalidRequest {
             provider: provider.to_string(),
-            reason: message,
+            reason: bounded_provider_message_reason(&message),
         };
     }
     LlmError::RequestFailed {
         provider: provider.to_string(),
-        reason: message,
+        reason: bounded_provider_message_reason(&message),
     }
+}
+
+fn bounded_provider_message_reason(message: &str) -> String {
+    ironclaw_common::truncate_for_preview(message, 512)
 }
 
 fn bounded_provider_reason(status: u16, body: &str) -> String {
@@ -779,6 +783,47 @@ mod tests {
                 retry_after: None
             } if provider == "fixture"
         ));
+    }
+
+    #[test]
+    fn message_mapper_bounds_payload_bearing_error_reasons() {
+        for (prefix, assert_reason) in [
+            (
+                "insufficient credits: ",
+                LlmError::QuotaExceeded {
+                    provider: "fixture".to_string(),
+                    reason: String::new(),
+                },
+            ),
+            (
+                "HTTP 400 invalid request: ",
+                LlmError::InvalidRequest {
+                    provider: "fixture".to_string(),
+                    reason: String::new(),
+                },
+            ),
+            (
+                "provider transport failed: ",
+                LlmError::RequestFailed {
+                    provider: "fixture".to_string(),
+                    reason: String::new(),
+                },
+            ),
+        ] {
+            let message = format!("{prefix}{}TAIL_MARKER", "x".repeat(2_000));
+            let error = map_provider_message_error("fixture", "fixture-model", &message);
+            let reason = match (&error, assert_reason) {
+                (LlmError::QuotaExceeded { reason, .. }, LlmError::QuotaExceeded { .. })
+                | (LlmError::InvalidRequest { reason, .. }, LlmError::InvalidRequest { .. })
+                | (LlmError::RequestFailed { reason, .. }, LlmError::RequestFailed { .. }) => {
+                    reason
+                }
+                _ => panic!("unexpected classification for {prefix}: {error:?}"),
+            };
+            assert!(reason.starts_with(prefix));
+            assert!(!reason.contains("TAIL_MARKER"));
+            assert!(reason.len() < message.len());
+        }
     }
 
     #[test]

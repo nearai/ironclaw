@@ -314,6 +314,10 @@ impl AnthropicOAuthProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicOAuthProvider {
+    fn provider_id(&self) -> String {
+        "anthropic_oauth".to_string()
+    }
+
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req
             .take_model_override()
@@ -795,6 +799,59 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn complete_preserves_missing_retry_after_on_headerless_502() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let body = r#"{"error":{"message":"upstream unavailable"}}"#;
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write error response");
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic_oauth",
+            None,
+            base_url,
+            "claude-test",
+        );
+        config.oauth_token = Some(SecretString::from("test-token".to_string()));
+        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let error = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect_err("scripted provider error");
+        server.await.expect("loopback server");
+
+        assert!(matches!(
+            error,
+            LlmError::BadGateway {
+                provider,
+                status: 502,
+                retry_after: None,
+            } if provider == "anthropic_oauth"
+        ));
+    }
 
     #[test]
     fn context_overflow_413_maps_to_context_length_exceeded() {

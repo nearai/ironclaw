@@ -413,7 +413,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
                 &self.provider_id,
@@ -429,7 +429,7 @@ where
             None,
             None,
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -461,7 +461,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
                 &self.provider_id,
@@ -477,7 +477,7 @@ where
             None,
             None,
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -509,7 +509,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
                 &self.provider_id,
@@ -529,7 +529,7 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -562,7 +562,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
                 &self.provider_id,
@@ -582,7 +582,7 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -740,7 +740,7 @@ where
         let run_id = request.run_id;
         let turn_id = request.turn_id;
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 provider.as_ref(),
                 snapshot.route().provider_id(),
@@ -757,7 +757,7 @@ where
             None,
             None,
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -781,7 +781,7 @@ where
         let run_id = request.run_id;
         let turn_id = request.turn_id;
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 provider.as_ref(),
                 snapshot.route().provider_id(),
@@ -798,7 +798,7 @@ where
             None,
             None,
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -822,7 +822,7 @@ where
         let run_id = request.run_id;
         let turn_id = request.turn_id;
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 provider.as_ref(),
                 snapshot.route().provider_id(),
@@ -843,7 +843,7 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -868,7 +868,7 @@ where
         let run_id = request.run_id;
         let turn_id = request.turn_id;
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
-        let (mut completion, replay_identity, effective_fallback_index) =
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 provider.as_ref(),
                 snapshot.route().provider_id(),
@@ -889,7 +889,7 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
@@ -958,7 +958,7 @@ fn map_fallback_route_error(error: LlmError, fallback_index: u32) -> HostManaged
     if fallback_index > 0 && matches!(&error, LlmError::ModelNotAvailable { .. }) {
         let provider_detail = error.to_string();
         let safe_log_detail = ironclaw_loop_host::scrub_model_visible_detail(&provider_detail);
-        tracing::warn!(
+        tracing::debug!(
             component = "model_provider",
             operation = "fallback_route",
             fallback_index,
@@ -980,16 +980,43 @@ fn prepare_fallback_completion<P>(
     requested_model: &str,
     fallback_index: u32,
     messages: Vec<HostManagedModelMessage>,
-) -> Result<(CompletionRequest, ProviderReplayIdentity, u32), HostManagedModelError>
+) -> Result<(CompletionRequest, ProviderReplayIdentity, u32, Option<u32>), HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
     let route = resolve_fallback_route(provider, fallback_index, requested_model)?;
+    let next_fallback_index = route.fallback_index.checked_add(1).and_then(|next_index| {
+        match provider.fallback_route(next_index, Some(requested_model)) {
+            Ok(next_route) if next_route.fallback_index == next_index => Some(next_index),
+            Ok(next_route) => {
+                debug!(
+                    requested_fallback_index = next_index,
+                    resolved_fallback_index = next_route.fallback_index,
+                    "provider returned mismatched fallback route evidence"
+                );
+                None
+            }
+            Err(LlmError::ModelNotAvailable { .. }) => None,
+            Err(error) => {
+                debug!(
+                    fallback_index = next_index,
+                    error = %ironclaw_common::truncate_for_preview(&error.to_string(), 512),
+                    "provider could not prove that another fallback route exists"
+                );
+                None
+            }
+        }
+    });
     let replay_identity = ProviderReplayIdentity::new(provider_id, &route.model)?;
     let mut completion = CompletionRequest::new(convert_messages(messages, &replay_identity)?);
     completion.model = Some(route.model);
     completion.set_fallback_index(route.fallback_index);
-    Ok((completion, replay_identity, route.fallback_index))
+    Ok((
+        completion,
+        replay_identity,
+        route.fallback_index,
+        next_fallback_index,
+    ))
 }
 
 fn add_route_metadata(completion: &mut CompletionRequest, snapshot: &ResolvedModelRouteSnapshot) {
@@ -1168,6 +1195,20 @@ impl ProviderReplayIdentity {
     }
 }
 
+struct ProviderRequestContext {
+    replay_identity: ProviderReplayIdentity,
+    next_fallback_index: Option<u32>,
+}
+
+impl ProviderRequestContext {
+    fn new(replay_identity: ProviderReplayIdentity, next_fallback_index: Option<u32>) -> Self {
+        Self {
+            replay_identity,
+            next_fallback_index,
+        }
+    }
+}
+
 fn validate_replay_identity_text(
     value: &str,
     label: &'static str,
@@ -1257,10 +1298,10 @@ impl CompletionStreamSink for ProviderStreamSink {
 
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
+    skip(provider, completion, capabilities, stream_sink, request_context, cache_scope),
     fields(
-        provider_id = %replay_identity.provider_id,
-        provider_model_id = %replay_identity.provider_model_id,
+        provider_id = %request_context.replay_identity.provider_id,
+        provider_model_id = %request_context.replay_identity.provider_model_id,
         provider_turn_scope = provider_turn_scope.as_deref().unwrap_or("model_call=unknown"),
     )
 )]
@@ -1270,12 +1311,16 @@ async fn complete_model_request<P>(
     capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
-    replay_identity: ProviderReplayIdentity,
+    request_context: ProviderRequestContext,
     cache_scope: Option<PromptCacheCallScope>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
+    let ProviderRequestContext {
+        replay_identity,
+        next_fallback_index,
+    } = request_context;
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
@@ -1345,7 +1390,7 @@ where
                         provider_started_at,
                         &error,
                     );
-                    return Err(map_provider_error(error));
+                    return Err(map_provider_completion_error(error, next_fallback_index));
                 }
             };
             if let Some(scope) = cache_scope.as_ref() {
@@ -1417,7 +1462,7 @@ where
                                 retry_started_at,
                                 &error,
                             );
-                            return Err(map_provider_error(error));
+                            return Err(map_provider_completion_error(error, next_fallback_index));
                         }
                     };
                     if let Some(scope) = cache_scope.as_ref() {
@@ -1509,7 +1554,7 @@ where
                 provider_started_at,
                 &error,
             );
-            return Err(map_provider_error(error));
+            return Err(map_provider_completion_error(error, next_fallback_index));
         }
     };
     if let Some(scope) = cache_scope.as_ref() {
@@ -2657,6 +2702,21 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     .safe_with_detail(provider_detail)
 }
 
+fn map_provider_completion_error(
+    error: LlmError,
+    next_fallback_index: Option<u32>,
+) -> HostManagedModelError {
+    let mapped = map_provider_error(error);
+    if matches!(
+        mapped.kind,
+        HostManagedModelErrorKind::ProviderUnavailable | HostManagedModelErrorKind::Unavailable
+    ) && let Some(next_fallback_index) = next_fallback_index
+    {
+        return mapped.with_next_fallback_index(next_fallback_index);
+    }
+    mapped
+}
+
 fn is_unconfigured_provider_error(error: &LlmError) -> bool {
     matches!(
         error,
@@ -2760,6 +2820,37 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    #[test]
+    fn provider_completion_error_exposes_only_proven_availability_fallbacks() {
+        let unavailable = map_provider_completion_error(
+            LlmError::BadGateway {
+                provider: "primary".to_string(),
+                status: 503,
+                retry_after: None,
+            },
+            Some(1),
+        );
+        assert_eq!(unavailable.next_fallback_index, Some(1));
+
+        let exhausted = map_provider_completion_error(
+            LlmError::BadGateway {
+                provider: "fallback".to_string(),
+                status: 503,
+                retry_after: None,
+            },
+            None,
+        );
+        assert_eq!(exhausted.next_fallback_index, None);
+
+        let auth = map_provider_completion_error(
+            LlmError::AuthFailed {
+                provider: "primary".to_string(),
+            },
+            Some(1),
+        );
+        assert_eq!(auth.next_fallback_index, None);
     }
 
     fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {

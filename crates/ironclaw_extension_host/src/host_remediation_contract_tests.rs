@@ -54,7 +54,7 @@ fn text_through_host_api_hop(detail: CapabilityFailureDetail) -> Option<String> 
     match resolution::failed(
         ironclaw_host_api::FailureKind::Backend,
         "tool failed".to_string(),
-        Some(detail),
+        detail,
     ) {
         Resolution::Done(done) => done
             .verdict

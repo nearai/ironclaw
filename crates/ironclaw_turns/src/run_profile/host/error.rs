@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{LoopDiagnosticRef, LoopGateRef};
+use crate::LoopGateRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,8 +137,10 @@ pub struct AgentLoopHostError {
     /// the host boundary so retry policy never parses diagnostic prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that the ordered model-provider chain has another
+    /// route available for recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    pub next_fallback_index: Option<u32>,
     /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
     /// carries the original error text (paths, codes, schema refs) so the model
     /// can retry or explain. Secret VALUES are redacted by the producer via
@@ -156,7 +158,7 @@ impl AgentLoopHostError {
             reason_kind: None,
             gate_ref: None,
             retry_after_ms: None,
-            diagnostic_ref: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -175,14 +177,13 @@ impl AgentLoopHostError {
         self.gate_ref = Some(gate_ref);
         self
     }
-
     pub fn with_retry_after_ms(mut self, retry_after_ms: u64) -> Self {
         self.retry_after_ms = Some(retry_after_ms);
         self
     }
 
-    pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
-        self.diagnostic_ref = Some(diagnostic_ref);
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
         self
     }
 }
