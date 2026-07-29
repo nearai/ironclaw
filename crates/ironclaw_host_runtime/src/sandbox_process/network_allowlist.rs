@@ -26,7 +26,7 @@
 //! take it as an input, and because a list of hostnames is reviewable on its
 //! own in a way it will not be once it is buried in a proxy PR.
 use ironclaw_common::env_helpers::env_or_override;
-use ironclaw_host_api::NetworkPolicy;
+use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
 use ironclaw_network::NetworkPolicyError;
 
 /// Environment variable operators can set to add domains to the sandboxed
@@ -128,27 +128,37 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
 /// key honors the same runtime-override precedence as the sibling
 /// `connect::DOCKER_HOST_ENV` — one env-reading convention across
 /// `sandbox_process`, not two.
-pub fn sandbox_extra_allowed_domains() -> Result<Vec<String>, NetworkPolicyError> {
+pub fn sandbox_extra_allowed_domains() -> Result<Vec<NetworkTargetPattern>, NetworkPolicyError> {
     let Some(raw) = env_or_override(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV) else {
         return Ok(Vec::new());
     };
     raw.split(',')
         .map(str::trim)
         .filter(|domain| !domain.is_empty())
-        .map(|domain| {
-            ironclaw_network::parse_host_pattern(domain).map(|pattern| pattern.host_pattern)
-        })
+        .map(ironclaw_network::parse_host_pattern)
         .collect()
 }
 
-/// The full sandboxed-shell egress allowlist: [`DEFAULT_SANDBOX_ALLOWED_DOMAINS`]
-/// plus any operator-configured extras from
-/// [`sandbox_extra_allowed_domains`]. `Err` when an extra domain fails
-/// hostname-shape validation — see [`sandbox_extra_allowed_domains`].
-pub fn sandbox_allowed_domains() -> Result<Vec<String>, NetworkPolicyError> {
+/// The full sandboxed-shell egress allowlist, as validated
+/// [`NetworkTargetPattern`]s: [`DEFAULT_SANDBOX_ALLOWED_DOMAINS`] plus any
+/// operator-configured extras from [`sandbox_extra_allowed_domains`]. `Err`
+/// when an extra domain fails hostname-shape validation — see
+/// [`sandbox_extra_allowed_domains`].
+///
+/// Carries the [`NetworkTargetPattern`] [`sandbox_extra_allowed_domains`]
+/// already validated straight through rather than downgrading it to a
+/// `String` and reconstructing the pattern by hand later — the validated
+/// value is the proof that it passed [`ironclaw_network::parse_host_pattern`];
+/// discarding it and rebuilding the struct from a bare string would let the
+/// two drift apart.
+pub fn sandbox_allowed_domains() -> Result<Vec<NetworkTargetPattern>, NetworkPolicyError> {
     Ok(DEFAULT_SANDBOX_ALLOWED_DOMAINS
         .iter()
-        .map(|domain| (*domain).to_string())
+        .map(|domain| NetworkTargetPattern {
+            scheme: None,
+            host_pattern: (*domain).to_string(),
+            port: None,
+        })
         .chain(sandbox_extra_allowed_domains()?)
         .collect())
 }
@@ -180,14 +190,7 @@ pub fn sandbox_max_egress_bytes() -> Result<u64, NetworkPolicyError> {
 /// until someone audits traffic; a boot failure is loud and immediate.
 pub fn sandbox_network_policy() -> Result<NetworkPolicy, NetworkPolicyError> {
     Ok(NetworkPolicy {
-        allowed_targets: sandbox_allowed_domains()?
-            .into_iter()
-            .map(|host_pattern| ironclaw_host_api::NetworkTargetPattern {
-                scheme: None,
-                host_pattern,
-                port: None,
-            })
-            .collect(),
+        allowed_targets: sandbox_allowed_domains()?,
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(sandbox_max_egress_bytes()?),
     })
@@ -294,7 +297,7 @@ mod tests {
 
         assert_eq!(
             sandbox_extra_allowed_domains().unwrap(),
-            Vec::<String>::new()
+            Vec::<NetworkTargetPattern>::new()
         );
     }
 
@@ -366,12 +369,17 @@ mod tests {
 
         remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
 
-        assert_eq!(extras, vec!["example.internal", "*.corp.example.com"]);
+        let extra_hosts: Vec<&str> = extras
+            .iter()
+            .map(|pattern| pattern.host_pattern.as_str())
+            .collect();
+        assert_eq!(extra_hosts, vec!["example.internal", "*.corp.example.com"]);
+        let all_hosts: Vec<&str> = all.iter().map(|p| p.host_pattern.as_str()).collect();
         assert!(
-            all.contains(&"crates.io".to_string()),
-            "operator extras must not displace the defaults: {all:?}"
+            all_hosts.contains(&"crates.io"),
+            "operator extras must not displace the defaults: {all_hosts:?}"
         );
-        assert!(all.contains(&"example.internal".to_string()));
-        assert!(all.contains(&"*.corp.example.com".to_string()));
+        assert!(all_hosts.contains(&"example.internal"));
+        assert!(all_hosts.contains(&"*.corp.example.com"));
     }
 }
