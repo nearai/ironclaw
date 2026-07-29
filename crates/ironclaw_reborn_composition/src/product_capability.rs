@@ -831,6 +831,47 @@ mod tests {
         assert_eq!(model_visible_failure_text(&resolution), cause);
     }
 
+    #[tokio::test]
+    async fn missing_runtime_detail_uses_explicit_fallbacks() {
+        let failed =
+            RuntimeCapabilityOutcome::Failed(ironclaw_host_runtime::RuntimeCapabilityFailure::new(
+                CapabilityId::new("demo.read").unwrap(),
+                FailureKind::Backend,
+                Some("capability invocation failed".to_string()),
+            ));
+        let failed_resolution = product_resolution(
+            &empty_product_result_filesystem(),
+            &resource_scope(),
+            InvocationId::new(),
+            failed,
+        )
+        .await
+        .expect("runtime failure remains model-recoverable");
+        assert_eq!(
+            model_visible_failure_text(&failed_resolution),
+            "capability invocation failed"
+        );
+
+        let unknown =
+            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
+                capability_id: CapabilityId::new("demo.legacy").unwrap(),
+                kind: "legacy_failure".to_string(),
+                message: None,
+            });
+        let unknown_resolution = product_resolution(
+            &empty_product_result_filesystem(),
+            &resource_scope(),
+            InvocationId::new(),
+            unknown,
+        )
+        .await
+        .expect("unknown runtime outcome remains model-recoverable");
+        assert_eq!(
+            model_visible_failure_text(&unknown_resolution),
+            ModelDiagnostic::unavailable().as_str()
+        );
+    }
+
     fn model_visible_failure_text(resolution: &Resolution) -> &str {
         let Resolution::Done(outcome) = resolution else {
             panic!("expected recoverable failure outcome, got {resolution:?}");

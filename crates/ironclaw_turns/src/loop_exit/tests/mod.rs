@@ -486,6 +486,28 @@ fn loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it() {
             })
         );
     }
+
+    for retired_value in [
+        json!({"unexpected": true}),
+        json!(["diag:legacy-unused"]),
+        json!(42),
+        json!("diagnostic:legacy-unused"),
+        json!("diag:"),
+        json!("diag:contains/slash"),
+        json!(format!("diag:{}", "a".repeat(252))),
+    ] {
+        let malformed = json!({
+            "reason_kind": "iteration_limit",
+            "checkpoint_id": null,
+            "diagnostic_ref": retired_value,
+            "exit_id": "exit:malformed-legacy-failed"
+        });
+
+        assert!(
+            serde_json::from_value::<LoopFailed>(malformed).is_err(),
+            "retired diagnostic_ref must retain its historical string validation"
+        );
+    }
 }
 
 #[test]

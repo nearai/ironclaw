@@ -479,8 +479,12 @@ impl<'de> Deserialize<'de> for LoopFailed {
             /// Read-only compatibility for exits written before the dead
             /// diagnostic-reference field was retired. No production code
             /// minted a usable value and no diagnostic store ever existed.
-            #[serde(default, rename = "diagnostic_ref")]
-            retired_diagnostic_ref: Option<de::IgnoredAny>,
+            #[serde(
+                default,
+                rename = "diagnostic_ref",
+                deserialize_with = "deserialize_retired_diagnostic_ref"
+            )]
+            retired_diagnostic_ref: Option<()>,
             exit_id: LoopExitId,
             #[serde(default, deserialize_with = "deserialize_bounded_unique_refs")]
             explanation_message_refs: Vec<LoopMessageRef>,
@@ -499,6 +503,49 @@ impl<'de> Deserialize<'de> for LoopFailed {
             safe_summary: wire.safe_summary,
         })
     }
+}
+
+fn deserialize_retired_diagnostic_ref<'de, D>(deserializer: D) -> Result<Option<()>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            validate_retired_diagnostic_ref(&value).map_err(de::Error::custom)?;
+            Ok(())
+        })
+        .transpose()
+}
+
+fn validate_retired_diagnostic_ref(value: &str) -> Result<(), String> {
+    const KIND: &str = "loop_diagnostic_ref";
+    const PREFIX: &str = "diag:";
+
+    if value.is_empty() {
+        return Err(format!("{KIND} must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(format!("{KIND} must be at most 256 bytes"));
+    }
+    if value.chars().any(|character| character.is_control()) {
+        return Err(format!("{KIND} must not contain control characters"));
+    }
+    let Some(suffix) = value.strip_prefix(PREFIX) else {
+        return Err(format!("{KIND} must start with {PREFIX}"));
+    };
+    if suffix.is_empty() {
+        return Err(format!("{KIND} must include an opaque id after {PREFIX}"));
+    }
+    if !suffix
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+    {
+        return Err(format!(
+            "{KIND} opaque id must contain only ASCII letters, digits, _, -, or ."
+        ));
+    }
+    Ok(())
 }
 
 #[non_exhaustive]

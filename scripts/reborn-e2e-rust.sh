@@ -27,6 +27,12 @@ run_test_exact() {
   local package="$1"
   local test_target="$2"
   local test_name="$3"
+  local listed
+  listed=$(cargo test -p "${package}" --test "${test_target}" "${test_name}" -- --exact --list)
+  if ! grep -Fqx "${test_name}: test" <<<"${listed}"; then
+    echo "error: exact test selector matched zero tests: ${package}/${test_target} ${test_name}" >&2
+    return 1
+  fi
   echo "::group::cargo test -p ${package} --test ${test_target} ${test_name} ${extra_args} --exact"
   # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
   cargo test -p "${package}" --test "${test_target}" "${test_name}" ${extra_args} --exact
@@ -45,6 +51,12 @@ run_lib_test() {
 run_lib_test_exact() {
   local package="$1"
   local test_name="$2"
+  local listed
+  listed=$(cargo test -p "${package}" --lib "${test_name}" -- --exact --list)
+  if ! grep -Fqx "${test_name}: test" <<<"${listed}"; then
+    echo "error: exact library test selector matched zero tests: ${package} ${test_name}" >&2
+    return 1
+  fi
   echo "::group::cargo test -p ${package} --lib ${test_name} ${extra_args} --exact"
   # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
   cargo test -p "${package}" --lib "${test_name}" ${extra_args} --exact

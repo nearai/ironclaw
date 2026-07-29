@@ -2,8 +2,8 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, DispatchInputIssueCode, FailureKind,
-    ProviderToolName, SameCallRetryConstraint,
+    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, Denial, DenyReason, DenyRef,
+    DispatchInputIssueCode, FailureKind, ProviderToolName, SameCallRetryConstraint,
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
@@ -4639,6 +4639,45 @@ async fn a_denial_tells_the_model_what_would_unlock_it() {
         "the denial hint must name a concrete next move"
     );
     assert_eq!(recovery.same_call_retry, SameCallRetryConstraint::Forbidden);
+}
+
+#[tokio::test]
+async fn denial_without_summary_emits_actionable_detail() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![ironclaw_host_api::Resolution::Denied(
+                Denial::new(DenyRef::new()).with_reason_kind(DenyReason::PolicyDenied),
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    let observation = appended
+        .first()
+        .and_then(|result| result.model_observation.as_ref())
+        .expect("summary-less denial must append a model-visible observation");
+    let ToolObservationDetail::GenericFailure {
+        failure_kind,
+        detail,
+    } = &observation.detail
+    else {
+        panic!("summary-less denial must carry generic failure detail");
+    };
+    assert_eq!(*failure_kind, FailureKind::PolicyDenied);
+    assert_eq!(
+        detail.as_deref(),
+        Some(
+            "The host denied this capability with reason policy_denied; follow the recovery \
+             guidance before choosing the next action."
+        )
+    );
 }
 
 #[tokio::test]
