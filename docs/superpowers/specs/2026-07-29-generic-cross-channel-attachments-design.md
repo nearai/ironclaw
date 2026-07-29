@@ -1,7 +1,7 @@
 # Generic Cross-Channel Attachments Design
 
 **Date:** 2026-07-29
-**Status:** Design approved; written specification awaiting review
+**Status:** Approved for implementation
 **Target:** PR #6364 (`codex/telegram-slack-attachments`)
 
 ## Summary
