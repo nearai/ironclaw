@@ -56,7 +56,6 @@ crates/ironclaw_runtime_policy/src/resolver.rs	fn sandboxed_secret_for :: _ => p
 crates/ironclaw_runtime_policy/src/resolver.rs	fn audit_for :: _ => panic!("audit_for: unhandled DeploymentMode variant")	The resolver intentionally fails loudly if a new deployment mode lacks an explicit policy.
 crates/ironclaw_secrets/src/secret_store.rs	fn index_key_tenant_id :: unreachable!("secrets index key `tenant_id` must be a simple identifier")	The fixed ASCII secrets index key is validated by the typed constructor.
 crates/ironclaw_secrets/src/secret_store.rs	fn index_name_secrets_tenant :: unreachable!("secrets index name `secrets_by_tenant` must be a simple identifier")	The fixed ASCII secrets index name is validated by the typed constructor.
-crates/ironclaw_turns/src/turn_state_row_store/turn_state_engine/transitions.rs	impl Inner::fn relinquish_transition :: _ => unreachable!("status checked above")	The transition checks and returns for disallowed statuses before mutation.
 crates/ironclaw_webui/src/product_auth/mod.rs	const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY :: None => unreachable!()	The option is checked before the product-auth response is assembled.
 crates/ironclaw_webui/src/product_auth/mod.rs	const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES :: None => unreachable!()	The option is checked before the product-auth response is assembled.
 crates/ironclaw_webui/src/product_auth/mod.rs	const PRODUCT_AUTH_MUTATION_MAX_REQUESTS :: None => unreachable!()	The option is checked before the product-auth response is assembled.
