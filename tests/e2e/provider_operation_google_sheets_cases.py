@@ -3,7 +3,11 @@
 import json
 
 from emulate_provider import google_json
-from provider_operation_types import ProviderOperationCase
+from provider_operation_types import (
+    ProviderOperationCase,
+    exact_output,
+    static_provider_json_response,
+)
 
 SPREADSHEET_ID = "sheet_reborn_abc"
 ADDED_SHEET = "ProviderCase"
@@ -50,6 +54,26 @@ async def _batch_read_outcome(emulate_url: str, preview: dict) -> None:
     rendered = json.dumps(preview)
     assert "REBORN_QA_SEEDED" in rendered, preview
     assert "NEAR AI" in rendered, preview
+
+
+async def _batch_read_empty_outcome(emulate_url: str, preview: dict) -> None:
+    assert not await _values(emulate_url, EMPTY_RANGE)
+    assert preview["truncated"] is False, preview
+    assert json.loads(preview["output_preview"]) == {
+        "value_ranges": [{"range": EMPTY_RANGE, "values": []}]
+    }, preview
+
+
+async def _get_spreadsheet_outcome(emulate_url: str, preview: dict) -> None:
+    await _baseline(emulate_url)
+    assert preview["truncated"] is False, preview
+    output = json.loads(preview["output_preview"])
+    assert output["spreadsheet_id"] == SPREADSHEET_ID, output
+    assert output["title"] == "ABC", output
+    assert [(sheet["sheet_id"], sheet["title"]) for sheet in output["sheets"]] == [
+        (0, "Sheet1"),
+        (7, "DeleteMe"),
+    ], output
 
 
 async def _clear_outcome(emulate_url: str, preview: dict) -> None:
@@ -146,6 +170,49 @@ GOOGLE_SHEETS_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_baseline,
         assert_outcome=_batch_read_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_batch_read_values_empty",
+        provider_service="google",
+        capability_id="google-sheets.batch_read_values",
+        arguments={
+            "spreadsheet_id": SPREADSHEET_ID,
+            "ranges": [EMPTY_RANGE],
+        },
+        assert_baseline=_baseline,
+        assert_outcome=_batch_read_empty_outcome,
+        outcome_class="empty",
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_get_spreadsheet",
+        provider_service="google",
+        capability_id="google-sheets.get_spreadsheet",
+        arguments={"spreadsheet_id": SPREADSHEET_ID},
+        assert_baseline=_baseline,
+        assert_outcome=_get_spreadsheet_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_get_spreadsheet_empty",
+        provider_service="google",
+        capability_id="google-sheets.get_spreadsheet",
+        arguments={"spreadsheet_id": "sheet_provider_contract_empty"},
+        assert_baseline=_baseline,
+        assert_outcome=exact_output(
+            {
+                "spreadsheet_id": "",
+                "title": "",
+                "url": "",
+                "sheets": [],
+            }
+        ),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/v4/spreadsheets/sheet_provider_contract_empty",
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
     ),
     ProviderOperationCase(
         case_id="google_sheets_clear_values",

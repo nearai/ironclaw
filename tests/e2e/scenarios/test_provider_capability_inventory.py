@@ -2,12 +2,11 @@
 
 import ast
 import json
-from pathlib import Path
 import re
-import tomllib
+from pathlib import Path
 
 import pytest
-
+import tomllib
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     COVERAGE_BACKLOG,
@@ -95,10 +94,13 @@ def _cargo_test_targets() -> dict[str, str]:
 def _assert_integration_evidence_is_executable(
     evidence: dict, targets: dict[str, str]
 ) -> None:
-    required = {"capability", "target", "source", "test"}
+    required = {"capability", "outcome_class", "target", "source", "test"}
     assert set(evidence) == required, (
         f"integration evidence fields must be exactly {sorted(required)}: "
         f"{evidence}"
+    )
+    assert evidence["outcome_class"] in REQUIRED_READ_OUTCOME_CLASSES, (
+        f"unknown integration outcome class: {evidence}"
     )
 
     assert evidence["target"] in targets, (
@@ -176,13 +178,14 @@ def test_tested_capabilities_have_executable_evidence_at_the_correct_seam():
         capability_id_to_wire_name(case.capability_id)
         for case in PROVIDER_OPERATION_CASES
     }
-    integration_capabilities = [
-        entry["capability"] for entry in INTEGRATION_EVIDENCE
+    integration_outcomes = [
+        (entry["capability"], entry["outcome_class"])
+        for entry in INTEGRATION_EVIDENCE
     ]
     duplicates = sorted(
-        capability
-        for capability in set(integration_capabilities)
-        if integration_capabilities.count(capability) > 1
+        outcome
+        for outcome in set(integration_outcomes)
+        if integration_outcomes.count(outcome) > 1
     )
     assert not duplicates, f"duplicate integration evidence: {duplicates}"
     assert INTEGRATION_EVIDENCE_CAPABILITY_IDS <= TESTED_CAPABILITY_IDS, (
@@ -585,10 +588,14 @@ def test_journey_evidence_accepts_a_genuinely_invoked_helper(call: str):
 
 
 def _covered_capability_outcomes() -> dict[str, set[str]]:
-    """Capability -> outcome classes proven by a typed operation case."""
+    """Capability -> outcome classes proven at an executable provider seam."""
     covered: dict[str, set[str]] = {}
     for case in PROVIDER_OPERATION_CASES:
         covered.setdefault(case.capability_id, set()).add(case.outcome_class)
+    for evidence in INTEGRATION_EVIDENCE:
+        covered.setdefault(evidence["capability"], set()).add(
+            evidence["outcome_class"]
+        )
     return covered
 
 
@@ -619,10 +626,6 @@ def test_read_capabilities_cover_every_required_outcome_class():
     """Epic #6524 workstream 5: seeded success *and* empty-result per read."""
     covered = _covered_capability_outcomes()
     backlogged = backlogged_capabilities("read_requires_outcome_classes")
-    # Integration evidence is not subtracted here. It names one executable test
-    # per capability with no notion of outcome class, so letting it exempt a
-    # read would be a silent exemption of exactly the kind this gate exists to
-    # remove. Those capabilities are carried in the backlog with a reason.
     missing = sorted(
         f"{capability_id}:{outcome_class}"
         for capability_id in READ_CAPABILITY_IDS - backlogged

@@ -135,6 +135,172 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
     );
 }
 
+/// The bundled hosted-MCP path also preserves an authenticated, successful
+/// empty provider result. This separately pins the request and the outcome so
+/// a locally fabricated empty value cannot satisfy the contract.
+#[tokio::test]
+async fn nearai_web_search_empty_result_dispatches_through_bundled_hosted_mcp() {
+    let group = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("extension-lifecycle group builds");
+    let h = group
+        .thread("nearai-hosted-mcp-empty-result")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                serde_json::json!({"extension_id": "nearai"}),
+            ),
+            RebornScriptedReply::text("NEAR AI search is installed."),
+            RebornScriptedReply::tool_call(
+                "nearai.web_search",
+                serde_json::json!({"query": "NEARAI_EMPTY_PROVIDER_RESULT"}),
+            ),
+            RebornScriptedReply::text("search complete"),
+        ])
+        .build()
+        .await
+        .expect("NEAR AI lifecycle thread builds");
+
+    h.seed_capability_credential_account("nearai", "NEAR AI integration account", &[])
+        .await
+        .expect("NEAR AI account is seeded under the dispatching user");
+    h.submit_turn("install NEAR AI search")
+        .await
+        .expect("install turn completes");
+    h.submit_turn("search for the empty-result sentinel")
+        .await
+        .expect("empty search turn completes");
+    h.assert_tool_invoked("nearai.web_search")
+        .await
+        .expect("canonical NEAR AI capability dispatched");
+
+    let requests = h.captured_network_requests_for_test();
+    let tools_call = requests
+        .iter()
+        .find(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .is_some_and(|body| {
+                    body["method"] == "tools/call"
+                        && body["params"]["arguments"]["query"] == "NEARAI_EMPTY_PROVIDER_RESULT"
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no empty-result hosted MCP tools/call captured across {} redacted request(s)",
+                requests.len()
+            )
+        });
+    assert!(
+        tools_call.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value.starts_with("Bearer ")
+                && value.len() > "Bearer ".len()
+        }),
+        "hosted MCP tools/call must carry a mediated bearer credential"
+    );
+
+    let output = h
+        .tool_result_output("nearai.web_search")
+        .await
+        .expect("empty hosted MCP result was recorded");
+    assert_eq!(
+        output["content"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "[]"
+        }])
+    );
+}
+
+/// Provider credentials are selected at the authenticated run-owner boundary:
+/// actor A can dispatch with A's exact account, while actor B cannot install
+/// or call the same hosted extension with A's credential.
+#[tokio::test]
+async fn nearai_hosted_mcp_isolates_provider_accounts_across_actors() {
+    const ACTOR_A_TOKEN: &str = "nearai-provider-account-actor-a";
+    let group = RebornIntegrationGroup::extension_lifecycle_multiuser()
+        .await
+        .expect("multiuser extension-lifecycle group builds");
+    let actor_a = group
+        .thread("nearai-provider-account-actor-a")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                serde_json::json!({"extension_id": "nearai"}),
+            ),
+            RebornScriptedReply::text("NEAR AI search is installed."),
+            RebornScriptedReply::tool_call(
+                "nearai.web_search",
+                serde_json::json!({"query": "actor-a-provider-query"}),
+            ),
+            RebornScriptedReply::text("search complete"),
+        ])
+        .build()
+        .await
+        .expect("actor A lifecycle thread builds");
+    actor_a
+        .seed_capability_credential_account_with_token(
+            "nearai",
+            "actor A NEAR AI account",
+            &[],
+            ACTOR_A_TOKEN,
+        )
+        .await
+        .expect("actor A account is seeded under actor A");
+    actor_a
+        .submit_turn("install NEAR AI search for actor A")
+        .await
+        .expect("actor A install completes");
+    actor_a
+        .submit_turn("search with actor A's account")
+        .await
+        .expect("actor A provider read completes");
+
+    let actor_a_tools_call = actor_a
+        .captured_network_requests_for_test()
+        .into_iter()
+        .find(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .is_some_and(|body| {
+                    body["method"] == "tools/call"
+                        && body["params"]["arguments"]["query"] == "actor-a-provider-query"
+                })
+        })
+        .expect("actor A provider request was observed");
+    assert!(
+        actor_a_tools_call.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value == &format!("Bearer {ACTOR_A_TOKEN}")
+        }),
+        "actor A request must carry actor A's exact provider account"
+    );
+
+    let actor_b = group
+        .thread("nearai-provider-account-actor-b")
+        .with_actor_id("nearai-provider-account-distinct-actor-b")
+        .script([RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            serde_json::json!({"extension_id": "nearai"}),
+        )])
+        .build()
+        .await
+        .expect("actor B lifecycle thread builds");
+    assert_ne!(
+        actor_a.binding.subject_user_id, actor_b.binding.subject_user_id,
+        "the isolation test requires distinct authenticated actors"
+    );
+    actor_b
+        .submit_turn_until_auth_blocked("install NEAR AI search for actor B")
+        .await
+        .expect("actor B must block on its own missing provider account");
+    assert!(
+        actor_b.captured_network_requests_for_test().is_empty(),
+        "actor B must not reach hosted MCP with actor A's provider account"
+    );
+}
+
 /// Core slice-6 scenario: a scripted MCP tool call round-trips through the real
 /// MCP runtime to the loopback mock server, and the invocation is recorded.
 #[tokio::test]

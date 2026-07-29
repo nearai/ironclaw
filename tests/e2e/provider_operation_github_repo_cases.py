@@ -4,7 +4,6 @@ import base64
 import json
 
 import httpx
-
 from emulate_provider import github_headers
 from provider_operation_github_common import (
     BRANCH,
@@ -283,6 +282,7 @@ GITHUB_REPO_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_repo_baseline,
         assert_outcome=_create_branch_outcome,
+        expected_request_count=2,
     ),
     ProviderOperationCase(
         case_id="github_list_branches",

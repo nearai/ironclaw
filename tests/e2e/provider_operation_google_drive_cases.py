@@ -3,9 +3,14 @@
 import json
 
 import httpx
-
 from emulate_provider import google_headers, google_json
-from provider_operation_types import ProviderOperationCase
+from provider_fault_proxy import ProviderFaultProfile
+from provider_operation_types import (
+    ProviderOperationCase,
+    exact_output,
+    exact_text_output,
+    static_provider_json_response,
+)
 
 FILE_ID = "drv_reborn_qa_brief"
 CREATED_FOLDER = "REBORN_PROVIDER_CASE_CREATED_FOLDER"
@@ -160,7 +165,82 @@ async def _shared_drives_outcome(emulate_url: str, preview: dict) -> None:
     assert "Reborn Engineering" in rendered, preview
 
 
+EMPTY_FILE_QUERY = "name = 'REBORN_PROVIDER_CASE_NO_SUCH_FILE'"
+EMPTY_DOWNLOAD_ID = "drv_provider_contract_empty"
+
+
+async def _list_files_outcome(emulate_url: str, preview: dict) -> None:
+    await _seeded_file_baseline(emulate_url)
+    rendered = json.dumps(preview)
+    assert FILE_ID in rendered, preview
+    assert "Reborn QA Brief" in rendered, preview
+
+
+async def _list_files_empty_outcome(emulate_url: str, preview: dict) -> None:
+    assert await _files_named(
+        emulate_url, "REBORN_PROVIDER_CASE_NO_SUCH_FILE"
+    ) == []
+    assert preview["truncated"] is False, preview
+    assert json.loads(preview["output_preview"]) == {"files": []}, preview
+
+
+async def _download_file_outcome(emulate_url: str, preview: dict) -> None:
+    assert await _media(emulate_url, FILE_ID) == (
+        "Drive content seeded by Emulate for Reborn QA."
+    )
+    assert preview["truncated"] is False, preview
+    assert preview["output_kind"] == "text", preview
+    assert (
+        preview["output_preview"]
+        == "Drive content seeded by Emulate for Reborn QA."
+    ), preview
+
+
+def _setup_empty_download(proxy) -> None:
+    path = f"/drive/v3/files/{EMPTY_DOWNLOAD_ID}"
+    metadata = ProviderFaultProfile(
+        name="provider_contract_empty",
+        action="respond",
+        status=200,
+        body=json.dumps(
+            {
+                "id": EMPTY_DOWNLOAD_ID,
+                "name": "Empty provider file.txt",
+                "mimeType": "text/plain",
+                "size": "0",
+            },
+            separators=(",", ":"),
+        ),
+    )
+    content = ProviderFaultProfile(
+        name="provider_contract_empty",
+        action="respond",
+        status=200,
+        body="",
+        content_type="text/plain",
+    )
+    proxy.arm(metadata, method="GET", path=path)
+    proxy.arm(content, method="GET", path=path)
+
+
 GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
+    ProviderOperationCase(
+        case_id="google_drive_list_files",
+        provider_service="google",
+        capability_id="google-drive.list_files",
+        arguments={"page_size": 25},
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=_list_files_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_list_files_empty",
+        provider_service="google",
+        capability_id="google-drive.list_files",
+        arguments={"query": EMPTY_FILE_QUERY, "page_size": 25},
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=_list_files_empty_outcome,
+        outcome_class="empty",
+    ),
     ProviderOperationCase(
         case_id="google_drive_get_file",
         provider_service="google",
@@ -168,6 +248,57 @@ GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
         arguments={"file_id": FILE_ID},
         assert_baseline=_seeded_file_baseline,
         assert_outcome=_get_file_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_get_file_empty",
+        provider_service="google",
+        capability_id="google-drive.get_file",
+        arguments={"file_id": "drv_provider_contract_empty"},
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=exact_output(
+            {
+                "file": {
+                    "id": "",
+                    "name": "",
+                    "is_folder": False,
+                    "mime_type": "",
+                    "shared": False,
+                    "starred": False,
+                    "trashed": False,
+                    "owned_by_me": False,
+                }
+            }
+        ),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/drive/v3/files/drv_provider_contract_empty",
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_download_file",
+        provider_service="google",
+        capability_id="google-drive.download_file",
+        arguments={"file_id": FILE_ID},
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=_download_file_outcome,
+        expected_request_count=2,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_download_file_empty",
+        provider_service="google",
+        capability_id="google-drive.download_file",
+        arguments={"file_id": EMPTY_DOWNLOAD_ID},
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=exact_text_output(""),
+        outcome_class="empty",
+        expected_request_count=2,
+        setup_provider_proxy=_setup_empty_download,
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
     ),
     ProviderOperationCase(
         case_id="google_drive_update_file",
@@ -226,6 +357,22 @@ GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
         assert_outcome=_list_permissions_outcome,
     ),
     ProviderOperationCase(
+        case_id="google_drive_list_permissions_empty",
+        provider_service="google",
+        capability_id="google-drive.list_permissions",
+        arguments={"file_id": FILE_ID},
+        assert_baseline=_baseline,
+        assert_outcome=exact_output({"permissions": []}),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path=f"/drive/v3/files/{FILE_ID}/permissions",
+            payload={"permissions": []},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
         case_id="google_drive_share_file",
         provider_service="google",
         capability_id="google-drive.share_file",
@@ -256,5 +403,21 @@ GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
         arguments={"page_size": 10},
         assert_baseline=_baseline,
         assert_outcome=_shared_drives_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_list_shared_drives_empty",
+        provider_service="google",
+        capability_id="google-drive.list_shared_drives",
+        arguments={"page_size": 10},
+        assert_baseline=_baseline,
+        assert_outcome=exact_output({"drives": []}),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/drive/v3/drives",
+            payload={"drives": []},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
     ),
 )

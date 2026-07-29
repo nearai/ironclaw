@@ -3,7 +3,12 @@
 import json
 
 from emulate_provider import google_json
-from provider_operation_types import ProviderOperationCase
+from provider_operation_types import (
+    ProviderOperationCase,
+    exact_output,
+    exact_text_output,
+    static_provider_json_response,
+)
 
 DOCUMENT_ID = "doc_reborn_strategy"
 SEEDED_TEXT = (
@@ -40,6 +45,13 @@ async def _get_outcome(emulate_url: str, preview: dict) -> None:
     rendered = json.dumps(preview)
     assert "NEAR AI Strategy" in rendered, preview
     assert DOCUMENT_ID in rendered, preview
+
+
+async def _read_content_outcome(emulate_url: str, preview: dict) -> None:
+    await _baseline(emulate_url)
+    assert preview["truncated"] is False, preview
+    assert preview["output_kind"] == "text", preview
+    assert preview["output_preview"] == SEEDED_TEXT, preview
 
 
 def _revision_outcome(marker: str | None = None):
@@ -82,6 +94,53 @@ GOOGLE_DOCS_PROVIDER_OPERATION_CASES = (
         arguments={"document_id": DOCUMENT_ID},
         assert_baseline=_baseline,
         assert_outcome=_get_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_get_document_empty",
+        provider_service="google",
+        capability_id="google-docs.get_document",
+        arguments={"document_id": "doc_provider_contract_empty"},
+        assert_baseline=_baseline,
+        assert_outcome=exact_output(
+            {
+                "document_id": "",
+                "title": "",
+                "revision_id": "",
+                "body_length": 1,
+            }
+        ),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/v1/documents/doc_provider_contract_empty",
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_read_content",
+        provider_service="google",
+        capability_id="google-docs.read_content",
+        arguments={"document_id": DOCUMENT_ID},
+        assert_baseline=_baseline,
+        assert_outcome=_read_content_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_read_content_empty",
+        provider_service="google",
+        capability_id="google-docs.read_content",
+        arguments={"document_id": "doc_provider_contract_empty"},
+        assert_baseline=_baseline,
+        assert_outcome=exact_text_output(""),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/v1/documents/doc_provider_contract_empty",
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
     ),
     ProviderOperationCase(
         case_id="google_docs_batch_update",
