@@ -2636,6 +2636,7 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -2697,6 +2698,7 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -2769,6 +2771,7 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))

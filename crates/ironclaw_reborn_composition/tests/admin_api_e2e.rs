@@ -949,6 +949,7 @@ async fn build_admin_harness_production() -> AdminHarness {
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )
+    .expect("libSQL bindings")
     .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
     .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(

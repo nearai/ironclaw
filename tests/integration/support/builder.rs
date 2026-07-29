@@ -2111,7 +2111,10 @@ async fn reopen_fresh_libsql_composite(
             .await
             .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(
+        LibSqlRootFilesystem::new(db)
+            .map_err(|e| format!("failed to build libsql runtime for reopen: {e}"))?,
+    );
     // Migrations are idempotent — the schema already exists from `build()`.
     fresh_fs
         .run_migrations()

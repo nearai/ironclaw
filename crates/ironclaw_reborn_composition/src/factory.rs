@@ -2135,7 +2135,7 @@ pub(crate) async fn build_default_local_dev_database_roots(
 ) -> Result<DurableBackend, RebornBuildError> {
     {
         let db = open_local_dev_libsql_database(root).await?;
-        let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db));
+        let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?);
         let database = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
         database.run_migrations().await?;
         mount_local_dev_database_roots(composite, Arc::clone(&database))?;
@@ -2386,7 +2386,7 @@ pub async fn open_local_dev_secret_store(
     root: &Path,
 ) -> Result<Arc<dyn SecretStorePort>, RebornBuildError> {
     let db = open_local_dev_libsql_database(root).await?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db)?);
     filesystem.run_migrations().await?;
     let scoped = crate::wrap_scoped(filesystem);
     let (store, _crypto) = build_secret_store(root, scoped, None).await?;
@@ -3556,7 +3556,7 @@ async fn build_production_shaped(
                 Some(runtime) => runtime,
                 None => Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(
                     open_libsql_database_from_connection(&connection).await?,
-                )),
+                )?),
             };
             let context = RebornProductionBuildContext {
                 profile,

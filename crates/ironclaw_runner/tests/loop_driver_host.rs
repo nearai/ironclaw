@@ -2454,7 +2454,7 @@ async fn build_libsql_thread_service(
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions};
 
-    let fs = LibSqlRootFilesystem::new(db);
+    let fs = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     fs.run_migrations().await.unwrap();
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/threads").unwrap(),
@@ -2478,7 +2478,7 @@ async fn libsql_filesystem_turn_store(
 ) -> ironclaw_turns::TurnStateRowStore<ironclaw_filesystem::LibSqlRootFilesystem> {
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let view = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").unwrap(),

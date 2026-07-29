@@ -198,7 +198,7 @@ async fn hosted_libsql_substrate_build(
             .await?,
     );
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)?),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(latency_secret_master_key()),

@@ -433,7 +433,10 @@ mod libsql_backed {
         auth_token: Option<SecretString>,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
         let db = build_database(&path_or_url, auth_token).await?;
-        let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+        let filesystem =
+            Arc::new(LibSqlRootFilesystem::new(db).map_err(|source| {
+                RebornEventStoreError::backend("libsql", "build runtime", source)
+            })?);
         filesystem
             .run_migrations()
             .await
@@ -1808,7 +1811,9 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let filesystem = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+        let filesystem = Arc::new(
+            ironclaw_filesystem::LibSqlRootFilesystem::new(db).expect("filesystem runtime"),
+        );
         filesystem
             .run_migrations()
             .await
@@ -1851,7 +1856,9 @@ mod tests {
                 .await
                 .expect("in-memory database"),
         );
-        let filesystem = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(database));
+        let filesystem = Arc::new(
+            ironclaw_filesystem::LibSqlRootFilesystem::new(database).expect("filesystem runtime"),
+        );
         filesystem
             .run_migrations()
             .await

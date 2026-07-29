@@ -48,8 +48,9 @@ const INDEXED_QUERY_PREFIX_SQL: &str = "SELECT path, indexed, version \
      FROM root_filesystem_entries \
      WHERE is_dir = 0 AND (path = ?1 OR (path >= ?2 AND path < ?3))";
 impl LibSqlRootFilesystem {
-    pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self::from_runtime(Arc::new(LibSqlRuntime::new(db)))
+    pub fn new(db: Arc<libsql::Database>) -> Result<Self, FilesystemError> {
+        let runtime = LibSqlRuntime::new(db).map_err(map_runtime_connection_error)?;
+        Ok(Self::from_runtime(Arc::new(runtime)))
     }
 
     pub fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {
@@ -2300,7 +2301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("vector-test.db");
         let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = LibSqlRootFilesystem::new(db);
+        let fs = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
         fs.run_migrations().await.unwrap();
         (fs, dir)
     }
@@ -2521,7 +2522,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("connect-retry-test.db");
         let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = Arc::new(LibSqlRootFilesystem::new(db));
+        let fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
         fs.run_migrations().await.unwrap();
 
         let mut handles = Vec::new();
@@ -2563,7 +2564,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("append-contention-test.db");
         let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+        let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime"));
         fs.run_migrations().await.unwrap();
 
         // Configure the runtime's writer connection to fail quickly against a
@@ -2661,7 +2662,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("append-cancellation-test.db");
         let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = Arc::new(LibSqlRootFilesystem::new(db));
+        let fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
         fs.run_migrations().await.unwrap();
 
         let path = VirtualPath::new("/resources/cancelled-append").unwrap();
@@ -2723,7 +2724,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("atomic-delete-test.db");
         let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = LibSqlRootFilesystem::new(Arc::clone(&db));
+        let fs = LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
         fs.run_migrations().await.unwrap();
 
         let path = VirtualPath::new("/resources/atomic/delete").unwrap();
@@ -2763,7 +2764,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("writer-lane-precondition-test.db");
         let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let runtime = Arc::new(LibSqlRuntime::new(Arc::clone(&db)));
+        let runtime = Arc::new(LibSqlRuntime::new(Arc::clone(&db)).expect("libSQL runtime"));
         let fs = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
         fs.run_migrations().await.unwrap();
 
@@ -2863,7 +2864,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("delete-single-conn-test.db");
         let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-        let fs = LibSqlRootFilesystem::new(db);
+        let fs = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
         fs.run_migrations().await.unwrap();
 
         let path = VirtualPath::new("/secrets/single-conn").unwrap();
@@ -2909,7 +2910,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+        let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime"));
         fs.run_migrations().await.unwrap();
 
         let path = VirtualPath::new("/resources/cancelled-delete").unwrap();

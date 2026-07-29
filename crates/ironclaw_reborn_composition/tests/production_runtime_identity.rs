@@ -104,6 +104,7 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,

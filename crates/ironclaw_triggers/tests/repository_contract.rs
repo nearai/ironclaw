@@ -1133,7 +1133,7 @@ async fn build_libsql_repo_with_db() -> (
             .await
             .expect("build libsql db"),
     );
-    let repo = LibSqlTriggerRepository::new(db.clone());
+    let repo = LibSqlTriggerRepository::new(db.clone()).expect("trigger runtime");
     repo.run_migrations().await.expect("run migrations");
     (dir, db, repo)
 }
@@ -1153,7 +1153,7 @@ async fn libsql_filesystem_and_trigger_writes_share_one_runtime_lane() {
             .await
             .expect("build libsql db"),
     );
-    let runtime = Arc::new(LibSqlRuntime::new(db));
+    let runtime = Arc::new(LibSqlRuntime::new(db).expect("libSQL runtime"));
     let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
     let repository = Arc::new(LibSqlTriggerRepository::from_runtime(Arc::clone(&runtime)));
     filesystem
@@ -1261,7 +1261,7 @@ async fn libsql_repository_run_migrations_is_idempotent() {
             .await
             .expect("build libsql db"),
     );
-    let repo = LibSqlTriggerRepository::new(db);
+    let repo = LibSqlTriggerRepository::new(db).expect("trigger runtime");
 
     repo.run_migrations().await.expect("first run migrations");
     repo.run_migrations().await.expect("second run migrations");
@@ -1282,7 +1282,7 @@ async fn libsql_repository_busy_timeout_waits_for_write_lock() {
         .await
         .expect("hold write lock");
 
-    let repo = LibSqlTriggerRepository::new(db);
+    let repo = LibSqlTriggerRepository::new(db).expect("trigger runtime");
     let started = Instant::now();
     let migration = tokio::spawn(async move { repo.run_migrations().await });
 
@@ -1889,7 +1889,7 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
 
     // Run migrations — this adds schedule_timezone NOT NULL DEFAULT 'UTC',
     // which backfills the existing row with "UTC".
-    let repo = LibSqlTriggerRepository::new(db);
+    let repo = LibSqlTriggerRepository::new(db).expect("trigger runtime");
     repo.run_migrations()
         .await
         .expect("migration must succeed on pre-existing table");
@@ -4703,3 +4703,4 @@ async fn libsql_once_trigger_completes_on_clear_active_fire() {
         "once trigger must transition to Completed after clear_active_fire"
     );
 }
+// arch-exempt: large_file, fallible libSQL runtime construction only adjusts existing contract setup, plan #6175

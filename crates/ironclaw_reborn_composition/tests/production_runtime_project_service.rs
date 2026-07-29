@@ -100,6 +100,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,

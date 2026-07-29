@@ -97,7 +97,9 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        runtime: Arc::new(
+            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+        ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("too-short")),
@@ -138,7 +140,9 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        runtime: Arc::new(
+            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+        ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: None,
@@ -174,7 +178,9 @@ async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_au
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        runtime: Arc::new(
+            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+        ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: false,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
@@ -257,7 +263,9 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
     );
 
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database)),
+        runtime: Arc::new(
+            ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"),
+        ),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),

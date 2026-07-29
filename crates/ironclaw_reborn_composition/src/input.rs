@@ -597,8 +597,8 @@ impl RebornHostBindings {
         database_path_or_url: impl Into<String>,
         _auth_token: Option<ironclaw_secrets::SecretMaterial>,
         secret_master_key: ironclaw_secrets::SecretMaterial,
-    ) -> Self {
-        Self::new(
+    ) -> Result<Self, RebornBuildError> {
+        Ok(Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
@@ -606,11 +606,11 @@ impl RebornHostBindings {
                     path_or_url: database_path_or_url.into(),
                     auth_token: None,
                 },
-                prebuilt_runtime: Some(Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db))),
+                prebuilt_runtime: Some(Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?)),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton: true,
             },
-        )
+        ))
     }
 
     /// Build libSQL composition from the runtime that owns the database.
@@ -647,8 +647,8 @@ impl RebornHostBindings {
         db: Arc<libsql::Database>,
         database_path_or_url: impl Into<String>,
         _auth_token: Option<ironclaw_secrets::SecretMaterial>,
-    ) -> Self {
-        Self::new(
+    ) -> Result<Self, RebornBuildError> {
+        Ok(Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
@@ -656,11 +656,11 @@ impl RebornHostBindings {
                     path_or_url: database_path_or_url.into(),
                     auth_token: None,
                 },
-                prebuilt_runtime: Some(Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db))),
+                prebuilt_runtime: Some(Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?)),
                 secret_master_key: None,
                 process_local_resource_governor_singleton: true,
             },
-        )
+        ))
     }
 
     pub fn postgres(

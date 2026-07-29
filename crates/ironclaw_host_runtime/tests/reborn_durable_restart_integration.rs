@@ -593,7 +593,7 @@ async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     scoped_run_state_filesystem(Arc::new(filesystem))
 }

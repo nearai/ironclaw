@@ -837,6 +837,7 @@ async fn production_defaults_first_party_trust_policy() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
         .with_runtime_process_binding(test_sandbox_process_binding()),
@@ -867,6 +868,7 @@ async fn production_requires_process_binding_for_defaulted_first_party_trust_pol
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
@@ -898,6 +900,7 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_vendor_oauth_client(
             "google",
             ironclaw_reborn_composition::OAuthClientConfig {
@@ -935,6 +938,7 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -999,6 +1003,7 @@ async fn production_rejects_empty_trust_policy() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(empty_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1031,6 +1036,7 @@ async fn production_self_mints_turn_wake_wiring() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_runtime_process_binding(test_sandbox_process_binding()),
@@ -1059,6 +1065,7 @@ async fn production_requires_runtime_policy() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_turn_run_wake_notifier(notifier),
     )
@@ -1090,6 +1097,7 @@ async fn production_rejects_local_only_runtime_policy() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(local_only_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1175,6 +1183,7 @@ async fn production_rejects_memory_libsql_event_store() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1211,6 +1220,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
             dir.path().join("reborn.db").to_string_lossy(),
             None,
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1303,6 +1313,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1335,6 +1346,7 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1558,6 +1570,7 @@ async fn production_libsql_secure_default_builds_without_process_port() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(hosted_secure_default_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1592,6 +1605,7 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1660,6 +1674,7 @@ async fn migration_dry_run_validates_libsql_shape() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1702,6 +1717,7 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),

@@ -11,7 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use deadpool::managed::{Manager, Metrics, Object, Pool, PoolError, RecycleError, RecycleResult};
+use deadpool::managed::{
+    BuildError, Manager, Metrics, Object, Pool, PoolError, RecycleError, RecycleResult,
+};
 use thiserror::Error;
 
 pub const LIBSQL_READ_POOL_MAX_CONNECTIONS: usize = 8;
@@ -90,6 +92,12 @@ pub enum LibSqlRuntimeError {
         lane: LibSqlLane,
         reason: LibSqlCheckoutFailureReason,
     },
+    #[error("libSQL {lane} pool construction failed")]
+    PoolBuild {
+        lane: LibSqlLane,
+        #[source]
+        source: BuildError,
+    },
     #[error("libSQL writer acquisition is not reentrant")]
     ReentrantWriter,
 }
@@ -160,16 +168,16 @@ impl fmt::Debug for LibSqlRuntime {
 }
 
 impl LibSqlRuntime {
-    pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self {
+    pub fn new(db: Arc<libsql::Database>) -> Result<Self, LibSqlRuntimeError> {
+        Ok(Self {
             read_pool: build_pool(
                 Arc::clone(&db),
                 LIBSQL_READ_POOL_MAX_CONNECTIONS,
                 LibSqlLane::Read,
-            ),
-            write_pool: build_pool(db, LIBSQL_WRITER_POOL_MAX_CONNECTIONS, LibSqlLane::Write),
+            )?,
+            write_pool: build_pool(db, LIBSQL_WRITER_POOL_MAX_CONNECTIONS, LibSqlLane::Write)?,
             writer_holder: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     pub async fn read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError> {
@@ -241,7 +249,11 @@ fn connection_pragmas(lane: LibSqlLane) -> &'static str {
     }
 }
 
-fn build_pool(db: Arc<libsql::Database>, max_size: usize, lane: LibSqlLane) -> LibSqlPool {
+fn build_pool(
+    db: Arc<libsql::Database>,
+    max_size: usize,
+    lane: LibSqlLane,
+) -> Result<LibSqlPool, LibSqlRuntimeError> {
     build_pool_with_config(db, max_size, lane, LIBSQL_POOL_CHECKOUT_TIMEOUT)
 }
 
@@ -250,18 +262,13 @@ fn build_pool_with_config(
     max_size: usize,
     lane: LibSqlLane,
     wait_timeout: Duration,
-) -> LibSqlPool {
-    match Pool::builder(LibSqlConnectionManager { db, lane })
+) -> Result<LibSqlPool, LibSqlRuntimeError> {
+    Pool::builder(LibSqlConnectionManager { db, lane })
         .max_size(max_size)
         .wait_timeout(Some(wait_timeout))
         .runtime(deadpool::Runtime::Tokio1)
         .build()
-    {
-        Ok(pool) => pool,
-        // The runtime is always configured above, which is the builder's only
-        // possible failure when a timeout is present.
-        Err(error) => unreachable!("libSQL pool build cannot fail: {error}"),
-    }
+        .map_err(|source| LibSqlRuntimeError::PoolBuild { lane, source })
 }
 
 async fn checkout(
@@ -359,7 +366,7 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let runtime = Arc::new(LibSqlRuntime::new(database));
+        let runtime = Arc::new(LibSqlRuntime::new(database).expect("runtime"));
 
         let first_writer = runtime.write().await.expect("first writer");
         let waiting_runtime = Arc::clone(&runtime);
@@ -394,7 +401,7 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let runtime = LibSqlRuntime::new(database);
+        let runtime = LibSqlRuntime::new(database).expect("runtime");
         let writer = runtime.write().await.expect("writer");
         writer
             .execute("CREATE TABLE guarded_writes (value TEXT NOT NULL)", ())
@@ -442,7 +449,7 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let runtime = Arc::new(LibSqlRuntime::new(database));
+        let runtime = Arc::new(LibSqlRuntime::new(database).expect("runtime"));
         let nested = tokio::spawn(async move {
             let _held_writer = runtime.write().await.expect("first writer");
             tokio::time::timeout(Duration::from_millis(25), runtime.write())
@@ -469,7 +476,7 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let pool = build_pool(database, 1, LibSqlLane::Write);
+        let pool = build_pool(database, 1, LibSqlLane::Write).expect("pool");
 
         {
             let connection = pool.get().await.expect("first checkout");
@@ -498,7 +505,8 @@ mod tests {
                 .expect("database"),
         );
         let pool =
-            build_pool_with_config(database, 1, LibSqlLane::Write, Duration::from_millis(25));
+            build_pool_with_config(database, 1, LibSqlLane::Write, Duration::from_millis(25))
+                .expect("pool");
         let _held = pool.get().await.expect("held checkout");
 
         let error = match checkout(&pool, LibSqlLane::Write).await {
@@ -524,7 +532,7 @@ mod tests {
                 .await
                 .expect("database"),
         );
-        let runtime = LibSqlRuntime::new(database);
+        let runtime = LibSqlRuntime::new(database).expect("runtime");
         let connection = runtime.write().await.expect("writer");
         connection
             .execute("CREATE TABLE cancellation_safety (value TEXT NOT NULL)", ())

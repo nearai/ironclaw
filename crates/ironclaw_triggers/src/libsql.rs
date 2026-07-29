@@ -73,8 +73,10 @@ pub struct LibSqlTriggerRepository {
     runtime: Arc<LibSqlRuntime>,
 }
 impl LibSqlTriggerRepository {
-    pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self::from_runtime(Arc::new(LibSqlRuntime::new(db)))
+    pub fn new(db: Arc<libsql::Database>) -> Result<Self, TriggerError> {
+        let runtime = LibSqlRuntime::new(db)
+            .map_err(|error| backend_error("build trigger connection runtime", error))?;
+        Ok(Self::from_runtime(Arc::new(runtime)))
     }
 
     pub fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {

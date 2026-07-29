@@ -100,7 +100,8 @@ async fn production_libsql_event_log_uses_the_composition_runtime_writer_lane() 
             .await
             .expect("build production libsql database"),
     );
-    let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database));
+    let runtime =
+        Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
     let services = build_runtime_substrate(
         RebornHostBindings::libsql_from_runtime(
             RebornCompositionProfile::Production,
@@ -1550,7 +1551,8 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
             .await
             .expect("build libsql database"),
     );
-    let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+    let assertion_filesystem =
+        LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("configured-owner").expect("owner");
     let tenant = TenantId::new("configured-tenant").expect("tenant");
     let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
@@ -1563,6 +1565,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_local_runtime_identity(tenant.clone(), agent.clone())
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
@@ -1665,7 +1668,8 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
             .await
             .expect("build libsql database"),
     );
-    let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+    let assertion_filesystem =
+        LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("default-owner").expect("owner");
     let services = build_runtime_substrate(
         RebornHostBindings::libsql(
@@ -1676,6 +1680,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
@@ -1792,6 +1797,7 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))

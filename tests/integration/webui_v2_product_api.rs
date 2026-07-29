@@ -76,7 +76,7 @@ async fn thread_history_cold_get_and_libsql_reopen() {
             .await
             .expect("open fresh libsql for reopen"),
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     fresh_fs
         .run_migrations()
         .await
