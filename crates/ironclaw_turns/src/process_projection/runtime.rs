@@ -532,7 +532,12 @@ impl AgentTurnProcessRuntime {
                 .ok_or(TurnError::RunNotRetryable {
                     run_id: request.run_id,
                 })?;
-            if checkpoint_kind == LoopCheckpointKind::Final {
+            if !matches!(
+                checkpoint_kind,
+                LoopCheckpointKind::BeforeModel
+                    | LoopCheckpointKind::BeforeSideEffect
+                    | LoopCheckpointKind::BeforeBlock
+            ) {
                 return Err(TurnError::RunNotRetryable {
                     run_id: request.run_id,
                 });
@@ -550,6 +555,7 @@ impl AgentTurnProcessRuntime {
                     state_ref: source.state_ref,
                     payload: source.payload,
                     created_at: Utc::now(),
+                    link_to_process: true,
                     metadata: source.metadata,
                 },
             ))

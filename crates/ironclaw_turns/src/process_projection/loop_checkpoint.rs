@@ -49,6 +49,7 @@ impl LoopCheckpointStore for ProcessLoopCheckpointStore {
                         reason: error.to_string(),
                     })?,
                 created_at: chrono::Utc::now(),
+                link_to_process: request.kind != LoopCheckpointKind::Final,
                 metadata: json!({
                     "turn_id": request.turn_id,
                     "schema_id": request.schema_id,

@@ -387,6 +387,10 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaimedProcess {
     pub state: JournaledProcessSnapshot,
@@ -690,6 +694,12 @@ pub struct RecordProcessCheckpointRequest {
     pub state_ref: ProcessCheckpointRef,
     pub payload: ProcessCheckpointPayload,
     pub created_at: Timestamp,
+    /// Whether this checkpoint becomes the process's active resume reference.
+    ///
+    /// Terminal evidence checkpoints are durable records but are not valid
+    /// continuation points, so their writers set this to `false`.
+    #[serde(default = "default_true")]
+    pub link_to_process: bool,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }

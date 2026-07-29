@@ -537,6 +537,7 @@ fn defensive_transition_matrix_fails_closed_without_corrupting_state() {
             state_ref: ProcessCheckpointRef::from_trusted("defensive-state"),
             payload: ProcessCheckpointPayload::new(payload.to_vec()).expect("payload"),
             created_at: Utc::now(),
+            link_to_process: true,
             metadata: serde_json::Value::Null,
         };
     assert_error(
@@ -828,6 +829,7 @@ fn command_dispatch_covers_submit_claim_heartbeat_transition_and_control_replay(
         state_ref: checkpoint_ref,
         payload: ProcessCheckpointPayload::new(b"checkpoint".to_vec()).expect("payload"),
         created_at: Utc::now(),
+        link_to_process: true,
         metadata: json!({"checkpoint": true}),
     };
     let mut submission = submit_request(process_id, request_scope.clone());
@@ -1119,6 +1121,7 @@ fn command_dispatch_covers_tree_dependency_checkpoint_and_legacy_import() {
         state_ref: ProcessCheckpointRef::from_trusted("dispatch-tree-state"),
         payload: ProcessCheckpointPayload::new(b"state".to_vec()).expect("checkpoint payload"),
         created_at: Utc::now(),
+        link_to_process: true,
         metadata: serde_json::Value::Null,
     };
     state

@@ -609,7 +609,7 @@ impl ProcessTransitionPort for RecordingTransitionPort {
             request.process_id,
             Some(request.failure),
             None,
-            None,
+            request.checkpoint_ref,
         ))
     }
 

@@ -904,6 +904,7 @@ impl ProcessJournalMaterializedState {
         &mut self,
         request: crate::RecordProcessCheckpointRequest,
     ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        let link_to_process = request.link_to_process;
         let snapshot = self.processes.get(&request.process_id).ok_or(
             ProcessJournalStoreError::UnknownProcess {
                 process_id: request.process_id,
@@ -935,9 +936,11 @@ impl ProcessJournalMaterializedState {
         }
         self.checkpoints
             .insert(request.checkpoint_id.clone(), record.clone());
-        self.process_mut(request.process_id)?.checkpoint_ref = Some(
-            ProcessCheckpointRef::from_trusted(request.checkpoint_id.as_str().to_string()),
-        );
+        if link_to_process {
+            self.process_mut(request.process_id)?.checkpoint_ref = Some(
+                ProcessCheckpointRef::from_trusted(request.checkpoint_id.as_str().to_string()),
+            );
+        }
         Ok(StoredCommandOutcome::Checkpointed(record))
     }
 

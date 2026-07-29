@@ -282,6 +282,7 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
             payload: ProcessCheckpointPayload::new(b"atomic-payload".to_vec())
                 .expect("bounded payload"),
             created_at: Utc::now(),
+            link_to_process: true,
             metadata: json!({"schema": "agent-loop-v1"}),
         })
         .await
@@ -1200,6 +1201,7 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
         payload: ProcessCheckpointPayload::new(b"checkpoint-body".to_vec())
             .expect("bounded payload"),
         created_at: Utc::now(),
+        link_to_process: true,
         metadata: json!({"schema": "agent-loop-v1"}),
     };
 
@@ -1214,6 +1216,21 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
             .expect("idempotent record"),
         recorded
     );
+    let terminal_evidence_id = ProcessCheckpointId::from_trusted("checkpoint-final-evidence");
+    store
+        .record_process_checkpoint(RecordProcessCheckpointRequest {
+            checkpoint_id: terminal_evidence_id.clone(),
+            process_id,
+            scope: scope.clone(),
+            state_ref: ProcessCheckpointRef::from_trusted("state-final-evidence"),
+            payload: ProcessCheckpointPayload::new(b"terminal evidence".to_vec())
+                .expect("bounded payload"),
+            created_at: Utc::now(),
+            link_to_process: false,
+            metadata: json!({"kind": "final"}),
+        })
+        .await
+        .expect("record unlinked terminal evidence");
 
     let reopened = ProcessJournalStore::new(filesystem);
     let loaded = reopened
@@ -1230,6 +1247,18 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
     let debug = format!("{:?}", loaded.payload);
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains("checkpoint-body"));
+    assert!(
+        reopened
+            .get_process_checkpoint(GetProcessCheckpointRequest {
+                checkpoint_id: terminal_evidence_id,
+                process_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("load terminal evidence")
+            .is_some(),
+        "unlinked terminal evidence must remain durable"
+    );
     assert_eq!(
         reopened
             .get_process_snapshot(GetProcessSnapshotRequest {
@@ -1241,7 +1270,8 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
             .checkpoint_ref,
         Some(ProcessCheckpointRef::from_trusted(
             checkpoint_id.as_str().to_string()
-        ))
+        )),
+        "recording terminal evidence must not replace the active resume checkpoint"
     );
 
     let mut wrong_scope = scope;

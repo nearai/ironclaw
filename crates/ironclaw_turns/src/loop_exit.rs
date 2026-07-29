@@ -130,17 +130,12 @@ impl LoopExitApplier {
         // and collapses it to a coarse outcome; carry it so the terminal
         // transition can persist it on the run record.
         let model_usage = exit.reported_model_usage();
-        let failure_checkpoint_id = match &exit {
-            LoopExit::Failed(failed) => failed.checkpoint_id,
-            _ => None,
-        };
         let decision = exit.validate(policy);
         let snapshot = apply_validated_process_loop_exit(
             self.transition_port.as_ref(),
             claimed,
             decision.mapping,
             model_usage,
-            failure_checkpoint_id,
         )
         .await?;
         crate::turn_run_state_from_process_snapshot(snapshot)
@@ -294,7 +289,6 @@ async fn apply_validated_process_loop_exit(
     claimed: &ClaimedTurnRun,
     mapping: LoopExitMapping,
     model_usage: Option<crate::run_profile::LoopModelUsage>,
-    failure_checkpoint_id: Option<TurnCheckpointId>,
 ) -> Result<JournaledProcessSnapshot, TurnError> {
     match mapping {
         LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
@@ -347,7 +341,13 @@ async fn apply_validated_process_loop_exit(
                     worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
                     lease_token: process_lease_token_from_turn(claimed.lease_token),
                     failure,
-                    checkpoint_ref: failure_checkpoint_id.map(|checkpoint_id| {
+                    // The failed exit's Final checkpoint is terminal evidence,
+                    // not a resumable continuation point. It was verified
+                    // before this transition; retain the checkpoint from the
+                    // claimed state so retry resumes from the last safe
+                    // BeforeModel/BeforeSideEffect/BeforeBlock checkpoint
+                    // instead.
+                    checkpoint_ref: claimed.state.checkpoint_id.map(|checkpoint_id| {
                         ProcessCheckpointRef::from_trusted(checkpoint_id.as_uuid().to_string())
                     }),
                     metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(

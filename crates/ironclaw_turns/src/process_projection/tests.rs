@@ -721,6 +721,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
             state_ref: ProcessCheckpointRef::from_trusted("retry-final-state"),
             payload: ProcessCheckpointPayload::new(b"final checkpoint".to_vec()).expect("payload"),
             created_at: Utc::now(),
+            link_to_process: true,
             metadata: serde_json::json!({
                 "kind": crate::run_profile::LoopCheckpointKind::Final,
             }),
@@ -824,9 +825,10 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             payload: ProcessCheckpointPayload::new(b"checkpoint payload".to_vec())
                 .expect("checkpoint payload"),
             created_at: Utc::now(),
+            link_to_process: true,
             metadata: serde_json::json!({
                 "source": "retry-test",
-                "kind": crate::run_profile::LoopCheckpointKind::BeforeSideEffect,
+                "kind": crate::run_profile::LoopCheckpointKind::BeforeModel,
             }),
         })
         .await

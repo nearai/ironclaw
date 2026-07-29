@@ -1515,7 +1515,9 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
 
 #[tokio::test]
 async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
-    let claimed = claimed_run();
+    let mut claimed = claimed_run();
+    let resumable_checkpoint_id = TurnCheckpointId::new();
+    claimed.state.checkpoint_id = Some(resumable_checkpoint_id);
     let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("applier-failure-evidence"),
@@ -1542,6 +1544,11 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
 
     assert_eq!(state.status, TurnStatus::Failed);
     assert_eq!(state.failure.expect("failure").category(), "model_error");
+    assert_eq!(
+        state.checkpoint_id,
+        Some(resumable_checkpoint_id),
+        "the failed process must retain its resumable checkpoint rather than the Final evidence checkpoint"
+    );
     assert_eq!(transition.raw_failure_texts(), vec!["model_error"]);
 }
 
