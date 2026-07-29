@@ -916,40 +916,51 @@ mod tests {
     #[test]
     fn unterminated_private_key_redaction_consumes_the_bounded_remainder() {
         let detector = LeakDetector::new();
-        let content = concat!(
-            "before\n",
-            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
-            "TEST_PRIVATE_KEY_MATERIAL"
-        );
 
-        let scan = detector.scan(content);
-        let redacted = scan
-            .redact_all_matches(content)
-            .expect("valid detector ranges")
-            .expect("private key should be redacted");
+        for label in [
+            "RSA PRIVATE KEY",
+            "PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "DSA PRIVATE KEY",
+        ] {
+            let content = format!("before\n-----BEGIN {label}-----\nTEST_PRIVATE_KEY_MATERIAL");
+            let scan = detector.scan(&content);
+            let redacted = scan
+                .redact_all_matches(&content)
+                .expect("valid detector ranges")
+                .expect("private key should be redacted");
 
-        assert_eq!(redacted, "before\n[REDACTED]");
+            assert_eq!(redacted, "before\n[REDACTED]", "label: {label}");
+        }
     }
 
     #[test]
     fn mismatched_private_key_end_label_does_not_truncate_redaction() {
         let detector = LeakDetector::new();
-        let content = concat!(
-            "before\n",
-            "-----BEGIN RSA PRIVATE KEY-----\n",
-            "FIRST_PRIVATE_KEY_FRAGMENT\n",
-            "-----END PRIVATE KEY-----\n",
-            "TRAILING_PRIVATE_KEY_FRAGMENT"
-        );
 
-        let scan = detector.scan(content);
-        let redacted = scan
-            .redact_all_matches(content)
-            .expect("valid detector ranges")
-            .expect("private key should be redacted");
+        for (begin_label, mismatched_end_label) in [
+            ("RSA PRIVATE KEY", "PRIVATE KEY"),
+            ("PRIVATE KEY", "RSA PRIVATE KEY"),
+            ("OPENSSH PRIVATE KEY", "EC PRIVATE KEY"),
+            ("EC PRIVATE KEY", "DSA PRIVATE KEY"),
+            ("DSA PRIVATE KEY", "EC PRIVATE KEY"),
+        ] {
+            let content = format!(
+                "before\n-----BEGIN {begin_label}-----\nFIRST_PRIVATE_KEY_FRAGMENT\n-----END {mismatched_end_label}-----\nTRAILING_PRIVATE_KEY_FRAGMENT"
+            );
+            let scan = detector.scan(&content);
+            let redacted = scan
+                .redact_all_matches(&content)
+                .expect("valid detector ranges")
+                .expect("private key should be redacted");
 
-        assert_eq!(redacted, "before\n[REDACTED]");
-        assert!(!redacted.contains("TRAILING_PRIVATE_KEY_FRAGMENT"));
+            assert_eq!(
+                redacted, "before\n[REDACTED]",
+                "begin: {begin_label}, end: {mismatched_end_label}"
+            );
+            assert!(!redacted.contains("TRAILING_PRIVATE_KEY_FRAGMENT"));
+        }
     }
 
     #[test]
@@ -1125,6 +1136,37 @@ mod tests {
                 Some("prefix [REDACTED] suffix".to_string())
             );
         }
+    }
+
+    #[test]
+    fn redact_all_matches_coalesces_overlaps_and_preserves_disjoint_matches() {
+        let content = "aa SECRET_ONE bb SECRET_TWO cc";
+        let first_start = content.find("SECRET_ONE").unwrap();
+        let second_start = content.find("SECRET_TWO").unwrap();
+        let synthetic_match = |location| LeakMatch {
+            pattern_name: "synthetic".to_string(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+            location,
+            masked_preview: "[masked]".to_string(),
+        };
+        let scan = LeakScanResult {
+            matches: vec![
+                synthetic_match(first_start..first_start + "SECRET_ONE".len()),
+                synthetic_match(first_start + 2..first_start + 6),
+                synthetic_match(second_start..second_start + "SECRET_TWO".len()),
+            ],
+            should_block: false,
+            redacted_content: None,
+        };
+
+        let redacted = scan
+            .redact_all_matches(content)
+            .expect("valid detector ranges")
+            .expect("matches should be redacted");
+
+        assert_eq!(redacted, "aa [REDACTED] bb [REDACTED] cc");
+        assert_eq!(redacted.matches("[REDACTED]").count(), 2);
     }
 
     #[test]

@@ -643,6 +643,42 @@ async fn compaction_port_rejects_private_keys_split_across_message_boundaries() 
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_private_key_begin_delimiter_split_across_messages() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("before\n-----BEGIN RSA").await;
+    fixture
+        .append_user(" PRIVATE KEY-----\nTRAILING_PRIVATE_KEY_FRAGMENT")
+        .await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect_err("private-key BEGIN delimiters spanning messages must fail closed");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(inference.last_input().is_empty());
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
+}
+
+#[tokio::test]
 async fn compaction_port_redacts_unterminated_private_key_span_across_later_messages() {
     let fixture = CompactionFixture::new().await;
     fixture
@@ -834,6 +870,34 @@ async fn compaction_port_rejects_serialized_redaction_expansion_over_byte_cap() 
 
     assert!(matches!(error, LoopCompactionError::InputTooLarge));
     assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_port_bounds_validation_without_rejecting_redactable_expansion() {
+    let fixture = CompactionFixture::new().await;
+    let private_key = format!("-----BEGIN RSA PRIVATE KEY-----\n{}", "&".repeat(60_000));
+    fixture.append_user(&private_key).await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("redaction must happen before enforcing the final serialized-input cap");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+
+    assert_eq!(response.redacted_leak_count, 1);
+    let input = inference.last_input();
+    assert!(input.contains("[REDACTED]"));
+    assert!(!input.contains("&amp;"));
+    assert!(input.len() < 1_024);
 }
 
 #[tokio::test]
