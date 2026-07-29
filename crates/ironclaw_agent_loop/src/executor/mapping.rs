@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlockedKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopCheckpointKind,
-        LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
+        LoopGateKind, LoopRecoveryClass, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
@@ -144,6 +144,21 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
     }
 }
 
+pub(super) fn model_recovery_class(class: ModelErrorClass) -> LoopRecoveryClass {
+    match class {
+        ModelErrorClass::Transient => LoopRecoveryClass::ModelTransient,
+        ModelErrorClass::ContextOverflow => LoopRecoveryClass::ModelContextOverflow,
+        ModelErrorClass::ContentFiltered => LoopRecoveryClass::ModelContentFiltered,
+        ModelErrorClass::InvalidOutput => LoopRecoveryClass::ModelInvalidOutput,
+        ModelErrorClass::Unavailable => LoopRecoveryClass::ModelUnavailable,
+        ModelErrorClass::Internal => LoopRecoveryClass::ModelInternal,
+        ModelErrorClass::StaleRequest => LoopRecoveryClass::ModelStaleRequest,
+        ModelErrorClass::Unauthorized => LoopRecoveryClass::ModelUnauthorized,
+        ModelErrorClass::CheckpointRejected => LoopRecoveryClass::ModelCheckpointRejected,
+        ModelErrorClass::TranscriptWriteFailed => LoopRecoveryClass::ModelTranscriptWriteFailed,
+    }
+}
+
 /// Whether a capability-stage port `Err` is a genuine host fault that must end
 /// the run (`capability_host_error`), as opposed to a caller-shaped failure the
 /// model can recover from (surfaced as a tool error via
@@ -219,11 +234,10 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 /// Sanitized failure-category wire strings for a terminal capability failure.
 ///
 /// The seven output strings are a HARD cross-crate contract: the runner's
-/// failure lane (`failure_lane.rs`) and auto-retry disposition
-/// (`retry_disposition.rs`) and the product failure explanations match on them
+/// failure summaries and the product failure explanations match on them
 /// byte-for-byte. This bucketing preserves the retired `CapabilityErrorClass`
-/// membership for the retired kinds and assigns each precise kind to the
-/// bucket its coarse ancestor used:
+/// membership for the retired kinds and assigns each precise kind to the bucket
+/// its coarse ancestor used:
 ///
 /// - `capability_permanent` survives only for `Cancelled` (the retired
 ///   `Permanent` *kind* merged into `OperationFailed`, so its old bucket is no
@@ -374,9 +388,8 @@ mod tests {
 
     /// Classification lock for the seven-string failure-category contract:
     /// every unified `FailureKind` maps to a deliberate wire category, and the
-    /// bucket set never grows — the runner's failure lane and auto-retry
-    /// disposition and the product failure explanations match these strings
-    /// byte-for-byte.
+    /// bucket set never grows — runner and product failure explanations match
+    /// these strings byte-for-byte.
     ///
     /// This complements the compile-time guarantee (the match is exhaustive
     /// with no `_ =>` wildcard) by also catching a silent *re-bucketing* of an

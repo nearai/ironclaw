@@ -3,8 +3,8 @@ use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
-        LoopProgressEvent, LoopSafeSummary, StageCheckpointPayloadRequest,
-        sanitize_model_visible_text,
+        LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+        LoopSafeSummary, StageCheckpointPayloadRequest, sanitize_model_visible_text,
     },
 };
 
@@ -108,6 +108,37 @@ impl CheckpointStage {
 
     pub(super) async fn emit_progress(&self, ctx: StageContext<'_>, event: LoopProgressEvent) {
         let _ = ctx.host.emit_loop_progress(event).await;
+    }
+
+    /// Append recovery evidence before the recovery transition can continue.
+    ///
+    /// Unlike observational progress, this event is a durable metric input.
+    /// Its sequence advances only after the host accepts the append. A worker
+    /// replaying the pre-transition checkpoint therefore reuses the same
+    /// sequence and logical event identity.
+    pub(super) async fn emit_recovery(
+        &self,
+        ctx: StageContext<'_>,
+        state: &mut LoopExecutionState,
+        stage: LoopRecoveryStage,
+        class: LoopRecoveryClass,
+        disposition: LoopRecoveryDisposition,
+    ) -> Result<(), AgentLoopExecutorError> {
+        let sequence = state
+            .recovery_event_sequence
+            .checked_add(1)
+            .ok_or(AgentLoopExecutorError::RecoverySequenceExhausted)?;
+        ctx.host
+            .emit_loop_progress(LoopProgressEvent::FailureRecovered {
+                sequence,
+                stage,
+                class,
+                disposition,
+            })
+            .await
+            .map_err(recovery_event_host_error)?;
+        state.recovery_event_sequence = sequence;
+        Ok(())
     }
 
     // Cancellation is checked cooperatively at N boundary points between external calls.
@@ -242,6 +273,35 @@ fn checkpoint_host_error(
         };
     }
     AgentLoopExecutorError::CheckpointFailed { stage: kind }
+}
+
+fn recovery_event_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return AgentLoopExecutorError::Cancelled;
+    }
+    debug_host_unavailable(HostStage::Checkpoint, &error);
+    let raw_summary = error.safe_summary;
+    let (safe_summary, rejected_summary_detail) = match LoopSafeSummary::new(raw_summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                validation_error = %validation_error,
+                "recovery event error summary rejected; using fallback"
+            );
+            (
+                LoopSafeSummary::model_gateway_failed(),
+                Some(sanitize_model_visible_text(raw_summary)),
+            )
+        }
+    };
+    AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+        stage: HostStage::Checkpoint,
+        kind: error.kind,
+        safe_summary,
+        reason_kind: error.reason_kind,
+        diagnostic_ref: error.diagnostic_ref,
+        detail: error.detail.or(rejected_summary_detail),
+    }
 }
 
 pub(super) struct CheckpointInput {
