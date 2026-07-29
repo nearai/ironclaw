@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from journey_types import (
     CargoEvidence,
+    DeliveryAddressEvidence,
     JourneyCase,
     JourneyDeliveryTarget,
     JourneyExecution,
@@ -292,12 +293,21 @@ PRODUCT_JOURNEY_CASES = (
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="slack_final_reply_flows_through_the_real_delivery_coordinator",
             target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="C777",
+                thread_anchor="1710000200.000050",
+                exact_count=1,
+                assertion="assert_slack_thread_delivery_evidence",
+            ),
         ),
     ),
     ProductJourneyCase(
@@ -310,12 +320,51 @@ PRODUCT_JOURNEY_CASES = (
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="telegram_update_becomes_a_turn_and_a_coordinated_reply",
             target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="-1008675309",
+                thread_anchor="77",
+                exact_count=1,
+                assertion="assert_telegram_topic_delivery_evidence",
+            ),
+        ),
+    ),
+    ProductJourneyCase(
+        case_id="telegram_pairing_chat_unpair_repair",
+        provider_worlds=(ProviderWorld.TELEGRAM,),
+        mutable_provider_worlds=(ProviderWorld.TELEGRAM,),
+        ingress=JourneyIngress.TELEGRAM,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        delivery_target=JourneyDeliveryTarget.TELEGRAM,
+        assertions=(
+            ObservableAssertion.DURABLE_STATE,
+            ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
+            ObservableAssertion.CREDENTIAL_INJECTION,
+        ),
+        evidence=CargoEvidence(
+            source="tests/integration/extension_delivery.rs",
+            test=(
+                "unbound_telegram_actor_pairs_via_web_minted_code_then_"
+                "turns_attribute_to_the_paired_user"
+            ),
+            target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="515151",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_telegram_chat_delivery_evidence",
+            ),
         ),
     ),
     ProductJourneyCase(
@@ -340,6 +389,20 @@ PRODUCT_JOURNEY_CASES = (
             ),
             target="trigger_poller_e2e",
             manifest="crates/ironclaw_reborn_composition/Cargo.toml",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="D-TRIGGER-DEFAULT",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_slack_dm_delivery_evidence",
+            ),
+            DeliveryAddressEvidence(
+                conversation_id="C-TRIGGER-OVERRIDE",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_slack_channel_delivery_evidence",
+            ),
         ),
     ),
 )

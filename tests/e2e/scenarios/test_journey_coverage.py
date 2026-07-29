@@ -18,6 +18,7 @@ from journey_cases import (
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
+    _production_channel_surfaces,
     journey_order_is_reversed,
     provider_journey_runs,
     required_delivery_targets,
@@ -28,7 +29,10 @@ from journey_cases import (
 )
 from journey_types import (
     CargoEvidence,
+    DeliveryAddressEvidence,
     JourneyCase,
+    ObservableAssertion,
+    ProductJourneyCase,
     ProviderJourneyCase,
     ProviderWorld,
     PytestEvidence,
@@ -315,6 +319,70 @@ def _assert_rust_evidence(case: JourneyCase, evidence: CargoEvidence) -> None:
     _assert_cargo_target(case.case_id, evidence, source_path)
 
 
+def _rust_function_body(source: str, function_name: str) -> str:
+    """Return one Rust function body after masking comments and strings."""
+    masked = _rust_code_without_comments_or_strings(source)
+    declarations = list(
+        re.finditer(
+            rf"\bfn\s+{re.escape(function_name)}\s*\([^)]*\)[^{{;]*\{{",
+            masked,
+            re.MULTILINE,
+        )
+    )
+    assert len(declarations) == 1, (
+        f"expected one Rust function {function_name!r}, found {len(declarations)}"
+    )
+    body_start = masked.find("{", declarations[0].start())
+    depth = 0
+    for index in range(body_start, len(masked)):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return masked[body_start + 1 : index]
+    raise AssertionError(f"Rust function {function_name!r} has no closing brace")
+
+
+def _assert_delivery_address_is_citable(
+    case: ProductJourneyCase,
+    address: DeliveryAddressEvidence,
+) -> None:
+    assert isinstance(case.evidence, CargoEvidence), (
+        f"{case.case_id}: external delivery evidence must cite a Cargo caller seam"
+    )
+    assert address.conversation_id.strip(), (
+        f"{case.case_id}: delivery conversation id is blank"
+    )
+    assert address.thread_anchor is None or address.thread_anchor.strip(), (
+        f"{case.case_id}: delivery thread anchor is blank"
+    )
+    assert address.exact_count == 1, (
+        f"{case.case_id}: representative delivery must assert exactly once"
+    )
+    assert ObservableAssertion.EXACT_DESTINATION in case.assertions
+    assert ObservableAssertion.EXACT_MUTATION_COUNT in case.assertions
+
+    source = (ROOT / case.evidence.source).read_text(encoding="utf-8")
+    _rust_function_body(source, address.assertion)
+    test_body = _rust_function_body(source, case.evidence.test)
+    reachable_bodies = [test_body]
+    for delegate in set(re.findall(r"\b([a-z][A-Za-z0-9_]*_impl)\s*\(", test_body)):
+        if delegate == address.assertion:
+            continue
+        try:
+            reachable_bodies.append(_rust_function_body(source, delegate))
+        except AssertionError:
+            pass
+    assert any(
+        re.search(rf"\b{re.escape(address.assertion)}\s*\(", body)
+        for body in reachable_bodies
+    ), (
+        f"{case.case_id}: cited assertion {address.assertion!r} is not called "
+        f"by {case.evidence.test!r} or its direct delegate"
+    )
+
+
 def test_provider_journey_registry_matches_every_harvested_emulate_journey():
     """Manifest additions cannot bypass the typed whole-path runner."""
     registered = {case.case_id for case in PROVIDER_JOURNEY_CASES}
@@ -515,6 +583,42 @@ def test_every_supported_ingress_and_delivery_target_has_journey_evidence():
     assert not missing_ingress, f"ingresses lack journey evidence: {missing_ingress}"
     assert not missing_delivery, (
         f"delivery targets lack journey evidence: {missing_delivery}"
+    )
+
+
+def test_external_delivery_variants_name_exact_caller_evidence():
+    """Opaque destinations and optional anchors stay mechanically citable."""
+    product_cases = [
+        case for case in ALL_JOURNEY_CASES if isinstance(case, ProductJourneyCase)
+    ]
+    by_surface: dict[str, list[DeliveryAddressEvidence]] = {}
+    for case in product_cases:
+        for address in case.delivery_addresses:
+            _assert_delivery_address_is_citable(case, address)
+            by_surface.setdefault(str(case.delivery_target), []).append(address)
+
+    for surface in _production_channel_surfaces("outbound"):
+        addresses = by_surface.get(surface, [])
+        assert any(address.thread_anchor is None for address in addresses), (
+            f"{surface}: no unthreaded delivery address evidence"
+        )
+        adapter_source = (
+            ROOT / f"crates/ironclaw_{surface}_extension/src/channel.rs"
+        )
+        assert adapter_source.is_file(), (
+            f"{surface}: production channel adapter source is not discoverable"
+        )
+        if "thread_anchor" in adapter_source.read_text(encoding="utf-8"):
+            assert any(address.thread_anchor is not None for address in addresses), (
+                f"{surface}: threaded delivery is implemented but lacks exact evidence"
+            )
+
+    slack_destinations = {
+        address.conversation_id for address in by_surface.get("slack", [])
+    }
+    assert {"D-TRIGGER-DEFAULT", "C-TRIGGER-OVERRIDE"} <= slack_destinations, (
+        "Slack's existing DM and shared-channel caller proofs must remain "
+        "independently citable"
     )
 
 

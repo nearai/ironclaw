@@ -72,6 +72,21 @@ class CargoEvidence:
 
 
 @dataclass(frozen=True)
+class DeliveryAddressEvidence:
+    """One provider address asserted at the cited caller/integration seam.
+
+    Production models channel destinations as an opaque conversation id plus
+    an optional thread anchor. Keep that shape here instead of inventing
+    vendor-specific channel/DM/thread enums.
+    """
+
+    conversation_id: str
+    thread_anchor: str | None
+    exact_count: int
+    assertion: str
+
+
+@dataclass(frozen=True)
 class JourneyCaseBase:
     """Shared metadata for one declarative whole-path proof."""
 
@@ -96,6 +111,8 @@ class ProviderJourneyCase(JourneyCaseBase):
 @dataclass(frozen=True)
 class ProductJourneyCase(JourneyCaseBase):
     """A trace-less product journey proved by its owning executable test."""
+
+    delivery_addresses: tuple[DeliveryAddressEvidence, ...] = ()
 
 
 JourneyCase: TypeAlias = ProviderJourneyCase | ProductJourneyCase

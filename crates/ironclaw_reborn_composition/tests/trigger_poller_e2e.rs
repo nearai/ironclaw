@@ -1168,18 +1168,8 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         2,
         "one provider-side message per scheduled trigger: {provider_messages:?}"
     );
-    assert_slack_message(
-        &provider_messages,
-        QA_9B_RESULT,
-        SLACK_DEFAULT_DM,
-        "QA-9B default delivery",
-    );
-    assert_slack_message(
-        &provider_messages,
-        QA_9D_RESULT,
-        SLACK_PER_TRIGGER_CHANNEL,
-        "QA-9D per-trigger override",
-    );
+    assert_slack_dm_delivery_evidence(&provider_messages);
+    assert_slack_channel_delivery_evidence(&provider_messages);
 
     let wire_messages = slack_provider.wire_messages();
     assert_eq!(
@@ -1261,6 +1251,24 @@ fn assert_slack_message(
         matching.count(),
         1,
         "{scenario} must create exactly one message in {expected_channel}: {messages:?}"
+    );
+}
+
+fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
+    assert_slack_message(
+        messages,
+        QA_9B_RESULT,
+        SLACK_DEFAULT_DM,
+        "QA-9B default DM delivery",
+    );
+}
+
+fn assert_slack_channel_delivery_evidence(messages: &[Value]) {
+    assert_slack_message(
+        messages,
+        QA_9D_RESULT,
+        SLACK_PER_TRIGGER_CHANNEL,
+        "QA-9D per-trigger channel delivery",
     );
 }
 
