@@ -10,6 +10,8 @@ scenarios exercise the real Reborn binary without duplicating process plumbing.
 import asyncio
 import json
 import os
+import re
+import shutil
 import signal
 import socket
 import uuid
@@ -17,6 +19,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
@@ -26,12 +29,159 @@ YOLO_PROFILE = "local-dev-yolo"
 DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
+DEFAULT_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
 
 # Shared tenant secret for the test-tools/market-data fixture (test-tools/README.md).
 # `IRONCLAW_REBORN_DEV_SECRET__<handle>` is read once at `serve` boot, so it must
 # be present in the process env before start — see
 # reborn_v2_private_installs_yolo_server below.
 MARKET_DATA_DEV_SECRET = "e2e-market-data-shared-key"
+
+
+def _directory_size(path: Path) -> int:
+    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+
+
+def _enforce_artifact_budget(
+    browser_artifact_root: Path,
+    max_bytes: int,
+    current_artifact_dir: Path,
+) -> None:
+    """Keep browser artifacts within a deterministic per-shard disk budget."""
+    bundles = [path for path in browser_artifact_root.iterdir() if path.is_dir()]
+    bundle_sizes = {path: _directory_size(path) for path in bundles}
+    total_bytes = sum(bundle_sizes.values())
+    if total_bytes <= max_bytes:
+        return
+
+    oldest_first = sorted(
+        (path for path in bundles if path != current_artifact_dir),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+    for path in oldest_first:
+        if total_bytes <= max_bytes:
+            break
+        total_bytes -= bundle_sizes[path]
+        shutil.rmtree(path)
+
+    if total_bytes <= max_bytes or not current_artifact_dir.exists():
+        return
+
+    largest_first = sorted(
+        (path for path in current_artifact_dir.rglob("*") if path.is_file()),
+        key=lambda path: path.stat().st_size,
+        reverse=True,
+    )
+    for path in largest_first:
+        if total_bytes <= max_bytes:
+            break
+        file_size = path.stat().st_size
+        path.unlink()
+        total_bytes -= file_size
+
+
+def _artifact_max_bytes() -> int:
+    raw_value = os.environ.get("IRONCLAW_E2E_ARTIFACT_MAX_BYTES", "").strip()
+    if not raw_value:
+        return DEFAULT_ARTIFACT_MAX_BYTES
+    try:
+        max_bytes = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            "IRONCLAW_E2E_ARTIFACT_MAX_BYTES must be a positive integer"
+        ) from error
+    if max_bytes <= 0:
+        raise ValueError(
+            "IRONCLAW_E2E_ARTIFACT_MAX_BYTES must be a positive integer"
+        )
+    return max_bytes
+
+
+class _ArtifactContext:
+    """Browser context that persists diagnostics when CI requests them."""
+
+    def __init__(
+        self,
+        context,
+        artifact_dir: Path,
+        browser_artifact_root: Path,
+        artifact_max_bytes: int,
+    ):
+        self._context = context
+        self._artifact_dir = artifact_dir
+        self._browser_artifact_root = browser_artifact_root
+        self._artifact_max_bytes = artifact_max_bytes
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._context, name)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        for index, page in enumerate(self._context.pages, start=1):
+            if page.is_closed():
+                continue
+            try:
+                await page.screenshot(
+                    path=str(self._artifact_dir / f"page-{index}.png"),
+                    full_page=True,
+                )
+            except PlaywrightError:
+                pass
+
+        try:
+            await self._context.tracing.stop(path=str(self._artifact_dir / "trace.zip"))
+        except PlaywrightError:
+            pass
+        await self._context.close()
+        _enforce_artifact_budget(
+            self._browser_artifact_root,
+            self._artifact_max_bytes,
+            self._artifact_dir,
+        )
+
+
+class _ArtifactBrowser:
+    """Browser proxy that records each context under a unique artifact path."""
+
+    def __init__(
+        self,
+        browser,
+        artifact_root: Path,
+        artifact_max_bytes: int,
+    ):
+        self._browser = browser
+        self._browser_artifact_root = artifact_root / "browser"
+        self._artifact_max_bytes = artifact_max_bytes
+
+    def __getattr__(self, name):
+        return getattr(self._browser, name)
+
+    async def new_context(self, *args, **kwargs):
+        node_id = os.environ.get("PYTEST_CURRENT_TEST", "browser-context").split(
+            " (", 1
+        )[0]
+        readable_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", node_id).strip("-")[-160:]
+        context_name = f"{readable_name}-{uuid.uuid4().hex[:8]}"
+        artifact_dir = self._browser_artifact_root / context_name
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        kwargs.setdefault("record_video_dir", str(artifact_dir / "videos"))
+        kwargs.setdefault("record_video_size", {"width": 960, "height": 540})
+        context = await self._browser.new_context(*args, **kwargs)
+        await context.tracing.start(
+            screenshots=True,
+            snapshots=False,
+            sources=False,
+        )
+        return _ArtifactContext(
+            context,
+            artifact_dir,
+            self._browser_artifact_root,
+            self._artifact_max_bytes,
+        )
 
 
 def find_free_port() -> int:
@@ -116,8 +266,11 @@ async def start_reborn_webui_v2_server(
     extra_env: dict[str, str] | None = None,
 ) -> tuple[object, str]:
     """Start ``ironclaw serve`` and return ``(process, base_url)``."""
+    binary_path = str(Path(ironclaw_reborn_binary).resolve())
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)
+    workspace_dir = home_dir / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     write_config_toml(
         reborn_home / "config.toml",
         mock_llm_server,
@@ -132,8 +285,14 @@ async def start_reborn_webui_v2_server(
     for attempt in range(1, 4):
         port = find_free_port()
         last_port = port
-        stdout_path = home_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
-        stderr_path = home_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
+        artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
+        if artifact_root:
+            log_dir = Path(artifact_root).resolve() / "server-logs" / home_dir.name
+            log_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            log_dir = home_dir
+        stdout_path = log_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
+        stderr_path = log_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
 
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -153,7 +312,7 @@ async def start_reborn_webui_v2_server(
         forward_coverage_env(env)
 
         args = [
-            ironclaw_reborn_binary,
+            binary_path,
             "serve",
             "--host",
             "127.0.0.1",
@@ -170,6 +329,7 @@ async def start_reborn_webui_v2_server(
                 stdout=out,
                 stderr=err,
                 env=env,
+                cwd=workspace_dir,
             )
         base_url = f"http://127.0.0.1:{port}"
 
@@ -363,10 +523,13 @@ async def reborn_v2_vision_server(ironclaw_reborn_binary, mock_llm_server, tmp_p
 @pytest.fixture(scope="module")
 async def reborn_v2_browser():
     """Chromium instance for Reborn v2 tests, independent of the legacy gateway."""
-    from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import async_playwright
 
     headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
+    artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
+    artifact_max_bytes = (
+        _artifact_max_bytes() if artifact_root else DEFAULT_ARTIFACT_MAX_BYTES
+    )
     async with async_playwright() as p:
         browser = None
         for attempt in range(3):
@@ -377,7 +540,14 @@ async def reborn_v2_browser():
                 if attempt == 2:
                     raise
                 await asyncio.sleep(1)
-        yield browser
+        if artifact_root:
+            yield _ArtifactBrowser(
+                browser,
+                Path(artifact_root).resolve(),
+                artifact_max_bytes,
+            )
+        else:
+            yield browser
         await browser.close()
 
 
