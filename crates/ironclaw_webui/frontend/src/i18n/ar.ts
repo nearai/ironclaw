@@ -527,7 +527,7 @@ registerPack("ar", {
   "tools.description.builtin.trace_commons.credits": "الإبلاغ عن حالة أرصدة Trace Commons للمستخدم الحالي والأرصدة وعدد الإرسالات والتفسيرات الحديثة.",
   "tools.description.builtin.trace_commons.profile_token": "إصدار قيمة قصيرة العمر لإدارة ملف Trace Commons الشخصي للإعداد اليدوي أو عبر المتصفح.",
   "tools.description.builtin.trace_commons.profile_set": "إنشاء أو تحديث ملف مجتمع Trace Commons العام للمستخدم الحالي بعد موافقة صريحة.",
-  "tools.description.builtin.profile_set": "تسجيل حقيقة محلية خاصة عن سياق وكيل المستخدم: المنطقة الزمنية أو اللغة أو الموقع.",
+  "tools.description.ironclaw.memory.profile_set": "تسجيل حقيقة محلية خاصة عن سياق وكيل المستخدم: المنطقة الزمنية أو اللغة أو الموقع.",
   "tools.description.builtin.memory_search": "البحث في مستندات ذاكرة Reborn الدائمة ضمن النطاق الحالي",
   "tools.description.builtin.memory_write": "كتابة مستندات ذاكرة Reborn الدائمة أو إلحاقها أو ترقيعها ضمن النطاق الحالي",
   "tools.description.builtin.memory_read": "قراءة مستند ذاكرة Reborn دائم ضمن النطاق الحالي",

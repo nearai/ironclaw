@@ -1,20 +1,30 @@
 """Completeness gate for typed whole-path journey evidence."""
 
 import ast
+import importlib.util
 import json
+import os
 import re
+import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
+
 from journey_cases import (
+    _HISTORICAL_MUTATING_PROVIDER_TOOLS,
+    _MUTATING_PROVIDER_TOOLS,
+    _TOOL_WORLD_PREFIXES,
     ALL_JOURNEY_CASES,
+    JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
-    PROVIDER_JOURNEY_RUN_IDS,
-    PROVIDER_JOURNEY_RUNS,
+    journey_order_is_reversed,
+    provider_journey_runs,
     required_delivery_targets,
     required_ingresses,
+    shared_world_provider_journey_runs,
     uncovered_surfaces,
+    unreset_mutating_tools,
 )
 from journey_types import (
     CargoEvidence,
@@ -311,6 +321,19 @@ def test_provider_journey_registry_matches_every_harvested_emulate_journey():
     assert registered == _manifest_provider_journeys()
 
 
+def _expected_forward_ids() -> list[str]:
+    expected_repeat_cases = {
+        "qa_5d_slack_strategy_doc_answer",
+        "qa_10f_slack_mention_encoding",
+    }
+    expected_ids = []
+    for case in PROVIDER_JOURNEY_CASES:
+        expected_ids.append(case.case_id)
+        if case.case_id in expected_repeat_cases:
+            expected_ids.append(f"{case.case_id}-isolated-repeat")
+    return expected_ids
+
+
 def test_provider_journey_runs_preserve_isolated_repeat_cases():
     """The two isolation probes remain doubled while ordinary cases run once."""
     expected_repeat_cases = {
@@ -322,15 +345,138 @@ def test_provider_journey_runs_preserve_isolated_repeat_cases():
     }
     assert actual_repeat_cases == expected_repeat_cases
 
-    expected_ids = []
-    for case in PROVIDER_JOURNEY_CASES:
-        expected_ids.append(case.case_id)
-        if case.case_id in expected_repeat_cases:
-            expected_ids.append(f"{case.case_id}-isolated-repeat")
-    assert list(PROVIDER_JOURNEY_RUN_IDS) == expected_ids
-    assert [case.case_id for case in PROVIDER_JOURNEY_RUNS] == [
+    expected_ids = _expected_forward_ids()
+    forward_runs, forward_ids = provider_journey_runs(reverse=False)
+    assert list(forward_ids) == expected_ids
+    assert [case.case_id for case in forward_runs] == [
         case_id.removesuffix("-isolated-repeat") for case_id in expected_ids
     ]
+
+
+def test_reversed_journey_order_runs_every_case_back_to_front():
+    """The reversed lane must actually reverse, and drop nothing.
+
+    A reversed lane that quietly ran forward would pass exactly like the
+    ordinary lane and retire the proof it exists to provide — the same
+    silent-no-op shape as a guard that never fires. Asserting the order flipped
+    AND that the multiset is unchanged catches both halves: a lane that does
+    not reverse, and a "reversal" that loses or duplicates a case.
+    """
+    forward_runs, forward_ids = provider_journey_runs(reverse=False)
+    reversed_runs, reversed_ids = provider_journey_runs(reverse=True)
+
+    assert list(reversed_ids) == list(reversed(forward_ids))
+    assert sorted(reversed_ids) == sorted(forward_ids)
+    assert [case.case_id for case in reversed_runs] == [
+        case.case_id for case in reversed(forward_runs)
+    ]
+    # Guards the degenerate case: with fewer than two runs, "reversed" and
+    # "forward" are the same list and every assertion above passes vacuously.
+    assert len(forward_ids) > 1, forward_ids
+    assert list(reversed_ids) != list(forward_ids)
+
+
+def test_shared_world_replay_reverses_each_mutating_journey_once():
+    """The shared lane excludes read-only cases and self-colliding repeats."""
+    forward_runs, forward_ids = shared_world_provider_journey_runs(reverse=False)
+    reversed_runs, reversed_ids = shared_world_provider_journey_runs(reverse=True)
+
+    assert forward_runs
+    assert all(case.mutable_provider_worlds for case in forward_runs)
+    assert len(forward_ids) == len(set(forward_ids))
+    assert list(reversed_ids) == list(reversed(forward_ids))
+    assert [case.case_id for case in reversed_runs] == [
+        case.case_id for case in reversed(forward_runs)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("reverse", True),
+        ("REVERSE", True),
+        ("  reverse  ", True),
+        ("forward", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_journey_order_env_selects_the_reversed_lane(monkeypatch, value, expected):
+    """The lane switch is the part CI sets, so parse it deliberately.
+
+    A typo or a stray space silently selecting the forward lane is the failure
+    that makes a green reversed run meaningless.
+    """
+    if value is None:
+        monkeypatch.delenv(JOURNEY_ORDER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(JOURNEY_ORDER_ENV, value)
+    assert journey_order_is_reversed() is expected
+
+
+def test_alone_lane_lists_every_mutating_journey():
+    """The alone-lane loop is only as good as the list it iterates.
+
+    An empty or drifted list would make the nightly step iterate fewer times,
+    exit 0, and retire the proof with nothing failing — so pin the list
+    against the case inventory rather than trusting the script's own output.
+    """
+    script = ROOT / "scripts/ci/list_mutating_journeys.py"
+    assert script.is_file(), script
+    spec = importlib.util.spec_from_file_location("list_mutating_journeys", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    expected = [
+        case.case_id
+        for case in PROVIDER_JOURNEY_CASES
+        if case.mutable_provider_worlds
+    ]
+    assert expected, "no mutating journeys: the alone lane would test nothing"
+    assert module.mutating_journey_ids() == expected
+
+
+@pytest.mark.parametrize(
+    ("stub_body", "expected_returncode"),
+    [
+        ("exit 23\n", 23),
+        ("exit 0\n", 1),
+    ],
+)
+def test_alone_lane_rejects_failed_or_empty_inventory(
+    tmp_path,
+    stub_body,
+    expected_returncode,
+):
+    """The workflow must fail closed before replaying an invalid inventory."""
+    workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(encoding="utf-8")
+    step = re.search(
+        r"      - name: Replay each mutating journey alone\n"
+        r"(?:        .*\n)*?"
+        r"        run: \|\n"
+        r"(?P<script>(?:          .*\n)+)",
+        workflow,
+    )
+    assert step, "missing isolated journey replay workflow step"
+    script = "\n".join(
+        line.removeprefix("          ")
+        for line in step.group("script").splitlines()
+    )
+
+    python_stub = tmp_path / "python"
+    python_stub.write_text(
+        f"#!/usr/bin/env bash\n{stub_body}",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode
 
 
 def test_every_journey_has_complete_typed_executable_evidence():
@@ -639,3 +785,79 @@ def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
             source_path,
             root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Provider-world baseline gate (#6524 workstream 3)
+#
+# A journey that writes to a provider world must declare that world, because
+# the declaration is what triggers the reset afterwards. Without it, whatever
+# the journey created survives into the next test and the leak guards this
+# workstream added never run.
+#
+# Which tools write is not a judgement call: production says so, as the
+# `external_write` effect on each manifest tool. The harness used to restate
+# that as a hand-kept list of five names while production declared seventy.
+# Nothing detected the drift, because a journey using an undeclared write
+# simply resets nothing and passes.
+# ---------------------------------------------------------------------------
+
+
+def test_every_production_provider_write_maps_to_a_resettable_world():
+    """No production write can run without a world that gets reset."""
+    unreset = unreset_mutating_tools()
+    assert not unreset, (
+        "these production tools declare `external_write` but belong to no "
+        f"provider world the harness can reset: {sorted(unreset)}. A journey "
+        "using one would mutate a world that nothing restores, and the next "
+        "test would inherit the result. Add the world to _TOOL_WORLD_PREFIXES "
+        "with a reset path, or give the tool a world that has one."
+    )
+
+
+def test_provider_write_derivation_still_finds_the_tools_it_replaced():
+    """The derivation cannot quietly collapse to nothing.
+
+    This is the gate on the gate. Deriving the set from manifests removes the
+    drift risk but adds a worse one: a manifest key rename would empty the
+    mapping, every journey would declare no mutable world, every reset would
+    be skipped, and the whole suite would still pass. The five names below are
+    the ones the hand-kept list carried, so they are a floor the derivation
+    must always clear.
+    """
+    missing = sorted(_HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS))
+    assert not missing, (
+        f"the derivation stopped recognising known provider writes: {missing}. "
+        "It reads the `external_write` effect from "
+        "crates/ironclaw_first_party_extensions/assets/*/manifest.toml -- check "
+        "whether that key or the tool ids were renamed. Until this is fixed no "
+        "journey resets its provider world."
+    )
+    # A count alone is a weak check: discovery could break for one provider
+    # and still clear any global floor on the strength of the others. Assert
+    # per world instead, so a single provider's manifests going unread fails
+    # here and names that provider.
+    derived_by_world: dict[str, list[str]] = {}
+    for tool_name, world in _MUTATING_PROVIDER_TOOLS.items():
+        derived_by_world.setdefault(str(world), []).append(tool_name)
+    resettable_worlds = {str(world) for world in _TOOL_WORLD_PREFIXES.values()}
+    empty_worlds = sorted(resettable_worlds - set(derived_by_world))
+    assert not empty_worlds, (
+        f"no provider writes were derived for {empty_worlds}, but every world "
+        "the harness can reset ships write tools. Journeys touching those "
+        "providers would declare no mutable world and skip their reset. Check "
+        "whether those manifests moved or their tool ids were renamed."
+    )
+
+    # Production currently declares 70 provider writes. Hold the floor close
+    # to that rather than at a token value: a partial discovery failure that
+    # still finds most tools is exactly what a low floor would wave through.
+    # Deliberately removing write tools should require moving this number, and
+    # noticing that you are.
+    assert len(_MUTATING_PROVIDER_TOOLS) >= 60, (
+        f"only {len(_MUTATING_PROVIDER_TOOLS)} provider writes were derived from "
+        "the shipped manifests; production declares about 70. Either the "
+        "derivation is reading the wrong manifests or key, or write tools were "
+        "removed -- if the removal is intentional, lower this floor in the same "
+        "change so the drop is reviewed rather than absorbed."
+    )

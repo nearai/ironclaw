@@ -62,29 +62,45 @@ icon: rocket
 首次启动智能体：
 
 ```bash
-ironclaw
+ironclaw onboard
+ironclaw serve
 ```
 
-<Accordion title="⚠️ 错误：另一个 IronClaw 实例已在运行">
-
-如果出现错误 `Error: Another IronClaw instance is already running (PID 38). If this is incorrect, remove the stale PID file: /home/agent/.ironclaw/ironclaw.pid`，只需运行以下命令删除过期的 PID 文件，然后重新启动智能体：
+`onboard` 只需执行一次，它会创建 IronClaw 主目录、写入初始配置，并要求您选择推理提供商与模型。完成后会打印一个包含令牌的登录链接：
 
 ```
-# 删除过期的 PID 文件
-rm /home/agent/.ironclaw/ironclaw.pid
-
-# 然后重新启动智能体
-ironclaw
+login_link: http://127.0.0.1:3000/login?token=<your-token>
 ```
+
+`serve` 默认监听 `127.0.0.1:3000`。在浏览器中打开上述登录链接，即可进入聊天界面。
+
+<Accordion title="⚠️ 端口已被占用">
+
+若 `3000` 端口已被占用，可指定其他端口：
+
+```bash
+ironclaw serve --port 3100
+```
+
+使用 `--port 0` 可让系统自动分配空闲端口。
 
 </Accordion>
 
-由于这是首次启动智能体，它会要求您配置推理提供商以及要使用的 LLM。
+<Accordion title="找不到登录链接？">
 
-![setup](/images/quickstart/setup-wizard.png)
+查看配置路径并读取令牌：
+
+```bash
+ironclaw config path
+cat ~/.ironclaw/reborn/webui-token
+```
+
+然后访问 `http://127.0.0.1:3000/login?token=<token>`。
+
+</Accordion>
 
 <Note>
-我们推荐使用 [NEAR AI](https://cloud.near.ai/) 作为推理提供商，以获得更高的隐私与安全性，并使用 `Qwen3-30B` 模型来兼顾效果与成本。
+我们推荐使用 [NEAR AI](https://cloud.near.ai/) 作为推理提供商，以获得更高的隐私与安全性。完整的提供商列表参见[推理提供商](/capabilities/llm-providers)（暂仅提供英文版）。
 </Note>
 
 <Accordion title="⚠️ 错误：Webhook 服务器启动失败">

@@ -48,10 +48,19 @@ fn context<'a>(config: &'a [(String, String)]) -> ChannelContext<'a> {
     }
 }
 
+fn bot_username_config() -> (String, String) {
+    (
+        TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+        "ironclaw_test_bot".to_string(),
+    )
+}
+
 fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+    let config = [bot_username_config()];
     TelegramChannelAdapter::default().inbound(VerifiedInbound {
         extension_id: "telegram",
         installation_id: "install_alpha",
+        config: &config,
         body,
         headers: &[],
     })
@@ -60,10 +69,13 @@ fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
 #[tokio::test]
 async fn activate_names_the_webhook_secret_as_a_declared_body_credential() {
     let egress = RecordingEgress::ok();
-    let config = vec![(
-        TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-        "https://host.example/webhooks/extensions/telegram/updates".to_string(),
-    )];
+    let config = vec![
+        bot_username_config(),
+        (
+            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
+            "https://host.example/webhooks/extensions/telegram/updates".to_string(),
+        ),
+    ];
     TelegramChannelAdapter::default()
         .activate(&context(&config), &egress)
         .await
@@ -107,17 +119,21 @@ async fn activate_names_the_webhook_secret_as_a_declared_body_credential() {
 #[tokio::test]
 async fn activate_fails_without_a_webhook_url_and_on_vendor_error() {
     let egress = RecordingEgress::ok();
+    let bot_config = [bot_username_config()];
     let error = TelegramChannelAdapter::default()
-        .activate(&context(&[]), &egress)
+        .activate(&context(&bot_config), &egress)
         .await
         .expect_err("missing webhook url must fail activation");
     assert!(matches!(error, ChannelError::VendorWiring { .. }));
 
     let failing = RecordingEgress::failing();
-    let config = vec![(
-        TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-        "https://host.example/hooks".to_string(),
-    )];
+    let config = vec![
+        bot_username_config(),
+        (
+            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
+            "https://host.example/hooks".to_string(),
+        ),
+    ];
     let error = TelegramChannelAdapter::default()
         .activate(&context(&config), &failing)
         .await

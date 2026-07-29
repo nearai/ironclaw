@@ -357,6 +357,21 @@ impl CompletionRequest {
         self
     }
 
+    /// Select an already-resolved entry in an ordered provider fallback chain.
+    pub fn set_fallback_index(&mut self, fallback_index: u32) {
+        self.metadata.insert(
+            FALLBACK_INDEX_METADATA_KEY.to_string(),
+            fallback_index.to_string(),
+        );
+    }
+
+    /// Return the host-selected ordered fallback index, when present.
+    pub fn fallback_index(&self) -> Option<u32> {
+        self.metadata
+            .get(FALLBACK_INDEX_METADATA_KEY)
+            .and_then(|value| value.parse().ok())
+    }
+
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
@@ -398,6 +413,76 @@ pub enum FinishReason {
     ContentFilter,
     #[default]
     Unknown,
+}
+
+/// Translate one provider finish-reason token into IronClaw's vocabulary.
+///
+/// One table serves every provider and every adapter: the tokens do not
+/// collide across providers, and matching is case-insensitive so Gemini's
+/// `SCREAMING_SNAKE_CASE` lands on the same rows as everyone else's
+/// `snake_case`. An empty token means "the provider said nothing" (`None`);
+/// a non-empty token we do not recognize is [`FinishReason::Unknown`] — never
+/// [`FinishReason::Stop`], because guessing "success" is the bug this fixes.
+///
+/// This lives here, beside [`resolve_finish_reason`], rather than in any one
+/// adapter: a second table for the same vocabulary is exactly how a newly
+/// added provider token ends up classified two different ways.
+pub(crate) fn map_provider_finish_token(token: &str) -> Option<FinishReason> {
+    let normalized = token.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(match normalized.as_str() {
+        // Clean stop. `stop` = OpenAI-shaped + Ollama + Gemini `STOP`.
+        "stop" | "end_turn" | "stop_sequence" => FinishReason::Stop,
+        // Truncated by a token budget.
+        "length" | "max_tokens" | "max_output_tokens" | "model_length" => FinishReason::Length,
+        // The model asked for tools.
+        "tool_calls" | "function_call" | "tool_use" => FinishReason::ToolUse,
+        // Blocked by the provider's content policy. `model_armor` is Gemini's
+        // token for a response blocked by Model Armor, Google's separate
+        // policy screen — a content block like any other.
+        "content_filter" | "refusal" | "safety" | "recitation" | "blocklist"
+        | "prohibited_content" | "spii" | "image_safety" | "language" | "model_armor" => {
+            FinishReason::ContentFilter
+        }
+        // Recognized, but not a clean stop and not classifiable:
+        // Gemini `OTHER` / `FINISH_REASON_UNSPECIFIED` / `MALFORMED_FUNCTION_CALL`,
+        // Anthropic `pause_turn`, Ollama `load`/`unload`, and anything new.
+        _ => FinishReason::Unknown,
+    })
+}
+
+/// Combine what the provider reported with what the response body looks like.
+///
+/// The provider's own word wins. `Length` and `ContentFilter` win even when
+/// tool calls were parsed — truncated tool arguments must not be executed, and
+/// `ironclaw_runner`'s model gateway only forwards provider tool calls when the
+/// finish reason is `ToolUse` or `Stop`, so reporting the truth here is what
+/// turns a silently-truncated run into a surfaced failure.
+///
+/// Shape inference survives only in two places: as the documented fallback
+/// when the provider stated nothing (`None`), and to refine an explicit clean
+/// stop into `ToolUse`. The latter is not a guess — Gemini reports
+/// `finishReason: "STOP"` on responses whose parts are `functionCall`s, and
+/// several OpenAI-compatible endpoints report `stop` alongside `tool_calls`.
+///
+/// `Unknown` is deliberately **not** refined. It is what an explicit provider
+/// failure maps to — Gemini's `MALFORMED_FUNCTION_CALL` and
+/// `UNEXPECTED_TOOL_CALL` say the model emitted a *broken* call, and those
+/// responses still carry function-call-shaped parts. Promoting them to
+/// `ToolUse` would hand the gateway a call the provider itself rejected and
+/// let it execute. Failing closed here costs a retry; refining costs a
+/// dispatch that should never have happened.
+pub(crate) fn resolve_finish_reason(
+    provider: Option<FinishReason>,
+    has_tool_calls: bool,
+) -> FinishReason {
+    match provider {
+        Some(FinishReason::Stop) | None if has_tool_calls => FinishReason::ToolUse,
+        Some(reported) => reported,
+        None => FinishReason::Stop,
+    }
 }
 
 /// Definition of a tool for the LLM.
@@ -570,6 +655,13 @@ impl ToolCompletionRequest {
         let model = self.model.take();
         normalized_model_override(model.as_deref()).map(str::to_string)
     }
+
+    /// Return the host-selected ordered fallback index, when present.
+    pub fn fallback_index(&self) -> Option<u32> {
+        self.metadata
+            .get(FALLBACK_INDEX_METADATA_KEY)
+            .and_then(|value| value.parse().ok())
+    }
 }
 
 /// Normalize a requested model override.
@@ -616,9 +708,29 @@ pub struct ModelMetadata {
     pub context_length: Option<u32>,
 }
 
+/// Metadata key used by host-managed callers to select one route from an
+/// ordered provider fallback chain.
+pub(crate) const FALLBACK_INDEX_METADATA_KEY: &str = "ironclaw_fallback_index";
+
+/// Deterministic selection evidence for an ordered provider fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFallbackRoute {
+    pub fallback_index: u32,
+    pub model: String,
+}
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Stable provider identity used in typed errors and routing evidence.
+    ///
+    /// Production adapters and decorators override this; the default keeps
+    /// external test doubles source-compatible without pretending a model slug
+    /// is a provider identity.
+    fn provider_id(&self) -> String {
+        "unknown".to_string()
+    }
+
     /// Get the model name.
     fn model_name(&self) -> &str;
 
@@ -679,6 +791,30 @@ pub trait LlmProvider: Send + Sync {
         normalized_model_override(requested_model)
             .map(std::borrow::ToOwned::to_owned)
             .unwrap_or_else(|| self.active_model_name())
+    }
+
+    /// Resolve an ordered fallback index without making a model call.
+    ///
+    /// Leaf providers expose only index zero. Ordered provider decorators
+    /// override this method and wrappers delegate it so host routing can fail
+    /// deterministically before dispatch when a requested fallback is absent.
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        if fallback_index == 0 {
+            return Ok(ModelFallbackRoute {
+                fallback_index,
+                model: self.effective_model_name(requested_model),
+            });
+        }
+        Err(LlmError::ModelNotAvailable {
+            provider: self.provider_id(),
+            model: normalized_model_override(requested_model)
+                .map(str::to_string)
+                .unwrap_or_else(|| self.active_model_name()),
+        })
     }
 
     /// Get the currently active model name.
@@ -787,6 +923,19 @@ mod model_override_tests {
             provider.effective_model_name(Some("  DEFAULT  ")),
             "stub-model"
         );
+    }
+
+    #[test]
+    fn default_missing_fallback_does_not_mislabel_the_model_as_provider() {
+        let error = StubProvider
+            .fallback_route(1, Some("requested-model"))
+            .expect_err("leaf providers expose only fallback index zero");
+
+        assert!(matches!(
+            error,
+            LlmError::ModelNotAvailable { provider, model }
+                if provider == "unknown" && model == "requested-model"
+        ));
     }
 
     #[test]
@@ -1025,6 +1174,60 @@ mod tests {
                  but duplicate ID '{id}' found for seeds ({a}, {b})"
             );
         }
+    }
+
+    #[test]
+    fn explicit_unknown_is_never_refined_into_tool_use() {
+        // Gemini reports MALFORMED_FUNCTION_CALL / UNEXPECTED_TOOL_CALL as an
+        // explicit failure, and such a response routinely still carries
+        // function-call-shaped content. Refining it to `ToolUse` would let the
+        // model gateway dispatch a call the provider itself rejected.
+        for token in ["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "OTHER"] {
+            let provider = map_provider_finish_token(token);
+            assert_eq!(
+                provider,
+                Some(FinishReason::Unknown),
+                "{token} must map to Unknown"
+            );
+            assert_eq!(
+                resolve_finish_reason(provider, true),
+                FinishReason::Unknown,
+                "{token} with tool-call-shaped content must stay Unknown"
+            );
+            assert_eq!(
+                resolve_finish_reason(provider, false),
+                FinishReason::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn shape_inference_survives_for_absent_and_clean_stop_reasons() {
+        // Absent reason: the documented fallback.
+        assert_eq!(resolve_finish_reason(None, true), FinishReason::ToolUse);
+        assert_eq!(resolve_finish_reason(None, false), FinishReason::Stop);
+        // Gemini reports `STOP` on responses whose parts are `functionCall`s,
+        // so a clean stop alongside real tool calls is still refined.
+        assert_eq!(
+            resolve_finish_reason(Some(FinishReason::Stop), true),
+            FinishReason::ToolUse
+        );
+        assert_eq!(
+            resolve_finish_reason(Some(FinishReason::Stop), false),
+            FinishReason::Stop
+        );
+    }
+
+    #[test]
+    fn explicit_failure_reasons_win_over_response_shape() {
+        for reason in [FinishReason::Length, FinishReason::ContentFilter] {
+            assert_eq!(resolve_finish_reason(Some(reason), true), reason);
+            assert_eq!(resolve_finish_reason(Some(reason), false), reason);
+        }
+        assert_eq!(
+            resolve_finish_reason(Some(FinishReason::ToolUse), false),
+            FinishReason::ToolUse
+        );
     }
 
     #[test]

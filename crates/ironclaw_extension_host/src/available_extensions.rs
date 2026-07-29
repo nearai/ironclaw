@@ -433,6 +433,7 @@ impl AvailableExtensionCatalog {
                 &host_ports,
                 None,
                 &contracts,
+                Some(package.package.root.clone()),
             )
             .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
@@ -717,6 +718,7 @@ fn bundled_extension_package(
         &host_ports,
         None,
         &contracts,
+        Some(root.clone()),
     )
     .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -1017,9 +1019,15 @@ where
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
-    let record =
-        ExtensionManifestRecord::from_toml(manifest_toml, stamp, host_ports, None, contracts)
-            .map_err(map_binding_error)?;
+    let record = ExtensionManifestRecord::from_toml(
+        manifest_toml,
+        stamp,
+        host_ports,
+        None,
+        contracts,
+        Some(entry.path.clone()),
+    )
+    .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
     let channel_directions = channel_directions_from_manifest_record(&record, entry.name.as_str())?;
     let channel_presentation = channel_presentation_from_manifest_record(&record);
@@ -2055,6 +2063,35 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             !summary.visible_capability_ids.is_empty(),
             "unified slack publishes model-visible tools"
         );
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("slack channel descriptor")
+                .commands,
+            ["model", "status"],
+            "shipping Slack exposes exactly the model and status commands"
+        );
+    }
+
+    #[test]
+    fn bundled_telegram_package_declares_model_and_status_commands() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("telegram channel descriptor")
+                .commands,
+            ["model", "status"],
+            "shipping Telegram exposes exactly the model and status commands"
+        );
     }
 
     #[test]
@@ -2584,6 +2621,7 @@ output_schema_ref = "schemas/write.output.json"
             &capability_provider_contracts(),
         )
         .expect("manifest");
+        let fixture_root = VirtualPath::new("/system/extensions/fixture").unwrap();
         let resolved_manifest = Arc::new(
             ExtensionManifestRecord::from_toml(
                 MANIFEST,
@@ -2591,16 +2629,13 @@ output_schema_ref = "schemas/write.output.json"
                 &HostPortCatalog::empty(),
                 None,
                 &capability_provider_contracts(),
+                Some(fixture_root.clone()),
             )
             .expect("resolved manifest")
             .resolved()
             .clone(),
         );
-        let package = ExtensionPackage::from_manifest(
-            manifest,
-            VirtualPath::new("/system/extensions/fixture").unwrap(),
-        )
-        .expect("package");
+        let package = ExtensionPackage::from_manifest(manifest, fixture_root).expect("package");
         AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .unwrap(),

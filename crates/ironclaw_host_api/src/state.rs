@@ -77,6 +77,76 @@ impl InstallationState {
             Self::Removed => "removed",
         }
     }
+
+    /// Parse a wire form produced by [`Self::as_str`]. The inverse is pinned by
+    /// `installation_state_wire_form_matches_str`.
+    pub fn from_wire(state: &str) -> Option<Self> {
+        match state {
+            "installed" => Some(Self::Installed),
+            "configured" => Some(Self::Configured),
+            "active" => Some(Self::Active),
+            "disabled" => Some(Self::Disabled),
+            "failed" => Some(Self::Failed),
+            "unsupported" => Some(Self::Unsupported),
+            "removed" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
+
+/// The public, user-actionable extension lifecycle state
+/// (`docs/reborn/extension-runtime/overview.md` §6.1).
+///
+/// ```text
+/// not a member                                        -> uninstalled
+/// member + missing tenant setup, personal auth, or
+///          pairing                                    -> setup_needed
+/// member + every requirement ready                    -> active
+/// ```
+///
+/// [`InstallationState`] is the *host's* internal checkpoint vocabulary
+/// (`Installed`, `Configured`, `Disabled`, `Failed`, `Unsupported`, `Removed`)
+/// used for recovery and diagnostics. Product surfaces must never expose those
+/// checkpoints as additional user actions or resting states — there is no
+/// public `installed` / `configured` / `failed` state and no Activate/Disable
+/// action. Internal failures stay redacted diagnostics attached to
+/// `setup_needed`; they never create a fourth product state.
+///
+/// [`Self::from_host_checkpoint`] collapses the checkpoint axis alone. A caller
+/// -scoped surface must additionally fold in that caller's readiness (required
+/// credentials, personal auth, channel pairing/connection) before publishing —
+/// an extension whose host record is `Active` is still `setup_needed` for a
+/// caller who has not connected it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePublicState {
+    Uninstalled,
+    SetupNeeded,
+    Active,
+}
+
+impl LifecyclePublicState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uninstalled => "uninstalled",
+            Self::SetupNeeded => "setup_needed",
+            Self::Active => "active",
+        }
+    }
+
+    /// Collapse a host-owned internal checkpoint onto the product contract.
+    /// This is the checkpoint axis only — see the type docs.
+    pub const fn from_host_checkpoint(state: InstallationState) -> Self {
+        match state {
+            InstallationState::Active => Self::Active,
+            InstallationState::Removed => Self::Uninstalled,
+            InstallationState::Installed
+            | InstallationState::Configured
+            | InstallationState::Disabled
+            | InstallationState::Failed
+            | InstallationState::Unsupported => Self::SetupNeeded,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +169,19 @@ mod tests {
                 serde_json::to_value(state).unwrap(),
                 serde_json::Value::String(expected.to_string())
             );
+            // The doc comment on `from_wire` claims this test pins the
+            // inverse. It did not until now -- only `as_str` and the serde
+            // form were asserted, so `from_wire` could drift from either.
+            assert_eq!(
+                InstallationState::from_wire(expected),
+                Some(state),
+                "from_wire must invert as_str for {expected}"
+            );
         }
+        assert_eq!(
+            InstallationState::from_wire("not_a_state"),
+            None,
+            "an unknown wire value must not resolve to a checkpoint"
+        );
     }
 }

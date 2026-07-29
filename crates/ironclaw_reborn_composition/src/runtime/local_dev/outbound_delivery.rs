@@ -5,9 +5,9 @@ use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, Resolution, ResourceEstimate, ResourceScope,
-    SafeSummary, UserId,
+    FailureKind, GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, Resolution,
+    ResourceEstimate, ResourceScope, SafeSummary, UserId,
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
@@ -16,8 +16,8 @@ use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
-        CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef, CapabilityProgress,
-        CapabilityResumeToken, ConcurrencyHint, LoopRunContext, resolution,
+        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
+        ConcurrencyHint, LoopRunContext, resolution,
     },
 };
 
@@ -239,11 +239,10 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                             .await;
                     }
                     OutboundDeliveryApprovalSettingsDecision::Deny => {
-                        return Ok(resolution::failed(
-                            CapabilityFailureKind::PolicyDenied,
+                        return Ok(super::diagnostic_failure(
+                            FailureKind::PolicyDenied,
                             "outbound delivery target setter is disabled by tool approval settings"
                                 .to_string(),
-                            None,
                         ));
                     }
                 },
@@ -780,29 +779,25 @@ fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostErro
 fn outbound_delivery_outcome(error: ProductSurfaceError) -> Result<Resolution, AgentLoopHostError> {
     match error.code {
         ProductSurfaceErrorCode::InvalidRequest | ProductSurfaceErrorCode::NotFound => {
-            Ok(resolution::failed(
-                CapabilityFailureKind::InvalidInput,
+            Ok(super::diagnostic_failure(
+                FailureKind::InputEncode,
                 "invalid outbound delivery request".to_string(),
-                None,
             ))
         }
         ProductSurfaceErrorCode::Unauthenticated | ProductSurfaceErrorCode::Forbidden => {
             approval_denied("not permitted to change the outbound delivery target")
         }
-        ProductSurfaceErrorCode::Conflict => Ok(resolution::failed(
-            CapabilityFailureKind::OperationFailed,
+        ProductSurfaceErrorCode::Conflict => Ok(super::diagnostic_failure(
+            FailureKind::OperationFailed,
             "outbound delivery target operation conflicted".to_string(),
-            None,
         )),
-        ProductSurfaceErrorCode::RateLimited => Ok(resolution::failed(
-            CapabilityFailureKind::Resource,
+        ProductSurfaceErrorCode::RateLimited => Ok(super::diagnostic_failure(
+            FailureKind::Resource,
             "outbound delivery target operation rate limited".to_string(),
-            None,
         )),
-        ProductSurfaceErrorCode::Unavailable => Ok(resolution::failed(
-            CapabilityFailureKind::Unavailable,
+        ProductSurfaceErrorCode::Unavailable => Ok(super::diagnostic_failure(
+            FailureKind::Unavailable,
             "outbound delivery service temporarily unavailable".to_string(),
-            None,
         )),
         ProductSurfaceErrorCode::Internal => Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
@@ -913,7 +908,7 @@ mod tests {
         let outcome =
             outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::InvalidRequest))
                 .expect("invalid request must be a model-visible failure, not terminal");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
         LoopSafeSummary::new(recoverable_summary(&outcome))
             .expect("safe summary must satisfy the loop validator");
     }
@@ -922,7 +917,7 @@ mod tests {
     fn not_found_is_a_recoverable_tool_failure_not_terminal() {
         let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::NotFound))
             .expect("not found must be a model-visible failure, not terminal");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
     }
 
     #[test]

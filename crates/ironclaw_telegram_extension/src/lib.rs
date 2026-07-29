@@ -18,7 +18,7 @@ mod channel;
 mod preference_targets;
 
 pub use channel::{
-    TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_WEBHOOK_SECRET_HANDLE, TELEGRAM_WEBHOOK_URL_CONFIG,
-    TelegramChannelAdapter,
+    TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_BOT_USERNAME_CONFIG, TELEGRAM_WEBHOOK_SECRET_HANDLE,
+    TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
 };
 pub use preference_targets::TelegramPreferenceTargetCodec;

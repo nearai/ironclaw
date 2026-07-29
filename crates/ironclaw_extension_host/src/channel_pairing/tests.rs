@@ -15,10 +15,11 @@ use ironclaw_conversations::{
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::RebornUserIdentityLookupError;
-use ironclaw_product::ChannelConnectionNoticePolicy;
 use ironclaw_product::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterId, ProductTriggerReason,
+    AuthPromptChallengeKind, BlockedAuthPromptRequest, BlockedAuthPromptSource,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ProductAdapterId,
+    ProductTriggerReason, RebornChannelConnectStrategy,
 };
 use tokio::sync::Notify;
 
@@ -334,6 +335,7 @@ fn fixture_with_prefixes(
         project_id: None,
         extension_id,
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
+        connection_requirement: connection_requirement(),
         deep_link_template: deep_link_template.map(str::to_string),
         inbound_code_prefixes: inbound_code_prefixes
             .iter()
@@ -389,7 +391,6 @@ fn pairing_ingress(service: Arc<ChannelPairingService>) -> Arc<GenericChannelInb
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
@@ -410,7 +411,6 @@ fn pairing_ingress_with_outcomes(
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
@@ -450,6 +450,18 @@ fn install() -> AdapterInstallationId {
 
 fn user(id: &str) -> UserId {
     UserId::new(id).expect("user")
+}
+
+fn connection_requirement() -> ChannelConnectionRequirement {
+    ChannelConnectionRequirement {
+        channel: EXT.to_string(),
+        display_name: "Vendor X".to_string(),
+        strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+        instructions: "Send the generated code to Vendor X.".to_string(),
+        input_placeholder: "Pairing code".to_string(),
+        submit_label: "Connect".to_string(),
+        error_message: "Pairing failed.".to_string(),
+    }
 }
 
 #[tokio::test]
@@ -508,6 +520,82 @@ async fn mint_rotates_to_a_single_live_code_and_resolves_the_deep_link() {
         .expect("status");
     assert!(!status.connected);
     assert_eq!(status.pending.expect("pending issue").code, second.code);
+}
+
+#[tokio::test]
+async fn recipe_auth_prompt_reuses_the_live_pairing_code_and_connection_recipe() {
+    let Fixture { service, .. } = fixture();
+    let registry = Arc::new(ChannelPairingRegistry::default());
+    registry.register(Arc::new(service));
+    let provider =
+        crate::run_delivery_ports::RecipeAuthChallengeProvider::compose(None, Some(registry))
+            .expect("pairing registry composes an auth challenge provider");
+    let source = crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(Some(provider));
+    let owner = user("alice");
+    let scope = ironclaw_turns::TurnScope::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        Some(AgentId::new("agent-a").expect("agent")),
+        None,
+        ironclaw_host_api::ThreadId::new("thread-pairing-prompt").expect("thread"),
+    );
+    let run_id = ironclaw_turns::TurnRunId::new();
+    let requirements = [ironclaw_host_api::RuntimeCredentialAuthRequirement {
+        provider: ironclaw_host_api::VendorId::new(EXT).expect("provider"),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+        requester_extension: ExtensionId::new(EXT).expect("extension"),
+        provider_scopes: Vec::new(),
+    }];
+
+    let first = source
+        .auth_prompt_for_blocked_run(BlockedAuthPromptRequest {
+            fallback_owner_user_id: &owner,
+            scope: &scope,
+            run_id,
+            gate_ref: "gate:pairing-prompt",
+            invocation_id: None,
+            body: "Pair the channel to continue.".to_string(),
+            credential_requirements: &requirements,
+        })
+        .await
+        .expect("first pairing prompt");
+    let second = source
+        .auth_prompt_for_blocked_run(BlockedAuthPromptRequest {
+            fallback_owner_user_id: &owner,
+            scope: &scope,
+            run_id,
+            gate_ref: "gate:pairing-prompt",
+            invocation_id: None,
+            body: "Pair the channel to continue.".to_string(),
+            credential_requirements: &requirements,
+        })
+        .await
+        .expect("re-rendered pairing prompt");
+
+    assert_eq!(first.challenge_kind, Some(AuthPromptChallengeKind::Pairing));
+    let first_connection = first
+        .connection
+        .as_ref()
+        .expect("pairing prompt carries manifest connection context");
+    assert_eq!(first_connection.channel, EXT);
+    assert_eq!(
+        first_connection.strategy.as_deref(),
+        Some("web_generated_code")
+    );
+    let first_pairing = first
+        .pairing
+        .as_ref()
+        .expect("pairing prompt carries a host-issued code");
+    assert_eq!(first_pairing.channel, EXT);
+    assert_eq!(first_pairing.display_name, "Vendor X");
+    assert_eq!(
+        second
+            .pairing
+            .as_ref()
+            .expect("re-rendered prompt carries the pairing issue")
+            .code,
+        first_pairing.code,
+        "prompt rendering must reuse a live code instead of rotating it",
+    );
 }
 
 #[tokio::test]

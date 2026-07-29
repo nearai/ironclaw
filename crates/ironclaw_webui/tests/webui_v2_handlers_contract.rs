@@ -25,8 +25,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint,
-    InstallationState, InvocationId, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
+    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
+    LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode, ProjectId, Resolution, ResultPreviewMeta, ResultProgress,
     ResultRef, RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
@@ -1784,7 +1784,7 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: InstallationState::Installed,
+        phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),
@@ -1800,19 +1800,14 @@ fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
         display_name: id.to_string(),
         runtime: "first_party".to_string(),
         description: format!("{id} extension"),
-        authenticated: active,
-        active,
         tools: Vec::new(),
-        needs_setup: !active,
-        has_auth: false,
         installation_state: if active {
-            InstallationState::Active
+            LifecyclePublicState::Active
         } else {
-            InstallationState::Installed
+            LifecyclePublicState::SetupNeeded
         },
         activation_error: None,
         version: Some("1.0.0".to_string()),
-        onboarding_state: None,
         onboarding: None,
         auth_accounts: Vec::new(),
         surfaces: Vec::new(),

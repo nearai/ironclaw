@@ -37,6 +37,9 @@ pub struct LoopModelRequest {
     pub inline_messages: Vec<LoopInlineMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
+    /// Zero-based index into the host-resolved ordered fallback chain.
+    #[serde(default)]
+    pub fallback_index: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<LoopModelCapabilityView>,
 }

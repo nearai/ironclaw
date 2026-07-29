@@ -57,7 +57,7 @@ use std::time::Duration;
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_llm::testing::provider_chain_over;
+use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
@@ -123,8 +123,10 @@ use super::product_surface::RebornProductSurfaceHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
-    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, FallbackProviderCallProbe, ModelProviderCallProbe, ParkingModelGate,
+    RecoverableModelFailureScript, SCRIPTED_FALLBACK_MODEL_NAME, SCRIPTED_MODEL_NAME,
+    parking_trace_llm, recoverable_failure_trace_llm, scripted_fallback_vendor_pair,
+    scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -140,7 +142,8 @@ mod group_constructors;
 
 /// Optional-runtime-wiring setters (`storage`, `safety_context`,
 /// `with_turn_event_sink`, `with_trace_capture`, `with_tool_disclosure_bridged`,
-/// `budget_accounting`, `communication_context_provider`,
+/// `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
+/// `communication_context_provider`,
 /// `hook_dispatcher_builder_factory`) on
 /// [`RebornIntegrationGroupBuilder`]. A private child module (not `pub mod`
 /// from `mod.rs`), same precedent as `group_constructors` above — it reaches
@@ -277,7 +280,9 @@ impl GroupSharedStorage {
                 scope.user_id = arc.user_id().clone();
                 Some(scope)
             }
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -296,7 +301,9 @@ impl GroupSharedStorage {
                 scope.user_id = owner.clone();
                 Some(scope)
             }
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 }
@@ -314,6 +321,10 @@ pub(crate) enum GroupCapability {
     Recording,
     /// Recording echo whose results deliberately report `NoChange`.
     RecordingNoProgress,
+    /// Recording echo whose port returns a caller-shaped `InvalidInvocation`
+    /// error instead of a resolution, projecting to `FailureKind::InputEncode`
+    /// (#6284 capability-stage contract).
+    RecordingRecoverablePortError,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
     /// `Arc` is cloned per thread.
@@ -334,6 +345,9 @@ impl GroupCapability {
             Self::RecordingNoProgress => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::no_progress())
             }
+            Self::RecordingRecoverablePortError => HarnessCapabilityMode::Recording(
+                RecordingTestCapabilityPort::recoverable_port_error(),
+            ),
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
     }
@@ -348,7 +362,9 @@ impl GroupCapability {
     ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
-            Self::Recording | Self::RecordingNoProgress => None,
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
         }
     }
 
@@ -365,7 +381,7 @@ impl GroupCapability {
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
-            Self::Recording | Self::RecordingNoProgress => {
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 return Err("no host-runtime capability backend for durable reopen".into());
             }
         };
@@ -430,6 +446,7 @@ impl RebornIntegrationGroup {
             turn_event_sink: None,
             trace_capture: false,
             tool_disclosure: None,
+            narrowed_bridged_allow_set: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -439,6 +456,7 @@ impl RebornIntegrationGroup {
             planned_default_iteration_limit: None,
             real_gate_dispatch_services: false,
             channel_connection: None,
+            bound_memory: None,
         }
     }
 
@@ -563,7 +581,9 @@ impl RebornIntegrationGroup {
     pub fn capability_harness(&self) -> Option<&Arc<HostRuntimeCapabilityHarness>> {
         match &self.shared.capability {
             GroupCapability::HostRuntime(arc) => Some(arc),
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -700,6 +720,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
     /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
     tool_disclosure: Option<ToolDisclosureMode>,
+    /// #5647 RED-pin seam: opt-in override of the forced `CapabilityAllowSet::All`
+    /// for Bridged-mode groups. `None` preserves today's behavior; only
+    /// consumed when `tool_disclosure == Some(Bridged)` (`into_group` fails fast otherwise).
+    narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -740,6 +764,17 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
+    /// E-MEMORY: a bound memory provider + the lifecycle set its manifest
+    /// declares. When set, `into_group` derives the three memory consumers
+    /// (prompt-context service, after-turn writer, profile source) through
+    /// the PRODUCTION decision helper
+    /// (`ironclaw_reborn_composition::memory_lifecycle_consumers`), so the
+    /// integration tier drives the same lifecycle gating runtime assembly
+    /// wires. Default `None` (no memory consumers, today's behavior).
+    bound_memory: Option<(
+        Arc<dyn ironclaw_memory::MemoryService>,
+        ironclaw_host_api::MemoryDescriptor,
+    )>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -813,6 +848,19 @@ impl RebornIntegrationGroupBuilder {
         base: GroupBaseData,
         capability: GroupCapability,
     ) -> HarnessResult<RebornIntegrationGroup> {
+        // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
+        // if the override is set without Bridged mode also selected.
+        if self.narrowed_bridged_allow_set.is_some()
+            && self.tool_disclosure != Some(ToolDisclosureMode::Bridged)
+        {
+            return Err(
+                "with_narrowed_capability_allow_set_for_bridged_test() was set but \
+                 tool_disclosure is not Bridged — the override only applies to \
+                 bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
+                    .into(),
+            );
+        }
+
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
@@ -856,18 +904,16 @@ impl RebornIntegrationGroupBuilder {
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
-        // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
-        // — so the disclosure decorator's synthetic bridge ids
-        // (`ironclaw.tool_search` etc., never in any granted set) survive to
-        // the model. The harness default (allowlist of exactly the granted
-        // capability ids) is NARROWER than production there and would strip
-        // the deferred bridge surface down to zero tools. Mirror production
-        // for bridged groups only; every non-bridged group keeps the strict
-        // allowlist.
+        // top-level user turn; mirror that for bridged groups (narrowed
+        // override = the #5647 seam). Bridge ids now survive narrowing via
+        // the filter's host-exempt set, so this is production parity, not a
+        // bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
-                    allow_set: CapabilityAllowSet::All,
+                    allow_set: self
+                        .narrowed_bridged_allow_set
+                        .unwrap_or(CapabilityAllowSet::All),
                 })
             } else {
                 capability_surface_resolver
@@ -997,6 +1043,33 @@ impl RebornIntegrationGroupBuilder {
         // struct value exists before `build_default_planned_runtime` takes it
         // by value.
         let milestone_sink_for_assertions = Arc::clone(&milestone_sink);
+        // E-MEMORY: derive the memory consumers through the production
+        // decision helper so an undeclared lifecycle hook is never wired here
+        // either — the same gate `build_reborn_runtime` applies.
+        let memory_consumers = self.bound_memory.as_ref().map(|(provider, lifecycle)| {
+            ironclaw_reborn_composition::memory_lifecycle_consumers(
+                Some(Arc::clone(provider)),
+                lifecycle,
+            )
+        });
+        // E-PROFILE / E-MEMORY: resolve ONE effective profile source and wire
+        // the SAME `Arc` into the runtime parts and `GroupSharedStorage` (so
+        // `user_profile_source_for_test()` reads what the runtime uses). A
+        // bound provider's declaration is authoritative, mirroring production
+        // (`runtime.rs`): ProfileRead → the provider-backed adapter; bound
+        // WITHOUT ProfileRead → `EmptyUserProfileSource` — never the group's
+        // local-dev filesystem source, which would fabricate profile reads
+        // production skips. No bound provider → the group default (HostRuntime
+        // mode: local-dev memory filesystem so `profile_set` writes read back;
+        // other backends: Empty).
+        let effective_user_profile_source: Arc<dyn HostUserProfileSource> =
+            match memory_consumers.as_ref() {
+                Some(consumers) => consumers.user_profile_source.clone().unwrap_or_else(|| {
+                    Arc::new(ironclaw_loop_host::EmptyUserProfileSource)
+                        as Arc<dyn HostUserProfileSource>
+                }),
+                None => Arc::clone(&user_profile_source),
+            };
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -1061,18 +1134,22 @@ impl RebornIntegrationGroupBuilder {
             skill_context_source: capability_recorder.skill_context_source(),
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
-            // E-PROFILE: HostRuntime mode backs this with the local-dev memory
-            // filesystem so `profile_set` writes read back; other backends fall
-            // back to `EmptyUserProfileSource`. Built as a local (not inline) so
-            // the SAME `Arc` is also stashed on `GroupSharedStorage` for a
-            // profile-round-trip test to read directly.
-            user_profile_source: Arc::clone(&user_profile_source),
-            // E-MEMORY: group tests do not yet replay the production memory
-            // context/after-turn writer lanes; wiring_parity.rs carries the
-            // explicit divergence while focused memory tests cover the runtime
-            // path directly.
-            memory_context_service: None,
-            after_turn_memory_writer: None,
+            // E-PROFILE / E-MEMORY: the ONE effective profile source (also
+            // stashed on `GroupSharedStorage`, so
+            // `user_profile_source_for_test()` reads exactly what the runtime
+            // wires).
+            user_profile_source: Arc::clone(&effective_user_profile_source),
+            // E-MEMORY: derived through the PRODUCTION lifecycle-gating helper
+            // when a bound memory provider is opted in
+            // (`with_bound_memory_provider`); `None` for every other group, so
+            // existing tests are behavior-identical. wiring_parity.rs carries
+            // the explicit divergence for the un-opted default.
+            memory_context_service: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.memory_context_service.clone()),
+            after_turn_memory_writer: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.after_turn_memory_writer.clone()),
             model_policy_guard: None,
             // C-BUDGET: production `build_default_budget_accountant` (Some only
             // for `budget_accounting()` groups; `None` otherwise, so all existing
@@ -1117,7 +1194,7 @@ impl RebornIntegrationGroupBuilder {
                 turn_store,
                 canonical_binding: base.canonical_binding,
                 capability_recorder,
-                user_profile_source,
+                user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
@@ -1209,11 +1286,21 @@ pub(crate) enum ThreadModelMode {
     /// Reports a recoverable provider failure a bounded number of times, then
     /// resumes normal scripted playback.
     Recoverable(RecoverableModelFailureScript),
+    /// Primary vendor failure followed by ordered fallback success through the
+    /// production retry/failover/circuit-breaker/decorator chain.
+    FallbackAdvance,
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
     Failing(ErrLlmKind),
 }
+
+type ThreadModelProviderParts = (
+    Arc<dyn LlmProvider>,
+    Option<ModelProviderCallProbe>,
+    Option<Arc<dyn LlmProvider>>,
+    Option<FallbackProviderCallProbe>,
+);
 
 impl<'g> RebornThreadBuilder<'g> {
     /// Set the scripted model replies for this thread (consumed in order at the
@@ -1260,6 +1347,13 @@ impl<'g> RebornThreadBuilder<'g> {
     /// provider-error mapping.
     pub fn fail_model_auth(mut self) -> Self {
         self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
+        self
+    }
+
+    /// Fail the primary vendor route as unavailable and let loop recovery
+    /// advance to the scripted fallback provider.
+    pub fn advance_fallback_after_unavailable(mut self) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvance;
         self
     }
 
@@ -1330,12 +1424,12 @@ impl<'g> RebornThreadBuilder<'g> {
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
         // provider modes mutually exclusive by construction — no priority
         // rule is needed here.
-        let (raw, model_provider_call_probe): (
-            Arc<dyn LlmProvider>,
-            Option<ModelProviderCallProbe>,
-        ) = match self.model_mode {
+        let (raw, model_provider_call_probe, fallback_raw, fallback_provider_call_probe):
+            ThreadModelProviderParts = match self.model_mode {
             ThreadModelMode::Parked(gate) => (
                 Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+                None,
+                None,
                 None,
             ),
             ThreadModelMode::Recoverable(script) => {
@@ -1345,10 +1439,20 @@ impl<'g> RebornThreadBuilder<'g> {
                     script.failures,
                     scripted_llm.clone(),
                 );
-                (Arc::new(provider), Some(probe))
+                (Arc::new(provider), Some(probe), None, None)
             }
-            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
-            ThreadModelMode::Normal => (scripted_llm.clone(), None),
+            ThreadModelMode::FallbackAdvance => {
+                let (primary, fallback, probe) =
+                    scripted_fallback_vendor_pair(scripted_llm.clone());
+                (
+                    Arc::new(primary),
+                    None,
+                    Some(Arc::new(fallback)),
+                    Some(probe),
+                )
+            }
+            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None, None, None),
+            ThreadModelMode::Normal => (scripted_llm.clone(), None, None, None),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
@@ -1358,8 +1462,16 @@ impl<'g> RebornThreadBuilder<'g> {
             ..SessionConfig::default()
         })
         .await;
-        let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
-        let provider = provider_chain_over(raw, &llm_config, session).await?;
+        let mut llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        let provider = if let Some(fallback) = fallback_raw {
+            llm_config.max_retries = 1;
+            llm_config.circuit_breaker_threshold = Some(2);
+            llm_config.response_cache_enabled = true;
+            llm_config.nearai.fallback_model = Some(SCRIPTED_FALLBACK_MODEL_NAME.to_string());
+            provider_chain_over_with_fallback(raw, fallback, &llm_config, session).await?
+        } else {
+            provider_chain_over(raw, &llm_config, session).await?
+        };
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
             .map_err(|reason| format!("invalid model profile id: {reason}"))?;
         let policy = LlmModelProfilePolicy::new()
@@ -1420,7 +1532,9 @@ impl<'g> RebornThreadBuilder<'g> {
         if shared.real_gate_dispatch_services {
             let harness = match &shared.capability {
                 GroupCapability::HostRuntime(arc) => arc,
-                GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+                GroupCapability::Recording
+                | GroupCapability::RecordingNoProgress
+                | GroupCapability::RecordingRecoverablePortError => {
                     return Err(
                         "with_real_gate_dispatch_services requires a HostRuntime capability backend"
                             .into(),
@@ -1473,6 +1587,7 @@ impl<'g> RebornThreadBuilder<'g> {
             capability_recorder,
             scripted_llm,
             model_provider_call_probe,
+            fallback_provider_call_probe,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,

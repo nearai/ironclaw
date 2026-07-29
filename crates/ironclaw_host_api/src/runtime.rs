@@ -24,6 +24,18 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    /// Sandboxed-shell execution lane: a persistent, per-tenant OS-process
+    /// sandbox (see `.claude/rules/safety-and-sandbox.md`). One invocation
+    /// makes many outbound calls, so it shares the multi-call
+    /// credential-reuse set with `Mcp`/`Wasm` (see
+    /// `runtime_reuses_staged_credentials`).
+    ///
+    /// Host-assigned only: whether an untrusted manifest may ever *request*
+    /// the sandbox lane is an open, deliberately-deferred question, so
+    /// `#[serde(skip_deserializing)]` closes it the same way as
+    /// `FirstParty`/`System` until that question is settled on purpose.
+    #[serde(skip_deserializing)]
+    Sandbox,
     #[serde(skip_deserializing)]
     FirstParty,
     #[serde(skip_deserializing)]
@@ -36,6 +48,7 @@ impl RuntimeKind {
             Self::Wasm => "wasm",
             Self::Mcp => "mcp",
             Self::Script => "script",
+            Self::Sandbox => "sandbox",
             Self::FirstParty => "first_party",
             Self::System => "system",
         }
@@ -45,6 +58,41 @@ impl RuntimeKind {
 impl std::fmt::Display for RuntimeKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// Which `DispatchError` variant family a [`RuntimeKind`]'s failures route
+/// to.
+///
+/// Several crates each classify a `RuntimeKind` into the matching
+/// `DispatchError` shape and were independently hand-editing four copies of
+/// this match every time a `RuntimeKind` variant was added (see the
+/// `Sandbox` addition). This type centralizes the *classification* only —
+/// each call site still builds its own `DispatchError` value (different
+/// payload fields, different fallback logic), because `DispatchError`
+/// construction genuinely differs by call site. Living beside `RuntimeKind`
+/// means a new variant here is a single compile error, not four silent
+/// misses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchErrorLane {
+    Wasm,
+    Mcp,
+    Script,
+    FirstParty,
+}
+
+impl RuntimeKind {
+    /// Classify this runtime into its `DispatchError` lane. Exhaustive over
+    /// `RuntimeKind` with no catch-all: adding a new variant forces this
+    /// match to be updated here, not silently misclassified at four call
+    /// sites.
+    pub const fn dispatch_error_lane(self) -> DispatchErrorLane {
+        match self {
+            Self::Wasm => DispatchErrorLane::Wasm,
+            Self::Mcp => DispatchErrorLane::Mcp,
+            Self::Script | Self::Sandbox => DispatchErrorLane::Script,
+            Self::FirstParty | Self::System => DispatchErrorLane::FirstParty,
+        }
     }
 }
 
@@ -89,6 +137,7 @@ fn trusted_runtime_kind_from_str(raw: &str) -> Result<RuntimeKind, serde::de::va
         // round-trip failure this helper exists to prevent).
         "first_party" => Ok(RuntimeKind::FirstParty),
         "system" => Ok(RuntimeKind::System),
+        "sandbox" => Ok(RuntimeKind::Sandbox),
         other => RuntimeKind::deserialize(serde::de::value::StrDeserializer::new(other)),
     }
 }
@@ -144,6 +193,7 @@ mod tests {
             RuntimeKind::Wasm,
             RuntimeKind::Mcp,
             RuntimeKind::Script,
+            RuntimeKind::Sandbox,
             RuntimeKind::FirstParty,
             RuntimeKind::System,
         ] {
@@ -171,10 +221,42 @@ mod tests {
     // host-assigned privileged kinds, so untrusted JSON cannot forge them.
     #[test]
     fn default_deserialize_still_rejects_privileged_variants() {
+        // `Sandbox` is the container-execution lane; a third-party manifest
+        // must not be able to self-assert it any more than `first_party`/
+        // `system`. Folded in here (rather than a standalone test) because
+        // this table is exactly "privileged variants the untrusted derived
+        // impl must reject" — `Sandbox` only wasn't in it while it was still
+        // an open, deliberately-deferred security question.
         assert!(serde_json::from_str::<RuntimeKind>("\"system\"").is_err());
         assert!(serde_json::from_str::<RuntimeKind>("\"first_party\"").is_err());
+        assert!(serde_json::from_str::<RuntimeKind>("\"sandbox\"").is_err());
         assert!(serde_json::from_str::<RuntimeKind>("\"wasm\"").is_ok());
         assert!(serde_json::from_str::<RuntimeKind>("\"mcp\"").is_ok());
         assert!(serde_json::from_str::<RuntimeKind>("\"script\"").is_ok());
+    }
+
+    // Regression: this canonical mapping replaced four independently
+    // hand-maintained `RuntimeKind` -> `DispatchError` match arms
+    // (ironclaw_capabilities::dispatch/registry,
+    // ironclaw_extension_host::resolver, ironclaw_host_runtime's
+    // runtime_adapters) that all had to be hand-edited when `Sandbox` was
+    // added. Pin the classification for every `RuntimeKind` variant here so
+    // the next variant is a compile error in exactly one place.
+    #[test]
+    fn dispatch_error_lane_covers_every_runtime_kind() {
+        for (kind, expected) in [
+            (RuntimeKind::Wasm, DispatchErrorLane::Wasm),
+            (RuntimeKind::Mcp, DispatchErrorLane::Mcp),
+            (RuntimeKind::Script, DispatchErrorLane::Script),
+            (RuntimeKind::Sandbox, DispatchErrorLane::Script),
+            (RuntimeKind::FirstParty, DispatchErrorLane::FirstParty),
+            (RuntimeKind::System, DispatchErrorLane::FirstParty),
+        ] {
+            assert_eq!(
+                kind.dispatch_error_lane(),
+                expected,
+                "{kind} classified into the wrong DispatchError lane"
+            );
+        }
     }
 }

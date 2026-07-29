@@ -362,6 +362,16 @@ where
             return Ok(InboundUserMessageDispatch::Accepted(outcome));
         }
 
+        // Bound the original untrusted channel descriptor set before it
+        // reaches a policy backend. Rewritten descriptors are reconciled and
+        // revalidated later, immediately before provider fetch.
+        if !envelope.channel_attachment_refs().is_empty() {
+            validate_attachment_sources(
+                payload.attachments.as_slice(),
+                envelope.channel_attachment_refs(),
+            )?;
+        }
+
         let policy_outcome = check_before_inbound_policy(
             before_inbound_policy,
             BeforeInboundPolicyRequest::new(envelope, payload)?,
@@ -714,6 +724,10 @@ fn channel_attachment_error(error: ChannelError) -> ProductSurfaceFailure {
                 retryable,
             }
         }
+        ChannelError::Configuration { .. } => ProductSurfaceFailure::InboundAttachmentFailed {
+            reason: "channel attachment transfer failed".into(),
+            retryable: true,
+        },
         ChannelError::Unsupported => permanent_attachment_failure(
             "channel adapter does not support inbound attachment transfer",
         ),

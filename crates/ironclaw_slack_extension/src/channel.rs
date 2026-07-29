@@ -412,6 +412,7 @@ mod tests {
         SlackChannelAdapter.inbound(VerifiedInbound {
             extension_id: "slack",
             installation_id: "install_alpha",
+            config: &[],
             body,
             headers: &[],
         })

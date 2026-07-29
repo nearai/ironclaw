@@ -664,6 +664,33 @@ mod tests {
         assert_eq!(approved[0].response_body_limit, 5 * 1024 * 1024);
     }
 
+    #[tokio::test]
+    async fn placeholder_paths_and_zero_request_bound_match_the_shipped_declaration() {
+        let mut exact = declared_vendor().remove(0);
+        exact.paths = vec!["/bot{token}/getFile".to_string()];
+        let mut download = exact.clone();
+        download.methods = vec![NetworkMethod::Get];
+        download.paths.clear();
+        download.path_prefixes = vec!["/file/bot{token}/".to_string()];
+        download.request_body_limit_bytes = Some(0);
+        let (egress, transport) = egress_over(vec![exact, download]);
+
+        egress
+            .send(post("https://vendor.example/bot{token}/getFile"))
+            .await
+            .expect("tokenized exact path is declared");
+
+        let mut get = post("https://vendor.example/file/bot{token}/photos/x.png");
+        get.method = NetworkMethod::Get;
+        get.body = None;
+        egress
+            .send(get)
+            .await
+            .expect("tokenized prefix with an empty GET body is declared");
+
+        assert_eq!(transport.approved.lock().unwrap().len(), 2);
+    }
+
     /// Prefix matching is a segment match, not a byte-prefix match. A declared
     /// `/file/bot123/` must not authorize `/file/bot123Evil/...`: that sibling
     /// shares the declared bytes but is a different path the manifest author

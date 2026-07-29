@@ -37,10 +37,6 @@ struct StaticSpawnInputCodec {
 
 struct RegisteringSpawnInputCodec;
 
-struct RejectingSpawnInputCodec {
-    error: AgentLoopHostError,
-}
-
 struct FixedToolPort {
     definition: ProviderToolDefinition,
     capability_ids: ProviderToolCallCapabilityIds,
@@ -217,17 +213,6 @@ impl SpawnSubagentInputCodec for RegisteringSpawnInputCodec {
         _tool_call: &ProviderToolCall,
     ) -> Result<CapabilityInputRef, AgentLoopHostError> {
         Ok(CapabilityInputRef::new("input:spawn-provider").unwrap())
-    }
-}
-
-#[async_trait]
-impl SpawnSubagentInputCodec for RejectingSpawnInputCodec {
-    async fn decode(
-        &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-    ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
-        Err(self.error.clone())
     }
 }
 
@@ -2287,6 +2272,16 @@ async fn invoke_spawn_surfaces_scope_recovery_in_progress_as_retryable_capabilit
         "summary should explain the retryable condition: {}",
         done.summary.as_str()
     );
+    assert_eq!(
+        done.verdict
+            .diagnostic()
+            .and_then(|diagnostic| diagnostic.model_visible_text()),
+        Some(
+            "subagent spawn scope recovery in progress: subagent await-edge scope recovery in \
+             progress, retry after 50ms"
+        ),
+        "the retryable outcome must preserve the scrubbed cause for the model"
+    );
 }
 
 #[tokio::test]
@@ -2864,59 +2859,96 @@ async fn json_spawn_input_codec_accepts_legacy_blocking_inputs() {
     }
 }
 
+/// Regression: malformed MODEL-SUPPLIED spawn input (JSON that fails the
+/// spawn-args decode, or model-correctable wire-args rejections such as
+/// requesting the disabled background mode) must surface as a model-visible
+/// `Denied` resolution — the `spawn_rejected` channel — so the model can
+/// correct the call. It must NOT propagate as `Err(AgentLoopHostError)`,
+/// which the executor maps to a run-ending `HostUnavailable`.
 #[tokio::test]
-async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
-    let context = test_run_context_with_agent_actor("spawn-background-disabled").await;
-    let harness = spawn_test_port_with_codec_and_recorders(
-        context,
-        Arc::new(RejectingSpawnInputCodec {
-            error: background_subagents_disabled(),
-        }),
-    );
+async fn invoke_spawn_denies_malformed_model_input_without_side_effects() {
+    for (label, input_value, expected_summary_fragment) in [
+        (
+            "malformed-json",
+            json!("not a spawn args object"),
+            "invalid spawn_subagent input",
+        ),
+        (
+            "background-disabled",
+            json!({
+                "flavor_id": "general",
+                "task": "background task",
+                "mode": "background"
+            }),
+            "background subagents are disabled",
+        ),
+    ] {
+        let context = test_run_context_with_agent_actor(&format!("spawn-denied-{label}")).await;
+        let harness = spawn_test_port_with_codec_and_recorders(
+            context,
+            Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+                StaticInputResolver {
+                    value: Ok(input_value),
+                },
+            ))),
+        );
 
-    let activity_id = harness
-        .port
-        .test_spawn_authorization(&input_ref())
-        .expect("spawn authorization");
-    let error = harness
-        .port
-        .invoke_capability(LoopRequest {
-            activity_id,
-            surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
-            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-            input_ref: input_ref(),
-            approval_resume: None,
-            auth_resume: None,
-        })
-        .await
-        .unwrap_err();
+        let activity_id = harness
+            .port
+            .test_spawn_authorization(&input_ref())
+            .expect("spawn authorization");
+        let resolution = harness
+            .port
+            .invoke_capability(LoopRequest {
+                activity_id,
+                surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                input_ref: input_ref(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("malformed model-supplied spawn input must not end the run");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    assert!(
-        error
-            .safe_summary
-            .contains("background subagents are disabled")
-    );
-    assert!(harness.child_runs.requests().is_empty());
-    assert!(harness.goal_store.puts().is_empty());
-    assert!(harness.await_edge_writer.records().is_empty());
+        let Resolution::Denied(denial) = resolution else {
+            panic!("{label}: expected denied resolution");
+        };
+        let summary = denial
+            .summary
+            .as_ref()
+            .map(ironclaw_host_api::SafeSummary::as_str)
+            .expect("denial carries a model-visible summary");
+        assert!(
+            summary.contains(expected_summary_fragment),
+            "{label}: summary {summary:?} should contain {expected_summary_fragment:?}"
+        );
+        assert!(harness.child_runs.requests().is_empty());
+        assert!(harness.goal_store.puts().is_empty());
+        assert!(harness.await_edge_writer.records().is_empty());
+    }
 }
 
+/// Batch sibling of the malformed-input regression: the pre-decode pass in
+/// `invoke_capability_batch` must convert a model-supplied decode failure into
+/// a per-invocation `Denied` resolution instead of `Err`-ing out the whole
+/// batch (and with it, the run).
 #[tokio::test]
-async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
-    let context = test_run_context_with_agent_actor("spawn-background-disabled-batch").await;
+async fn invoke_spawn_batch_denies_malformed_model_input_without_side_effects() {
+    let context = test_run_context_with_agent_actor("spawn-denied-batch").await;
     let harness = spawn_test_port_with_codec_and_recorders(
         context,
-        Arc::new(RejectingSpawnInputCodec {
-            error: background_subagents_disabled(),
-        }),
+        Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            StaticInputResolver {
+                value: Ok(json!("not a spawn args object")),
+            },
+        ))),
     );
 
     let activity_id = harness
         .port
         .test_spawn_authorization(&input_ref())
         .expect("spawn authorization");
-    let error = harness
+    let batch = harness
         .port
         .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![LoopRequest {
@@ -2930,13 +2962,21 @@ async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
             stop_on_first_suspension: true,
         })
         .await
-        .unwrap_err();
+        .expect("malformed model-supplied spawn input must not end the run");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(batch.resolutions.len(), 1);
+    assert!(!batch.stopped_on_suspension);
+    let Resolution::Denied(denial) = &batch.resolutions[0] else {
+        panic!("expected denied resolution");
+    };
+    let summary = denial
+        .summary
+        .as_ref()
+        .map(ironclaw_host_api::SafeSummary::as_str)
+        .expect("denial carries a model-visible summary");
     assert!(
-        error
-            .safe_summary
-            .contains("background subagents are disabled")
+        summary.contains("invalid spawn_subagent input"),
+        "summary {summary:?} should name the malformed spawn input"
     );
     assert!(harness.child_runs.requests().is_empty());
     assert!(harness.goal_store.puts().is_empty());

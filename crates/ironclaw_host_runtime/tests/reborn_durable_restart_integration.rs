@@ -16,10 +16,10 @@ use ironclaw_events::{
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeFailureKind,
 };
 use ironclaw_processes::{
     ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessManager,
@@ -178,7 +178,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
         ))
         .await
         .unwrap();
-    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second_resume, FailureKind::Authorization);
 }
 
 /// PR #5234 review (Medium): the test above shares one `Arc<InMemoryBackend>`
@@ -326,7 +326,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
         ))
         .await
         .unwrap();
-    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second_resume, FailureKind::Authorization);
 }
 
 #[tokio::test]
@@ -593,7 +593,7 @@ async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     scoped_run_state_filesystem(Arc::new(filesystem))
 }
@@ -790,7 +790,7 @@ async fn wait_for_status(
     panic!("process {process_id} did not reach {status:?}");
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome, got {other:?}"),

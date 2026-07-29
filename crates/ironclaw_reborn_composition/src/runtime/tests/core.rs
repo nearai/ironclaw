@@ -140,7 +140,6 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: None,
         preference_target_codec: None,
     }]);
     let input =
@@ -512,7 +511,6 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
         .expect("local-dev is exempt from the scheduler wake wiring requirement");
 }
 
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal,
@@ -523,6 +521,7 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
+use ironclaw_host_api::{InstallationState, LifecyclePublicState};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -560,7 +559,6 @@ use ironclaw_turns::{
 use rust_decimal_macros::dec;
 
 use crate::RebornRuntimeProcessBinding;
-use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -1574,6 +1572,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         }],
         surface_version: None,
         resolved_model_route: None,
+        fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
     }
@@ -2629,14 +2628,15 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-production-hooks-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -2690,14 +2690,15 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
     });
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-production-cutover-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -2762,14 +2763,15 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
     let observer = Arc::new(RecordingTrajectoryObserver::default());
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-observer-reject-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -5384,7 +5386,10 @@ async fn local_dev_webui_bundle_uses_lifecycle_product_service_for_setup_extensi
     let setup = query_webui_extension_setup(bundle.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
-    assert_eq!(setup.phase, InstallationState::Installed);
+    // The setup route is caller-visible: an installed extension whose required
+    // credential the caller has not supplied is `setup_needed`, not a raw
+    // internal checkpoint (§6.1).
+    assert_eq!(setup.phase, LifecyclePublicState::SetupNeeded);
     assert!(setup.blockers.is_empty());
     assert_eq!(setup.secrets.len(), 1);
     assert_eq!(setup.secrets[0].name, "github_runtime_token");

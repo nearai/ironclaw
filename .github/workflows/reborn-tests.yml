@@ -7,6 +7,14 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+      deep_generations:
+        description: >-
+          Enumerate longer generated lifecycle sequences (#6524 workstream 9).
+          Pull requests stay at the fast depth; the nightly deep run raises it.
+          Depth 3 is 84 sequences (~70s) against depth 2's 20 (~20s).
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       ref:
@@ -39,6 +47,19 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # Generated-sequence depth for tests/integration/generated_gate_sequences.rs.
+  # Evaluates to the fast depth on every trigger except a workflow_call that
+  # explicitly asks for more, so a PR never pays the nightly cost. The test
+  # parses this strictly and fails on a bad value rather than falling back,
+  # so a typo here cannot silently downgrade the nightly lane.
+  IRONCLAW_GENERATED_SEQUENCE_DEPTH: ${{ inputs.deep_generations && '3' || '2' }}
+  # Pin wall-clock rendering inputs so a test cannot pass or fail on the
+  # runner's locale. Reborn renders model-visible time slices, and date/number
+  # formatting differs by locale, so an unpinned runner turns a formatting
+  # regression into an unreproducible flake. UTC also keeps recorded fixtures
+  # comparable with what a developer sees locally.
+  TZ: "UTC"
+  LANG: "C.UTF-8"
   # PR #5086 measured mold linking the heaviest Reborn build in parallel with
   # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
   # the previous one-job Cargo build serialization as the one-line fallback.
@@ -466,6 +487,14 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_GROUP_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
+      # Group suites build a full Reborn runtime per scenario on the libtest
+      # test-thread stack, so their combined debug async frames sit within a
+      # few percent of whatever stack they are given (reborn_group_triggers'
+      # triggered_gate_group overflowed the 8 MiB libtest default on an
+      # unrelated layout shift). Same pathology and value as the root-tests
+      # job above and the documented RUST_MIN_STACK in
+      # reborn_qa_recorded_behavior.rs.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

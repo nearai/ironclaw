@@ -15,11 +15,13 @@ kind = "first_party"
 service = "native_memory_provider"
 
 # The [memory] surface marks this extension a backend for the host memory
-# adapter and declares the operation families it supports. document_store is
-# the model tool surface; context_retrieval / interaction_log gate the
-# host-managed retrieve-before / record-after lifecycle.
+# adapter. The [[tools]] array below is the provider's model tool surface;
+# `lifecycle` declares the host-initiated hooks this provider participates in
+# (an undeclared hook is never called). The native provider implements the
+# full set: both retrieve-before-run lanes, after-turn interaction recording,
+# and loop-start profile reads.
 [memory]
-operations = ["document_store", "context_retrieval", "interaction_log"]
+lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]
 
 # read/write model tools + native-only search/tree conveniences. All four are
 # routed to the bound MemoryService by the host; their input/output schemas are
@@ -45,7 +47,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
+description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"
@@ -75,3 +77,13 @@ origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation =
 input_schema_ref = "schemas/memory/tree.input.v1.json"
 output_schema_ref = "schemas/memory/tree.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/tree.md"
+
+[[tools]]
+id = "ironclaw.memory.profile_set"
+description = "Record a private, local fact about the user's agent context — timezone (IANA name), locale (BCP-47), or location (free label). Use this (not memory write) whenever the user states one of these so future answers stay correct. This is a private local write, not a public profile; it is unrelated to builtin.trace_commons.profile_set."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/profile-set.input.v1.json"
+output_schema_ref = "schemas/memory/profile-set.output.v1.json"

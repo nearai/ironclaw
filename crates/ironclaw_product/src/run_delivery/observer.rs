@@ -6,10 +6,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
+use crate::commands::{
+    CommandAudience, CommandResultView, declared_command_help_text, product_command_descriptors,
+    render_command_result_text,
+};
 use crate::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductSurfaceRejectionKind, ProductTriggerReason,
+    AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind,
+    ProductTriggerReason,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -139,6 +144,7 @@ pub struct RunDeliveryObserver {
     services: RunDeliveryServices,
     settings: RunDeliverySettings,
     connection_notices: ChannelConnectionNoticePolicy,
+    command_help_text: String,
     delivery_permits: Arc<Semaphore>,
     /// Per-observer, per-conversation connect-nudge reservations. Reserving
     /// before delivery prevents concurrent unbound events from racing.
@@ -181,11 +187,35 @@ impl RunDeliveryObserver {
             services,
             settings,
             connection_notices,
+            command_help_text: declared_command_help_text(std::iter::empty::<&str>()),
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             connect_nudge_reservations: Mutex::new(HashMap::new()),
             hint_seen: Mutex::new((std::collections::VecDeque::new(), HashSet::new())),
             delivery_runs: Mutex::new(DeliveryRunLedger::default()),
         }
+    }
+
+    pub fn with_enabled_commands<I, S>(mut self, commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        // Filter to user-audience declared names so the static help text
+        // never advertises an admin-only command to a non-admin actor. This
+        // filter is unconditional (applies to every actor); the observer has
+        // no per-actor role to check at this seam — it only has the fixed
+        // enabled-command declaration.
+        let user_visible: Vec<String> = commands
+            .into_iter()
+            .filter(|name| {
+                product_command_descriptors().any(|descriptor| {
+                    descriptor.name == name.as_ref() && descriptor.audience == CommandAudience::User
+                })
+            })
+            .map(|name| name.as_ref().to_string())
+            .collect();
+        self.command_help_text = declared_command_help_text(user_visible);
+        self
     }
 
     pub async fn post_connection_status_notice(
@@ -210,6 +240,11 @@ impl RunDeliveryObserver {
     /// entry point the composition's post-admission observer seam calls.
     pub async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
         self.close_connect_nudge_epoch_after_accepted_user_message(&envelope, &ack);
+        // Product commands settle synchronously; their result or
+        // user-correctable rejection is the only reply this event will see.
+        if self.post_command_feedback(&envelope, &ack).await {
+            return;
+        }
         // Rejected approval/auth feedback is a single best-effort post, not
         // a long-running delivery — handle before taking the semaphore.
         if self
@@ -643,12 +678,38 @@ impl RunDeliveryObserver {
                 // it: cancel the run (same outcome as `auth deny`) and
                 // redirect to the web app.
                 match view {
-                    Some(view) if view.authorization_url.is_some() => {
+                    // Serviceable = the challenge can actually be completed
+                    // from a chat surface: an OAuth link the provider hosts,
+                    // or a host-issued pairing code. A manual-token challenge
+                    // never is, and an unknown one fails closed.
+                    Some(view) if prompts::auth_prompt_is_serviceable(&view) => {
                         let mut view = view;
-                        // OAuth setup links are only safe in a private DM;
-                        // strip the URL for any other origin.
+                        view.body = prompts::actionable_auth_prompt_body(&view);
+                        // Setup links and pairing codes are bearer material:
+                        // only a private DM may carry them. Any other origin
+                        // gets a redirect to the web app instead.
                         if !auth_setup_link_is_private(envelope) {
                             view.authorization_url = None;
+                            view.pairing = None;
+                            view.body = match view.challenge_kind {
+                                Some(AuthPromptChallengeKind::Pairing) => {
+                                    prompts::PAIRING_PRIVATE_SETUP_MESSAGE.to_string()
+                                }
+                                // `None` reaches here only through
+                                // `auth_prompt_is_serviceable`'s legacy arm,
+                                // which admits a prompt on a non-empty
+                                // `authorization_url` alone -- i.e. an OAuth
+                                // prompt predating the `challenge_kind` wire
+                                // field. It gets the OAuth redirect, not the
+                                // generic dead end.
+                                Some(AuthPromptChallengeKind::OAuthUrl) | None => {
+                                    prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
+                                }
+                                Some(
+                                    AuthPromptChallengeKind::ManualToken
+                                    | AuthPromptChallengeKind::Other,
+                                ) => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
+                            };
                         }
                         ActionableNotification {
                             event_kind: RunNotificationEventKind::AuthRequired,
@@ -657,7 +718,7 @@ impl RunDeliveryObserver {
                             gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                         }
                     }
-                    _ => {
+                    view => {
                         cancel_auth_blocked_run(
                             self.services.turn_coordinator.as_ref(),
                             self.services.auth_flow_cancel.as_deref(),
@@ -673,7 +734,7 @@ impl RunDeliveryObserver {
                                 scope.clone(),
                                 Some(run_id),
                                 envelope.external_conversation_ref(),
-                                prompts::AUTH_UNAVAILABLE_MESSAGE,
+                                prompts::unserviceable_auth_prompt_message(view.as_ref()),
                                 format!("auth-unavailable:{run_id}"),
                             )
                             .await;
@@ -745,6 +806,14 @@ impl RunDeliveryObserver {
                     delivery,
                     parts: vec![OutboundPart::Text(notification.text)],
                     thread_anchor: None,
+                    // MUST stay false on this path. `ObservedReplyTargetAuthority`
+                    // (below) has no DM classification for the raw source
+                    // conversation and hard-fails any request that sets this,
+                    // so setting it would drop every DM auth prompt instead of
+                    // protecting it. The privacy strip on the inbound envelope
+                    // is this path's enforcement; the flag belongs to the
+                    // triggered path, whose resolver can classify the target
+                    // (`triggered.rs` passes true for auth prompts).
                     require_direct_message_target: false,
                     extension_id: &self.services.extension_id,
                     thread_scope: &thread_scope,
@@ -829,6 +898,54 @@ impl RunDeliveryObserver {
                 envelope.external_conversation_ref(),
                 hint,
                 format!("rejection-hint:{}", envelope.external_event_id().as_str()),
+            )
+            .await;
+        true
+    }
+
+    async fn post_command_feedback(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) -> bool {
+        if !matches!(envelope.payload(), ProductInboundPayload::Command(_)) {
+            return false;
+        }
+        let text = match ack {
+            ProductInboundAck::CommandResult { command, payload } => {
+                render_command_result(command, payload)
+            }
+            ProductInboundAck::Rejected(rejection) => match rejection.kind {
+                ProductRejectionKind::InvalidRequest => self.command_help_text.clone(),
+                // Fixed host copy keyed by rejection kind only — the
+                // rejection's internal `reason` string is never echoed to
+                // the user.
+                ProductRejectionKind::AccessDenied => {
+                    "This command requires an admin account.".to_string()
+                }
+                ProductRejectionKind::PolicyDenied => {
+                    "Commands can only be used in a direct conversation with Ironclaw.".to_string()
+                }
+                // The connect-nudge path owns first-contact feedback.
+                ProductRejectionKind::BindingRequired => return false,
+                // Remaining terminal families intentionally settle without
+                // exposing internal rejection details.
+                _ => return true,
+            },
+            _ => return true,
+        };
+        // Results use the bound conversation scope. Admission rejections may
+        // happen before a shared-route binding exists; their fixed host text
+        // falls back to the channel notice scope and leaks no user data.
+        let scope = self.notice_scope(envelope).await;
+        self.services
+            .post_notice(
+                DeliveryIntent::CommandFeedback,
+                scope,
+                None,
+                envelope.external_conversation_ref(),
+                &text,
+                format!("command-feedback:{}", envelope.external_event_id().as_str()),
             )
             .await;
         true
@@ -1166,6 +1283,30 @@ pub(crate) fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         | ProductInboundAck::CommandResult { .. }
         | ProductInboundAck::NoOp => None,
     }
+}
+
+fn render_command_result(command: &str, payload: &crate::ProductCommandResultPayload) -> String {
+    if let Ok(view) = serde_json::from_value::<CommandResultView>(payload.as_value().clone()) {
+        return render_command_result_text(&view);
+    }
+    let heading = format!("Command `/{command}` completed.");
+    let rendered = match serde_json::to_string_pretty(payload.as_value()) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::run_delivery",
+                %error,
+                "could not render product command result payload"
+            );
+            return heading;
+        }
+    };
+    let indented = rendered
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{heading}\n\n{indented}")
 }
 
 fn submitted_run_id_for_feedback(_error: &RunDeliveryError) -> Option<TurnRunId> {

@@ -321,8 +321,14 @@ oauth-connect integration test rather than adding a parallel one).
   verification recipe execution (host verifier: `hmac_sha256` segment
   evaluation, constant-time compare, timestamp/replay window;
   `shared_secret_header` constant-time; candidate installations tried within a
-  small fixed bound) → `adapter.inbound(VerifiedInbound)` (pure, panic-isolated,
-  bounded input; signing secrets never in scope) → outcome:
+  small fixed bound) → drop verification candidates → resolve the verified
+  installation's manifest-declared non-secret configuration →
+  `adapter.inbound(VerifiedInbound)` (pure, panic-isolated, bounded input;
+  resolved non-secret configuration is available, signing secrets never are)
+  → outcome:
+  - adapter `Parse` failure → permanent malformed-payload 400; adapter
+    `Configuration` failure → retryable 503 so corrected host configuration
+    can recover on vendor redelivery.
   - `Messages` → durable dedupe + admission commit in one transaction (dedupe
     key: `(installation, event_id)`), **then** 2xx; persistence failure →
     retryable 5xx. Then existing workflow: identity and conversation binding,
@@ -331,9 +337,13 @@ oauth-connect integration test rather than adding a parallel one).
   - `Ignore` → 2xx after the same durable no-op commit.
 - `reply_context` from the message is stored host-side with the conversation
   source binding and handed back in `OutboundEnvelope`.
-- Inbound attachments are `AttachmentRef`s (vendor URL/id + mime hint) so
-  `inbound` stays pure; the host-side fetch through restricted channel egress
-  is specified but implemented only when a consumer needs bytes.
+- Inbound attachments are transient `ChannelAttachmentRef`s (descriptor +
+  opaque vendor reference), so `inbound` stays pure. After replay dedupe and
+  before-inbound policy, the product workflow bounds the original metadata;
+  after policy it reconciles rewritten descriptors, fetches through the exact
+  adapter generation and manifest-restricted egress, validates the returned
+  bytes, and lands them through the project filesystem before message
+  acceptance. Provider references never serialize or enter durable records.
 - Conversation binding consumes the channel's declared `conversation_model`:
   `continuous` channels bind one IronClaw conversation per external
   conversation ref (today's Slack/Telegram behavior, now declared instead of
@@ -375,6 +385,11 @@ signed vendor POST → verified → normalized → turn admitted.
   retry/backoff/dedupe/single-flight/shutdown-drain. Crash after possible
   vendor success → `Unknown`, never blind resend. Sole delivery-state writer —
   adapters get no store. Production construction rejects a no-op sink.
+- For final and triggered replies, the coordinator materializes recognized
+  `/workspace/...` references through the turn-scoped project filesystem after
+  target/channel resolution and before `Sending`. It enforces shared
+  count/per-file/total budgets, rejects caller-supplied file parts, and passes
+  only transient `OutboundPart::File` values to the adapter.
 - `CommunicationPresentationPolicy` derived from `[channel.presentation]`
   flows into prompt construction; delete the concrete
   Discord/WhatsApp/Telegram/Slack branches in

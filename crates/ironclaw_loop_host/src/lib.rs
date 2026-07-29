@@ -866,7 +866,6 @@ where
         {
             tracing::debug!(
                 kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
                 "loop assistant_reply_finalized milestone failed after finalized transcript write"
             );
             return Ok(());
@@ -1229,6 +1228,7 @@ where
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
+            fallback_index: request.fallback_index,
             messages: resolved_messages,
             surface_version: request.surface_version.clone(),
             resolved_model_route: self.run_context.resolved_model_route.clone(),
@@ -1273,21 +1273,29 @@ where
                     safe_reasoning_deltas,
                     output,
                     usage,
+                    effective_fallback_index,
                 } = response;
-                let chunks = safe_text_deltas
-                    .into_iter()
-                    .map(|safe_text_delta| ModelStreamChunk {
-                        safe_text_delta: sanitize_model_visible_text(safe_text_delta),
-                    })
-                    .collect::<Vec<_>>();
-                let loop_response = LoopModelResponse {
-                    chunks,
-                    safe_reasoning_deltas,
-                    output,
-                    effective_model_profile_id: model_profile_id.clone(),
-                    usage,
-                };
-                Ok(loop_response)
+                if effective_fallback_index != request.fallback_index {
+                    Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "model gateway returned mismatched fallback route evidence",
+                    ))
+                } else {
+                    let chunks = safe_text_deltas
+                        .into_iter()
+                        .map(|safe_text_delta| ModelStreamChunk {
+                            safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                        })
+                        .collect::<Vec<_>>();
+                    let loop_response = LoopModelResponse {
+                        chunks,
+                        safe_reasoning_deltas,
+                        output,
+                        effective_model_profile_id: model_profile_id.clone(),
+                        usage,
+                    };
+                    Ok(loop_response)
+                }
             }
             Err(error) => Err(model_gateway_error(error)),
         };
@@ -1317,7 +1325,6 @@ where
             if let Err(error) = milestones.model_started(requested_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_started milestone failed before model request"
                 );
             }
@@ -1331,7 +1338,6 @@ where
             if let Err(error) = milestones.model_completed(effective_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_completed milestone failed after successful model response"
                 );
             }
@@ -1345,7 +1351,6 @@ where
             if let Err(error) = milestones.model_failed(reason_kind).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_failed milestone failed after model error"
                 );
             }
@@ -1686,6 +1691,9 @@ pub trait HostManagedModelStreamSink: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelRequest {
     pub model_profile_id: ModelProfileId,
+    /// Zero-based index into the gateway provider's ordered fallback chain.
+    #[serde(default)]
+    pub fallback_index: u32,
     pub messages: Vec<HostManagedModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1809,6 +1817,9 @@ pub struct HostManagedModelResponse {
     /// USD spend instead of the conservative reservation estimate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<LoopModelUsage>,
+    /// Authoritative ordered-chain index used for this successful call.
+    #[serde(default)]
+    pub effective_fallback_index: u32,
 }
 
 impl HostManagedModelResponse {
@@ -1822,6 +1833,7 @@ impl HostManagedModelResponse {
                 content: sanitized_content,
             }),
             usage: None,
+            effective_fallback_index: 0,
         }
     }
 
@@ -1848,6 +1860,7 @@ impl HostManagedModelResponse {
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
+            effective_fallback_index: 0,
         }
     }
 
@@ -1865,6 +1878,11 @@ impl HostManagedModelResponse {
     /// sites can chain into [`assistant_reply`] / [`capability_calls`].
     pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.effective_fallback_index = fallback_index;
         self
     }
 }
@@ -1903,6 +1921,11 @@ pub enum HostManagedModelErrorKind {
     BudgetAccountingFailed,
     /// Provider credentials are missing, expired, or otherwise unavailable.
     CredentialUnavailable,
+    /// Provider throttled the request. `retry_after_ms` carries the bounded
+    /// provider instruction when present.
+    RateLimited,
+    /// Provider returned a typed upstream 5xx availability failure.
+    ProviderUnavailable,
     Unavailable,
     Cancelled,
 }
@@ -1914,6 +1937,12 @@ pub struct HostManagedModelError {
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub gate_ref: Option<LoopGateRef>,
+    /// Provider-supplied retry delay. Typed so the recovery strategy does not
+    /// have to parse model-visible detail text.
+    pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that the provider chain has another configured
+    /// route. Recovery may advance only when this is present.
+    pub next_fallback_index: Option<u32>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -1930,6 +1959,8 @@ impl HostManagedModelError {
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -1940,6 +1971,8 @@ impl HostManagedModelError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -1969,6 +2002,22 @@ impl HostManagedModelError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
+        self
+    }
+
+    pub fn with_retry_after(mut self, retry_after: std::time::Duration) -> Self {
+        self.retry_after_ms = Some(
+            retry_after
+                .as_millis()
+                .min(u64::MAX as u128)
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        self
+    }
+
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
         self
     }
 }
@@ -2293,6 +2342,12 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(gate_ref) = error.gate_ref {
         host_error = host_error.with_gate_ref(gate_ref);
     }
+    if let Some(retry_after_ms) = error.retry_after_ms {
+        host_error = host_error.with_retry_after_ms(retry_after_ms);
+    }
+    if let Some(next_fallback_index) = error.next_fallback_index {
+        host_error = host_error.with_next_fallback_index(next_fallback_index);
+    }
     // `error.detail` is already producer-scrubbed; fall back to the scrubbed
     // rejected summary only when there is no structured detail.
     if let Some(detail) = error.detail.or(rejected_summary_detail) {
@@ -2319,6 +2374,8 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::CredentialUnavailable => {
             AgentLoopHostErrorKind::CredentialUnavailable
         }
+        HostManagedModelErrorKind::RateLimited => AgentLoopHostErrorKind::RateLimited,
+        HostManagedModelErrorKind::ProviderUnavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Unavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Cancelled => AgentLoopHostErrorKind::Cancelled,
     }
@@ -2338,6 +2395,10 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
             "resource accounting storage is unavailable"
         }
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
+        HostManagedModelErrorKind::RateLimited => "model provider rate limited the request",
+        HostManagedModelErrorKind::ProviderUnavailable => {
+            "model provider is temporarily unavailable"
+        }
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
     }
@@ -2348,6 +2409,42 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    #[test]
+    fn typed_provider_errors_reach_distinct_loop_recovery_classes_with_retry_payload() {
+        for (kind, expected) in [
+            (
+                HostManagedModelErrorKind::RateLimited,
+                AgentLoopHostErrorKind::RateLimited,
+            ),
+            (
+                HostManagedModelErrorKind::ProviderUnavailable,
+                AgentLoopHostErrorKind::Unavailable,
+            ),
+        ] {
+            let mut error = HostManagedModelError::safe(kind, safe_model_summary(kind))
+                .with_retry_after(std::time::Duration::from_millis(1_750));
+            if kind == HostManagedModelErrorKind::ProviderUnavailable {
+                error = error.with_next_fallback_index(1);
+            }
+            let mapped = model_gateway_error(error);
+
+            assert_eq!(
+                mapped.kind, expected,
+                "{kind:?} must reach its distinct loop recovery class"
+            );
+            assert_eq!(
+                mapped.retry_after_ms,
+                Some(1_750),
+                "{kind:?} must preserve its typed provider retry hint"
+            );
+            assert_eq!(
+                mapped.next_fallback_index,
+                (kind == HostManagedModelErrorKind::ProviderUnavailable).then_some(1),
+                "{kind:?} must preserve only applicable fallback route evidence"
+            );
+        }
+    }
 
     fn ctx_msg(sequence: u64, kind: MessageKind, content: &str) -> ContextMessage {
         ContextMessage {
@@ -2612,5 +2709,69 @@ mod tests {
             Some("2Fassistant-directives.md")
         );
         assert_eq!(personal_context_source_label("///"), None);
+    }
+
+    /// Every recovery hint the loop can emit must survive persistence.
+    ///
+    /// The vocabulary now has a single home (`host_api`) and `ironclaw_threads`
+    /// deserializes that enum rather than re-declaring its variants, so drift is
+    /// structurally impossible. This test guards the seam anyway, because the
+    /// *failure mode* is what makes it worth a test: an unaccepted value does
+    /// not surface a validation error to anyone — the caller **drops the whole
+    /// observation**, so the model loses the cause *and* the guidance and sees
+    /// only a bare summary.
+    ///
+    /// That is not hypothetical. #6284 item 4 added six hints while the
+    /// vocabulary was still duplicated by hand, missed the copy, and every
+    /// denial it was meant to improve persisted with no observation at all.
+    /// Crate-level tests all passed; only the persistence seam revealed it.
+    ///
+    /// This crate is the lowest one that sees both the emitting and persisting
+    /// sides. Driven through the real envelope constructor, not the validator,
+    /// so it pins what production actually stores.
+    #[test]
+    fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
+        use ironclaw_host_api::{CapabilityRecoveryHint, SameCallRetryConstraint};
+        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+        use ironclaw_turns::run_profile::{
+            MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+            ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+            ToolRecoveryObservation,
+        };
+
+        for hint in CapabilityRecoveryHint::ALL {
+            let observation = ModelVisibleToolObservation {
+                schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Error,
+                summary: "The capability failed.".to_string(),
+                detail: ToolObservationDetail::GenericFailure {
+                    failure_kind: ironclaw_host_api::FailureKind::PolicyDenied,
+                    detail: None,
+                },
+                artifacts: Vec::new(),
+                recovery: Some(
+                    ToolRecoveryObservation::new(SameCallRetryConstraint::Forbidden, *hint)
+                        // Exercise the optional delay field too: it is a key on
+                        // the same object, and an unknown KEY is rejected the
+                        // same silent way an unknown hint is.
+                        .with_retry_after(Some(30_000)),
+                ),
+                trust: ObservationTrust::UntrustedToolOutput,
+            };
+            let value = serde_json::to_value(&observation).expect("observation serializes");
+
+            let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+                "result:hint-conformance",
+                ToolResultSafeSummary::new("The capability failed.").expect("summary"),
+                Some(value),
+            )
+            .expect("envelope constructs");
+
+            assert!(
+                envelope.model_observation.is_some(),
+                "recovery hint {hint:?} does not survive persistence, so storing it DROPS THE \
+                 WHOLE OBSERVATION — the model would lose the cause and the guidance."
+            );
+        }
     }
 }

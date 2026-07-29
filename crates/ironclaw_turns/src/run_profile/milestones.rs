@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ExtensionId, FailureKind, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -10,9 +10,9 @@ use crate::{
 };
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-    CapabilitySurfaceVersion, LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind,
-    LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
+    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRecoveryClass,
+    LoopRecoveryDisposition, LoopRecoveryStage, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
@@ -108,13 +108,20 @@ pub enum LoopHostMilestoneKind {
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
+        reason_kind: FailureKind,
         /// Bounded, host-authored failure summary (e.g. a builtin's
         /// `"invalid JSON: ..."` message). Additive; pre-existing producers
         /// emit `None`. Product projections and durable runtime events must
         /// re-sanitize this value before surfacing it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         safe_summary: Option<LoopSafeSummary>,
+    },
+    FailureRecovered {
+        #[serde(default)]
+        sequence: u64,
+        stage: LoopRecoveryStage,
+        class: LoopRecoveryClass,
+        disposition: LoopRecoveryDisposition,
     },
     CapabilityBatchStarted {
         iteration: u32,
@@ -260,6 +267,7 @@ impl LoopHostMilestoneKind {
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CapabilityCompleted { .. } => "capability_completed",
             Self::CapabilityFailed { .. } => "capability_failed",
+            Self::FailureRecovered { .. } => "failure_recovered",
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
@@ -523,7 +531,7 @@ where
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
+        reason_kind: FailureKind,
         safe_summary: Option<LoopSafeSummary>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
@@ -533,6 +541,22 @@ where
             runtime,
             reason_kind,
             safe_summary,
+        })
+        .await
+    }
+
+    pub async fn failure_recovered(
+        &self,
+        sequence: u64,
+        stage: LoopRecoveryStage,
+        class: LoopRecoveryClass,
+        disposition: LoopRecoveryDisposition,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::FailureRecovered {
+            sequence,
+            stage,
+            class,
+            disposition,
         })
         .await
     }
@@ -978,6 +1002,37 @@ mod hook_milestone_schema_snapshots {
   }
 }"#;
         assert_eq!(pretty(&value), EXPECTED);
+    }
+}
+
+#[cfg(test)]
+mod recovery_milestone_schema_compatibility {
+    use super::{
+        LoopHostMilestoneKind, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+    };
+
+    #[test]
+    fn legacy_recovery_milestone_without_sequence_defaults_to_zero() {
+        let legacy = r#"{
+            "failure_recovered": {
+                "stage": "model",
+                "class": "model_unavailable",
+                "disposition": "retried"
+            }
+        }"#;
+
+        let decoded: LoopHostMilestoneKind =
+            serde_json::from_str(legacy).expect("legacy recovery milestone must remain readable");
+
+        assert!(matches!(
+            decoded,
+            LoopHostMilestoneKind::FailureRecovered {
+                sequence: 0,
+                stage: LoopRecoveryStage::Model,
+                class: LoopRecoveryClass::ModelUnavailable,
+                disposition: LoopRecoveryDisposition::Retried,
+            }
+        ));
     }
 }
 

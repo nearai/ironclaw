@@ -220,6 +220,11 @@ Notes on the sections:
   `shared_secret_header` (constant-time compare), or `none`. Signing secrets
   never reach the adapter. Two recipe kinds cover Slack and Telegram; new kinds
   are added to the host when a protocol genuinely needs one.
+- **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
+  segment-bounded `path_prefixes`, and request/response byte limits. Empty path
+  lists preserve the legacy host+method policy. Path-placeholder credentials
+  remain host-injected; the policy matcher evaluates the placeholder-bearing
+  path, and the runtime substitutes the secret only after approval.
 - **`conversation_model`** (required on `[channel]`) classifies how external
   conversations map to IronClaw conversations:
   - `continuous` — the protocol supplies conversation identity; each external
@@ -455,8 +460,21 @@ pub trait ChannelAdapter: Send + Sync {
     }
 
     /// Parse one host-verified inbound request into a normalized outcome.
-    /// Pure protocol work: no I/O, no secrets, bounded input.
+    /// `VerifiedInbound` includes the verified installation's host-resolved,
+    /// manifest-declared non-secret config. Pure protocol work: no I/O, no
+    /// secrets, bounded input.
     fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
+
+    /// Fetch one inbound attachment through the manifest-restricted egress
+    /// pinned to the adapter generation that parsed the request. The default
+    /// fails closed with `Unsupported`.
+    async fn fetch_attachment(
+        &self,
+        attachment: &ChannelAttachmentRef,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<InboundAttachment, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
 
     /// Render and send one normalized outbound envelope through restricted
     /// egress. Owns vendor formatting, splitting, target syntax, DM
@@ -471,6 +489,16 @@ pub trait ChannelAdapter: Send + Sync {
 }
 ```
 
+For inbound calls, `ChannelError::Parse` means the verified vendor payload is
+malformed and maps to a permanent 400. `ChannelError::Configuration` means
+host-supplied adapter configuration is missing or invalid and maps to a
+retryable 503; this distinction prevents operator mistakes from being
+misreported as vendor payload failures. Telegram validates the configured
+public bot username syntactically (5–32 ASCII alphanumeric/underscore
+characters ending in `bot`, case-insensitively). A syntactically valid but
+wrong identity requires a future mediated `getMe` verification step; inbound
+normalization does not perform live vendor I/O.
+
 ```rust
 pub enum InboundOutcome {
     /// Normalized message(s) for the workflow (actor, conversation, event id,
@@ -484,12 +512,22 @@ pub enum InboundOutcome {
 }
 ```
 
-Attachments are **references, not bytes**: an `AttachmentRef` carries the
-vendor URL/id and a mime hint, which keeps `inbound` pure. When something
-actually needs the bytes, the *host* fetches them through restricted egress
-with the channel credential — secrets stay host-side. Outbound attachments are
-envelope parts; `deliver` owns the upload. (The ref type is defined now; the
-fetch path is built only when a consumer needs it.)
+Inbound attachments remain **references, not bytes** during parsing:
+`ChannelAttachmentRef` carries a validated descriptor plus an opaque vendor
+reference. The reference is host-only, omitted from serialization and redacted
+from `Debug`. After duplicate replay misses and before-inbound policy allows or
+rewrites the message, the product workflow fetches through the exact
+generation-pinned adapter and manifest-restricted egress, validates id, MIME,
+size, count, and total-byte budgets, and lands bytes through the project
+filesystem before accepting the message. Retryable transfer failures release
+the idempotency attempt; permanent failures settle it.
+
+For final and triggered outbound replies, the coordinator recognizes confined
+`/workspace/...` file references, preflights and reads them through the
+turn-scoped project filesystem, and appends transient `OutboundPart::File`
+values. Callers cannot inject pre-materialized file parts. The adapter owns the
+vendor upload; raw bytes never enter attempts, events, projections, or
+transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
 

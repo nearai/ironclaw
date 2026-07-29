@@ -1,12 +1,13 @@
 """Typed inventory for harvested provider and representative product journeys."""
 
 import json
+import os
+import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
-import tomllib
 from journey_types import (
     CargoEvidence,
     JourneyCase,
@@ -39,13 +40,76 @@ _TOOL_WORLD_PREFIXES = {
 _HTTP_WORLD_HOSTS = {
     "api.github.com": ProviderWorld.GITHUB,
 }
-_MUTATING_PROVIDER_TOOLS = {
-    "gmail__send_message": ProviderWorld.GOOGLE,
-    "google-docs__create_document": ProviderWorld.GOOGLE,
-    "google-sheets__create_spreadsheet": ProviderWorld.GOOGLE,
-    "google-sheets__append_values": ProviderWorld.GOOGLE,
-    "slack__send_message": ProviderWorld.SLACK,
-}
+# The five tools this set used to name by hand. Kept only as a regression
+# floor: if the derivation below ever stops finding them, it has broken.
+_HISTORICAL_MUTATING_PROVIDER_TOOLS = frozenset(
+    {
+        "gmail__send_message",
+        "google-docs__create_document",
+        "google-sheets__create_spreadsheet",
+        "google-sheets__append_values",
+        "slack__send_message",
+    }
+)
+
+
+def _production_mutating_tools() -> dict[str, ProviderWorld]:
+    """Provider-world writes, taken from the shipped manifests.
+
+    A journey that mutates a provider world must declare that world so the
+    harness resets it afterwards; otherwise whatever the journey created
+    survives into the next test. Which tools mutate is not a judgement call --
+    production already states it, as the `external_write` effect on each tool
+    (`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`).
+
+    This used to be a hand-kept list of five names while production declared
+    seventy such tools. Every one of the other sixty-five -- `github__create_issue`,
+    `google-drive__upload_file`, and so on -- would have run without marking its
+    world mutable, so no reset fired and the leak guards this workstream added
+    never got the chance to.
+    """
+    mutating: dict[str, ProviderWorld] = {}
+    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+        with manifest_path.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        for tool in manifest.get("tools", []) or []:
+            if "external_write" not in (tool.get("effects") or []):
+                continue
+            # Manifest ids are `github.create_issue`; traces record
+            # `github__create_issue`.
+            tool_name = str(tool["id"]).replace(".", "__", 1)
+            world = next(
+                (
+                    world
+                    for prefix, world in _TOOL_WORLD_PREFIXES.items()
+                    if tool_name.startswith(prefix)
+                ),
+                None,
+            )
+            # Tools outside a world the harness can reset (web-access, nearai)
+            # are not skipped silently -- `unreset_mutating_tools()` below is
+            # what reports them.
+            if world is not None:
+                mutating[tool_name] = world
+    return mutating
+
+
+_MUTATING_PROVIDER_TOOLS = _production_mutating_tools()
+
+
+def unreset_mutating_tools() -> frozenset[str]:
+    """Production writes whose provider world no fixture can reset."""
+    unreset = set()
+    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+        with manifest_path.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        for tool in manifest.get("tools", []) or []:
+            if "external_write" not in (tool.get("effects") or []):
+                continue
+            tool_name = str(tool["id"]).replace(".", "__", 1)
+            if tool_name not in _MUTATING_PROVIDER_TOOLS:
+                unreset.add(tool_name)
+    return frozenset(unreset)
 _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_10f_slack_mention_encoding",
@@ -126,10 +190,29 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
 PROVIDER_JOURNEY_CASES = _provider_journey_cases()
 
 
-def _provider_journey_runs() -> tuple[
-    tuple[ProviderJourneyCase, ...],
-    tuple[str, ...],
-]:
+JOURNEY_ORDER_ENV = "IRONCLAW_JOURNEY_ORDER"
+
+
+def journey_order_is_reversed() -> bool:
+    """Whether CI explicitly selected the shared-world reverse proof.
+
+    The dedicated scenario owns ordering and provider lifecycle. This selector
+    makes that expensive lane fail closed if workflow wiring drops its intent.
+    """
+    return os.environ.get(JOURNEY_ORDER_ENV, "").strip().lower() == "reverse"
+
+
+def provider_journey_runs(
+    *,
+    reverse: bool = False,
+) -> tuple[tuple[ProviderJourneyCase, ...], tuple[str, ...]]:
+    """Journey runs and their ids, forward or reversed.
+
+    Takes `reverse` explicitly rather than reading the environment so the
+    ordering itself is testable without mutating process state — a reversed
+    lane that silently ran forward would look exactly like a passing lane, and
+    would quietly retire the proof it was added to provide.
+    """
     runs = []
     ids = []
     for case in PROVIDER_JOURNEY_CASES:
@@ -138,12 +221,54 @@ def _provider_journey_runs() -> tuple[
         if case.repeat_after_reset:
             runs.append(case)
             ids.append(f"{case.case_id}-isolated-repeat")
+    if reverse:
+        runs.reverse()
+        ids.reverse()
     return tuple(runs), tuple(ids)
 
 
-PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = _provider_journey_runs()
+def shared_world_provider_journey_runs(
+    *,
+    reverse: bool = False,
+) -> tuple[tuple[ProviderJourneyCase, ...], tuple[str, ...]]:
+    """Mutating journeys to replay without provider resets between cases.
+
+    Isolation repeats belong to the ordinary runner: repeating them here would
+    deliberately collide with their own mutation rather than expose leakage
+    from a different journey.
+    """
+    runs = [case for case in PROVIDER_JOURNEY_CASES if case.mutable_provider_worlds]
+    if reverse:
+        runs.reverse()
+    return tuple(runs), tuple(case.case_id for case in runs)
+
+
+# The ordinary replay owns per-case isolation. Reversed ordering is reserved
+# for the dedicated shared-world scenario, where ordering can affect outcomes.
+PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = provider_journey_runs()
 
 PRODUCT_JOURNEY_CASES = (
+    ProductJourneyCase(
+        case_id="generic_extension_webhook_signed_post_becomes_a_turn",
+        provider_worlds=(ProviderWorld.NONE,),
+        mutable_provider_worlds=(),
+        ingress=JourneyIngress.EXTENSION_WEBHOOK,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        # The cited test ends at durable turn admission: its scripted reply is
+        # never consulted and nothing is delivered, so naming a delivery
+        # target would overstate it.
+        delivery_target=JourneyDeliveryTarget.NONE,
+        # Admission only. The test registers its ingress secret directly, so
+        # the webhook never crosses the runtime credential-injection path --
+        # claiming that assertion would credit this row with coverage that
+        # lives elsewhere.
+        assertions=(ObservableAssertion.DURABLE_STATE,),
+        evidence=CargoEvidence(
+            source="tests/integration/extension_ingress.rs",
+            test="signed_acme_post_flows_through_the_production_mount_into_a_turn",
+            target="reborn_integration_extension_ingress",
+        ),
+    ),
     ProductJourneyCase(
         case_id="webui_text_turn_persists",
         provider_worlds=(ProviderWorld.NONE,),
@@ -234,10 +359,18 @@ def _production_channel_surfaces(direction: str) -> set[str]:
 
 
 def required_ingresses() -> set[str]:
-    """Built-in ingress plus every production channel declaring inbound."""
+    """Built-in ingress plus every production channel declaring inbound.
+
+    `EXTENSION_WEBHOOK` is the generic mount itself, not a third channel.
+    Slack and Telegram both arrive through it, so covering them exercises it
+    incidentally -- but only for two vendors the host already ships. The
+    surface that matters is the one a *new* extension arrives on, and the only
+    way to prove that is with an extension the host has never heard of.
+    """
     return {
         JourneyIngress.WEBUI,
         JourneyIngress.SCHEDULED_TRIGGER,
+        JourneyIngress.EXTENSION_WEBHOOK,
         *_production_channel_surfaces("inbound"),
     }
 

@@ -73,6 +73,19 @@ pub async fn provider_chain_over(
     crate::apply_decorator_chain(raw, config, session).await
 }
 
+/// Build the production decorator chain over scripted primary and fallback
+/// vendor seams. The configured fallback model still controls whether the
+/// production failover layer is enabled; only provider construction is
+/// substituted so cross-crate integration tests remain hermetic.
+pub async fn provider_chain_over_with_fallback(
+    primary: std::sync::Arc<dyn crate::provider::LlmProvider>,
+    fallback: std::sync::Arc<dyn crate::provider::LlmProvider>,
+    config: &crate::config::LlmConfig,
+    session: std::sync::Arc<crate::session::SessionManager>,
+) -> Result<std::sync::Arc<dyn crate::provider::LlmProvider>, crate::error::LlmError> {
+    crate::apply_decorator_chain_with_fallback(primary, Some(fallback), config, session).await
+}
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 

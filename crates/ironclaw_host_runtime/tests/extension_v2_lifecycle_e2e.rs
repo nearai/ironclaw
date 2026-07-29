@@ -154,6 +154,83 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     assert_eq!(requests[0].input, json!({"message":"hello"}));
 }
 
+// `dispatch_error_for_runtime` maps `Script | Sandbox => DispatchError::Script`,
+// but until now nothing in this file drove it with a `RuntimeKind::Sandbox`
+// adapter (the only `RecordingAdapter` above is `RuntimeKind::Script`). Test
+// through the caller (`RuntimeDispatcher::dispatch_json`), not the mapping
+// helper directly, per the repo's "test through the caller" rule: drive a
+// Sandbox-runtime adapter through the same governor-failure path and assert
+// the dispatcher surfaces `DispatchError::Script`.
+#[tokio::test]
+async fn sandbox_runtime_adapter_governor_failure_surfaces_script_dispatch_error() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_process_count(1)
+        .set_output_bytes(10_000);
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_concurrency_slots(1),
+        )
+        .unwrap();
+    // Hold the sole concurrency slot open (never reconciled) so the
+    // adapter's self-reserve call below hits the governor at capacity and
+    // must fail closed, exercising the same governor-failure branch the
+    // Script-runtime adapter hits in the happy-path test above.
+    let _blocking_reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
+
+    let adapter = Arc::new(RecordingAdapter::new(
+        RuntimeKind::Sandbox,
+        json!({"message":"sandbox ok"}),
+        Arc::clone(&governor),
+    ));
+    let capability_id = CapabilityId::new("sandbox.echo").unwrap();
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: capability_id.clone(),
+        resolved: ResolvedCapability {
+            provider: ExtensionId::new("sandbox").unwrap(),
+            runtime: RuntimeKind::Sandbox,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor));
+    let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+
+    let result = dispatch_port
+        .dispatch_json(Authorized::seal_for_test(
+            Invocation {
+                activity_id: ActivityId::new(),
+                capability: capability_id,
+                input: json!({"message":"hello"}),
+                scope: scope.clone(),
+                actor: Actor::System,
+                origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                estimate,
+                correlation_id: CorrelationId::new(),
+                process_id: Some(ProcessId::new()),
+                parent_process_id: None,
+            },
+            RuntimeLane::Process,
+            MountView::default(),
+            // No pre-supplied reservation: the adapter must self-reserve via
+            // the governor, which is where the zero-capacity limit bites.
+            None,
+            Timestamp::MAX_UTC,
+        ))
+        .await;
+
+    match result {
+        Err(DispatchError::Script { .. }) => {}
+        other => {
+            panic!("expected DispatchError::Script for a Sandbox-runtime adapter, got {other:?}")
+        }
+    }
+}
+
 #[tokio::test]
 async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     let github_asset_root = github_first_party_asset_root();
@@ -162,20 +239,18 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     let (_storage, fs) = mounted_github_package_fs();
     // Parse through the single record entry point (the github asset is a
     // manifest v3 document).
+    let root = VirtualPath::new("/system/extensions/github").unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/github").unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     let extension_id = ExtensionId::new("github").unwrap();
@@ -562,7 +637,7 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Script => DispatchError::Script {
+        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
             kind,
             model_visible_cause: None,
         },

@@ -19,10 +19,9 @@ use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityFailureKind, CapabilityInputRef,
-        CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
-        LoopRequestBatch, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::json;
@@ -49,6 +48,7 @@ enum CapabilityMode {
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
     InvocationError,
+    RecoverablePortError,
     InvalidInputThenEcho,
 }
 
@@ -61,8 +61,22 @@ impl RecordingTestCapabilityPort {
         Self::new(CapabilityMode::NoProgress, false, false)
     }
 
-    /// Every capability invocation fails with a scripted host invocation error
-    /// (fault-matrix P4: non-model capability-stage failure).
+    /// Every capability invocation returns a scripted **caller-shaped** port
+    /// error (`InvalidInvocation`). Before #6284's capability-stage fix, any
+    /// non-`Cancelled` port error ended the run; now caller-shaped kinds
+    /// surface model-visibly and the run continues. Pairs with
+    /// [`Self::invocation_error`], which uses a kind that is still terminal.
+    pub fn recoverable_port_error() -> Self {
+        Self::new(CapabilityMode::RecoverablePortError, false, false)
+    }
+
+    /// Every capability invocation fails with a scripted TERMINAL host fault
+    /// (`Unavailable` — fault-matrix P4: non-model capability-stage failure).
+    /// Deliberately a kind in the executor's terminal set
+    /// (`capability_port_error_is_terminal`): caller-shaped kinds such as
+    /// `InvalidInvocation` now surface model-visibly and the run recovers
+    /// in-loop, which would defeat the run-failed → user-retry journeys this
+    /// double exists to drive.
     pub fn invocation_error() -> Self {
         Self::new(CapabilityMode::InvocationError, false, false)
     }
@@ -282,18 +296,37 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request);
         if matches!(self.mode, CapabilityMode::InvocationError) {
+            // Terminal host fault: `Unavailable` stays in the executor's
+            // terminal set, so the run fails with a retryable checkpoint
+            // instead of recovering in-loop (see `invocation_error()`).
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "scripted capability invocation failure",
+            ));
+        }
+        if matches!(self.mode, CapabilityMode::RecoverablePortError) {
+            // Caller-shaped host fault: the model can act on it, so the
+            // executor surfaces it as a tool error and the run continues.
+            //
+            // `InvalidInvocation` (not `Unauthorized`) on purpose: the summary
+            // prefix for `Authorization` is "capability failed with
+            // authorization: ", and "authorization:" is a banned marker in the
+            // loop-safe validator, so that kind fail-softs to the redacted
+            // fallback and would hide the very kind this test asserts on.
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
-                "scripted capability invocation failure",
+                "scripted caller-shaped capability port failure",
             ));
         }
         if matches!(self.mode, CapabilityMode::InvalidInputThenEcho)
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {
             return Ok(resolution::failed(
-                CapabilityFailureKind::InvalidInput,
+                ironclaw_host_api::FailureKind::InputEncode,
                 "capability input failed validation".to_string(),
-                None,
+                ironclaw_turns::run_profile::CapabilityFailureDetail::Diagnostic {
+                    text: "capability input failed validation".to_string(),
+                },
             ));
         }
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)

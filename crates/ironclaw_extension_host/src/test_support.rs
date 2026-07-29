@@ -225,6 +225,7 @@ fn resolve(toml: &str) -> ResolvedExtensionManifest {
         &catalog(),
         None,
         &contracts,
+        None,
     )
     .expect("fixture manifest parses")
     .resolved()

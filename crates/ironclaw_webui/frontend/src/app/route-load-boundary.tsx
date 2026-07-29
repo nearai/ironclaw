@@ -47,19 +47,34 @@ export function RouteLoadError({ onRetry }: RouteLoadErrorProps) {
 interface RouteErrorBoundaryProps {
   children: React.ReactNode;
   fallback: React.ReactNode;
+  resetKey?: string;
 }
 
 interface RouteErrorBoundaryState {
   failed: boolean;
+  resetKey: string | undefined;
 }
 
 export class RouteErrorBoundary extends React.Component<
   RouteErrorBoundaryProps,
   RouteErrorBoundaryState
 > {
-  state: RouteErrorBoundaryState = { failed: false };
+  state: RouteErrorBoundaryState = {
+    failed: false,
+    resetKey: this.props.resetKey,
+  };
 
-  static getDerivedStateFromError(): RouteErrorBoundaryState {
+  static getDerivedStateFromProps(
+    props: RouteErrorBoundaryProps,
+    state: RouteErrorBoundaryState,
+  ): RouteErrorBoundaryState | null {
+    if (props.resetKey !== state.resetKey) {
+      return { failed: false, resetKey: props.resetKey };
+    }
+    return null;
+  }
+
+  static getDerivedStateFromError(): Pick<RouteErrorBoundaryState, "failed"> {
     return { failed: true };
   }
 
@@ -81,7 +96,9 @@ export function RouteLoadBoundary({ children }: RouteLoadBoundaryProps) {
 
   return (
     <RouteErrorBoundary
-      key={location.pathname}
+      // Reset only the failed state. A React key here would also remount healthy
+      // route descendants and discard layout, form, and preference state.
+      resetKey={location.pathname}
       fallback={<RouteLoadError onRetry={() => window.location.reload()} />}
     >
       <React.Suspense fallback={<RouteLoading />}>{children}</React.Suspense>

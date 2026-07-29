@@ -23,11 +23,12 @@ use ironclaw_outbound::{
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
-    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundOutcome,
-    OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome, ProductAdapterError,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence,
-    TrustedInboundContext, UserMessagePayload, VerifiedInbound,
+    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    InboundCommandPayload, InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound,
+    PartDeliveryOutcome, ProductAdapterError, ProductAdapterId, ProductCommandResultPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
+    UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
@@ -611,6 +612,18 @@ fn build_harness(
     auth_url: Option<&str>,
     max_wait: Duration,
 ) -> Harness {
+    build_harness_with_commands(states, bind_fails, auth_url, max_wait, &["status"])
+}
+
+/// Same as `build_harness`, but with an explicit declared-command set for the
+/// observer's static help text (`build_harness` always enables `["status"]`).
+fn build_harness_with_commands(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    auth_url: Option<&str>,
+    max_wait: Duration,
+    commands: &[&str],
+) -> Harness {
     build_harness_with_settings(
         states,
         bind_fails,
@@ -621,6 +634,7 @@ fn build_harness(
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
         },
+        commands,
     )
 }
 
@@ -630,6 +644,7 @@ fn build_harness_with_settings(
     bind_fails: bool,
     auth_url: Option<&str>,
     settings: RunDeliverySettings,
+    commands: &[&str],
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -672,11 +687,14 @@ fn build_harness_with_settings(
         auth_flow_cancel: None,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
-    let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
-        services,
-        settings,
-        connection_notices.clone(),
-    ));
+    let observer = Arc::new(
+        RunDeliveryObserver::with_settings_and_connection_notices(
+            services,
+            settings,
+            connection_notices.clone(),
+        )
+        .with_enabled_commands(commands.iter().copied()),
+    );
     Harness {
         observer,
         connection_notices,
@@ -752,6 +770,154 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn observer_delivers_command_result_through_the_coordinator() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command =
+        InboundCommandPayload::new("model", "", ProductTriggerReason::BotCommand).expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-result",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::CommandResult {
+                command: "model".to_string(),
+                payload: ProductCommandResultPayload::new(serde_json::json!({
+                    "active": {
+                        "model": "gpt-5.5"
+                    },
+                    "configured": true
+                })),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec![
+            "Command `/model` completed.\n\n    {\n      \"active\": {\n        \"model\": \"gpt-5.5\"\n      },\n      \"configured\": true\n    }"
+                .to_string()
+        ]
+    );
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
+    assert_eq!(envelopes[0].extension_id, EXTENSION_ID);
+}
+
+#[tokio::test]
+async fn observer_delivers_scoped_command_help_for_invalid_request() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
+        .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-invalid",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "opaque parser or admission detail",
+            )),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["Available commands:\n/status".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn access_denied_command_rejection_delivers_admin_notice() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command =
+        InboundCommandPayload::new("extension_configure", "", ProductTriggerReason::DirectChat)
+            .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-access-denied",
+    );
+    let internal_reason = "admin-audience command from a non-admin actor";
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::AccessDenied,
+                internal_reason,
+            )),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts,
+        vec!["This command requires an admin account.".to_string()]
+    );
+    assert!(
+        texts.iter().all(|text| !text.contains(internal_reason)),
+        "the internal rejection reason must never reach the delivered text: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn static_command_help_excludes_admin_audience_commands() {
+    let harness = build_harness_with_commands(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+        &["model", "status", "extension_configure"],
+    );
+    let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
+        .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-invalid-role-filtered-help",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "opaque parser or admission detail",
+            )),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["Available commands:\n/model\n/status".to_string()]
     );
 }
 
@@ -882,7 +1048,7 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
     let mut states = vec![scripted_state(TurnStatus::Running, None)];
     states.extend(std::iter::repeat_with(|| scripted_state(TurnStatus::Running, None)).take(32));
     states.push(scripted_state(TurnStatus::Completed, None));
-    let harness = build_harness_with_settings(states, false, None, settings);
+    let harness = build_harness_with_settings(states, false, None, settings, &["status"]);
     let run_id = TurnRunId::new();
     seed_final_message(&harness.threads, run_id, "slow run finished").await;
 

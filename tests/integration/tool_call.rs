@@ -463,49 +463,43 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
 /// at the gateway (`CapabilitySurfaceDenyFilter`, before
-/// `register_provider_tool_call` ever stages an invocation) — the whole
-/// provider response fails with `InvalidOutput` → `Unavailable`, reaching a
-/// terminal `TurnStatus::Failed`/`"model_unavailable"` after exactly one
-/// scripted turn. No `ToolResultReference` is persisted; `assert_tool_invoked`
-/// returning `Err` proves the capability was never dispatched.
+/// `register_provider_tool_call` ever stages an invocation). The loop must
+/// surface the precise `outside_capability_surface` observation to the model,
+/// let it repair the response on the next call, and complete without ever
+/// dispatching or reporting the rejected call as successful.
 #[tokio::test]
-async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
+async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     let h = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::tool_call(
-            "builtin.spawn_subagent",
-            json!({"goal": "test"}),
-        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.spawn_subagent", json!({"goal": "test"})),
+            RebornScriptedReply::text(
+                "I cannot use that capability, so I will continue without it.",
+            ),
+        ])
         .build()
         .await
         .expect("harness builds");
 
-    let run_id = h
-        .submit_turn_async("spawn a subagent")
+    h.submit_turn("spawn a subagent")
         .await
-        .expect("turn submitted");
-    let state = h
-        .wait_for_status(run_id, ironclaw_turns::TurnStatus::Failed)
+        .expect("run recovers from the disabled capability call");
+    h.assert_reply_contains("continue without it")
         .await
-        .expect("run reaches Failed after the disabled capability is rejected at the gateway");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("a Failed run must carry a failure detail");
-    assert_eq!(
-        failure.category(),
-        "model_unavailable",
-        "expected the Unavailable fidelity category (InvalidOutput -> Unavailable), got {failure:?}"
-    );
+        .expect("repaired reply is finalized");
+    h.assert_model_request_contains(
+        "model error observation: invalid_output reason=outside_capability_surface; \
+         repair the response and continue",
+    )
+    .await
+    .expect("the retry tells the model precisely why its tool call was rejected");
 
-    // No side effect: the capability was rejected before dispatch, so it was
-    // never invoked.
-    assert!(
-        h.assert_tool_invoked("builtin.spawn_subagent")
-            .await
-            .is_err(),
-        "disabled capability must never be dispatched, even when the model calls it anyway"
-    );
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("the rejected capability must never be dispatched");
+    h.assert_capability_result_count("builtin.spawn_subagent", 0)
+        .await
+        .expect("the rejected call must not produce a successful capability result");
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
@@ -867,4 +861,50 @@ where
     if let Err(panic) = handle.join() {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// #6284 item 1, at the seam that matters: a **caller-shaped capability port
+/// error ends the tool call, not the run**.
+///
+/// Before the capability-stage fix, `capability_host_error` mapped every
+/// non-`Cancelled` `AgentLoopHostError` from the port to a terminal
+/// `HostUnavailable{Capability}` — so an expired credential, a scope
+/// mismatch, or a malformed invocation killed a run the model could have
+/// recovered from. The executor now splits the port-error kinds exhaustively:
+/// caller-shaped ones (`InvalidInvocation` here) surface as a model-visible tool
+/// error and the loop continues; genuine host faults stay terminal.
+///
+/// Asserted at the durable seam — the persisted `ToolResultReference` envelope
+/// and the finalized reply — not on a completed status, so it proves the model
+/// actually saw the failure *and* kept working. Crate-tier coverage of the same
+/// split lives in `ironclaw_agent_loop`'s executor tests; this pins it through
+/// the production composition.
+#[tokio::test]
+async fn caller_shaped_capability_port_error_is_a_tool_error_not_a_dead_run() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_recoverable_port_error_for_test()
+        .script([
+            RebornScriptedReply::tool_call("test_echo", json!({"message": "hi"})),
+            RebornScriptedReply::text("the tool was refused, so here is what I can say instead"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("use the echo tool")
+        .await
+        .expect("turn completes");
+
+    // The model was told, in the durable envelope the next turn reads from.
+    h.assert_tool_error(
+        reborn_support::assertions::ToolErrorClass::Failed,
+        "input_encode",
+    )
+    .await
+    .expect("a caller-shaped port error reaches the model as a recoverable tool error");
+
+    // …and the run kept going rather than dying on the port error.
+    h.assert_reply_contains("here is what I can say instead")
+        .await
+        .expect("the run continues past a recoverable port error");
 }

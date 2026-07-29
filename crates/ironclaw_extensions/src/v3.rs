@@ -22,9 +22,9 @@ use std::collections::BTreeMap;
 use ironclaw_host_api::{
     ChannelDescriptor, ChannelDescriptorError, EffectKind, ExtensionId,
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, MemoryDescriptor,
-    MemoryOperationKind, NetworkScheme, NetworkTargetPattern, OriginGateMatrix, PermissionMode,
-    RecipeValidationError, RequestedTrustClass, RuntimeCredentialAccountSetup,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
+    NetworkScheme, NetworkTargetPattern, OriginGateMatrix, PermissionMode, RecipeValidationError,
+    RequestedTrustClass, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+    RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -312,25 +312,15 @@ pub(crate) fn parse_v3(
         });
     }
     // A `[memory]` surface declares the extension a backend for the host memory
-    // adapter. It is host-bundled + first_party only (the host owns the memory
-    // tool surface and the compose-time provider binding), and must back the
-    // mandatory document-store family.
-    if let Some(memory) = &raw.memory {
-        if !matches!(runtime, ExtensionRuntimeV2::FirstParty { .. }) {
-            return Err(ManifestV3Error::InvalidMemory {
-                reason: "[memory] requires a first_party runtime".to_string(),
-            });
-        }
-        if memory.operations.is_empty() {
-            return Err(ManifestV3Error::InvalidMemory {
-                reason: "[memory].operations must not be empty".to_string(),
-            });
-        }
-        if !memory.backs(MemoryOperationKind::DocumentStore) {
-            return Err(ManifestV3Error::InvalidMemory {
-                reason: "[memory].operations must include \"document_store\"".to_string(),
-            });
-        }
+    // adapter. It is host-bundled + first_party only (the host owns the
+    // compose-time provider binding). The manifest's `[[tools]]` array is the
+    // provider's tool surface and `lifecycle` — any subset, including empty —
+    // declares the host-initiated hooks it participates in, so no further
+    // shape constraint applies here.
+    if raw.memory.is_some() && !matches!(runtime, ExtensionRuntimeV2::FirstParty { .. }) {
+        return Err(ManifestV3Error::InvalidMemory {
+            reason: "[memory] requires a first_party runtime".to_string(),
+        });
     }
     let sandboxed_runtime = matches!(
         runtime,
@@ -385,6 +375,13 @@ pub(crate) fn parse_v3(
 
     // Normalize tools (or the synthesized MCP connection template) into the
     // internal capability model, reusing the v2 validated construction path.
+    // A `[memory]`-declaring manifest (host-bundled only — checked above) may
+    // declare tools under the reserved stable memory namespace, with its
+    // requested gating clamped below.
+    let memory_tool_namespace = raw
+        .memory
+        .is_some()
+        .then_some(ironclaw_host_api::MEMORY_TOOL_ID_NAMESPACE);
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
     let mut mcp_template_credentials = None;
@@ -429,7 +426,7 @@ pub(crate) fn parse_v3(
             origin_gate_matrix: mcp.origin_gate_matrix.clone(),
         };
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
+            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog, None).map_err(
                 |error| ManifestV3Error::Invalid {
                     reason: error.to_string(),
                 },
@@ -513,12 +510,27 @@ pub(crate) fn parse_v3(
                 origin_gate_matrix: tool.origin_gate_matrix,
             },
         };
+        // Requested, not granted: a memory provider's declared tool gating is
+        // clamped by the host — `ungated` survives only where the reviewed
+        // allowlist grants it, exactly as host trust policy already clamps
+        // `trust = "first_party_requested"`.
+        let mut raw_capability = raw_capability;
+        if memory_tool_namespace.is_some()
+            && let Some(matrix) = raw_capability.origin_gate_matrix.take()
+        {
+            raw_capability.origin_gate_matrix =
+                Some(matrix.clamp_requested_for_memory_tool(&raw_capability.id));
+        }
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
-                |error| ManifestV3Error::Invalid {
-                    reason: error.to_string(),
-                },
-            )?,
+            CapabilityDeclV2::from_raw(
+                raw_capability,
+                &id,
+                host_port_catalog,
+                memory_tool_namespace,
+            )
+            .map_err(|error| ManifestV3Error::Invalid {
+                reason: error.to_string(),
+            })?,
         );
     }
 
@@ -579,6 +591,9 @@ pub(crate) fn parse_v3(
         description: manifest.description.clone(),
         requested_trust: manifest.requested_trust,
         runtime: manifest.runtime.clone(),
+        // No package root is in scope at v3 parse time either; the loader
+        // fabricates one when this is `None`.
+        root: None,
         mcp: mcp.map(|mcp| ResolvedMcpDeclaration {
             server: mcp.server.as_str().to_string(),
             namespace: mcp.namespace,

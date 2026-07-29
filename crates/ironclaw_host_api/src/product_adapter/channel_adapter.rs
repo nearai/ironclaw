@@ -99,6 +99,9 @@ pub struct ChannelContext<'a> {
 pub struct VerifiedInbound<'a> {
     pub extension_id: &'a str,
     pub installation_id: &'a str,
+    /// Host-resolved, manifest-declared non-secret configuration for the
+    /// verified installation. Secret material remains host-side.
+    pub config: &'a [(String, String)],
     /// Request body bytes (bounded by the ingress body limit).
     pub body: &'a [u8],
     /// Request headers the host chose to forward (verification headers are
@@ -145,10 +148,19 @@ pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 /// Named distinctly from `ironclaw_common::ChannelAttachmentRef`, which is the
 /// durable byte-free transcript reference — a different concept that used to
 /// share this name and forced import aliases wherever both appeared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChannelAttachmentRef {
     pub descriptor: ProductAttachmentDescriptor,
     pub vendor_ref: String,
+}
+
+impl std::fmt::Debug for ChannelAttachmentRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelAttachmentRef")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A bounded immediate response (returned after verification, before any
@@ -254,6 +266,11 @@ pub struct TargetCandidate {
 pub enum ChannelError {
     #[error("inbound request could not be parsed: {reason}")]
     Parse { reason: String },
+    /// Host-supplied adapter configuration is missing or invalid. Inbound
+    /// routers treat this as retryable because vendor redelivery may succeed
+    /// after an operator repairs configuration.
+    #[error("channel configuration is unavailable: {reason}")]
+    Configuration { reason: String },
     #[error("outbound rendering failed: {reason}")]
     Render { reason: String },
     #[error("vendor wiring failed: {reason}")]
@@ -294,6 +311,26 @@ impl ImmediateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProductAttachmentKind;
+
+    #[test]
+    fn channel_attachment_ref_debug_redacts_the_vendor_reference() {
+        let attachment = ChannelAttachmentRef {
+            descriptor: ProductAttachmentDescriptor::new(
+                "file-1",
+                "application/pdf",
+                Some("report.pdf".to_string()),
+                Some(4),
+                ProductAttachmentKind::Document,
+            )
+            .expect("descriptor"),
+            vendor_ref: "opaque-provider-secret-reference".to_string(),
+        };
+
+        let debug = format!("{attachment:?}");
+        assert!(debug.contains("file-1"));
+        assert!(!debug.contains("opaque-provider-secret-reference"));
+    }
 
     #[test]
     fn reply_context_bound_is_enforced_host_side() {

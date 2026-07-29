@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum ProductCommandHandler {
     ProductLifecycleCommand,
     ProductModelCommand,
+    ProductStatusCommand,
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -35,6 +36,7 @@ impl ProductCommandHandler {
         match capability.as_str() {
             PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
             PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
+            PRODUCT_STATUS_COMMAND_OPERATION_ID => Some(Self::ProductStatusCommand),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
             SUBMIT_TURN_COMMAND_ID => Some(Self::SubmitTurn),
             CANCEL_RUN_COMMAND_ID => Some(Self::CancelRun),
@@ -106,6 +108,14 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::ProductStatusCommand => {
+                let request: ProductStatusCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_status_command(caller, request)
+                        .await?,
+                )
+            }
             Self::CreateThread => command_output(
                 services
                     .create_thread(caller, product_command_input(input)?)
@@ -155,11 +165,14 @@ impl ProductCommandHandler {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
             }
-            Self::TraceHoldAuthorize => command_output(
-                services
-                    .authorize_trace_hold(caller, product_command_input(input)?)
-                    .await?,
-            ),
+            Self::TraceHoldAuthorize => {
+                let request: RebornTraceHoldAuthorizeProductRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .authorize_trace_hold(caller, request.submission_id)
+                        .await?,
+                )
+            }
             Self::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest = product_command_input(input)?;
                 command_output(

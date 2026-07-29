@@ -12,10 +12,10 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
-    ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionInstallationStorePort,
-    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    ManifestSource,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    MembershipDeactivation,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
@@ -107,6 +107,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             &HostPortCatalog::empty(),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("manifest record")
     }
@@ -274,11 +275,11 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         self.inner.get_manifest(extension_id).await
     }
 
-    async fn upsert_manifest(
+    async fn persist_removal_tombstone(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        self.inner.upsert_manifest(manifest).await
+        self.inner.persist_removal_tombstone(manifest).await
     }
 
     async fn upsert_manifest_and_installation(
@@ -319,6 +320,26 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         self.inner.upsert_installation(installation).await
     }
 
+    async fn activate_membership(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        user_id: &UserId,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        self.inner
+            .activate_membership(installation_id, user_id)
+            .await
+    }
+
+    async fn deactivate_membership(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        user_id: &UserId,
+    ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+        self.inner
+            .deactivate_membership(installation_id, user_id)
+            .await
+    }
+
     async fn delete_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -331,14 +352,6 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
         self.inner.delete_manifest(extension_id).await
-    }
-
-    async fn update_health(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        health: ExtensionHealthSnapshot,
-    ) -> Result<(), ExtensionInstallationError> {
-        self.inner.update_health(installation_id, health).await
     }
 }
 
@@ -866,7 +879,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     match install {
         Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
         Resolution::Done(ref outcome)
-            if outcome.verdict.error_kind() == Some(&FailureKind::InvalidInput) => {}
+            if outcome.verdict.error_kind() == Some(&FailureKind::InputEncode) => {}
         Resolution::Blocked(Blocked::Auth(_)) => {}
         other => panic!("telegram install failed: {other:?}"),
     }

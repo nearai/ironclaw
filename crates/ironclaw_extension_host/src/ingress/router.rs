@@ -16,7 +16,9 @@ use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{
     ChannelIngressDescriptor, ChannelIngressMethod, RestrictedEgress, SecretHandle,
 };
-use ironclaw_product::{ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound};
+use ironclaw_product::{
+    ChannelAdapter, ChannelError, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
+};
 
 use crate::active::ActiveExtension;
 use crate::deployment_channels::{DeploymentChannelBinding, DeploymentChannelRegistry};
@@ -52,6 +54,18 @@ pub trait IngressSecretsPort: Send + Sync {
         installation_id: &str,
         handle: Option<&SecretHandle>,
     ) -> Result<Vec<VerificationCandidate>, IngressPortError>;
+}
+
+/// Resolves manifest-declared non-secret configuration for the installation
+/// selected by ingress verification. Implementations must not return secret
+/// values or handles.
+#[async_trait]
+pub trait IngressConfigurationPort: Send + Sync {
+    async fn non_secret_config(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError>;
 }
 
 /// One verified, normalized inbound message ready for durable admission.
@@ -195,10 +209,14 @@ impl IngressResponse {
 /// Injected router dependencies (composition supplies concrete ports).
 pub struct ExtensionIngressRouterDeps {
     pub secrets: Arc<dyn IngressSecretsPort>,
+    pub configuration: Arc<dyn IngressConfigurationPort>,
     pub sink: Arc<dyn InboundSink>,
     pub reply_context: Arc<dyn ReplyContextStore>,
     /// Host transport used only to construct per-request manifest-restricted
     /// egress from the already pinned ingress binding.
+    // arch-exempt: optional_arc, minimal/test host-runtime graphs intentionally
+    // omit HTTP egress; absence preserves the explicit fail-closed 503 path for
+    // attachment-bearing messages, plan #4539
     pub channel_egress_transport: Option<Arc<dyn ChannelEgressTransport>>,
 }
 
@@ -346,7 +364,26 @@ impl ExtensionIngressRouter {
         };
         drop(candidates); // secrets leave scope before any adapter work
 
-        // 5. adapter.inbound — pure, panic-isolated; verification headers are
+        // 5. Resolve only manifest-declared non-secret configuration for the
+        //    installation selected by successful verification.
+        let non_secret_config = match self
+            .deps
+            .configuration
+            .non_secret_config(binding.extension_id(), &verified.installation_id)
+            .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::debug!(
+                    extension_id = %binding.extension_id(),
+                    error = %error,
+                    "extension ingress non-secret configuration unavailable"
+                );
+                return IngressResponse::error(503, "temporarily_unavailable");
+            }
+        };
+
+        // 6. adapter.inbound — pure, panic-isolated; verification headers are
         //    consumed by the host and never forwarded.
         let Some(channel) = binding.adapter() else {
             return IngressResponse::error(404, "unknown_route");
@@ -366,11 +403,19 @@ impl ExtensionIngressRouter {
             let inbound = VerifiedInbound {
                 extension_id: binding.extension_id(),
                 installation_id: &verified.installation_id,
+                config: &non_secret_config,
                 body: &request.body,
                 headers: &forwarded_headers,
             };
             match catch_unwind(AssertUnwindSafe(|| channel.inbound(inbound))) {
                 Ok(Ok(outcome)) => outcome,
+                Ok(Err(ChannelError::Configuration { .. })) => {
+                    tracing::debug!(
+                        extension_id = %binding.extension_id(),
+                        "channel adapter host configuration is unavailable"
+                    );
+                    return IngressResponse::error(503, "temporarily_unavailable");
+                }
                 Ok(Err(error)) => {
                     tracing::debug!(
                         extension_id = %binding.extension_id(),
@@ -389,7 +434,7 @@ impl ExtensionIngressRouter {
             }
         };
 
-        // 6. Outcome handling. 2xx only after durable commits.
+        // 7. Outcome handling. 2xx only after durable commits.
         match outcome {
             InboundOutcome::Ignore => IngressResponse::ok(),
             InboundOutcome::Respond(response) => {

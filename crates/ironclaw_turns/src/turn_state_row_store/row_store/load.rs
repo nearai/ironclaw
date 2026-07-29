@@ -327,7 +327,7 @@ where
     ) -> Result<Option<TurnRunState>, TurnError> {
         let (run, turn) = {
             let mut guard = self.snapshot_state.lock().await;
-            self.drop_cache_if_degraded(&mut guard);
+            self.drop_cache_if_failed_fatal(&mut guard);
             if guard.is_none() {
                 *guard = Some(self.load_snapshot_from_rows().await?);
             }

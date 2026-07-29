@@ -16,14 +16,14 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     Action, CapabilityDescriptor, CapabilityId, CredentialStageError, Decision, ExecutionContext,
-    ExtensionHostAssemblyConfig, MountAlias, MountGrant, MountPermissions, MountView, Obligations,
-    Principal, ResourceEstimate, ResourceScope, ResourceUsage, VendorId, VirtualPath,
+    ExtensionHostAssemblyConfig, FailureKind, MountAlias, MountGrant, MountPermissions, MountView,
+    Obligations, Principal, ResourceEstimate, ResourceScope, ResourceUsage, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
     HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::LifecycleProductSurfaceContext;
@@ -56,6 +56,12 @@ pub struct ExtensionLifecycleTestServices {
     pub lifecycle_service: Arc<ExtensionHostLifecycleProductService>,
     pub approval_requests: Arc<TestApprovalRequestStore>,
     pub capability_leases: Arc<TestCapabilityLeaseStore>,
+    /// The exact trust policy instance `ActiveExtensionPublisher` publishes
+    /// into. Tests read back the published `AuthorityCeiling` through
+    /// `TrustPolicy::evaluate` — the real consumption seam
+    /// (`ironclaw_authorization::effects_are_covered`) — instead of exposing
+    /// publisher internals.
+    pub trust_policy: Arc<HostTrustPolicy>,
     secret_store: Arc<dyn SecretStorePort>,
 }
 
@@ -150,9 +156,11 @@ pub async fn build_lifecycle_test_services(
     let lifecycle_service = Arc::new(tokio::sync::Mutex::new(ExtensionLifecycleService::new(
         active_registry.snapshot_owned(),
     )));
+    let trust_policy =
+        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
     let active_extensions = ActiveExtensionPublisher::new(
         Arc::clone(&active_registry),
-        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy")),
+        Arc::clone(&trust_policy),
         Arc::new(InvalidationBus::new()),
     );
     restore_extension_lifecycle_state(
@@ -278,6 +286,7 @@ pub async fn build_lifecycle_test_services(
         lifecycle_service: Arc::new(lifecycle_service),
         approval_requests,
         capability_leases,
+        trust_policy,
         secret_store,
     }
 }
@@ -287,7 +296,7 @@ pub async fn invoke_json_with_local_dev_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-) -> Result<serde_json::Value, RuntimeFailureKind> {
+) -> Result<serde_json::Value, FailureKind> {
     match invoke_with_local_dev_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),

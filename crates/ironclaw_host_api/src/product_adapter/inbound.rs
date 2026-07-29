@@ -103,10 +103,11 @@ pub enum ProductTriggerReason {
 /// it enters the product surface.
 ///
 /// `None` at the call site means the normalized message is an ordinary user
-/// message. These variants cover only protocol-specific interaction replies
-/// that should not become user turns.
+/// message. These variants cover channel-neutral interaction replies and
+/// slash commands that should not become user turns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelInboundClassification {
+    Command(InboundCommandPayload),
     ApprovalResolution(ApprovalResolutionPayload),
     ScopedApprovalResolution(ScopedApprovalResolutionPayload),
     AuthResolution(AuthResolutionPayload),
@@ -116,6 +117,7 @@ pub enum ChannelInboundClassification {
 impl From<ChannelInboundClassification> for ProductInboundPayload {
     fn from(classification: ChannelInboundClassification) -> Self {
         match classification {
+            ChannelInboundClassification::Command(payload) => Self::Command(payload),
             ChannelInboundClassification::ApprovalResolution(payload) => {
                 Self::ApprovalResolution(payload)
             }
@@ -254,6 +256,12 @@ pub fn parse_product_slash_command(
         .unwrap_or(without_slash.len());
     let command_slice = &without_slash[..command_end];
     let arguments_slice = without_slash[command_end..].trim_start();
+    // Vendor adapters remove an address only when it names the verified
+    // current bot. A surviving `@target` therefore belongs to another bot and
+    // must remain ordinary conversation text, not become an Ironclaw command.
+    if command_slice.contains('@') {
+        return Ok(None);
+    }
     validate_command_name(command_slice)
         .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
     validate_payload_string(
@@ -268,6 +276,43 @@ pub fn parse_product_slash_command(
     InboundCommandPayload::new(command, arguments, trigger)
         .map(Some)
         .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))
+}
+
+/// Classify channel text reserved for product interactions or commands.
+///
+/// Returns `None` when text remains an ordinary user message. Confident
+/// reserved syntax that cannot be parsed is classified as `NoOp` so the
+/// channel ingress fails closed rather than forwarding malformed control text.
+pub fn classify_channel_inbound_text(
+    text: &str,
+    trigger: ProductTriggerReason,
+) -> Option<ChannelInboundClassification> {
+    match crate::product_adapter::interaction_commands::parse_interaction_resolution_text(
+        crate::product_adapter::interaction_commands::strip_wrapping_inline_code(text),
+        trigger,
+    ) {
+        Ok(Some(ProductInboundPayload::ApprovalResolution(payload))) => {
+            return Some(ChannelInboundClassification::ApprovalResolution(payload));
+        }
+        Ok(Some(ProductInboundPayload::ScopedApprovalResolution(payload))) => {
+            return Some(ChannelInboundClassification::ScopedApprovalResolution(
+                payload,
+            ));
+        }
+        Ok(Some(ProductInboundPayload::AuthResolution(payload))) => {
+            return Some(ChannelInboundClassification::AuthResolution(payload));
+        }
+        Ok(Some(ProductInboundPayload::NoOp)) | Err(_) => {
+            return Some(ChannelInboundClassification::NoOp);
+        }
+        Ok(Some(_)) | Ok(None) => {}
+    }
+
+    match parse_product_slash_command(text, trigger) {
+        Ok(Some(command)) => Some(ChannelInboundClassification::Command(command)),
+        Ok(None) => None,
+        Err(_) => Some(ChannelInboundClassification::NoOp),
+    }
 }
 
 #[derive(Deserialize)]

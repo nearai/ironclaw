@@ -15,6 +15,11 @@ mod metadata;
 mod path;
 mod safety;
 mod service;
+/// Provider-level contract suite every `MemoryService` impl wires; see the
+/// module docs. Test-only (zero bytes in production builds; the
+/// `src/test_support.rs` name is the repo-wide feature-gated convention).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use context::MemoryContext;
 pub use events::{
@@ -36,13 +41,17 @@ pub use safety::{
     PromptWriteSource,
 };
 pub use service::{
-    MEMORY_DISABLED_CONTEXT_ALIASES, MemoryContextProfileId, MemoryInteractionMessage,
-    MemoryInteractionRole, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
-    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
+    MEMORY_DISABLED_CONTEXT_ALIASES, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
+    MEMORY_SEARCH_SCOPE, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
+    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
     MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, memory_context_disabled,
+    MemoryWriteStatus, PROFILE_SET_CAPABILITY_ID, memory_context_disabled,
+    profile_set_response_output, read_response_output, search_response_output,
+    tree_response_output, write_response_output,
 };

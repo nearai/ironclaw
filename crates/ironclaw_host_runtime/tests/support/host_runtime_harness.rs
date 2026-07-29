@@ -32,15 +32,15 @@ use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
     CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime, HostRuntime,
     HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeFailureKind, RuntimeInvocation, RuntimeProcessError, RuntimeProcessPort,
-    SandboxCommandTransport, builtin_first_party_package,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeInvocation,
+    RuntimeProcessError, RuntimeProcessPort, SandboxCommandTransport, builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -116,7 +116,7 @@ impl HostPolicyFacts for PermissiveHostPolicyFacts {
 pub(crate) async fn libsql_scoped_turns_fs(
     db: Arc<libsql::Database>,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let view = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").unwrap(),
@@ -213,10 +213,7 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
     }
 }
 
-pub(crate) fn assert_failed_outcome(
-    outcome: RuntimeCapabilityOutcome,
-    expected_kind: RuntimeFailureKind,
-) {
+pub(crate) fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
         other => panic!("expected failed outcome, got {other:?}"),

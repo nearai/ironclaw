@@ -47,6 +47,9 @@ uuid = { version = "1", features = ["v4"] }
 # gated off in the production-facing build of the library so the
 # no-panics scanner only sees production code.
 ironclaw_memory_native = { path = ".", features = ["test-support"] }
+# The provider-level MemoryService contract suite this crate wires in
+# tests/memory_service_contract.rs.
+ironclaw_memory = { path = "../ironclaw_memory", features = ["test-support"] }
 tempfile = "3"
 # `rt-multi-thread` is required by the race-safety test's
 # `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` —

@@ -655,7 +655,11 @@ async fn triggered_notification_for_state(
                 None => None,
             };
             match view {
-                Some(mut view) if view.authorization_url.is_some() => {
+                // Serviceable = completable from the channel (a provider-hosted
+                // OAuth link, or a host-issued pairing code). Triggered
+                // delivery always targets a DM, so bearer material is safe here.
+                Some(mut view) if prompts::auth_prompt_is_serviceable(&view) => {
+                    view.body = prompts::actionable_auth_prompt_body(&view);
                     view.body
                         .push_str(&prompts::triggered_gate_footer(trigger_label));
                     // The DM requirement is enforced by the resolver at send
@@ -669,10 +673,12 @@ async fn triggered_notification_for_state(
                         require_direct_message_target: true,
                     }))
                 }
-                _ => {
-                    // Non-OAuth challenge (manual credential entry). Deny:
-                    // cancel the parked run and deliver the auth-unavailable
-                    // notice as the terminal reply.
+                view => {
+                    // Not serviceable from a channel (manual credential entry,
+                    // or an unknown challenge). Deny: cancel the parked run and
+                    // deliver the matching auth-unavailable notice as the
+                    // terminal reply.
+                    let unavailable = prompts::unserviceable_auth_prompt_message(view.as_ref());
                     cancel_auth_blocked_run(
                         services.turn_coordinator.as_ref(),
                         services.auth_flow_cancel.as_deref(),
@@ -687,7 +693,7 @@ async fn triggered_notification_for_state(
                         intent: DeliveryIntent::TriggeredDelivery,
                         text: format!(
                             "{}{}",
-                            prompts::AUTH_UNAVAILABLE_MESSAGE,
+                            unavailable,
                             prompts::triggered_update_footer(trigger_label)
                         ),
                         gate_ref_for_routing: None,

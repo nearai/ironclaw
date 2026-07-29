@@ -2,23 +2,23 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName,
+    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, Denial, DenyReason, DenyRef,
+    DispatchInputIssueCode, FailureKind, ProviderToolName, SameCallRetryConstraint,
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
-    LoopDiagnosticRef, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
+    LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
-        CapabilityInputIssue, CapabilityInputRef, CapabilityInputRepair, CapabilityRecoveryHint,
-        CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
+        CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
         LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
-        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
-        ObservationTrust, ParentLoopOutput, PromptMode, ProviderToolCallReplay,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
+        LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
+        ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus,
         VisibleCapabilityRequest, resolution,
     },
 };
@@ -60,6 +60,12 @@ use support::*;
 
 mod cancellation;
 mod failure_matrix;
+
+fn diagnostic_failure_detail(text: &str) -> CapabilityFailureDetail {
+    CapabilityFailureDetail::Diagnostic {
+        text: text.to_string(),
+    }
+}
 
 fn continuation_observation(
     result_ref: &LoopResultRef,
@@ -154,6 +160,39 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
             kind: CheckpointKind::Final,
             iteration_at_checkpoint: final_state.iteration,
         })
+    );
+}
+
+#[tokio::test]
+async fn recovery_event_append_failure_stops_before_model_retry() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model gateway unavailable",
+        )])
+        .with_failing_progress_port();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("recovery cannot proceed without its durable numerator event");
+
+    match error {
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Checkpoint,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary,
+            reason_kind: None,
+            detail: None,
+        } => assert_eq!(safe_summary.as_str(), "progress sink unavailable"),
+        other => panic!("expected checkpoint diagnostics, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "the failed recovery append must gate the retry side effect"
     );
 }
 
@@ -1426,6 +1465,22 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
         "retry must return to PromptStage so compaction can run before the next model call"
     );
     assert!(host.progress_event_names().contains(&"compaction_started"));
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Model,
+                    class: LoopRecoveryClass::ModelContextOverflow,
+                    disposition: LoopRecoveryDisposition::Retried,
+                }
+            ))
+            .count(),
+        1,
+        "one failed model attempt must produce exactly one recovery numerator event"
+    );
 
     let final_state = final_staged_state(&host);
     assert_eq!(
@@ -1572,7 +1627,6 @@ async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_r
             kind: AgentLoopHostErrorKind::BudgetApprovalRequired,
             safe_summary: LoopSafeSummary::new("budget approval required").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -3389,14 +3443,14 @@ async fn model_retry_success_clears_recovery_state() {
 }
 
 #[tokio::test]
-async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
-    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-credentials").expect("valid");
+async fn model_unrecoverable_host_error_preserves_inline_sanitized_cause() {
+    let cause = "credential provider refused the configured model identity";
     let host = MockHost::new(Vec::new()).with_model_errors(vec![
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::CredentialUnavailable,
             "model credentials are unavailable",
         )
-        .with_diagnostic_ref(diagnostic_ref),
+        .with_detail(cause),
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -3413,8 +3467,7 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
-            detail: None,
+            detail: Some(cause.to_string()),
         }
     );
 }
@@ -3449,7 +3502,6 @@ async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -4025,6 +4077,22 @@ async fn model_content_filter_gives_model_one_rephrase_attempt() {
             .pending_model_error_observation
             .is_none()
     );
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Model,
+                    class: LoopRecoveryClass::ModelContentFiltered,
+                    disposition: LoopRecoveryDisposition::ModelVisible,
+                }
+            ))
+            .count(),
+        1,
+        "one model-visible recovery must emit one durable numerator event"
+    );
 }
 
 #[tokio::test]
@@ -4053,15 +4121,78 @@ async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
 }
 
 #[tokio::test]
-async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_first() {
+async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evidence() {
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(1),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("fallback retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 1);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 1);
+}
+
+#[tokio::test]
+async fn model_unavailable_without_fallback_evidence_retries_the_current_route() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("same-route availability retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 0);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 0);
+}
+
+#[tokio::test]
+async fn failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first() {
+    // Vehicle: iteration-limit abort. The retired capability `Permanent` kind
+    // merged into model-visible `OperationFailed` under the unified
+    // FailureKind, so a scripted capability failure can no longer end the run;
+    // the explanation flow under test is failure-kind-agnostic.
+    //
+    // The limit is 0, not 1, so the loop's one bounded pre-termination warning
+    // turn is the *first* scripted turn: the budget stage schedules the warning
+    // before the first model call, and that warning is already spent when the
+    // limit is re-checked on the next iteration. The model call immediately
+    // after the scripted capability batch is therefore the failure-explanation
+    // call, which keeps this test about explanation behavior instead of
+    // warning-turn accounting (pinned separately by
+    // `iteration_limit_gives_model_one_warning_turn_to_finish`).
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
             ScriptedModelResponse::Reply {
-                text: "The run stopped after a capability failure.".to_string(),
+                text: "The run stopped after hitting the iteration limit.".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::failed("permanent")]]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::completed(
+            "result:limit-1",
+        )]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
     };
@@ -4072,13 +4203,13 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
     state.assistant_refs.push(partial_ref.clone());
 
     let exit = executor
-        .execute_family(&crate::families::default(), &host, state)
+        .execute_family(&family_with_iteration_limit(0), &host, state)
         .await
         .expect("execute");
 
     match exit {
         LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::CapabilityProtocolError);
+            assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
             assert_eq!(
                 failed.explanation_message_refs,
                 vec![partial_ref, message_ref("msg:assistant")]
@@ -4089,7 +4220,7 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
     assert_eq!(host.model_call_count(), 2);
     assert_eq!(
         host.finalized_assistant_messages(),
-        vec!["The run stopped after a capability failure.".to_string()]
+        vec!["The run stopped after hitting the iteration limit.".to_string()]
     );
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
@@ -4108,14 +4239,19 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
 
 #[tokio::test]
 async fn failure_explanation_prompt_is_inline_only_and_context_free() {
+    // Vehicle: iteration-limit abort at limit 0 (see
+    // `failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first`
+    // for why the limit is 0 and where the warning turn lands).
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
             ScriptedModelResponse::Reply {
-                text: "The run stopped after a capability failure.".to_string(),
+                text: "The run stopped after hitting the iteration limit.".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::failed("permanent")]]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::completed(
+            "result:limit-2",
+        )]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
     };
@@ -4125,7 +4261,7 @@ async fn failure_explanation_prompt_is_inline_only_and_context_free() {
     state.assistant_refs.push(message_ref("msg:partial-work"));
 
     let exit = executor
-        .execute_family(&crate::families::default(), &host, state)
+        .execute_family(&family_with_iteration_limit(0), &host, state)
         .await
         .expect("execute");
 
@@ -4144,6 +4280,12 @@ async fn failure_explanation_prompt_is_inline_only_and_context_free() {
 
 #[tokio::test]
 async fn explanation_model_error_degrades_to_original_failed_exit() {
+    // Vehicle: iteration-limit abort at limit 0 (see
+    // `failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first`
+    // for why the limit is 0). The scripted `Internal` error must land on the
+    // failure-explanation call, not on the pre-termination warning turn —
+    // otherwise the run degrades to `ModelError` and this test would no longer
+    // pin "the explanation call failing preserves the original failure kind".
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
@@ -4151,7 +4293,9 @@ async fn explanation_model_error_degrades_to_original_failed_exit() {
                 kind: AgentLoopHostErrorKind::Internal,
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::failed("permanent")]]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::completed(
+            "result:limit-3",
+        )]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
     };
@@ -4162,13 +4306,13 @@ async fn explanation_model_error_degrades_to_original_failed_exit() {
     state.assistant_refs.push(partial_ref.clone());
 
     let exit = executor
-        .execute_family(&crate::families::default(), &host, state)
+        .execute_family(&family_with_iteration_limit(0), &host, state)
         .await
         .expect("execute");
 
     match exit {
         LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::CapabilityProtocolError);
+            assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
             assert_eq!(failed.explanation_message_refs, vec![partial_ref]);
         }
         other => panic!("expected failed exit, got {other:?}"),
@@ -4234,7 +4378,7 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     let family = crate::families::default_with_overrides(
         crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
     );
-    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-outage").expect("valid");
+    let cause = "provider connection timed out before a response arrived";
     // Exactly attempts+1 scripted failures: the final one is the call where
     // the strategy's budget is exhausted and it aborts. Any extra call would
     // hit the mock's script-exhausted Internal fallback and change the
@@ -4243,7 +4387,7 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
         (0..=attempts)
             .map(|_| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
-                    .with_diagnostic_ref(diagnostic_ref.clone())
+                    .with_detail(cause)
             })
             .collect(),
     );
@@ -4267,9 +4411,12 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
                 "abort must carry the strategy's failure category"
             );
             assert_eq!(
-                failed.diagnostic_ref,
-                Some(diagnostic_ref),
-                "abort must carry the model error's diagnostic ref"
+                failed
+                    .safe_summary
+                    .as_ref()
+                    .and_then(|summary| summary.detail()),
+                Some(cause),
+                "abort must inline the model error's bounded cause"
             );
         }
         other => panic!("expected failed exit, got {other:?}"),
@@ -4283,6 +4430,9 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
 
 #[tokio::test]
 async fn cancellation_before_explanation_skips_explanation_model_call() {
+    // Vehicle: iteration-limit abort at limit 0, so the model call that
+    // cancellation must suppress is the failure-explanation call itself (see
+    // `failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first`).
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
@@ -4290,7 +4440,9 @@ async fn cancellation_before_explanation_skips_explanation_model_call() {
                 text: "This explanation should not be requested.".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::failed("permanent")]]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::completed(
+            "result:cancel-before-explanation",
+        )]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
     };
@@ -4305,7 +4457,7 @@ async fn cancellation_before_explanation_skips_explanation_model_call() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = executor
-        .execute_family(&crate::families::default(), &host, state)
+        .execute_family(&family_with_iteration_limit(0), &host, state)
         .await
         .expect("execute");
 
@@ -4352,6 +4504,10 @@ async fn exit_stage_aborted_cancellation_skips_explanation_and_returns_cancelled
 
 #[tokio::test]
 async fn cancellation_during_explanation_model_call_propagates_cancelled() {
+    // Vehicle: iteration-limit abort at limit 0, so the scripted `Cancelled`
+    // error hits the failure-explanation model call rather than the bounded
+    // pre-termination warning turn (see
+    // `failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first`).
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
@@ -4359,7 +4515,9 @@ async fn cancellation_during_explanation_model_call_propagates_cancelled() {
                 kind: AgentLoopHostErrorKind::Cancelled,
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::failed("permanent")]]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::completed(
+            "result:cancel-during-explanation",
+        )]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
     };
@@ -4368,7 +4526,7 @@ async fn cancellation_during_explanation_model_call_propagates_cancelled() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let result = executor
-        .execute_family(&crate::families::default(), &host, state)
+        .execute_family(&family_with_iteration_limit(0), &host, state)
         .await;
 
     assert!(
@@ -4492,16 +4650,13 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
 
 #[tokio::test]
 async fn retry_uses_single_call_invocation() {
-    for error_kind in [
-        CapabilityFailureKind::Transient,
-        CapabilityFailureKind::Network,
-    ] {
+    for error_kind in [FailureKind::Transient, FailureKind::Network] {
         let host = MockHost::new(vec![calls_response()])
             .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
                 resolutions: vec![resolution::failed(
                     error_kind,
                     "temporary failure".to_string(),
-                    None,
+                    diagnostic_failure_detail("temporary failure"),
                 )],
                 stopped_on_suspension: false,
             }])
@@ -4525,6 +4680,118 @@ async fn retry_uses_single_call_invocation() {
         assert!(matches!(exit, LoopExit::Completed(_)));
         assert_eq!(final_staged_state(&host).recovery_state, Default::default());
     }
+}
+
+/// A denial must reach the model with something it can act on.
+///
+/// Denials passed `model_observation: None`, so the model got a summary string
+/// and nothing structured — no recovery, no retry constraint, no repairs. A
+/// denial meaning *authenticate and this works* was indistinguishable from a
+/// permanent block (#6284 item 4). This drives a real denial through the
+/// executor and asserts the appended result carries a recovery observation
+/// naming the next move.
+#[tokio::test]
+async fn a_denial_tells_the_model_what_would_unlock_it() {
+    // `auth_denied` is minted by the capability port for a real authorization
+    // failure; #6781 maps it to `DenyReason::UnknownSecret`. Provider replay
+    // metadata is required for a denial to mint a result ref, so this uses the
+    // two-provider-call shape (one completed, one denied) that
+    // `denied_provider_call_appends_failure_tool_result_for_replay` uses.
+    let result_ref = LoopResultRef::new("result:denial-hint-ok").expect("valid");
+    let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![
+                resolution::completed(
+                    result_ref.clone(),
+                    "provider call completed".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    true,
+                    0,
+                    None,
+                    None,
+                ),
+                resolution::denied(
+                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::unknown("auth_denied")
+                        .expect("valid reason tag"),
+                    // Deliberately avoids the word "credential": the summary
+                    // channel's credential-marker guard would scrub it to a
+                    // placeholder, which is orthogonal to what this pins.
+                    "sign-in required for this provider".to_string(),
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 2, "completed call plus the denial");
+    let denial_result = &appended[1];
+    let observation = denial_result
+        .model_observation
+        .as_ref()
+        .expect("a denial must carry a model observation, not None");
+    let recovery = observation
+        .recovery
+        .as_ref()
+        .expect("a denial observation must carry recovery guidance");
+
+    // The specific action, not a generic "obey the constraint".
+    assert_eq!(
+        recovery.recovery_hint,
+        CapabilityRecoveryHint::AuthenticateThenRetry,
+        "a credential-missing denial must point the model at an auth flow"
+    );
+    assert!(
+        recovery.recovery_hint.names_an_action(),
+        "the denial hint must name a concrete next move"
+    );
+    assert_eq!(recovery.same_call_retry, SameCallRetryConstraint::Forbidden);
+}
+
+#[tokio::test]
+async fn denial_without_summary_emits_actionable_detail() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![ironclaw_host_api::Resolution::Denied(
+                Denial::new(DenyRef::new()).with_reason_kind(DenyReason::PolicyDenied),
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    let observation = appended
+        .first()
+        .and_then(|result| result.model_observation.as_ref())
+        .expect("summary-less denial must append a model-visible observation");
+    let ToolObservationDetail::GenericFailure {
+        failure_kind,
+        detail,
+    } = &observation.detail
+    else {
+        panic!("summary-less denial must carry generic failure detail");
+    };
+    assert_eq!(*failure_kind, FailureKind::PolicyDenied);
+    assert_eq!(
+        detail.as_deref(),
+        Some(
+            "The host denied this capability with reason policy_denied; follow the recovery \
+             guidance before choosing the next action."
+        )
+    );
 }
 
 #[tokio::test]
@@ -4560,6 +4827,25 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
     assert!(matches!(exit, LoopExit::Completed(_))); // safety: test-only assertion
     assert_eq!(host.single_invocations().len(), 1); // safety: test-only assertion
     assert_eq!(final_staged_state(&host).recovery_state, Default::default()); // safety: test-only assertion
+    let recovered = host
+        .progress_events()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Capability,
+                    class: LoopRecoveryClass::Capability(FailureKind::PolicyDenied),
+                    disposition: LoopRecoveryDisposition::Retried,
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        recovered, 1,
+        "one applied capability retry must emit exactly one recovery numerator"
+    );
 }
 
 #[tokio::test]
@@ -4831,9 +5117,9 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
     let host = MockHost::new(vec![provider_calls_response(), reply_response()])
         .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::InvalidInput,
+                FailureKind::InputEncode,
                 "provider arguments failed schema validation".to_string(),
-                Some(CapabilityFailureDetail::InvalidInput {
+                CapabilityFailureDetail::InvalidInput {
                     issues: vec![CapabilityInputIssue {
                         path: "file_path".to_string(),
                         code: DispatchInputIssueCode::MissingRequired,
@@ -4841,7 +5127,7 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
                         received: None,
                         schema_path: Some("required".to_string()),
                     }],
-                }),
+                },
             )],
             stopped_on_suspension: false,
         }]);
@@ -4904,9 +5190,9 @@ async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recove
         (0..3)
             .map(|_| ironclaw_host_api::ResolutionBatch {
                 resolutions: vec![resolution::failed(
-                    CapabilityFailureKind::OperationFailed,
+                    FailureKind::OperationFailed,
                     "filesystem discovery failed".to_string(),
-                    None,
+                    diagnostic_failure_detail("filesystem discovery failed"),
                 )],
                 stopped_on_suspension: false,
             })
@@ -4937,6 +5223,24 @@ async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recove
     );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 3);
+    let recovery_sequences = host
+        .progress_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            LoopProgressEvent::FailureRecovered {
+                sequence,
+                stage: LoopRecoveryStage::Capability,
+                class: LoopRecoveryClass::Capability(FailureKind::OperationFailed),
+                disposition: LoopRecoveryDisposition::ModelVisible,
+            } => Some(sequence),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery_sequences,
+        vec![1, 2, 3],
+        "each directly model-visible tool failure must contribute one ordered numerator event"
+    );
     assert_eq!(
         final_staged_state(&host)
             .stop_state
@@ -4961,14 +5265,14 @@ async fn repeated_multi_call_failures_do_not_trip_no_progress_and_run_can_recove
             .map(|_| ironclaw_host_api::ResolutionBatch {
                 resolutions: vec![
                     resolution::failed(
-                        CapabilityFailureKind::OperationFailed,
+                        FailureKind::OperationFailed,
                         "first discovery failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("first discovery failed"),
                     ),
                     resolution::failed(
-                        CapabilityFailureKind::OperationFailed,
+                        FailureKind::OperationFailed,
                         "second discovery failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("second discovery failed"),
                     ),
                 ],
                 stopped_on_suspension: false,
@@ -5062,9 +5366,9 @@ async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_st
             (0..3)
                 .map(|_| ironclaw_host_api::ResolutionBatch {
                     resolutions: vec![resolution::failed(
-                        CapabilityFailureKind::OperationFailed,
+                        FailureKind::OperationFailed,
                         "non-replayable capability failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("non-replayable capability failed"),
                     )],
                     stopped_on_suspension: false,
                 })
@@ -5109,27 +5413,27 @@ async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_st
 async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
     for (error_kind, safe_summary, expected_summary) in [
         (
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "invalid input",
-            "capability failed with invalid_input: invalid input",
+            "capability failed with input_encode: invalid input",
         ),
         (
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "provider arguments failed schema validation at instance path root against schema path required",
-            "capability failed with invalid_input: provider arguments failed schema validation at instance path root against schema path required",
+            "capability failed with input_encode: provider arguments failed schema validation at instance path root against schema path required",
         ),
         (
-            CapabilityFailureKind::MissingRuntime,
+            FailureKind::MissingRuntime,
             "runtime missing",
             "capability failed with missing_runtime: runtime missing",
         ),
         (
-            CapabilityFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
             "operation failed",
             "capability failed with operation_failed: operation failed",
         ),
         (
-            CapabilityFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
             "response body exceeded limit 10000000",
             "capability failed with output_too_large: response body exceeded limit 10000000",
         ),
@@ -5139,7 +5443,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
                 resolutions: vec![resolution::failed(
                     error_kind,
                     safe_summary.to_string(),
-                    None,
+                    diagnostic_failure_detail(safe_summary),
                 )],
                 stopped_on_suspension: false,
             }]);
@@ -5186,9 +5490,9 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
     let host = MockHost::new(vec![provider_calls_response(), reply_response()])
         .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::OutputTooLarge,
+                FailureKind::OutputTooLarge,
                 long_summary,
-                None,
+                diagnostic_failure_detail("capability output exceeded the allowed size"),
             )],
             stopped_on_suspension: false,
         }]);
@@ -7111,6 +7415,59 @@ async fn stale_surface_batch_failure_is_recoverable() {
     );
 }
 
+/// Regression test for epic #6284 item 1: a caller-shaped capability port
+/// error (here `Unauthorized`, but any kind whose
+/// `capability_port_error_is_terminal` is false) returned from the batch
+/// dispatch must NOT end the run as `HostUnavailable { Capability }`.
+///
+/// Pre-fix (RED): every non-Cancelled port `Err` funneled through
+/// `capability_host_error` and killed the run. Post-fix (GREEN): the executor
+/// routes the error by `FailureKind::fate` — the model receives a tool-error
+/// observation (kind `authorization`) via `handle_capability_error`, the loop
+/// continues, and the scripted final reply completes the run.
+#[tokio::test]
+async fn recoverable_batch_port_error_surfaces_as_model_visible_tool_error() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .fail_batch_with(AgentLoopHostErrorKind::Unauthorized);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect(
+            "REGRESSION: an Unauthorized capability port error must not kill the run as \
+             HostUnavailable — it must surface to the model as a tool error",
+        );
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "run must complete after the model observes the authorization tool error; got {exit:?}"
+    );
+
+    // The model saw the failure as a tool-error observation with the honest
+    // unified kind (Unauthorized -> Authorization), not a run-ending fault.
+    let appended = host.appended_result_refs();
+    let observation = appended
+        .iter()
+        .find_map(|request| request.model_observation.as_ref())
+        .expect("a tool-error observation must be appended for the failed call");
+    assert_eq!(observation.status, ToolObservationStatus::Error);
+    match &observation.detail {
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail,
+        } => {
+            assert_eq!(*failure_kind, FailureKind::Authorization);
+            assert_eq!(
+                detail.as_deref(),
+                Some("scripted batch failure"),
+                "the caller-shaped host cause must survive the persistence/model observation seam"
+            );
+        }
+        other => panic!("expected GenericFailure observation detail, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn non_stale_batch_failure_stays_terminal() {
     let host =
@@ -7781,9 +8138,9 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         // [1] cap1 approval-resume → Backend failure.
         ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::Backend,
+                FailureKind::Backend,
                 "transient backend error during cap1 resume".to_string(),
-                None,
+                diagnostic_failure_detail("transient backend error during cap1 resume"),
             )],
             stopped_on_suspension: false,
         },
@@ -7866,6 +8223,22 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         host.single_invocations().is_empty(),
         "no single invoke_capability call must be made for a resume-origin Backend failure \
          (retry is suppressed to avoid double-exec)"
+    );
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Capability,
+                    class: LoopRecoveryClass::Capability(FailureKind::Backend),
+                    disposition: LoopRecoveryDisposition::ModelVisible,
+                }
+            ))
+            .count(),
+        1,
+        "the redirected resume-origin failure must emit one model-visible recovery event"
     );
 }
 
@@ -7951,9 +8324,9 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         // [1] Phase 2: cap1 auth-resume → Backend failure.
         ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::Backend,
+                FailureKind::Backend,
                 "transient backend error during cap1 auth-resume".to_string(),
-                None,
+                diagnostic_failure_detail("transient backend error during cap1 auth-resume"),
             )],
             stopped_on_suspension: false,
         },
@@ -8130,7 +8503,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
             LoopProgressEvent::CapabilityActivityFailed {
                 activity_id,
                 capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::GateDeclined,
+                reason_kind: FailureKind::GateDeclined,
                 ..
             } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
         )),
@@ -8151,6 +8524,15 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         observation.summary, "Capability declined by user.",
         "observation summary must describe the gate-declined failure"
     );
+    let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+        panic!("gate-declined observation must carry generic failure detail");
+    };
+    assert!(
+        detail
+            .as_deref()
+            .is_some_and(|text| text.contains("user declined its approval request")),
+        "gate-declined observation must tell the model why the capability did not run"
+    );
     let recovery = observation
         .recovery
         .as_ref()
@@ -8166,9 +8548,9 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     let host =
         MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::GateDeclined,
+                FailureKind::GateDeclined,
                 "auth gate denied by user".to_string(),
-                None,
+                diagnostic_failure_detail("auth gate denied by user"),
             )],
             stopped_on_suspension: false,
         }]);
@@ -8315,9 +8697,9 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         // auth resume; the host terminalizes it as a gate-declined failure.
         ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::GateDeclined,
+                FailureKind::GateDeclined,
                 "auth gate denied by user".to_string(),
-                None,
+                diagnostic_failure_detail("auth gate denied by user"),
             )],
             stopped_on_suspension: false,
         },
@@ -8456,9 +8838,9 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             // first, then Y's normal dispatch completes.
             resolutions: vec![
                 resolution::failed(
-                    CapabilityFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -8679,9 +9061,9 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
             // terminalization first, then the surviving call's completion.
             resolutions: vec![
                 resolution::failed(
-                    CapabilityFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -8867,9 +9249,9 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             // first, then Y and Z complete.
             resolutions: vec![
                 resolution::failed(
-                    CapabilityFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),

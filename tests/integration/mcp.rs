@@ -249,18 +249,24 @@ async fn assert_mcp_tool_called_fails_when_no_mcp_call_ran() {
 }
 
 /// Error path — MCP `tools/call` returns a JSON-RPC `error` object. The client
-/// surfaces this as `Failed{Backend}` (a recoverable, model-visible tool
+/// surfaces this as `Failed{Client}` (a recoverable, model-visible tool
 /// error), so the run continues to completion rather than dying with
 /// `driver_unavailable`. Distinct wire path from the 5xx case below: this trips
 /// the client's JSON-RPC error-field guard, not its HTTP status gate.
 #[tokio::test]
-async fn mcp_tool_call_error_cause_reaches_next_model_request() {
+async fn mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request() {
+    const RAW_TOKEN: &str = concat!("ghp_", "012345678901234567890123456789012345");
+    const TAIL_SENTINEL: &str = "diagnostic-tail-must-not-reach-model";
+    let diagnostic_cause = format!(
+        "MCP request failed while opening /workspace/project/runtime.sock using {RAW_TOKEN}: {}{TAIL_SENTINEL}",
+        "é".repeat(3_000)
+    );
     let server = start_mock_mcp_server(vec![MockToolResponse {
         name: "search".to_string(),
         content: serde_json::json!({"results": []}),
     }])
     .await;
-    server.set_tool_call_error(-32602, "distinctive-mcp-cause-5965");
+    server.set_tool_call_error(-32602, diagnostic_cause);
 
     let h = RebornIntegrationHarness::test_default()
         .script([
@@ -277,19 +283,32 @@ async fn mcp_tool_call_error_cause_reaches_next_model_request() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool was invoked before the error");
-    h.assert_tool_error(ToolErrorClass::Failed, "backend")
+    h.assert_tool_error(ToolErrorClass::Failed, "client")
         .await
         .expect("JSON-RPC error surfaced as a model-visible Failed tool error");
-    h.assert_model_request_contains("distinctive-mcp-cause-5965")
+    h.assert_model_request_contains("/workspace/project/runtime.sock")
         .await
-        .expect("MCP backend cause reached the next captured model request");
+        .expect("the useful MCP backend cause reached the next captured model request");
+    h.assert_model_request_contains("[REDACTED]")
+        .await
+        .expect("the next model request carries the redacted cause");
+    assert!(
+        h.assert_model_request_contains(RAW_TOKEN).await.is_err(),
+        "the raw credential token must not reach any captured model request"
+    );
+    assert!(
+        h.assert_model_request_contains(TAIL_SENTINEL)
+            .await
+            .is_err(),
+        "diagnostic text beyond the shared byte cap must not reach the model"
+    );
     h.assert_reply_contains("done")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
 /// Error path — MCP server returns HTTP 5xx on the tool call. The client
-/// surfaces this as `Failed{Backend}` (recoverable, model-visible), and the run
+/// surfaces this as `Failed{Client}` (recoverable, model-visible), and the run
 /// completes. Distinct wire path from the JSON-RPC-error case above: this trips
 /// the client's HTTP status gate, not its JSON-RPC error-field guard.
 #[tokio::test]
@@ -316,7 +335,7 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool call reached the server before the 5xx");
-    h.assert_tool_error(ToolErrorClass::Failed, "backend")
+    h.assert_tool_error(ToolErrorClass::Failed, "client")
         .await
         .expect("server 5xx surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")

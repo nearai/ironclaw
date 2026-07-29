@@ -49,7 +49,7 @@ use crate::outbound_delivery::{
 };
 use crate::{ProjectFilesystemReader, ProjectFsEntryKind, ProjectFsError};
 
-/// The nine semantic intents (§5.4). Emitters express *what* is being
+/// The semantic intents (§5.4). Emitters express *what* is being
 /// communicated; the coordinator decides targeting, persistence, and retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryIntent {
@@ -65,6 +65,8 @@ pub enum DeliveryIntent {
     ConnectRequired,
     /// Pairing or account-connection status feedback.
     ConnectionStatus,
+    /// Immediate result or user-correctable rejection of a product command.
+    CommandFeedback,
     /// A transient "working on it" indicator.
     Working,
     /// Remove an earlier delivery (e.g. delete the working indicator).
@@ -99,6 +101,7 @@ impl DeliveryIntent {
             Self::FailureNotice => "failure-notice",
             Self::ConnectRequired => "connect-required",
             Self::ConnectionStatus => "connection-status",
+            Self::CommandFeedback => "command-feedback",
             Self::Working => "working",
             Self::Cleanup => "cleanup",
             Self::TriggeredDelivery => "triggered-delivery",

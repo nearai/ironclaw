@@ -11,6 +11,7 @@ import json
 import httpx
 import pytest
 
+from conftest import skip_if_emulate_capability_absent
 from emulate_provider import (
     github_json,
     github_headers,
@@ -97,9 +98,18 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
         )
         events_response.raise_for_status()
         events = events_response.json()["items"]
-        assert any(event["summary"] == "Reborn planning sync" for event in events)
+        # Match on the provider-issued event id from the seed fixture
+        # (fixtures/emulate/google_gmail.yaml), not the human-readable
+        # summary: two events with the same summary would otherwise be
+        # indistinguishable here.
         assert any(
-            event["summary"] == "PepsiCo procurement sync"
+            event["id"] == "evt_reborn_planning_sync"
+            and event["summary"] == "Reborn planning sync"
+            for event in events
+        )
+        assert any(
+            event["id"] == "evt_pepsico_procurement_sync"
+            and event["summary"] == "PepsiCo procurement sync"
             and any(
                 attendee["email"] == "buyer@pepsico.example"
                 for attendee in event.get("attendees", [])
@@ -252,7 +262,7 @@ async def test_emulate_google_covers_reborn_docs_contract(emulate_google_server)
             json={"title": marker},
         )
         if created.status_code == 404:
-            pytest.skip("Emulate 0.7.0 does not expose the Google Docs API")
+            skip_if_emulate_capability_absent("Emulate 0.7.0 does not expose the Google Docs API")
         created.raise_for_status()
         document_id = created.json()["documentId"]
         assert created.json()["title"] == marker
@@ -298,7 +308,7 @@ async def test_emulate_google_covers_reborn_sheets_contract(emulate_google_serve
             json={"properties": {"title": marker}},
         )
         if created.status_code == 404:
-            pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
+            skip_if_emulate_capability_absent("Emulate 0.7.0 does not expose the Google Sheets API")
         created.raise_for_status()
         spreadsheet = created.json()
         spreadsheet_id = spreadsheet["spreadsheetId"]
@@ -495,7 +505,7 @@ async def test_emulate_slack_covers_reborn_search_messages(emulate_slack_server)
             params={"query": marker, "count": 20, "sort": "timestamp"},
         )
         if response.status_code == 404:
-            pytest.skip("Emulate 0.7.0 does not expose Slack search.messages")
+            skip_if_emulate_capability_absent("Emulate 0.7.0 does not expose Slack search.messages")
         response.raise_for_status()
         body = response.json()
         assert body["ok"] is True
@@ -640,7 +650,10 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             "/repos/nearai/ironclaw/issues",
             params={"state": "open"},
         )
-        assert any(item["title"] == issue_title for item in issues)
+        # Match on the provider-issued issue number, not the title: a
+        # second issue created with the same title elsewhere in the repo
+        # would otherwise satisfy this assertion for the wrong resource.
+        assert any(item["number"] == issue["number"] for item in issues)
 
         issue_search = await github_json(
             client,

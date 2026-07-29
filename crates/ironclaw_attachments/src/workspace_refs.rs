@@ -149,8 +149,11 @@ fn mask_fenced_code_blocks(bytes: &mut [u8]) {
             close_start = next_line_start(bytes, candidate_end);
         }
         let Some(end) = close_end else {
-            line_start = next_line_start(bytes, opening_line_end);
-            continue;
+            // CommonMark treats an unclosed fenced block as extending through
+            // end-of-input. Masking the remainder also prevents each later
+            // fence-looking line from rescanning the same suffix.
+            bytes[line_start..].fill(b' ');
+            break;
         };
         bytes[line_start..end].fill(b' ');
         line_start = end;
@@ -327,6 +330,20 @@ mod tests {
         assert_eq!(
             extract_workspace_attachment_paths(text),
             vec!["/workspace/visible.txt"]
+        );
+    }
+
+    #[test]
+    fn ignores_unclosed_fenced_block_through_end_of_input() {
+        let mut text = String::from("```text\n");
+        for index in 0..1_000 {
+            text.push_str(&format!("```unclosed-{index}\n"));
+        }
+        text.push_str("/workspace/secret.pdf");
+
+        assert!(
+            extract_workspace_attachment_paths(&text).is_empty(),
+            "an unclosed fenced block extends through the end of the input"
         );
     }
 

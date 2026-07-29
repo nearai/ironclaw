@@ -288,7 +288,10 @@ export function SelectMenu({
   return (
     <div
       ref={rootRef}
-      className={cn("relative inline-block min-w-[9.5rem] text-left", className)}
+      className={cn(
+        "relative inline-block min-w-[9.5rem] text-left font-sans text-ui",
+        className
+      )}
       {...rootPassthroughProps}
     >
       <button
@@ -311,7 +314,7 @@ export function SelectMenu({
         className={cn(
           "inline-flex h-8 w-full items-center justify-between gap-2 rounded-[8px] border",
           "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5",
-          "font-mono text-xs text-[var(--v2-text-strong)] shadow-none transition-colors",
+          "text-[var(--v2-text-strong)] shadow-none transition-colors",
           "hover:bg-[var(--v2-surface-muted)]",
           "focus-visible:outline-none focus-visible:ring-2",
           "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
@@ -362,7 +365,7 @@ export function SelectMenu({
                 onClick={() => chooseOption(option)}
                 className={cn(
                   "flex w-full items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
-                  "text-left font-mono text-xs text-[var(--v2-text)] transition-colors",
+                  "text-left text-[var(--v2-text)] transition-colors",
                   "focus-visible:outline-none",
                   "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
                   "disabled:cursor-not-allowed disabled:opacity-50",

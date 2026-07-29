@@ -137,8 +137,8 @@ pub use ironclaw_turns::TurnStatus;
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
 pub use memory_provider_factory::{
-    Mem0ConnectionConfig, MemoryProviderDeps, build_memory_service_resolver,
-    create_document_store_provider,
+    Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
+    create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
@@ -508,13 +508,23 @@ where
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
+///
+/// State, event, and audit persistence all use `runtime`. A second libSQL
+/// connection target is deliberately not configurable here: one physical
+/// database has one composition-owned runtime and one writer admission lane.
 pub struct LibSqlProductionSubstrateConfig<TPolicy, TWake>
 where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
-    pub database: Arc<libsql::Database>,
-    pub event_store: RebornEventStoreConfig,
+    pub runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+    /// The exact target from which `runtime` was opened through
+    /// [`ironclaw_libsql_runtime::LibSqlRuntime::open`]. Caller-supplied
+    /// database handles do not carry this provenance and are rejected.
+    ///
+    /// Retained only for production durability and transport-policy
+    /// validation; it is never reopened by the event store.
+    pub database_path_or_url: String,
     /// Set this only when deployment guarantees exactly one runtime process, or
     /// one elected runtime owner, is allowed to enforce resource quotas for this
     /// database. The filesystem governor keeps in-process tallies as authority.

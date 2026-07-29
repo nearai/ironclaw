@@ -1,49 +1,64 @@
 ---
-title: "Web Search"
-description: "Let your agent search the web"
+title: "Web Access"
+sidebarTitle: "Web Search"
+description: "Let your agent search the web and read pages"
+icon: globe
 ---
 
-The Web Search tool allows your agent to use the [Brave Search API]() search the web for up-to-date information, making it ideal for answering questions about current events, finding specific data, or gathering general information.
+The Web Access extension lets your agent search the web and retrieve full page content,
+so it can answer questions about current events, look up specific data, and cite its
+sources.
+
+It needs no credentials. There is no API key to obtain and no account to create — install
+it, activate it, and the tools are available.
 
 ---
 
 ## Setup
 
-
 <Steps>
 
-<Step title="Get a Brave Search API Key">
-To use the Web Search tool, you need to obtain an API key from Brave Search. You can get one by signing up at https://api-dashboard.search.brave.com 
+<Step title="Install the extension">
 
-<Info>
+```bash
+ironclaw extension install web-access
+```
 
-As of the time of writing, Brave Search API offers 5$ of free credits per month on their basic plan, which is more than enough for testing and small-scale use.
-
-</Info>
-
+<Note>
+The extension id is `web-access`, not `web-search`. Run `ironclaw extension search web`
+to confirm the id your install knows about.
+</Note>
 
 </Step>
 
-<Step title="Install the Web Search Extension">
-
-To install the Web Search extension, run the following command in your terminal:
+<Step title="Activate it">
 
 ```bash
-ironclaw registry install web-search
+ironclaw extension activate web-access
 ```
 
-</Step>
-
-<Step title="Configure the API Key">
-
-After installing the extension, you need to configure your Brave Search API key in IronClaw. You can do this by running:
-
-```bash
-ironclaw tool auth web-search
-```
-
-Then follow the prompts to enter your API key.
+Activation publishes the tools to the agent. Because no credentials are involved, there
+is nothing to supply afterwards.
 
 </Step>
 
 </Steps>
+
+You can do both steps from **Extensions** in the [web interface](/using/webui) instead.
+
+---
+
+## What the Agent Can Do
+
+| Capability | Description |
+| --- | --- |
+| `web-access.search` | Search the web and return results with citations |
+| `web-access.get_content` | Retrieve a page's full content, or re-read a page cached from an earlier search |
+
+Both are allowed by default once the extension is active.
+
+<Tip>
+For GitHub repositories, issues, pull requests, releases, or workflow data, the
+[GitHub extension](/extensions/github) returns better-structured results than a web
+search. Install it if your agent works with GitHub regularly.
+</Tip>

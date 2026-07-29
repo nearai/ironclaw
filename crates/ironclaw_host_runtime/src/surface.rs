@@ -13,8 +13,8 @@ use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
     capability_catalog::read_json_ref,
     first_party_tools::{
-        BUILTIN_FIRST_PARTY_PROVIDER, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-        resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+        BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref,
+        resolve_native_memory_input_schema_ref,
     },
 };
 use ironclaw_runtime_policy::plan_capability;
@@ -23,6 +23,7 @@ const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,
     RuntimeKind::Mcp,
     RuntimeKind::Script,
+    RuntimeKind::Sandbox,
     RuntimeKind::FirstParty,
     RuntimeKind::System,
 ];
@@ -314,20 +315,25 @@ impl<'a> CapabilityCatalog<'a> {
             return Ok(descriptor);
         }
 
-        // Native memory rides the same always-on inline-schema lane as builtin,
-        // under its own provider id, so its model-facing tools resolve without
-        // any asset materialization.
-        if descriptor.provider.as_str() == NATIVE_MEMORY_FIRST_PARTY_PROVIDER {
+        // The bound memory provider's package rides the same always-on
+        // inline-schema lane as builtin, under its own provider id, so its
+        // model-facing tools resolve without any asset materialization. Every
+        // bundled memory provider (native, mem0) declares the shared
+        // `schemas/memory/*` refs, served from one compiled-in source of
+        // truth.
+        if crate::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS
+            .contains(&descriptor.provider.as_str())
+        {
             let Some(reference) = reference else {
                 return Err(HostRuntimeError::invalid_request(format!(
-                    "native memory capability {} must publish from an input schema ref",
+                    "memory capability {} must publish from an input schema ref",
                     descriptor.id
                 )));
             };
             descriptor.parameters_schema = resolve_native_memory_input_schema_ref(&reference)
                 .ok_or_else(|| {
                     HostRuntimeError::invalid_request(format!(
-                        "native memory capability {} references unknown input schema {}",
+                        "memory capability {} references unknown input schema {}",
                         descriptor.id, reference
                     ))
                 })?;
@@ -525,6 +531,7 @@ fn runtime_kind_token(runtime: RuntimeKind) -> &'static str {
         RuntimeKind::Wasm => "wasm",
         RuntimeKind::Mcp => "mcp",
         RuntimeKind::Script => "script",
+        RuntimeKind::Sandbox => "sandbox",
         RuntimeKind::FirstParty => "first_party",
         RuntimeKind::System => "system",
     }
@@ -590,6 +597,18 @@ mod tests {
         }
     }
 
+    /// Pins the wire token for the sandboxed-shell lane. `runtime_kind_token`
+    /// is duplicated in `ironclaw_loop_host::capability_info::runtime_kind_label`
+    /// (see the mirrored test there) — the two copies can drift.
+    #[test]
+    fn runtime_kind_token_maps_sandbox_to_stable_wire_string() {
+        assert_eq!(runtime_kind_token(RuntimeKind::Sandbox), "sandbox");
+        assert_eq!(
+            canonical_runtime_kinds(&[RuntimeKind::Sandbox]),
+            vec!["sandbox"]
+        );
+    }
+
     #[tokio::test]
     async fn builtin_surface_descriptor_requires_input_schema_ref() {
         let descriptor = CapabilityDescriptor {
@@ -633,7 +652,10 @@ mod tests {
     async fn native_memory_surface_descriptor_requires_input_schema_ref() {
         let descriptor = CapabilityDescriptor {
             id: CapabilityId::new("ironclaw.memory.bad").unwrap(),
-            provider: ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            provider: ExtensionId::new(
+                crate::first_party_tools::NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+            )
+            .unwrap(),
             runtime: RuntimeKind::FirstParty,
             trust_ceiling: TrustClass::UserTrusted,
             description: "bad native memory descriptor".to_string(),

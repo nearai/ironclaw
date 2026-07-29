@@ -32,9 +32,9 @@ use ironclaw_host_api::{
     TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, InboundAttachment, InstallationState, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode,
+    CapabilitySurfaceKind, InboundAttachment, InstallationState, LifecyclePublicState,
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceValidationCode,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -49,7 +49,7 @@ use ironclaw_product::{
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
     ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
-    ChannelConnectionService, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
+    ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
@@ -72,14 +72,15 @@ use ironclaw_product::{
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductService, PROJECT_DELETE_CAPABILITY_ID,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
-    PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
-    PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCancelRunRequest, ProductCapabilityInvoker,
-    ProductCreateThreadRequest, ProductListAutomationsRequest, ProductListThreadsRequest,
-    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
+    OperatorStatusService, OutboundPreferencesProductService, PRODUCT_STATUS_COMMAND_OPERATION_ID,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
+    PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
+    ProductCancelRunRequest, ProductCapabilityInvoker, ProductCreateThreadRequest,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
+    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
@@ -88,41 +89,41 @@ use ironclaw_product::{
     RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
-    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornServices, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeProductRequest, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
     SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
+    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -168,6 +169,40 @@ use tokio::sync::{Notify, oneshot};
 
 fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
+}
+
+#[tokio::test]
+async fn status_command_reports_idle_for_a_bound_conversation_without_messages() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let response = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(PRODUCT_STATUS_COMMAND_OPERATION_ID)
+                .expect("status operation"),
+            input: serde_json::to_value(ProductStatusCommandInput {
+                thread_id: "thread-empty-command-conversation".to_string(),
+            })
+            .expect("status input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("a newly bound conversation has an idle status");
+    let view: CommandResultView =
+        serde_json::from_value(response.output).expect("command result view");
+
+    assert_eq!(view.title, "Status");
+    assert_eq!(view.fields.len(), 1);
+    assert_eq!(view.fields[0].label, "State");
+    assert_eq!(view.fields[0].value, "idle");
+    assert_eq!(
+        view.lines,
+        vec!["No assistant activity in this conversation yet."]
+    );
 }
 
 /// Wait until the wall clock is strictly past `floor`, so the next thread
@@ -2288,6 +2323,39 @@ async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
     assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(!error.retryable);
+}
+
+#[tokio::test]
+async fn trace_hold_authorize_capability_decodes_typed_product_input() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_host_api::ProductSurfaceInvokeRequest {
+            operation_id: TRACE_HOLD_AUTHORIZE_COMMAND
+                .capability_id()
+                .expect("trace hold capability id"),
+            input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
+                submission_id: "not-a-submission-id".to_string(),
+            })
+            .expect("trace hold input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("invalid submission id must fail validation");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.field.as_deref(), Some("submission_id"));
+    assert_eq!(
+        error.validation_code,
+        Some(ProductSurfaceValidationCode::InvalidId)
+    );
 }
 
 #[tokio::test]
@@ -5861,7 +5929,7 @@ async fn setup_extension_projects_through_configured_lifecycle_service() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,
         LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
@@ -5894,7 +5962,7 @@ async fn extension_setup_is_available_as_product_view() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert_eq!(
         lifecycle_service.package_refs(),
         vec![
@@ -5929,8 +5997,8 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
 
     assert_eq!(extension.tools, vec!["github.read", "github.write"]);
     assert_eq!(
-        extension.onboarding_state,
-        Some(RebornExtensionOnboardingState::SetupRequired)
+        extension.installation_state,
+        LifecyclePublicState::SetupNeeded
     );
     let onboarding = extension.onboarding.as_ref().expect("onboarding payload");
     assert_eq!(
@@ -6037,6 +6105,12 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
             phase: InstallationState::Active,
             install_scope: None,
         },
+    }))
+    // The caller has connected this OAuth channel. Without it the extension is
+    // correctly `setup_needed` (that is the unpaired-channel contract), so the
+    // connected signal is what this test's `active` assertion depends on.
+    .with_channel_connection_service(Arc::new(ConnectedChannelConnectionService {
+        connections: std::collections::HashMap::from([("slack".to_string(), true)]),
     }));
 
     let response = query_extensions(&services, caller())
@@ -6070,7 +6144,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     // so the frontend never derives a label from the channel id.
     assert_eq!(connection.display_name, "Slack");
     // §6.1 installation-state enum replaces the activation_status string.
-    assert_eq!(info.installation_state, InstallationState::Active);
+    assert_eq!(info.installation_state, LifecyclePublicState::Active);
 }
 
 /// A caller-scoped channel-connection service that reports a fixed set of
@@ -6154,7 +6228,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         .expect("multi-surface extension listed");
 
     // §6.1 installation-state enum on the wire (replaces the activation_status string).
-    assert_eq!(info.installation_state, InstallationState::Active);
+    assert_eq!(info.installation_state, LifecyclePublicState::Active);
 
     // §6.4 / ADR 0001 accounts list — the frozen shape, named field for field.
     // A live grant backfills to `connected` (MIG-1); one account per vendor,
@@ -6360,14 +6434,16 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         .find(|extension| extension.package_ref.id.as_str() == "acme")
         .expect("extension listed");
 
-    // (a) The terminal §6.1 `Failed` state projects distinctly — NOT collapsed
-    // to Installed/Active.
+    // (a) An internal activation failure stays a redacted diagnostic attached
+    // to the one caller-visible setup state; it never creates a third public
+    // lifecycle state (overview.md §6.1). The distinguishing signal is
+    // `activation_error` below, not a bespoke wire state.
     assert_eq!(
         info.installation_state,
-        InstallationState::Failed,
-        "a Failed extension must project its own installation_state",
+        LifecyclePublicState::SetupNeeded,
+        "a failed internal activation checkpoint must remain setup_needed",
     );
-    assert_ne!(info.installation_state, InstallationState::Installed);
+    assert_ne!(info.installation_state, LifecyclePublicState::Active);
 
     // (c) The redacted activation error reaches the DTO with its reason (the
     // frontend card renders this slot; it was fed `None` before).
@@ -9547,7 +9623,7 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
         .expect("setup extension response");
 
     let onboarding = response.onboarding.as_ref().expect("onboarding payload");
-    assert_eq!(response.phase, InstallationState::Configured);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert_eq!(
         onboarding.credential_instructions.as_deref(),
         Some("github is installed. Activate it to make its tools available.")

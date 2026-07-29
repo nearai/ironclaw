@@ -79,6 +79,11 @@ fn parse_codex_cli_version(output: &str) -> Option<String> {
 /// wedged or slow binary stalling provider construction.
 const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The Responses API's terminal event for a response that did *not* complete.
+/// Named because the event type is itself a finish-reason signal: it proves
+/// the response was incomplete even when the payload elaborates nothing.
+const RESPONSES_INCOMPLETE_EVENT: &str = "response.incomplete";
+
 /// Query the installed `codex` binary for its version (e.g. `0.137.0`).
 ///
 /// Returns `None` if the binary is absent, times out, exits non-zero, or its
@@ -483,6 +488,49 @@ impl CodexChatGptProvider {
         items
     }
 
+    async fn map_failed_response(response: reqwest::Response, request_model: &str) -> LlmError {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .map(crate::retry::parse_retry_after_value);
+        let unreadable_body_error = |reason: &'static str| match status.as_u16() {
+            429 => LlmError::RateLimited {
+                provider: "codex_chatgpt".to_string(),
+                retry_after,
+            },
+            500..=599 => LlmError::BadGateway {
+                provider: "codex_chatgpt".to_string(),
+                status: status.as_u16(),
+                retry_after,
+            },
+            _ => LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: reason.to_string(),
+            },
+        };
+        let body = match tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::error::read_bounded_provider_error_body(response),
+        )
+        .await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return unreadable_body_error("failed to read provider error response"),
+            Err(_) => {
+                return unreadable_body_error("timed out while reading provider error response");
+            }
+        };
+        let body = String::from_utf8_lossy(&body);
+        crate::error::map_provider_http_error(crate::error::ProviderHttpError {
+            adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
+            model: request_model,
+            status: status.as_u16(),
+            body: body.as_ref(),
+            retry_after,
+        })
+    }
+
     /// Send a request and parse the SSE response.
     ///
     /// On HTTP 401, if a refresh token is available, attempts to refresh
@@ -495,6 +543,11 @@ impl CodexChatGptProvider {
             model = %body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
             "Codex ChatGPT: sending request"
         );
+        let request_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(self.configured_model.as_str())
+            .to_string();
 
         let api_key = self.api_key.read().await.clone();
         let resp =
@@ -520,22 +573,7 @@ impl CodexChatGptProvider {
                     .await?;
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
-                        let body_text =
-                            tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
-                                .await
-                                .unwrap_or(Ok(String::new()))
-                                .unwrap_or_default();
-                        if let Some(error) =
-                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
-                        {
-                            return Err(error);
-                        }
-                        return Err(LlmError::RequestFailed {
-                            provider: "codex_chatgpt".to_string(),
-                            reason: format!(
-                                "HTTP {retry_status} from {url} (after concurrent token refresh): {body_text}"
-                            ),
-                        });
+                        return Err(Self::map_failed_response(retry_resp, &request_model).await);
                     }
                     return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
                 }
@@ -561,22 +599,7 @@ impl CodexChatGptProvider {
 
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
-                        let body_text =
-                            tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
-                                .await
-                                .unwrap_or(Ok(String::new()))
-                                .unwrap_or_default();
-                        if let Some(error) =
-                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
-                        {
-                            return Err(error);
-                        }
-                        return Err(LlmError::RequestFailed {
-                            provider: "codex_chatgpt".to_string(),
-                            reason: format!(
-                                "HTTP {retry_status} from {url} (after token refresh): {body_text}"
-                            ),
-                        });
+                        return Err(Self::map_failed_response(retry_resp, &request_model).await);
                     }
 
                     return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
@@ -596,21 +619,7 @@ impl CodexChatGptProvider {
         }
 
         if !status.is_success() {
-            // Read the error body with a timeout to avoid hanging
-            let body_text = tokio::time::timeout(Duration::from_secs(5), resp.text())
-                .await
-                .unwrap_or(Ok(String::new()))
-                .unwrap_or_default();
-            // Context-overflow (HTTP 413, or a 400 whose body names a
-            // context-length error) must surface as ContextLengthExceeded so
-            // the loop's context-shrink recovery fires.
-            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
-                return Err(error);
-            }
-            return Err(LlmError::RequestFailed {
-                provider: "codex_chatgpt".to_string(),
-                reason: format!("HTTP {status} from {url}: {body_text}",),
-            });
+            return Err(Self::map_failed_response(resp, &request_model).await);
         }
 
         Self::parse_sse_response_stream(resp, self.request_timeout).await
@@ -852,12 +861,20 @@ impl CodexChatGptProvider {
                     entry.arguments = arguments.to_string();
                 }
             }
+            // The Responses API streams a policy refusal on its own channel.
+            "response.refusal.delta" | "response.refusal.done" => {
+                result.saw_refusal = true;
+            }
             "response.output_item.done" => {
                 if let Some(item) = parsed.get("item").or_else(|| parsed.get("output")) {
                     Self::merge_completed_output_item(result, item, result.text.is_empty());
                 }
             }
-            "response.completed" => {
+            // Both terminal events. `response.incomplete` used to fall through
+            // to `_ => {}`, so the stream ran dry and a `max_output_tokens`
+            // truncation surfaced as "stream ended before response.completed"
+            // with the partial answer discarded.
+            "response.completed" | RESPONSES_INCOMPLETE_EVENT => {
                 if let Some(response) = parsed.get("response")
                     && let Some(usage) = response.get("usage")
                 {
@@ -872,13 +889,29 @@ impl CodexChatGptProvider {
                 }
                 if let Some(response) = parsed.get("response") {
                     Self::merge_completed_response_output(result, response);
+                    // The provider states why it stopped; a refusal part is a
+                    // content block even when `status` reads "completed".
+                    result.finish_reason = Self::map_responses_status(response, event_type).or({
+                        if result.saw_refusal {
+                            Some(FinishReason::ContentFilter)
+                        } else {
+                            None
+                        }
+                    });
+                } else if result.saw_refusal {
+                    result.finish_reason = Some(FinishReason::ContentFilter);
+                } else if event_type == RESPONSES_INCOMPLETE_EVENT {
+                    // No `response` object at all, but the event type still
+                    // says the response did not complete.
+                    result.finish_reason = Some(FinishReason::Unknown);
                 }
                 tracing::debug!(
                     content_bytes = result.text.len(),
                     tool_call_count = result.pending_tool_calls.len(),
                     input_tokens = result.input_tokens,
                     output_tokens = result.output_tokens,
-                    "Codex ChatGPT: parsed completed response"
+                    finish_reason = ?result.finish_reason,
+                    "Codex ChatGPT: parsed terminal response"
                 );
                 return Ok(true);
             }
@@ -950,8 +983,13 @@ impl CodexChatGptProvider {
         allow_text_fallback: bool,
     ) {
         match item.get("type").and_then(|value| value.as_str()) {
-            Some("message") if allow_text_fallback => {
-                Self::append_output_message_text(&mut result.text, item);
+            Some("message") => {
+                if Self::output_message_has_refusal(item) {
+                    result.saw_refusal = true;
+                }
+                if allow_text_fallback {
+                    Self::append_output_message_text(&mut result.text, item);
+                }
             }
             Some("function_call") => {
                 let item_id = item
@@ -1002,6 +1040,65 @@ impl CodexChatGptProvider {
         }
     }
 
+    /// Map the Responses API's own terminal event to a finish reason.
+    ///
+    /// Three signals, in order of authority:
+    ///
+    /// 1. `incomplete_details.reason` — the provider's own token, translated
+    ///    by the one shared table, [`crate::provider::map_provider_finish_token`].
+    ///    A second hand-maintained table here is how `max_output_tokens` ends
+    ///    up classified one way by Codex and another way everywhere else. A
+    ///    reason present but unrecognized (or blank) is `Unknown`, never `Stop`.
+    /// 2. `status` — `incomplete` is a failure even when nothing elaborates it.
+    /// 3. The event type itself — an explicit `response.incomplete` from an
+    ///    older or proxied endpoint proves the response was incomplete even
+    ///    when it carries neither field. The absent-status clean fallback
+    ///    belongs to `response.completed` alone.
+    ///
+    /// Returns `None` only when the response completed normally, leaving the
+    /// response shape to decide between `Stop` and `ToolUse`.
+    fn map_responses_status(response: &Value, event_type: &str) -> Option<FinishReason> {
+        if let Some(reason) = response
+            .get("incomplete_details")
+            .and_then(|details| details.get("reason"))
+            .and_then(|reason| reason.as_str())
+        {
+            return crate::provider::map_provider_finish_token(reason)
+                .or(Some(FinishReason::Unknown));
+        }
+
+        match response
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+        {
+            "completed" => None,
+            "" if event_type != RESPONSES_INCOMPLETE_EVENT => None,
+            _ => Some(FinishReason::Unknown),
+        }
+    }
+
+    /// Does this output message carry a policy refusal?
+    ///
+    /// Two shapes count: a part whose `type` is literally `"refusal"`, and a
+    /// part carrying a non-empty `refusal` string (the structured-outputs
+    /// shape). The key's mere *presence* does not: OpenAI sets `refusal` to
+    /// `null` on every non-refused structured-output part, so treating that as
+    /// a refusal would report a successful answer as content-filtered.
+    fn output_message_has_refusal(item: &Value) -> bool {
+        item.get("content")
+            .and_then(|value| value.as_array())
+            .is_some_and(|content| {
+                content.iter().any(|part| {
+                    part.get("type").and_then(|value| value.as_str()) == Some("refusal")
+                        || part
+                            .get("refusal")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|refusal| !refusal.trim().is_empty())
+                })
+            })
+    }
+
     fn append_output_message_text(output: &mut String, item: &Value) {
         let Some(content) = item.get("content").and_then(|value| value.as_array()) else {
             return;
@@ -1024,6 +1121,11 @@ struct ResponsesResult {
     pending_tool_calls: std::collections::HashMap<String, PendingToolCall>,
     input_tokens: u32,
     output_tokens: u32,
+    /// What the provider said about why it stopped. `None` means it reported a
+    /// normal completion (or reported nothing), so the response shape decides.
+    finish_reason: Option<FinishReason>,
+    /// A policy refusal was streamed or present in the output.
+    saw_refusal: bool,
 }
 
 #[derive(Debug)]
@@ -1036,6 +1138,10 @@ struct PendingToolCall {
 
 #[async_trait]
 impl LlmProvider for CodexChatGptProvider {
+    fn provider_id(&self) -> String {
+        "codex_chatgpt".to_string()
+    }
+
     fn model_name(&self) -> &str {
         // Return resolved model if available, otherwise the configured name.
         self.resolved_model
@@ -1060,7 +1166,7 @@ impl LlmProvider for CodexChatGptProvider {
             content: result.text,
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,
-            finish_reason: FinishReason::Stop,
+            finish_reason: crate::provider::resolve_finish_reason(result.finish_reason, false),
             reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
@@ -1114,11 +1220,8 @@ impl LlmProvider for CodexChatGptProvider {
             crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
         );
 
-        let finish_reason = if tool_calls.is_empty() {
-            FinishReason::Stop
-        } else {
-            FinishReason::ToolUse
-        };
+        let finish_reason =
+            crate::provider::resolve_finish_reason(result.finish_reason, !tool_calls.is_empty());
 
         Ok(ToolCompletionResponse {
             content: if result.text.is_empty() {
@@ -1911,6 +2014,310 @@ data: {"response":{"usage":{"input_tokens":5,"output_tokens":5}}}
             response.tool_calls[0].arguments,
             json!({ "required_arg": "x" })
         );
+    }
+
+    /// Conformance matrix for the Codex ChatGPT (OpenAI Responses API)
+    /// adapter — #6284 item 8, contract clause (e).
+    ///
+    /// `complete` hardcoded `FinishReason::Stop` and `complete_with_tools`
+    /// guessed from the tool-call shape, while the terminal event's own
+    /// `status` / `incomplete_details.reason` were never read. A response cut
+    /// off at `max_output_tokens` and a policy refusal both reported success.
+    ///
+    /// Each case is the Responses API's own terminal payload, driven through
+    /// the public `complete` entry point over a real loopback HTTP boundary.
+    #[tokio::test]
+    async fn codex_finish_reason_conformance_matrix() {
+        async fn finish_reason_for(sse: &'static str) -> FinishReason {
+            let base_url = responses_api_test_server::spawn(sse).await;
+            let provider = CodexChatGptProvider::new(&base_url, "test-key", "gpt-4o");
+            provider
+                .complete(CompletionRequest::new(vec![ChatMessage::user("hi")]))
+                .await
+                .expect("provider returns the terminal response")
+                .finish_reason
+        }
+
+        // status = completed → a clean stop.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"done"}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Stop,
+        );
+
+        // status = incomplete, reason = max_output_tokens → truncation.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"half an ans"}
+
+data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Length,
+            "a max_output_tokens truncation must not be reported as a clean stop",
+        );
+
+        // status = incomplete, reason = content_filter → policy block.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"I can't"}
+
+data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::ContentFilter,
+        );
+
+        // A refusal content part on an otherwise "completed" response.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"refusal","refusal":"I'm sorry, I can't help with that."}]}],"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::ContentFilter,
+            "a Responses API refusal part is a content block, not a clean stop",
+        );
+
+        // `refusal: null` is the *non*-refused shape: OpenAI sets the key on
+        // every structured-output part and leaves it null when nothing was
+        // refused. Treating the key's mere presence as a refusal fails runs
+        // that actually succeeded.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"here you go","refusal":null}]}],"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Stop,
+            "refusal: null alongside real content is a clean stop, not a content block",
+        );
+
+        // A refusal string on a part whose `type` is not literally "refusal"
+        // (the structured-outputs shape) is still a policy block.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","refusal":"I'm sorry, I can't help with that."}]}],"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::ContentFilter,
+            "a non-null refusal string is a content block whatever the part type says",
+        );
+
+        // status = incomplete with a reason we do not recognize → Unknown,
+        // never Stop.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"partial"}
+
+data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"teapot"},"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Unknown,
+        );
+
+        // status = incomplete with `incomplete_details` absent entirely. This
+        // is the branch that keeps an incomplete response carrying partial
+        // output from falling back to a clean Stop.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"partial"}
+
+data: {"type":"response.incomplete","response":{"status":"incomplete","usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Unknown,
+            "an incomplete status states a failure even when it says nothing more",
+        );
+
+        // An explicit `response.incomplete` event that omits both `status` and
+        // `incomplete_details` (older or proxied endpoint). The event type
+        // alone proves the response was incomplete, so the absent-status clean
+        // fallback must not apply here.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"partial"}
+
+data: {"type":"response.incomplete","response":{"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Unknown,
+            "an explicit response.incomplete event is a failure signal even unelaborated",
+        );
+
+        // The Responses API also streams a policy refusal on its own channel,
+        // with no refusal part in the terminal payload at all. The dedicated
+        // `response.refusal.*` events are the only evidence there is.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.refusal.delta","delta":"I'm sorry, "}
+
+data: {"type":"response.refusal.done","refusal":"I'm sorry, I can't help with that."}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::ContentFilter,
+            "a refusal streamed on its own channel is a content block, not a clean stop",
+        );
+
+        // status absent entirely (older/proxied server) → documented fallback:
+        // the terminal event arrived, so a text-only body is a clean stop.
+        assert_eq!(
+            finish_reason_for(
+                r#"data: {"type":"response.output_text.delta","delta":"done"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#
+            )
+            .await,
+            FinishReason::Stop,
+        );
+    }
+
+    /// Test through the caller on the tool-capable path: a response truncated
+    /// at `max_output_tokens` that still emitted a function call must report
+    /// `Length`, not `ToolUse` — the arguments may be cut off mid-JSON.
+    #[tokio::test]
+    async fn complete_with_tools_reports_codex_truncation_over_tool_call_shape() {
+        let base_url = responses_api_test_server::spawn(
+            r#"event: response.output_item.added
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"builtin_echo"}}
+
+event: response.function_call_arguments.delta
+data: {"item_id":"fc_1","delta":"{\"message\":\"hel"}
+
+event: response.incomplete
+data: {"response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":3,"output_tokens":2}}}
+
+"#,
+        )
+        .await;
+        let provider = CodexChatGptProvider::new(&base_url, "test-key", "gpt-4o");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("use echo")],
+            vec![ToolDefinition {
+                name: "builtin.echo".to_string(),
+                description: "Echo input".to_string(),
+                parameters: json!({"type": "object"}),
+            }],
+        );
+
+        let response = provider
+            .complete_with_tools(request)
+            .await
+            .expect("provider returns the terminal response");
+
+        assert_eq!(
+            response.finish_reason,
+            FinishReason::Length,
+            "a truncated tool call must not be laundered into ToolUse",
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_http_error_body_preserves_status_through_provider_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn request_truncated_error(
+            status_line: &'static str,
+            headers: &'static str,
+        ) -> LlmError {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let address = listener.local_addr().expect("local address");
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.expect("accept request");
+                    let mut request = [0u8; 4096];
+                    let bytes_read = socket.read(&mut request).await.expect("read request");
+                    let request = String::from_utf8_lossy(&request[..bytes_read]);
+                    if request.starts_with("GET /models") {
+                        let body = r#"{"models":[{"slug":"gpt-4o"}]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("write model response");
+                        continue;
+                    }
+
+                    assert!(request.starts_with("POST /responses"));
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: 128\r\n{headers}connection: close\r\n\r\n{{\"error\":"
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write truncated error response");
+                    break;
+                }
+            });
+
+            let provider =
+                CodexChatGptProvider::new(&format!("http://{address}"), "test-key", "gpt-4o");
+            let error = provider
+                .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+                .await
+                .expect_err("truncated error body must fail the request");
+            server.await.expect("test server");
+            error
+        }
+
+        let error = request_truncated_error("400 Bad Request", "").await;
+        assert!(matches!(
+            error,
+            LlmError::RequestFailed { provider, reason }
+                if provider == "codex_chatgpt"
+                    && reason == "failed to read provider error response"
+        ));
+
+        let error = request_truncated_error("429 Too Many Requests", "retry-after: 17\r\n").await;
+        assert!(matches!(
+            error,
+            LlmError::RateLimited {
+                provider,
+                retry_after: Some(retry_after),
+            } if provider == "codex_chatgpt" && retry_after == Duration::from_secs(17)
+        ));
+
+        let error = request_truncated_error("502 Bad Gateway", "retry-after: 23\r\n").await;
+        assert!(matches!(
+            error,
+            LlmError::BadGateway {
+                provider,
+                status: 502,
+                retry_after: Some(retry_after),
+            } if provider == "codex_chatgpt" && retry_after == Duration::from_secs(23)
+        ));
     }
 
     mod responses_api_test_server {

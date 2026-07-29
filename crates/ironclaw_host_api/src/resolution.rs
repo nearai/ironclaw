@@ -37,9 +37,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelFailureDiagnostic, ModelResultPreview,
-    OutputDigest, ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary,
-    TerminateHint,
+    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelDiagnostic, ModelFailureDiagnostic,
+    ModelResultPreview, OutputDigest, ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId,
+    SafeSummary, TerminateHint,
 };
 
 /// A pending-gate handle plus the additive context needed to resume and correlate
@@ -336,7 +336,6 @@ impl Suspension {
 /// recoverable failure. `FailureKind` is a bounded taxonomy, never the raw backend
 /// cause — that stays host-side.
 ///
-/// Not `Copy` (unlike the earlier slice): `FailureKind::Unknown` owns a `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolVerdict {
@@ -347,12 +346,12 @@ pub enum ToolVerdict {
     /// Carries the [`FailureKind`] recovery classification, and — additively — the
     /// redacted, model-visible [`ModelFailureDiagnostic`] the model corrects from
     /// (the structured `InvalidInput` issues or a redacted free-text cause), so a
-    /// later slice can render the tool error without reading host storage. `None`
-    /// when the producer supplied no structured diagnostic.
+    /// later slice can render the tool error without reading host storage.
+    /// New producers cannot construct this variant without supplying it.
     RecoverableFailure {
         error_kind: FailureKind,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        diagnostic: Option<ModelFailureDiagnostic>,
+        #[serde(default = "legacy_unavailable_failure_diagnostic")]
+        diagnostic: ModelFailureDiagnostic,
     },
     /// The capability spawned a child run; non-suspending (§5.3 table). Carries
     /// the child's [`RunId`] — a correlation ref, safe on the sanitized boundary.
@@ -360,16 +359,6 @@ pub enum ToolVerdict {
 }
 
 impl ToolVerdict {
-    /// A recoverable failure carrying only its recovery classification (no
-    /// structured diagnostic). Use [`ToolVerdict::recoverable_failure_with_diagnostic`]
-    /// to attach the model-visible [`ModelFailureDiagnostic`].
-    pub fn recoverable_failure(error_kind: FailureKind) -> Self {
-        Self::RecoverableFailure {
-            error_kind,
-            diagnostic: None,
-        }
-    }
-
     /// A recoverable failure carrying its recovery classification and the redacted,
     /// model-visible diagnostic the model corrects from.
     pub fn recoverable_failure_with_diagnostic(
@@ -378,7 +367,7 @@ impl ToolVerdict {
     ) -> Self {
         Self::RecoverableFailure {
             error_kind,
-            diagnostic: Some(diagnostic),
+            diagnostic,
         }
     }
 
@@ -396,11 +385,11 @@ impl ToolVerdict {
         }
     }
 
-    /// The redacted, model-visible diagnostic, present only on a
-    /// [`ToolVerdict::RecoverableFailure`] whose producer supplied one.
+    /// The redacted, model-visible diagnostic, present on every
+    /// [`ToolVerdict::RecoverableFailure`].
     pub fn diagnostic(&self) -> Option<&ModelFailureDiagnostic> {
         match self {
-            ToolVerdict::RecoverableFailure { diagnostic, .. } => diagnostic.as_ref(),
+            ToolVerdict::RecoverableFailure { diagnostic, .. } => Some(diagnostic),
             _ => None,
         }
     }
@@ -420,6 +409,14 @@ impl ToolVerdict {
             ToolVerdict::RecoverableFailure { .. } => "recoverable_failure",
             ToolVerdict::ChildSpawned { .. } => "child_spawned",
         }
+    }
+}
+
+/// Compatibility default for recoverable-failure payloads written before the
+/// diagnostic became structurally required. New constructors never use it.
+fn legacy_unavailable_failure_diagnostic() -> ModelFailureDiagnostic {
+    ModelFailureDiagnostic::Diagnostic {
+        text: ModelDiagnostic::unavailable(),
     }
 }
 
@@ -840,17 +837,32 @@ mod tests {
             serde_json::Value::String("success".to_string())
         );
         assert_eq!(ToolVerdict::Success.kind(), "success");
-        let failure = ToolVerdict::recoverable_failure(FailureKind::InvalidInput);
+        let failure = ToolVerdict::recoverable_failure_with_diagnostic(
+            FailureKind::InputEncode,
+            ModelFailureDiagnostic::Diagnostic {
+                text: ModelDiagnostic::new("tool input rejected").unwrap(),
+            },
+        );
         assert_eq!(failure.kind(), "recoverable_failure");
         assert_eq!(
             serde_json::to_value(&failure).unwrap(),
-            serde_json::json!({ "recoverable_failure": { "error_kind": "invalid_input" } })
+            // New writes emit the precise tag; historical "invalid_input" rows
+            // stay readable via `FailureKind::from_tag`'s alias.
+            serde_json::json!({
+                "recoverable_failure": {
+                    "error_kind": "input_encode",
+                    "diagnostic": {
+                        "kind": "diagnostic",
+                        "text": "tool input rejected"
+                    }
+                }
+            })
         );
         assert!(ToolVerdict::Success.is_success());
         assert!(!failure.is_success());
         assert_eq!(ToolVerdict::Success.child_run(), None);
         assert_eq!(ToolVerdict::Success.error_kind(), None);
-        assert_eq!(failure.error_kind(), Some(&FailureKind::InvalidInput));
+        assert_eq!(failure.error_kind(), Some(&FailureKind::InputEncode));
     }
 
     #[test]
@@ -858,25 +870,37 @@ mod tests {
         // The structured, model-visible diagnostic rides the verdict so a later
         // slice can render the correction hint without reading host storage.
         let diagnostic = ModelFailureDiagnostic::Diagnostic {
-            text: SafeSummary::new("tool input rejected").unwrap(),
+            text: crate::ModelDiagnostic::new("tool input rejected").unwrap(),
         };
         let verdict = ToolVerdict::RecoverableFailure {
-            error_kind: FailureKind::InvalidInput,
-            diagnostic: Some(diagnostic.clone()),
+            error_kind: FailureKind::InputEncode,
+            diagnostic: diagnostic.clone(),
         };
         assert_eq!(verdict.diagnostic(), Some(&diagnostic));
         let back: ToolVerdict =
             serde_json::from_value(serde_json::to_value(&verdict).unwrap()).unwrap();
         assert_eq!(back, verdict);
         assert_eq!(back.diagnostic(), Some(&diagnostic));
-        // The additive diagnostic is omitted from the wire when absent, so the
-        // pre-diagnostic wire shape still rehydrates.
-        let bare = ToolVerdict::recoverable_failure(FailureKind::Network);
-        assert_eq!(bare.diagnostic(), None);
+        // A pre-diagnostic payload still rehydrates, but the legacy-only
+        // default becomes explicit on every subsequent write.
+        let legacy_wire = serde_json::json!({ "recoverable_failure": { "error_kind": "network" } });
+        let legacy: ToolVerdict = serde_json::from_value(legacy_wire).unwrap();
+        let fallback = ModelFailureDiagnostic::Diagnostic {
+            text: ModelDiagnostic::unavailable(),
+        };
+        assert_eq!(legacy.diagnostic(), Some(&fallback));
         assert_eq!(
-            serde_json::to_value(&bare).unwrap(),
-            serde_json::json!({ "recoverable_failure": { "error_kind": "network" } }),
-            "absent diagnostic must not appear on the wire"
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({
+                "recoverable_failure": {
+                    "error_kind": "network",
+                    "diagnostic": {
+                        "kind": "diagnostic",
+                        "text": "The capability runtime did not provide additional diagnostic detail."
+                    }
+                }
+            }),
+            "new writes must never emit a detail-less recoverable failure"
         );
     }
 
@@ -908,11 +932,11 @@ mod tests {
     fn recoverable_failure_carries_its_error_kind_across_the_wire() {
         // The recovery classification (retry-vs-terminal) survives round-trip —
         // the field the old mapping dropped as "G1".
-        for kind in [
-            FailureKind::Network,
-            FailureKind::unknown("quota_exceeded").unwrap(),
-        ] {
-            let verdict = ToolVerdict::recoverable_failure(kind.clone());
+        for kind in [FailureKind::Network, FailureKind::MethodMissing] {
+            let verdict = ToolVerdict::recoverable_failure_with_diagnostic(
+                kind,
+                legacy_unavailable_failure_diagnostic(),
+            );
             let back: ToolVerdict =
                 serde_json::from_value(serde_json::to_value(&verdict).unwrap()).unwrap();
             assert_eq!(back.error_kind(), Some(&kind));
@@ -956,7 +980,10 @@ mod tests {
                 origin: None,
                 output_digest: None,
             },
-            verdict: ToolVerdict::recoverable_failure(FailureKind::InvalidInput),
+            verdict: ToolVerdict::recoverable_failure_with_diagnostic(
+                FailureKind::InputEncode,
+                legacy_unavailable_failure_diagnostic(),
+            ),
             summary: SafeSummary::new("tool input rejected").unwrap(),
             progress: ResultProgress::default(),
             terminate_hint: TerminateHint::default(),
@@ -1069,7 +1096,10 @@ mod tests {
     }
 
     fn recoverable_failure() -> ToolVerdict {
-        ToolVerdict::recoverable_failure(FailureKind::InvalidInput)
+        ToolVerdict::recoverable_failure_with_diagnostic(
+            FailureKind::InputEncode,
+            legacy_unavailable_failure_diagnostic(),
+        )
     }
 
     fn outcome(verdict: ToolVerdict) -> Outcome {

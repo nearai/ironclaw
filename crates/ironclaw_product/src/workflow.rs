@@ -52,8 +52,9 @@ use crate::command_dispatch::{
     RejectingProductCommandAdmissionService,
 };
 use crate::commands::{
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID, ProductCommand,
-    ProductLifecycleCommandInput, ProductModelCommandInput,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductLifecycleCommandInput,
+    ProductModelCommandInput, ProductStatusCommandInput,
 };
 use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
@@ -152,7 +153,8 @@ impl DefaultProductSurface {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, Vec::new(), None).await
+        self.submit_inbound_inner(envelope, InboundAttachmentAdmission::Inline(Vec::new()))
+            .await
     }
 
     async fn submit_inbound_with_channel_attachment_transfer(
@@ -163,8 +165,10 @@ impl DefaultProductSurface {
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         self.submit_inbound_inner(
             envelope,
-            Vec::new(),
-            Some((channel_adapter, channel_egress)),
+            InboundAttachmentAdmission::Channel {
+                adapter: channel_adapter,
+                egress: channel_egress,
+            },
         )
         .await
     }
@@ -307,6 +311,14 @@ fn admission_outcome(
     }
 }
 
+enum InboundAttachmentAdmission {
+    Inline(Vec<InboundAttachment>),
+    Channel {
+        adapter: Arc<dyn ChannelAdapter>,
+        egress: Arc<dyn RestrictedEgress>,
+    },
+}
+
 impl DefaultProductSurface {
     /// Shared submit path for both the bytes-free [`Self::submit_inbound`]
     /// door and the inline-attachment [`Self::submit_inbound_with_attachments`] door.
@@ -315,8 +327,7 @@ impl DefaultProductSurface {
     async fn submit_inbound_inner(
         &self,
         envelope: ProductInboundEnvelope,
-        attachments: Vec<InboundAttachment>,
-        pinned_channel_transfer: Option<(Arc<dyn ChannelAdapter>, Arc<dyn RestrictedEgress>)>,
+        attachment_admission: InboundAttachmentAdmission,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         if matches!(
             envelope.payload(),
@@ -336,8 +347,10 @@ impl DefaultProductSurface {
         // Inline attachment bytes are only landed for user-message payloads (see
         // `dispatch_payload`). Fail closed if a caller staged bytes on any other
         // payload kind rather than silently dropping the user's files.
-        if !attachments.is_empty()
-            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        if matches!(
+            &attachment_admission,
+            InboundAttachmentAdmission::Inline(attachments) if !attachments.is_empty()
+        ) && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
         {
             return Err(ProductAdapterError::SurfaceRejected {
                 kind: ProductSurfaceRejectionKind::InvalidRequest,
@@ -397,8 +410,7 @@ impl DefaultProductSurface {
                         auth_interaction_service: &*self.auth_interaction_service,
                         delivered_gate_routes: &*self.delivered_gate_routes,
                     },
-                    attachments,
-                    pinned_channel_transfer,
+                    attachment_admission,
                 )
                 .await;
 
@@ -471,7 +483,8 @@ impl DefaultProductSurface {
         envelope: ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, attachments, None).await
+        self.submit_inbound_inner(envelope, InboundAttachmentAdmission::Inline(attachments))
+            .await
     }
 }
 
@@ -1123,19 +1136,12 @@ async fn dispatch_payload(
     action_id: crate::ProductActionId,
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
-    attachments: Vec<InboundAttachment>,
-    pinned_channel_transfer: Option<(Arc<dyn ChannelAdapter>, Arc<dyn RestrictedEgress>)>,
+    attachment_admission: InboundAttachmentAdmission,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
-            let dispatch = match pinned_channel_transfer {
-                Some((adapter, egress)) => {
-                    if !attachments.is_empty() {
-                        return Err(ProductSurfaceFailure::TurnSubmissionRejected {
-                            reason: "mixed inline and channel attachment sources are not allowed"
-                                .into(),
-                        });
-                    }
+            let dispatch = match attachment_admission {
+                InboundAttachmentAdmission::Channel { adapter, egress } => {
                     ports
                         .inbound_turn_service
                         .accept_user_message_with_before_policy_and_channel_transfer(
@@ -1146,7 +1152,7 @@ async fn dispatch_payload(
                         )
                         .await?
                 }
-                None => {
+                InboundAttachmentAdmission::Inline(attachments) => {
                     ports
                         .inbound_turn_service
                         .accept_user_message_with_before_policy_and_attachments(
@@ -1714,17 +1720,16 @@ async fn dispatch_product_command(
     command_surface: Option<&dyn ProductSurface>,
     command: ProductCommand,
 ) -> Result<ProductInboundAck, ProductSurfaceFailure> {
-    if matches!(
-        command,
-        ProductCommand::Status | ProductCommand::Unknown { .. }
-    ) {
-        return Ok(command_rejected_ack(&command));
+    if let ProductCommand::Unknown { name, .. } = &command {
+        return Ok(unknown_command_ack(name));
     }
     let Some(command_surface) = command_surface else {
         return Ok(command_rejected_ack(&command));
     };
-    let (operation_id, input, command_name) = product_command_operation(command)?;
-    let binding = lookup_interaction_binding(envelope, binding_service).await?;
+    let binding = binding_service
+        .resolve_binding(resolve_binding_request(envelope))
+        .await?;
+    let (operation_id, input, command_name) = product_command_operation(command, &binding)?;
     let caller = ProductSurfaceCaller::new(
         binding.tenant_id,
         binding.actor_user_id,
@@ -1750,6 +1755,7 @@ async fn dispatch_product_command(
 
 fn product_command_operation(
     command: ProductCommand,
+    binding: &ResolvedBinding,
 ) -> Result<(CapabilityId, serde_json::Value, String), ProductSurfaceFailure> {
     match command {
         ProductCommand::Lifecycle { action } => {
@@ -1767,10 +1773,25 @@ fn product_command_operation(
                 .map_err(product_command_internal_error)?,
             "model".to_string(),
         )),
-        ProductCommand::Status | ProductCommand::Unknown { .. } => {
-            unreachable!("unsupported product commands are rejected before operation mapping")
-        }
+        ProductCommand::Status => Ok((
+            command_operation_id(PRODUCT_STATUS_COMMAND_OPERATION_ID)?,
+            serde_json::to_value(ProductStatusCommandInput {
+                thread_id: binding.thread_id.to_string(),
+            })
+            .map_err(product_command_internal_error)?,
+            "status".to_string(),
+        )),
+        ProductCommand::Unknown { name, .. } => Err(ProductSurfaceFailure::UnsupportedActionKind {
+            kind: format!("unknown_product_command:{name}"),
+        }),
     }
+}
+
+fn unknown_command_ack(name: &str) -> ProductInboundAck {
+    ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        format!("unknown product command: {name}"),
+    ))
 }
 
 fn command_operation_id(id: &str) -> Result<CapabilityId, ProductSurfaceFailure> {
