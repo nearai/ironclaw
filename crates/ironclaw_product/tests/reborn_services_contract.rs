@@ -35,7 +35,7 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{
     CapabilitySurfaceKind, InstallationState, LifecyclePublicState, ProductSurface,
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode,
+    ProductSurfaceInvokeRequest, ProductSurfaceValidationCode,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -50,7 +50,7 @@ use ironclaw_product::{
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
     ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
-    ChannelConnectionService, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
+    ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
@@ -73,14 +73,15 @@ use ironclaw_product::{
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductService, PROJECT_DELETE_CAPABILITY_ID,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
-    PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
-    PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCancelRunRequest, ProductCapabilityInvoker,
-    ProductCreateThreadRequest, ProductListAutomationsRequest, ProductListThreadsRequest,
-    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
+    OperatorStatusService, OutboundPreferencesProductService, PRODUCT_STATUS_COMMAND_OPERATION_ID,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
+    PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
+    ProductCancelRunRequest, ProductCapabilityInvoker, ProductCreateThreadRequest,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
+    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
@@ -168,6 +169,40 @@ use tokio::sync::{Notify, oneshot};
 
 fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
+}
+
+#[tokio::test]
+async fn status_command_reports_idle_for_a_bound_conversation_without_messages() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let response = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(PRODUCT_STATUS_COMMAND_OPERATION_ID)
+                .expect("status operation"),
+            input: serde_json::to_value(ProductStatusCommandInput {
+                thread_id: "thread-empty-command-conversation".to_string(),
+            })
+            .expect("status input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("a newly bound conversation has an idle status");
+    let view: CommandResultView =
+        serde_json::from_value(response.output).expect("command result view");
+
+    assert_eq!(view.title, "Status");
+    assert_eq!(view.fields.len(), 1);
+    assert_eq!(view.fields[0].label, "State");
+    assert_eq!(view.fields[0].value, "idle");
+    assert_eq!(
+        view.lines,
+        vec!["No assistant activity in this conversation yet."]
+    );
 }
 
 /// Wait until the wall clock is strictly past `floor`, so the next thread

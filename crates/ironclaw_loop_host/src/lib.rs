@@ -2628,4 +2628,68 @@ mod tests {
         );
         assert_eq!(personal_context_source_label("///"), None);
     }
+
+    /// Every recovery hint the loop can emit must survive persistence.
+    ///
+    /// The vocabulary now has a single home (`host_api`) and `ironclaw_threads`
+    /// deserializes that enum rather than re-declaring its variants, so drift is
+    /// structurally impossible. This test guards the seam anyway, because the
+    /// *failure mode* is what makes it worth a test: an unaccepted value does
+    /// not surface a validation error to anyone — the caller **drops the whole
+    /// observation**, so the model loses the cause *and* the guidance and sees
+    /// only a bare summary.
+    ///
+    /// That is not hypothetical. #6284 item 4 added six hints while the
+    /// vocabulary was still duplicated by hand, missed the copy, and every
+    /// denial it was meant to improve persisted with no observation at all.
+    /// Crate-level tests all passed; only the persistence seam revealed it.
+    ///
+    /// This crate is the lowest one that sees both the emitting and persisting
+    /// sides. Driven through the real envelope constructor, not the validator,
+    /// so it pins what production actually stores.
+    #[test]
+    fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
+        use ironclaw_host_api::{CapabilityRecoveryHint, SameCallRetryConstraint};
+        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+        use ironclaw_turns::run_profile::{
+            MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+            ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+            ToolRecoveryObservation,
+        };
+
+        for hint in CapabilityRecoveryHint::ALL {
+            let observation = ModelVisibleToolObservation {
+                schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Error,
+                summary: "The capability failed.".to_string(),
+                detail: ToolObservationDetail::GenericFailure {
+                    failure_kind: ironclaw_host_api::FailureKind::PolicyDenied,
+                    detail: None,
+                },
+                artifacts: Vec::new(),
+                recovery: Some(
+                    ToolRecoveryObservation::new(SameCallRetryConstraint::Forbidden, *hint)
+                        // Exercise the optional delay field too: it is a key on
+                        // the same object, and an unknown KEY is rejected the
+                        // same silent way an unknown hint is.
+                        .with_retry_after(Some(30_000)),
+                ),
+                trust: ObservationTrust::UntrustedToolOutput,
+            };
+            let value = serde_json::to_value(&observation).expect("observation serializes");
+
+            let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+                "result:hint-conformance",
+                ToolResultSafeSummary::new("The capability failed.").expect("summary"),
+                Some(value),
+            )
+            .expect("envelope constructs");
+
+            assert!(
+                envelope.model_observation.is_some(),
+                "recovery hint {hint:?} does not survive persistence, so storing it DROPS THE \
+                 WHOLE OBSERVATION — the model would lose the cause and the guidance."
+            );
+        }
+    }
 }

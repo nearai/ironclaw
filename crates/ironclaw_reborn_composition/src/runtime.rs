@@ -3571,6 +3571,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
                         standalone_storage_root,
                         default_system_prompt_path,
                         resolved_tool_disclosure.is_bridged(),
+                        bool_env_flag("BENCHMARKING_MODE"),
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
                         reason: error.to_string(),
@@ -4076,6 +4077,14 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         boot,
         llm_reload,
     };
+    // Channel graphs begin reconciling before the canonical product surface
+    // can exist. Fill their first-write-wins command handle only after the
+    // runtime is complete, using the same surface exposed to WebUI and other
+    // product callers.
+    if let Some(assembly) = runtime._channel_host_assembly.as_ref() {
+        let command_surface = runtime.product_surface(None)?;
+        let _ = assembly.set_product_command_surface(command_surface);
+    }
     // Fill the composition's late-bound channel-connection facade slot (§6.4)
     // now the runtime's serving tenant is known: extension removal
     // (`ExtensionManagementPort::remove`) disconnects the caller's
@@ -4198,6 +4207,21 @@ struct ComposedSkillContextSource {
 }
 
 const MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+/// Reads a boolean feature flag from the environment. Absent or unrecognized
+/// values are treated as off — this gates an opt-in prompt addendum for
+/// unattended dataset evaluation (see `default_system_prompt.rs`), not a
+/// required config value, so we default closed rather than erroring on a
+/// typo'd value.
+fn bool_env_flag(key: &'static str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
 
 fn optional_nonzero_u32_env(
     key: &'static str,

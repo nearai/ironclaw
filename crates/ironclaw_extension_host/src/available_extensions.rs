@@ -2055,6 +2055,35 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             !summary.visible_capability_ids.is_empty(),
             "unified slack publishes model-visible tools"
         );
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("slack channel descriptor")
+                .commands,
+            ["status"],
+            "shipping Slack exposes only the exact status command"
+        );
+    }
+
+    #[test]
+    fn bundled_telegram_package_declares_status_only() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("telegram channel descriptor")
+                .commands,
+            ["status"],
+            "shipping Telegram exposes only the exact status command"
+        );
     }
 
     #[test]

@@ -491,7 +491,6 @@ pub(crate) async fn build_runtime_channel_host(
             .register_extras(
                 &binding.extension_id,
                 ironclaw_extension_host::channel_host::ChannelExtras {
-                    classifier: None,
                     preference_target_codec: binding.preference_target_codec.clone(),
                     subject_route_resolver: None,
                     storage_roots: None,

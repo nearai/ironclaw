@@ -26,9 +26,9 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, RuntimeLane,
-    SecretHandle,
+    CapabilityDispatcher, CapabilityId, DispatchError, DispatchErrorLane, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
+    RuntimeLane, SecretHandle,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -1005,8 +1005,9 @@ fn runtime_sort_key(kind: RuntimeKind) -> u8 {
         RuntimeKind::Wasm => 0,
         RuntimeKind::Mcp => 1,
         RuntimeKind::Script => 2,
-        RuntimeKind::FirstParty => 3,
-        RuntimeKind::System => 4,
+        RuntimeKind::Sandbox => 3,
+        RuntimeKind::FirstParty => 4,
+        RuntimeKind::System => 5,
     }
 }
 
