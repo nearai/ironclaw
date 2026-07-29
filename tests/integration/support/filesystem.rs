@@ -8,8 +8,8 @@ use ironclaw_product::ResolvedBinding;
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, EventRecord, FileStat,
-    FilesystemError, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, StorageTxn,
-    VersionedEntry,
+    FilesystemError, Filter, IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem, SeqNo,
+    StorageTxn, VersionedEntry,
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
 
@@ -132,6 +132,15 @@ where
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query_ordered(path, filter, page).await
     }
 
     async fn ensure_index(

@@ -197,30 +197,6 @@ async fn production_store_bundle_with_secret_credentials_validates_runtime_stora
     assert_runtime_storage_validation_error(&error);
 }
 
-#[tokio::test]
-async fn production_turn_state_store_uses_row_layout() {
-    let view = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").expect("turns mount alias"),
-        VirtualPath::new("/turns").expect("turns virtual path"),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .expect("mount view");
-    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
-        view,
-    ));
-
-    // `production_turn_state_store` returns the concrete
-    // `TurnStateRowStore` by type, so "production uses the row
-    // layout" is now a compile-time guarantee. This exercises the factory
-    // end-to-end and confirms the constructed store answers reads.
-    let store =
-        production_turn_state_store(filesystem, ironclaw_turns::TurnStateStoreLimits::default());
-
-    let snapshot = store.persistence_snapshot().await.expect("read snapshot");
-    assert!(snapshot.runs.is_empty());
-}
-
 fn empty_composite_filesystem() -> Arc<CompositeRootFilesystem> {
     Arc::new(CompositeRootFilesystem::new())
 }
@@ -563,9 +539,12 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
     ))
     .await
     .expect("standalone services build");
+    let turn_state = Arc::new(services.processes.agent_turn_runtime());
     let hook = TriggerCreatorPairingHook {
         outbound_delivery_targets: Arc::clone(&services.outbound_delivery_targets),
-        source_turn_state: services.turn_state.clone(),
+        source_reply_target: Arc::new(std::sync::RwLock::new(Arc::new(
+            TurnStateTriggerSourceReplyTarget::new(turn_state),
+        ))),
         scoped_filesystem: failing_trigger_conversation_filesystem(),
         conversations: tokio::sync::OnceCell::new(),
     };
@@ -597,7 +576,7 @@ async fn standalone_services_include_repl_runtime_substrate() {
     let _ = &services.product_auth;
     assert!(services.local_runtime_for_test().is_some());
     let _ = &services.scoped_filesystem;
-    let _ = &services.turn_state;
+    let _ = &services.processes;
     let _ = &services
         .local_runtime_for_test()
         .expect("local runtime")
@@ -1598,31 +1577,6 @@ fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
 }
 
 #[test]
-fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
-    let root = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
-    let owner_scope = ResourceScope {
-        tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
-        user_id: UserId::new("owner-alpha").expect("owner"),
-        agent_id: Some(ironclaw_host_api::AgentId::new("agent-alpha").expect("agent")),
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: InvocationId::new(),
-    };
-    let scoped =
-        owner_turn_state_filesystem(root, &owner_scope).expect("owner turn-state filesystem");
-    let path = ScopedPath::new("/turns/state.json").expect("turn state path");
-    let resolved = scoped
-        .resolve(&ResourceScope::system(), &path)
-        .expect("fixed view should resolve global store operation");
-
-    assert_eq!(
-        resolved.as_str(),
-        "/tenants/tenant-alpha/users/owner-alpha/turns/state.json"
-    );
-}
-
-#[test]
 fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
     let identity = RebornLocalRuntimeIdentity {
@@ -1705,7 +1659,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .await
     .expect("production libsql services build");
 
-    let turn_state = &services.turn_state;
+    let turn_state = services.processes.agent_turn_runtime();
     // Runtime-store unification (branch `unify-runtime-store-graph`): every
     // build — production libsql included — now composes the single unified
     // runtime store graph (`extension_lifecycle_surface_context` is no longer
@@ -1744,8 +1698,8 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         spawn_tree_root_run_id: None,
         product_context: None,
     };
-    ironclaw_turns::TurnStateStore::submit_turn(
-        turn_state.as_ref(),
+    ironclaw_turns::AgentTurnRuntimePort::submit_turn(
+        &turn_state,
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1753,29 +1707,14 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .await
     .expect("submit through production turn-state store");
 
-    let configured_path = VirtualPath::new(
-        "/tenants/configured-tenant/users/configured-owner/turns/rows/v1/deltas/log",
-    )
-    .expect("configured turn-state row delta log path");
-    let system_path =
-        VirtualPath::new("/tenants/__system__/users/__system__/turns/rows/v1/deltas/log")
-            .expect("system turn-state row delta log path");
-
     assert!(
-        append_log_has_entries(
+        process_journal_contains_scope(
             &assertion_filesystem,
-            &configured_path,
-            "configured turn-state row delta log read"
+            "configured-tenant",
+            "configured-owner"
         )
-        .await
-    );
-    assert!(
-        !append_log_has_entries(
-            &assertion_filesystem,
-            &system_path,
-            "system turn-state row delta log read"
-        )
-        .await
+        .await,
+        "process journal should retain the configured runtime identity"
     );
 }
 
@@ -1819,13 +1758,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     .await
     .expect("production libsql services build");
 
-    let turn_state = &services.turn_state;
-    let default_path =
-        VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
-            .expect("default turn-state row delta log path");
-    let system_path =
-        VirtualPath::new("/tenants/__system__/users/__system__/turns/rows/v1/deltas/log")
-            .expect("system turn-state row delta log path");
+    let turn_state = services.processes.agent_turn_runtime();
     let default_identity = RebornRuntimeIdentity::reborn_cli();
     let default_tenant = TenantId::new(default_identity.tenant_id).expect("default tenant");
     let scope = ironclaw_turns::TurnScope::new_with_owner(
@@ -1857,8 +1790,8 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         spawn_tree_root_run_id: None,
         product_context: None,
     };
-    ironclaw_turns::TurnStateStore::submit_turn(
-        turn_state.as_ref(),
+    ironclaw_turns::AgentTurnRuntimePort::submit_turn(
+        &turn_state,
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1867,35 +1800,44 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     .expect("submit through production turn-state store");
 
     assert!(
-        append_log_has_entries(
-            &assertion_filesystem,
-            &default_path,
-            "default turn-state row delta log read"
-        )
-        .await
-    );
-    assert!(
-        !append_log_has_entries(
-            &assertion_filesystem,
-            &system_path,
-            "system turn-state row delta log read"
-        )
-        .await
+        process_journal_contains_scope(&assertion_filesystem, "reborn-cli", "default-owner").await,
+        "process journal should retain the default runtime identity"
     );
 }
 
-async fn append_log_has_entries<F>(filesystem: &F, path: &VirtualPath, label: &str) -> bool
+async fn process_journal_contains_scope<F>(filesystem: &F, tenant_id: &str, user_id: &str) -> bool
 where
     F: RootFilesystem,
 {
-    match filesystem
-        .tail(path, ironclaw_filesystem::SeqNo::ZERO)
+    let prefix =
+        VirtualPath::new("/tenants/__system__/users/__system__/processes/materialized/process")
+            .expect("row-native process journal path");
+    for entry in filesystem
+        .list_dir(&prefix)
         .await
+        .expect("list row-native process journal")
     {
-        Ok(entries) => !entries.is_empty(),
-        Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => false,
-        Err(error) => panic!("{label}: {error}"),
+        let path = VirtualPath::new(format!("{}/{}", prefix.as_str(), entry.name))
+            .expect("row-native process path");
+        let body = filesystem
+            .read_file(&path)
+            .await
+            .expect("read row-native process");
+        let process: serde_json::Value =
+            serde_json::from_slice(&body).expect("deserialize row-native process");
+        if process
+            .pointer("/scope/tenant_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(tenant_id)
+            && process
+                .pointer("/scope/user_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(user_id)
+        {
+            return true;
+        }
     }
+    false
 }
 
 #[tokio::test]

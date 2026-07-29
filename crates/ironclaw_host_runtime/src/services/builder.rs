@@ -1,26 +1,22 @@
-use std::any::type_name;
-
 use std::sync::Arc;
 
 use super::LibSqlRootFilesystem;
 use super::PostgresRootFilesystem;
 use super::{
-    ApprovalRequestStore, ApprovalRequestStorePort, AuditSink, CapabilityLeaseStorePort,
-    CoalescingEventSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink,
-    EffectiveRuntimePolicy, EventBatchConfig, EventSink, FilesystemResourceGovernor,
-    FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor, NetworkHttpEgress,
-    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStorePort,
-    ProcessStorePort, ProductionComponentType, ProductionImplementationReadiness,
-    ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
-    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
-    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStorePort, RunStateStore,
-    RunStateStorePort, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
+    AgentTurnRuntimePort, ApprovalRequestStore, ApprovalRequestStorePort, AuditSink,
+    CapabilityLeaseStorePort, CoalescingEventSink, DurableAuditLog, DurableAuditSink,
+    DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig, EventSink,
+    FilesystemResourceGovernor, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
+    NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessInvocationStatePort,
+    ProductionComponentType, ProductionImplementationReadiness, ProductionWiringComponent,
+    ProductionWiringIssueKind, ProductionWiringReport, RebornEventStoreConfig,
+    RebornEventStoreError, RebornEventStores, RebornProfile, ResourceGovernor, RootFilesystem,
+    RunProfileResolver, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
     SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateRowStore, TurnStateStore, WasmError,
-    WasmRuntimeAdapter, WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost,
-    WitToolRuntimeConfig, build_reborn_event_stores, production_wiring_report,
-    set_runtime_http_egress, set_tool_call_http_egress,
+    TurnRunWakeNotifier, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
+    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
+    production_wiring_report, set_runtime_http_egress, set_tool_call_http_egress,
 };
 use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -28,14 +24,12 @@ use crate::http_body::UnsupportedRuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
 use ironclaw_secrets::{CredentialAccountStore, CredentialSessionStore};
 
-impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
+impl<F, G> HostRuntimeServices<F, G>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
 {
-    fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G, S, R>
+    fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G>
     where
         T: RootFilesystem + 'static,
     {
@@ -48,9 +42,8 @@ where
             authorizer,
             process_services,
             surface_version,
-            run_state,
+            invocation_state,
             approval_requests,
-            run_state_approval_store,
             capability_leases,
             persistent_approval_policies,
             event_sink,
@@ -78,7 +71,6 @@ where
             wasm_runtime,
             turn_state,
             run_profile_resolver,
-            turn_run_transition_port,
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
@@ -94,9 +86,8 @@ where
             authorizer,
             process_services,
             surface_version,
-            run_state,
+            invocation_state,
             approval_requests,
-            run_state_approval_store,
             capability_leases,
             persistent_approval_policies,
             event_sink,
@@ -124,7 +115,6 @@ where
             wasm_runtime,
             turn_state,
             run_profile_resolver,
-            turn_run_transition_port,
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
@@ -135,18 +125,18 @@ where
     pub fn with_postgres_root_filesystem(
         self,
         filesystem: Arc<PostgresRootFilesystem>,
-    ) -> HostRuntimeServices<PostgresRootFilesystem, G, S, R> {
+    ) -> HostRuntimeServices<PostgresRootFilesystem, G> {
         self.with_root_filesystem(filesystem)
     }
 
     pub fn with_libsql_root_filesystem(
         self,
         filesystem: Arc<LibSqlRootFilesystem>,
-    ) -> HostRuntimeServices<LibSqlRootFilesystem, G, S, R> {
+    ) -> HostRuntimeServices<LibSqlRootFilesystem, G> {
         self.with_root_filesystem(filesystem)
     }
 
-    pub fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T, S, R>
+    pub fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T>
     where
         T: ResourceGovernor + 'static,
     {
@@ -159,65 +149,8 @@ where
             authorizer,
             process_services,
             surface_version,
-            run_state,
+            invocation_state,
             approval_requests,
-            run_state_approval_store,
-            capability_leases,
-            persistent_approval_policies,
-            event_sink,
-            audit_sink,
-            security_audit_sink,
-            secret_store,
-            credential_account_store,
-            credential_session_store,
-            runtime_credential_account_resolver,
-            network_policy_store,
-            secret_injection_store,
-            process_lifecycle_store: _,
-            runtime_http_egress,
-            tool_call_http_egress,
-            process_port,
-            managed_process_port,
-            tenant_sandbox_process_port,
-            wasm_credential_provider,
-            runtime_health,
-            runtime_policy,
-            process_sandbox_executor,
-            script_runtime,
-            mcp_runtime,
-            first_party_runtime,
-            wasm_runtime,
-            turn_state,
-            run_profile_resolver,
-            turn_run_transition_port,
-            turn_run_wake_notifier,
-            extension_tool_resolver,
-            post_edit_check,
-            mut component_types,
-        } = self;
-        let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
-        let process_lifecycle_store = Arc::new(ProcessObligationLifecycleStore::new(
-            process_services.process_store(),
-            Arc::clone(&network_policy_store),
-            Arc::clone(&secret_injection_store),
-            lifecycle_governor,
-        ));
-        if let Some(event_sink) = &event_sink {
-            process_lifecycle_store.set_event_sink(Arc::clone(event_sink));
-        }
-        component_types.resource_governor = ProductionComponentType::of::<T>();
-        HostRuntimeServices {
-            registry,
-            trust_policy,
-            trust_policy_configured,
-            filesystem,
-            governor,
-            authorizer,
-            process_services,
-            surface_version,
-            run_state,
-            approval_requests,
-            run_state_approval_store,
             capability_leases,
             persistent_approval_policies,
             event_sink,
@@ -245,7 +178,52 @@ where
             wasm_runtime,
             turn_state,
             run_profile_resolver,
-            turn_run_transition_port,
+            turn_run_wake_notifier,
+            extension_tool_resolver,
+            post_edit_check,
+            mut component_types,
+        } = self;
+        let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
+        process_lifecycle_store.set_resource_governor(lifecycle_governor);
+        component_types.resource_governor = ProductionComponentType::of::<T>();
+        HostRuntimeServices {
+            registry,
+            trust_policy,
+            trust_policy_configured,
+            filesystem,
+            governor,
+            authorizer,
+            process_services,
+            surface_version,
+            invocation_state,
+            approval_requests,
+            capability_leases,
+            persistent_approval_policies,
+            event_sink,
+            audit_sink,
+            security_audit_sink,
+            secret_store,
+            credential_account_store,
+            credential_session_store,
+            runtime_credential_account_resolver,
+            network_policy_store,
+            secret_injection_store,
+            process_lifecycle_store,
+            runtime_http_egress,
+            tool_call_http_egress,
+            process_port,
+            managed_process_port,
+            tenant_sandbox_process_port,
+            wasm_credential_provider,
+            runtime_health,
+            runtime_policy,
+            process_sandbox_executor,
+            script_runtime,
+            mcp_runtime,
+            first_party_runtime,
+            wasm_runtime,
+            turn_state,
+            run_profile_resolver,
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
@@ -261,7 +239,7 @@ where
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
-    ) -> HostRuntimeServices<F, FilesystemResourceGovernor<FsBackend>, S, R>
+    ) -> HostRuntimeServices<F, FilesystemResourceGovernor<FsBackend>>
     where
         FsBackend: RootFilesystem + 'static,
     {
@@ -297,13 +275,12 @@ where
         self
     }
 
-    pub fn with_run_state<T>(mut self, run_state: Arc<T>) -> Self
+    pub fn with_invocation_state<T>(mut self, invocation_state: Arc<T>) -> Self
     where
-        T: RunStateStorePort + 'static,
+        T: ProcessInvocationStatePort + 'static,
     {
-        self.component_types.run_state = Some(ProductionComponentType::of::<T>());
-        self.run_state = Some(run_state);
-        self.run_state_approval_store = None;
+        self.component_types.invocation_state = Some(ProductionComponentType::of::<T>());
+        self.invocation_state = Some(invocation_state);
         self
     }
 
@@ -313,84 +290,35 @@ where
     {
         self.component_types.approval_requests = Some(ProductionComponentType::of::<T>());
         self.approval_requests = Some(approval_requests);
-        self.run_state_approval_store = None;
         self
     }
 
-    pub fn with_run_state_approval_store<T>(self, store: Arc<T>) -> Self
-    where
-        T: RunStateApprovalStorePort + 'static,
-    {
-        self.with_run_state_approval_store_readiness(store, ProductionComponentType::of::<T>())
-    }
-
-    /// Attaches a combined run-state/approval store that is explicitly marked
-    /// local-only by the composition root. This avoids relying on implementation
-    /// type-name strings for custom test/local stores while preserving a typed
-    /// production-readiness classification.
-    pub fn with_local_only_run_state_approval_store<T>(self, store: Arc<T>) -> Self
-    where
-        T: RunStateApprovalStorePort + 'static,
-    {
-        self.with_run_state_approval_store_readiness(
-            store,
-            ProductionComponentType::named(
-                type_name::<T>(),
-                ProductionImplementationReadiness::LocalOnly,
-            ),
-        )
-    }
-
-    fn with_run_state_approval_store_readiness<T>(
-        mut self,
-        store: Arc<T>,
-        component_type: ProductionComponentType,
-    ) -> Self
-    where
-        T: RunStateApprovalStorePort + 'static,
-    {
-        self.component_types.run_state = Some(component_type);
-        self.component_types.approval_requests = Some(component_type);
-        self.run_state = Some(store.clone());
-        self.approval_requests = Some(store.clone());
-        self.run_state_approval_store = Some(store);
-        self
-    }
-
-    /// Builds and attaches filesystem-backed run-state and approval-request
-    /// stores over the supplied [`ScopedFilesystem`].
+    /// Builds and attaches journal-backed invocation state plus a
+    /// filesystem-backed approval-request store.
     ///
-    /// Production composition wires both `/run-state` and `/approvals` mount
-    /// aliases on the same [`ScopedFilesystem`], so a single handle is enough
-    /// to construct both stores: each takes its alias-relative subtree
-    /// through the shared `MountView`. The backend choice
+    /// The process journal owns invocation lifecycle. The scoped filesystem is
+    /// used only for approval records. The backend choice
     /// (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
     /// `InMemoryBackend`, …) happens at the `RootFilesystem` layer, not here.
     ///
-    /// Replaces the legacy `with_libsql_run_state_approval_store` /
-    /// `with_postgres_run_state_approval_store` builders (deleted along with
-    /// the corresponding per-backend `Filesystem*Store` siblings — see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
-    ///
-    /// Unlike the deleted SQL combined store this wiring does NOT carry an
-    /// atomic `save_pending_and_block_approval` transition: filesystem
-    /// stores ship as two independent records under distinct mount aliases.
-    /// Callers fall back to the two-step
+    /// CapabilityHost uses the two-step
     /// `ApprovalRequestStorePort::save_pending` then
-    /// `RunStateStorePort::block_approval` path in
-    /// `ironclaw_capabilities::host`. Production composition should layer a
-    /// transactional wrapper (or accept the two-step semantics) when
-    /// cross-record atomicity matters.
-    pub fn with_filesystem_run_state<FsBackend>(
+    /// `ProcessInvocationStatePort::block_approval` path in
+    /// `ironclaw_capabilities::host`, with rollback if the process transition
+    /// fails.
+    pub fn with_process_journal_invocation_state<FsBackend>(
         self,
+        process_runtime: Arc<dyn ironclaw_processes::ProcessRuntimePort>,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
     ) -> Self
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let run_state = Arc::new(RunStateStore::new(Arc::clone(&scoped_filesystem)));
+        let invocation_state = Arc::new(ironclaw_processes::ProcessInvocationStore::new(
+            process_runtime,
+        ));
         let approval_requests = Arc::new(ApprovalRequestStore::new(scoped_filesystem));
-        self.with_run_state(run_state)
+        self.with_invocation_state(invocation_state)
             .with_approval_requests(approval_requests)
     }
 
@@ -415,37 +343,10 @@ where
 
     pub fn with_turn_state<T>(mut self, turn_state: Arc<T>) -> Self
     where
-        T: TurnStateStore + 'static,
+        T: AgentTurnRuntimePort + 'static,
     {
         self.component_types.turn_state = Some(ProductionComponentType::of::<T>());
-        self.component_types.turn_run_transition_port = None;
-        self.component_types.turn_run_transition_port_verified = false;
         self.turn_state = Some(turn_state);
-        self.turn_run_transition_port = None;
-        self
-    }
-
-    pub fn with_turn_state_and_transition_port<T>(mut self, turn_state: Arc<T>) -> Self
-    where
-        T: TurnStateStore + TurnRunTransitionPort + 'static,
-    {
-        self.component_types.turn_state = Some(ProductionComponentType::of::<T>());
-        self.component_types.turn_run_transition_port = Some(ProductionComponentType::of::<T>());
-        self.component_types.turn_run_transition_port_verified = true;
-        let state: Arc<dyn TurnStateStore> = turn_state.clone();
-        let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
-        self.turn_state = Some(state);
-        self.turn_run_transition_port = Some(transition_port);
-        self
-    }
-
-    pub fn with_turn_run_transition_port<T>(mut self, transition_port: Arc<T>) -> Self
-    where
-        T: TurnRunTransitionPort + 'static,
-    {
-        self.component_types.turn_run_transition_port = Some(ProductionComponentType::of::<T>());
-        self.component_types.turn_run_transition_port_verified = false;
-        self.turn_run_transition_port = Some(transition_port);
         self
     }
 
@@ -459,35 +360,6 @@ where
     }
 
     /// Builds and attaches a filesystem-backed turn-state store over the
-    /// supplied [`ScopedFilesystem`].
-    ///
-    /// The turn-state store performs global snapshot operations internally, so
-    /// callers must pass a handle whose `/turns` alias is already fixed to the
-    /// owning user's subtree. Do not pass the shared dynamic invocation scoped
-    /// filesystem here: its global-operation scope would route turn state to
-    /// the system sentinel owner rather than the runtime owner. The backend
-    /// choice (`CompositeRootFilesystem` over `LibSqlRootFilesystem`,
-    /// `PostgresRootFilesystem`, `InMemoryBackend`, …) still happens at the
-    /// [`RootFilesystem`] layer, not here.
-    ///
-    /// Replaces the legacy `with_libsql_turn_state_store` /
-    /// `with_postgres_turn_state_store` builders (deleted along with the
-    /// corresponding per-backend `Filesystem*Store` siblings — see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`). The
-    /// filesystem store implements both [`TurnStateStore`] and
-    /// [`TurnRunTransitionPort`], so this wiring covers production
-    /// readiness for both axes.
-    pub fn with_filesystem_turn_state_store<FsBackend>(
-        self,
-        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
-    ) -> Self
-    where
-        FsBackend: RootFilesystem + 'static,
-    {
-        let store = Arc::new(TurnStateRowStore::new(scoped_filesystem));
-        self.with_turn_state_and_transition_port(store)
-    }
-
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
     where
         T: TurnRunWakeNotifier + 'static,

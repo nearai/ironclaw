@@ -27,7 +27,7 @@ pub async fn open_standalone_extension_installation_store_for_test(
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_approval_request_store_for_test(
     storage_root: &std::path::Path,
-) -> Result<std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>, crate::RebornBuildError>
+) -> Result<std::sync::Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>, crate::RebornBuildError>
 {
     crate::factory::open_standalone_approval_request_store_for_test(storage_root).await
 }

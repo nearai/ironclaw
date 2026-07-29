@@ -35,8 +35,8 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, TurnRunId,
-    TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    GateRef, GateResumeDisposition, ResumeTurnPrecondition, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus,
 };
 
 use super::builder::{INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness};
@@ -252,13 +252,7 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<TurnRunState> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let state = self
-                .turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
+            let state = self.turn_runtime.get_run_state(scope, run_id).await?;
             if state.status == expected {
                 return Ok(state);
             }

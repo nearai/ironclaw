@@ -25,6 +25,7 @@ use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
 };
+use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 use ironclaw_reborn_composition::test_support::{
     libsql_host_bindings_for_test, libsql_host_bindings_with_resolved_secret_master_key_for_test,
@@ -40,6 +41,7 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
+use ironclaw_runner::runtime::ProcessRuntimeSystem;
 use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
@@ -47,10 +49,7 @@ use ironclaw_runner::turn_scheduler::{
 use ironclaw_secrets::SecretMaterial;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    runner::{ClaimedTurnRun, TurnRunTransitionPort},
-    test_support::in_memory_turn_state_store,
-};
+use ironclaw_turns::runner::ClaimedTurnRun;
 use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 use serde_json::Value;
@@ -113,7 +112,7 @@ impl TurnRunExecutor for NoopTurnRunExecutor {
     async fn execute_claimed_run(
         &self,
         _claimed: ClaimedTurnRun,
-        _transitions: Arc<dyn TurnRunTransitionPort>,
+        _transitions: Arc<dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>>,
     ) -> Result<(), TurnRunExecutorError> {
         Ok(())
     }
@@ -475,10 +474,14 @@ fn empty_trust_policy() -> Arc<HostTrustPolicy> {
 }
 
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
-    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(in_memory_turn_state_store());
+    let processes = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
-    let handle =
-        TurnRunScheduler::new(transitions, executor, TurnRunSchedulerConfig::default()).start();
+    let handle = TurnRunScheduler::new_with_process_runtime(
+        processes.runtime(),
+        executor,
+        TurnRunSchedulerConfig::default(),
+    )
+    .start();
     (handle.wake_notifier(), handle)
 }
 

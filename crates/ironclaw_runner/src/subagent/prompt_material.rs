@@ -1,11 +1,12 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, InvocationId, ProcessId};
 use ironclaw_loop_host::{
-    SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource, SubagentThreadKind,
-    SubagentThreadMetadata,
+    SubagentGoalRecord, SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource,
+    SubagentThreadKind, SubagentThreadMetadata,
 };
+use ironclaw_processes::{GetProcessInputRequest, ProcessInputPort};
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
@@ -14,26 +15,22 @@ use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, Lo
 use crate::subagent::{
     directions::direction_prompt,
     flavors::{SubagentFlavorId, lookup_flavor, parse_flavor_id},
-    goal_store::{SubagentGoalStoreError, SubagentGoalStorePort},
 };
 
 #[cfg(test)]
-pub struct RebornSubagentPromptMaterialSource<G>
-where
-    G: SubagentGoalStorePort + ?Sized,
-{
-    goal_store: Arc<G>,
+pub struct RebornSubagentPromptMaterialSource {
+    process_inputs: Arc<dyn ProcessInputPort<Error = ironclaw_turns::TurnError>>,
     flavor_id: SubagentFlavorId,
 }
 
 #[cfg(test)]
-impl<G> RebornSubagentPromptMaterialSource<G>
-where
-    G: SubagentGoalStorePort + ?Sized,
-{
-    pub fn new(goal_store: Arc<G>, flavor_id: SubagentFlavorId) -> Self {
+impl RebornSubagentPromptMaterialSource {
+    pub fn new(
+        process_inputs: Arc<dyn ProcessInputPort<Error = ironclaw_turns::TurnError>>,
+        flavor_id: SubagentFlavorId,
+    ) -> Self {
         Self {
-            goal_store,
+            process_inputs,
             flavor_id,
         }
     }
@@ -46,31 +43,25 @@ where
 /// gate read did, per the design doc's verified ruling. The struct keeps its
 /// name (a rename would ripple further with no behavior change) but no
 /// longer holds a gate/edge dependency at all.
-pub struct GateBackedSubagentPromptMaterialSource<G>
-where
-    G: SubagentGoalStorePort + ?Sized,
-{
-    goal_store: Arc<G>,
+pub struct GateBackedSubagentPromptMaterialSource {
+    process_inputs: Arc<dyn ProcessInputPort<Error = ironclaw_turns::TurnError>>,
     thread_service: Arc<dyn SessionThreadService>,
 }
 
-impl<G> GateBackedSubagentPromptMaterialSource<G>
-where
-    G: SubagentGoalStorePort + ?Sized,
-{
-    pub fn new(goal_store: Arc<G>, thread_service: Arc<dyn SessionThreadService>) -> Self {
+impl GateBackedSubagentPromptMaterialSource {
+    pub fn new(
+        process_inputs: Arc<dyn ProcessInputPort<Error = ironclaw_turns::TurnError>>,
+        thread_service: Arc<dyn SessionThreadService>,
+    ) -> Self {
         Self {
-            goal_store,
+            process_inputs,
             thread_service,
         }
     }
 }
 
 #[async_trait]
-impl<G> SubagentPromptMaterialSource for GateBackedSubagentPromptMaterialSource<G>
-where
-    G: SubagentGoalStorePort + Send + Sync + ?Sized,
-{
+impl SubagentPromptMaterialSource for GateBackedSubagentPromptMaterialSource {
     async fn material_for_run(
         &self,
         run_context: &LoopRunContext,
@@ -91,7 +82,7 @@ where
             )
         })?;
         let goal = goal_for_run(
-            self.goal_store.as_ref(),
+            self.process_inputs.as_ref(),
             Some(self.thread_service.as_ref()),
             run_context,
         )
@@ -102,44 +93,65 @@ where
 
 #[cfg(test)]
 #[async_trait]
-impl<G> SubagentPromptMaterialSource for RebornSubagentPromptMaterialSource<G>
-where
-    G: SubagentGoalStorePort + Send + Sync + ?Sized,
-{
+impl SubagentPromptMaterialSource for RebornSubagentPromptMaterialSource {
     async fn material_for_run(
         &self,
         run_context: &LoopRunContext,
     ) -> Result<SubagentPromptMaterial, AgentLoopHostError> {
-        let goal = goal_for_run(self.goal_store.as_ref(), None, run_context).await?;
+        let goal = goal_for_run(self.process_inputs.as_ref(), None, run_context).await?;
         material_for_flavor_with_goal(goal, self.flavor_id)
     }
 }
 
-async fn goal_for_run<G>(
-    goal_store: &G,
+async fn goal_for_run(
+    process_inputs: &dyn ProcessInputPort<Error = ironclaw_turns::TurnError>,
     thread_service: Option<&dyn SessionThreadService>,
     run_context: &LoopRunContext,
-) -> Result<SubagentPromptGoal, AgentLoopHostError>
-where
-    G: SubagentGoalStorePort + Send + Sync + ?Sized,
-{
-    match goal_store
-        .get_goal(&run_context.scope, run_context.run_id)
+) -> Result<SubagentPromptGoal, AgentLoopHostError> {
+    let mut scope = run_context.scope.to_resource_scope();
+    scope.invocation_id = InvocationId::from_uuid(run_context.run_id.as_uuid());
+    match process_inputs
+        .get_process_input(GetProcessInputRequest {
+            process_id: ProcessId::from_uuid(run_context.run_id.as_uuid()),
+            scope,
+        })
         .await
     {
-        Ok(goal) => Ok(SubagentPromptGoal {
-            task: goal.task,
-            handoff: goal.handoff,
-        }),
-        Err(SubagentGoalStoreError::NotFound { .. }) => {
+        Ok(Some(input)) => {
+            if input.input_ref.as_str() != "subagent-goal:v1" {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!(
+                        "subagent run has unsupported process input {}",
+                        input.input_ref.as_str()
+                    ),
+                ));
+            }
+            let goal = serde_json::from_slice::<SubagentGoalRecord>(input.payload.as_bytes())
+                .map_err(|error| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        format!("subagent process input is invalid: {error}"),
+                    )
+                })?;
+            Ok(SubagentPromptGoal {
+                task: goal.task,
+                handoff: goal.handoff,
+            })
+        }
+        Ok(None) => {
             let Some(thread_service) = thread_service else {
-                return Err(map_goal_error(SubagentGoalStoreError::NotFound {
-                    run_id: run_context.run_id,
-                }));
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("subagent goal for run {} not found", run_context.run_id),
+                ));
             };
             goal_from_thread(thread_service, run_context).await
         }
-        Err(error) => Err(map_goal_error(error)),
+        Err(error) => Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            format!("subagent process input unavailable: {error}"),
+        )),
     }
 }
 
@@ -276,40 +288,74 @@ fn thread_scope_for_run(run_context: &LoopRunContext) -> Result<ThreadScope, Age
     })
 }
 
-fn map_goal_error(error: SubagentGoalStoreError) -> AgentLoopHostError {
-    let kind = match error {
-        SubagentGoalStoreError::NotFound { .. } => AgentLoopHostErrorKind::InvalidInvocation,
-        SubagentGoalStoreError::PayloadTooLarge { .. } => AgentLoopHostErrorKind::BudgetExceeded,
-        SubagentGoalStoreError::DuplicateKey { .. } => AgentLoopHostErrorKind::InvalidInvocation,
-        SubagentGoalStoreError::Backend { .. } => AgentLoopHostErrorKind::Unavailable,
-    };
-    AgentLoopHostError::new(kind, error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use chrono::Utc;
     use ironclaw_host_api::{AgentId, ThreadId};
     use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
+    use ironclaw_processes::{
+        GetProcessInputRequest, ProcessInputPayload, ProcessInputPort, ProcessInputRecord,
+        ProcessInputRef,
+    };
     use ironclaw_threads::{
         AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
         MessageContent,
     };
     use ironclaw_turns::{GateRef, LoopResultRef, TurnRunId};
 
-    use crate::subagent::{
-        flavors::SubagentFlavorId,
-        goal_store::{SubagentGoal, in_memory_backed_subagent_goal_store},
-    };
+    use crate::subagent::flavors::SubagentFlavorId;
 
     use super::*;
 
+    struct StaticProcessInput(Option<ProcessInputRecord>);
+
+    #[async_trait]
+    impl ProcessInputPort for StaticProcessInput {
+        type Error = ironclaw_turns::TurnError;
+
+        async fn get_process_input(
+            &self,
+            request: GetProcessInputRequest,
+        ) -> Result<Option<ProcessInputRecord>, Self::Error> {
+            Ok(self
+                .0
+                .as_ref()
+                .filter(|record| {
+                    record.process_id == request.process_id && record.scope == request.scope
+                })
+                .cloned())
+        }
+    }
+
+    fn process_inputs(
+        context: &LoopRunContext,
+        goal: Option<SubagentGoalRecord>,
+    ) -> Arc<dyn ProcessInputPort<Error = ironclaw_turns::TurnError>> {
+        let mut scope = context.scope.to_resource_scope();
+        scope.invocation_id = InvocationId::from_uuid(context.run_id.as_uuid());
+        Arc::new(StaticProcessInput(goal.map(|goal| {
+            ProcessInputRecord {
+                process_id: ProcessId::from_uuid(context.run_id.as_uuid()),
+                scope,
+                input_ref: ProcessInputRef::from_trusted("subagent-goal:v1"),
+                payload: ProcessInputPayload::new(
+                    serde_json::to_vec(&goal).expect("serialize subagent goal"),
+                )
+                .expect("bounded subagent goal"),
+                created_at: Utc::now(),
+            }
+        })))
+    }
+
     #[tokio::test]
     async fn material_source_fails_loud_on_goal_miss() {
-        let store = Arc::new(in_memory_backed_subagent_goal_store());
-        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::General);
         let context = ironclaw_agent_loop::test_support::test_run_context("missing-goal");
+        let source = RebornSubagentPromptMaterialSource::new(
+            process_inputs(&context, None),
+            SubagentFlavorId::General,
+        );
 
         let error = source.material_for_run(&context).await.unwrap_err();
 
@@ -318,20 +364,17 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_combines_static_direction_goal_and_allowlist() {
-        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let context = ironclaw_agent_loop::test_support::test_run_context("goal");
-        store
-            .put_goal(
-                &context.scope,
-                context.run_id,
-                SubagentGoal {
+        let source = RebornSubagentPromptMaterialSource::new(
+            process_inputs(
+                &context,
+                Some(SubagentGoalRecord {
                     task: "research task".to_string(),
                     handoff: Some("handoff".to_string()),
-                },
-            )
-            .await
-            .unwrap();
-        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::Planner);
+                }),
+            ),
+            SubagentFlavorId::Planner,
+        );
 
         let material = source.material_for_run(&context).await.unwrap();
 
@@ -353,7 +396,6 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_uses_thread_metadata_for_flavor() {
-        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("thread-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-thread-flavor").unwrap());
@@ -364,7 +406,10 @@ mod tests {
             Some("task from thread"),
         )
         .await;
-        let source = GateBackedSubagentPromptMaterialSource::new(store, thread_service);
+        let source = GateBackedSubagentPromptMaterialSource::new(
+            process_inputs(&context, None),
+            thread_service,
+        );
 
         let material = source.material_for_run(&context).await.unwrap();
 
@@ -378,12 +423,14 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_errors_when_no_flavor_is_recorded() {
-        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("missing-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-missing-flavor").unwrap());
         ensure_subagent_thread(thread_service.as_ref(), &context, None, None).await;
-        let source = GateBackedSubagentPromptMaterialSource::new(store, thread_service);
+        let source = GateBackedSubagentPromptMaterialSource::new(
+            process_inputs(&context, None),
+            thread_service,
+        );
 
         let error = source.material_for_run(&context).await.unwrap_err();
 
@@ -393,7 +440,6 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_errors_when_flavor_is_unknown() {
-        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("unknown-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-unknown-flavor").unwrap());
@@ -404,7 +450,10 @@ mod tests {
             None,
         )
         .await;
-        let source = GateBackedSubagentPromptMaterialSource::new(store, thread_service);
+        let source = GateBackedSubagentPromptMaterialSource::new(
+            process_inputs(&context, None),
+            thread_service,
+        );
 
         let error = source.material_for_run(&context).await.unwrap_err();
 

@@ -8,14 +8,15 @@ use ironclaw_turns::TurnCoordinator;
 #[cfg(any(test, feature = "test-support"))]
 use crate::automation::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::automation::trigger_poller::{
-    AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer, SnapshotActiveRunLookup,
+    AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer, ProcessActiveRunLookup,
 };
 use crate::factory::filesystem_reborn_identity_store;
 use crate::runtime::RebornRuntimeError;
 use crate::runtime_input::{
     TriggerFireAccessChecker, TriggerPollerAuthorizerConfig, TriggerPollerSettings,
 };
-use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use ironclaw_processes::ProcessLifecycleLookupSource;
+use ironclaw_turns::TurnError;
 
 pub(crate) struct TriggerPollerServices {
     pub(crate) materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
@@ -114,9 +115,9 @@ fn build_trigger_fire_authorizer(
 }
 
 pub(crate) fn build_trigger_active_run_lookup(
-    snapshot_source: Arc<dyn TurnRunSnapshotSource>,
+    lifecycle_source: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
 ) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
-    Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
+    Arc::new(ProcessActiveRunLookup::new(lifecycle_source))
 }
 
 pub(crate) fn poller_user_directory(

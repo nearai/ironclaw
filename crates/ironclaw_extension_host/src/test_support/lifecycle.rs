@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval, PersistentApprovalPolicyStore};
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthSurface, RebornAuthContinuationDispatcher,
@@ -28,7 +29,6 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::LifecycleProductSurfaceContext;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 

@@ -13,7 +13,7 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityDispatchResult, CapabilityId, CapabilitySet,
     CorrelationId, DispatchError, EffectKind, ExecutionContext, ExtensionId, HostPortCatalog,
@@ -27,7 +27,6 @@ use ironclaw_host_api::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
@@ -41,10 +40,10 @@ use super::{
     CapabilitySurfaceVersion, ConfiguredInvocationServicesResolver, DeploymentMode,
     EffectiveRuntimePolicy, FilesystemBackendKind, FirstPartyCapabilityRegistry,
     FirstPartyRuntimeAdapter, HostProcessPort, HostRuntimeHttpEgressPort, HostRuntimeServices,
-    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStorePort, ProcessStorePort,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
-    RuntimeAdapter, RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile,
-    SecretMode, ServiceResolvedRuntimeAdapter,
+    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
+    RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile, SecretMode,
+    ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
 use crate::CommandExecutionRequest;
@@ -1189,12 +1188,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
 }
 
-fn test_services() -> HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ProcessStore<InMemoryBackend>,
-    ProcessResultStore<InMemoryBackend>,
-> {
+fn test_services() -> HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor> {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::new(DiskFilesystem::new()),
@@ -1205,13 +1199,8 @@ fn test_services() -> HostRuntimeServices<
     )
 }
 
-fn configured_egress<
-    F: RootFilesystem + 'static,
-    G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
->(
-    services: &HostRuntimeServices<F, G, S, R>,
+fn configured_egress<F: RootFilesystem + 'static, G: ResourceGovernor + 'static>(
+    services: &HostRuntimeServices<F, G>,
 ) -> Arc<dyn RuntimeHttpEgress> {
     services
         .runtime_http_egress

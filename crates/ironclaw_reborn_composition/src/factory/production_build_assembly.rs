@@ -30,7 +30,7 @@ pub(super) async fn build_production_shaped(
     let oauth_provider_configs = deployment.oauth_provider_configs.clone();
     let oauth_dcr_callback = deployment.oauth_dcr_callback.clone();
     let nearai_mcp_bootstrap_config = deployment.nearai_mcp_bootstrap_config.clone();
-    let turn_state_store_limits = deployment.turn_state_store_limits;
+    let process_concurrency_limits = deployment.process_concurrency_limits.clone();
     let first_party_bundles = deployment.first_party_bundles.clone();
     let traffic_policy = deployment.traffic();
     // Scope an implicit mem0 app id to the standalone storage root.
@@ -72,7 +72,7 @@ pub(super) async fn build_production_shaped(
         oauth_dcr_callback,
         owner_id,
         local_runtime_identity,
-        turn_state_store_limits,
+        process_concurrency_limits,
         resolved_memory: resolved_memory_provider,
         scheduler_wake_wiring,
         account_setup_descriptors,
@@ -333,7 +333,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(super) owner_id: String,
     pub(super) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
-    pub(super) turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
+    pub(super) process_concurrency_limits: ProcessConcurrencyLimits,
     pub(super) resolved_memory: crate::ResolvedMemoryProvider,
     pub(super) scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
     pub(super) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
@@ -456,16 +456,5 @@ pub(super) fn planned_run_profile_resolver()
     ))
 }
 
-pub(super) type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
-    F,
-    FilesystemResourceGovernor<F>,
-    ironclaw_processes::ProcessStore<F>,
-    ironclaw_processes::ProcessResultStore<F>,
->;
-
-pub(super) fn substrate_only_default_owner_id() -> Result<UserId, crate::RebornCompositionError> {
-    let identity = RebornRuntimeIdentity::reborn_cli();
-    // The substrate-only builders do not receive app/runtime owner input.
-    // Preserve their legacy location under the default `reborn-cli` owner.
-    UserId::new(identity.tenant_id).map_err(crate::RebornCompositionError::Mount)
-}
+pub(super) type FilesystemProductionHostRuntimeServices<F> =
+    HostRuntimeServices<F, FilesystemResourceGovernor<F>>;

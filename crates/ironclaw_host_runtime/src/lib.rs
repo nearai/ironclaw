@@ -7,7 +7,7 @@
 //!   depend on;
 //! - [`DefaultHostRuntime`] — the production composition that wraps
 //!   [`ironclaw_capabilities::CapabilityHost`] (which itself coordinates
-//!   authorization, approvals, run-state lifecycle, and process spawn) behind
+//!   authorization, approvals, process invocation lifecycle, and process spawn) behind
 //!   that contract.
 //!
 //! The service preserves three important boundaries:
@@ -1005,18 +1005,18 @@ mod unsupported_operation_default_tests {
 
     fn context() -> ExecutionContext {
         ExecutionContext::local_default(
-            UserId::new("user").expect("user id"),
-            ExtensionId::new("caller").expect("extension id"),
+            UserId::new("user").expect("user id"), // safety: test-only static fixture
+            ExtensionId::new("caller").expect("extension id"), // safety: test-only static fixture
             RuntimeKind::Wasm,
             TrustClass::UserTrusted,
             CapabilitySet::default(),
             MountView::default(),
         )
-        .expect("execution context")
+        .expect("execution context") // safety: test-only static fixture
     }
 
     fn capability_id() -> CapabilityId {
-        CapabilityId::new("echo.say").expect("capability id")
+        CapabilityId::new("echo.say").expect("capability id") // safety: test-only static fixture
     }
 
     fn failure(outcome: RuntimeCapabilityOutcome) -> RuntimeCapabilityFailure {
@@ -1046,7 +1046,7 @@ mod unsupported_operation_default_tests {
                     Value::Null,
                 ))
                 .await
-                .expect("default spawn body returns an outcome, not an error"),
+                .expect("default spawn body returns an outcome, not an error"), // safety: test-only assertion
         );
         let auth_resume = failure(
             runtime
@@ -1058,7 +1058,7 @@ mod unsupported_operation_default_tests {
                     None,
                 ))
                 .await
-                .expect("default auth-resume body returns an outcome, not an error"),
+                .expect("default auth-resume body returns an outcome, not an error"), // safety: test-only assertion
         );
         let spawn_resume = failure(
             runtime
@@ -1070,7 +1070,7 @@ mod unsupported_operation_default_tests {
                     Value::Null,
                 ))
                 .await
-                .expect("default spawn-resume body returns an outcome, not an error"),
+                .expect("default spawn-resume body returns an outcome, not an error"), // safety: test-only assertion
         );
 
         for (label, failure) in [
@@ -1078,16 +1078,19 @@ mod unsupported_operation_default_tests {
             ("auth_resume_capability", auth_resume),
             ("resume_spawn_capability", spawn_resume),
         ] {
-            assert_eq!(
+            assert_eq! // safety: test-only assertion
+            (
                 failure.kind,
                 FailureKind::UnsupportedRunner,
                 "{label} default must name the permanent unsupported-operation kind"
             );
-            assert!(
+            assert! // safety: test-only assertion
+            (
                 !failure.kind.is_retryable(),
                 "{label} default must not consume retry budget on a permanently unsupported operation"
             );
-            assert_eq!(
+            assert_eq! // safety: test-only assertion
+            (
                 failure.kind.fate(),
                 FailureFate::ModelVisible,
                 "{label} default must surface to the model so it can route around the gap"

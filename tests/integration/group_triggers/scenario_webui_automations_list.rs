@@ -47,7 +47,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let service =
         ironclaw_reborn_composition::test_support::standalone_automation_product_service_for_test(
             trigger_repository,
-            Arc::clone(&g.shared.turn_store),
+            g.shared.process_system.lifecycle(),
         );
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())

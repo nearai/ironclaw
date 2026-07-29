@@ -1,17 +1,16 @@
 //! Dependency-inversion seam for subagent await-edge delivery.
 //!
 //! `ironclaw_loop_host` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
-//! but cannot depend on `ironclaw_runner`, which owns the concrete CAS'd
-//! filesystem await-edge store and resolver
+//! but cannot depend on `ironclaw_runner`, which owns the agent-specific
+//! process-dependency projection and resolver
 //! (`crates/ironclaw_runner/src/subagent/await_edge/`). This module defines
-//! the two traits that seam crosses — `AwaitEdgeWriter` (spawn-time writes,
-//! consumed by `subagent_spawn_port.rs`) and `AwaitEdgeSettler` (completion-time
+//! the two traits that seam crosses — `AwaitEdgeWriter` (recovery admission and
+//! post-submit rollback) and `AwaitEdgeSettler` (completion-time
 //! settle/resume/drain, consumed by `ironclaw_runner`'s completion path) —
 //! per the design's §4.1 crate-placement ruling (permanent seam, category 2
 //! of `.claude/rules/type-placement.md`, no `arch-exempt`).
 //!
-//! See `docs/reborn/subagent-spawn/thread-harness-design.md` §2-§5 for the
-//! full CAS state machine these traits front.
+//! Process dependency persistence is owned by `ironclaw_processes`.
 
 use std::{sync::Arc, time::Duration};
 
@@ -20,7 +19,6 @@ use ironclaw_turns::{
     TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnRunId, TurnScope,
 };
 
-use crate::subagent_spawn_port::AwaitedChildSetRecord;
 use ironclaw_turns::run_profile::AgentLoopHostError;
 
 /// Retryable rejection returned by [`AwaitEdgeWriter::check_scope_recovered`]
@@ -32,7 +30,7 @@ pub struct ScopeRecoveryInProgress {
     pub retry_after_hint: Duration,
 }
 
-/// Spawn-side writer seam (§3 replacement for `SubagentGateResolutionStore`).
+/// Spawn-side recovery/rollback seam.
 /// Implemented in `ironclaw_runner` by `AwaitEdgeStore` (production)
 /// and here by `InMemoryAwaitEdgeWriter` (loop_host's own unit tests, no
 /// filesystem/CAS semantics needed).
@@ -49,17 +47,8 @@ pub trait AwaitEdgeWriter: Send + Sync {
         Ok(())
     }
 
-    /// Idempotently opens the edge (+ scope-roster touch before it, §4.5
-    /// write-before-first-edge ordering) for this parent/child pair. No-ops
-    /// if an edge for this exact pair is already recorded.
-    async fn record_awaited_child(
-        &self,
-        record: AwaitedChildSetRecord,
-    ) -> Result<(), AgentLoopHostError>;
-
-    /// Rollback-only: abandon and delete the just-opened edge (§2 mode-scoped
-    /// case (b) — spawn failed after the edge write; explicit teardown, not
-    /// a normal terminal close).
+    /// Rollback-only: abandon the dependency opened atomically with child
+    /// process submission when a later spawn step fails.
     async fn abandon_awaited_child(
         &self,
         child_scope: &TurnScope,
@@ -122,8 +111,8 @@ impl ResolveReport {
 /// since the certified design doc names this exact trait `AwaitEdgeSettler`.
 #[async_trait]
 pub trait AwaitEdgeSettler: Send + Sync {
-    /// Drives settle → (group-ready?) → write-result → resume → release →
-    /// prune → delete for one child terminal event (§2, §5.2, §5.5, §8.1).
+    /// Drives settle → (group-ready?) → write-result → resume → consume for
+    /// one child terminal event.
     async fn on_child_terminal(
         &self,
         event: &ironclaw_turns::TurnLifecycleEvent,
@@ -136,6 +125,11 @@ pub trait AwaitEdgeSettler: Send + Sync {
     /// `Arc<dyn AwaitEdgeSettler>` without depending on the resolver's
     /// concrete, filesystem-backend-generic type.
     fn bind_coordinator(&self, coordinator: Arc<dyn TurnCoordinator>) -> Result<(), TurnError>;
+
+    fn bind_turn_tree_store(
+        &self,
+        store: Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
+    ) -> Result<(), TurnError>;
 
     /// Bind the capability result writer late, mirroring `bind_coordinator`'s
     /// deferred-binding pattern. Needed because some composition call sites
@@ -151,9 +145,9 @@ pub trait AwaitEdgeSettler: Send + Sync {
         result_writer: Arc<dyn crate::LoopCapabilityResultWriter>,
     ) -> Result<(), TurnError>;
 
-    /// Adapter to the pre-existing `TurnCommittedEventObserver` seam
-    /// (`ironclaw_turns::TurnLifecycleEventBus::subscribe_required` needs a
-    /// `TurnCommittedEventObserver`, not this trait) — implemented as
+    /// Adapter to the turn projection observer seam
+    /// (the process journal observer needs a `TurnCommittedEventObserver`, not
+    /// this trait) — implemented as
     /// `Arc::clone(&self) as Arc<dyn TurnCommittedEventObserver>` inside the
     /// concrete type, where the concrete type is known and ordinary
     /// (non-upcasting) trait-object coercion applies.

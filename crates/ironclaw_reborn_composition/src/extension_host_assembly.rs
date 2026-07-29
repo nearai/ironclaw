@@ -479,7 +479,7 @@ pub(crate) async fn build_runtime_channel_host(
     let approval_context = Some(Arc::new(
         ironclaw_extension_host::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
             Arc::clone(&services.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+                as Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
         ),
     ) as Arc<dyn ApprovalPromptContextSource>);
     let blocked_auth_prompts = Some(Arc::new(

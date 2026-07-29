@@ -157,7 +157,7 @@ impl HarnessCapabilityRecorder {
 
     pub(crate) fn approval_requests_store(
         &self,
-    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.approval_requests_store(),

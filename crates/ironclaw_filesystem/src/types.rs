@@ -487,7 +487,7 @@ impl BackendCapabilities {
     /// implements. Includes Events, FTS, and Vector on top of
     /// `sql_typical`.
     pub const fn in_memory_full() -> Self {
-        Self::sql_typical_full()
+        Self::sql_typical_full().with_txn(TxnCapability::MultiKey)
     }
 
     /// Convenience: read + write + append + list + stat + delete only.

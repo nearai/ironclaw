@@ -5,31 +5,29 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilitySurfaceProfileResolver,
-    CompositeTurnRunWakeNotifier, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
-    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
-    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    verify_product_live_cancellation_probe,
+    AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
+    HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
+    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
+    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
+    SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
+use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, CheckpointStateStorePort, DefaultTurnCoordinator,
-    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
-    LoopCheckpointStore, RunProfileResolver, TurnCommittedEventObserver, TurnEventSink,
-    TurnLifecycleEventBus, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
-    TurnStateStore,
+    AgentLoopDriverError, AgentTurnProcessCommitObserver, AgentTurnRuntimePort,
+    AgentTurnSpawnTreeRuntimePort, DefaultTurnCoordinator, LoopCheckpointStore, RunProfileResolver,
+    TurnCommittedEventObserver, TurnEventSink, TurnRunWakeNotifier, TurnSpawnTreePort,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
         AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
         LoopRunContext, MemoryPromptContextService,
     },
-    runner::TurnRunTransitionPort,
 };
 
 use crate::{
@@ -50,7 +48,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
-        goal_store::SubagentGoalStorePort, prompt_material::GateBackedSubagentPromptMaterialSource,
+        prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
@@ -60,6 +58,9 @@ use crate::{
         TurnRunSchedulerHandle, TurnRunWakeChannel,
     },
 };
+
+mod process_system;
+pub use process_system::ProcessRuntimeSystem;
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
 ///
@@ -224,24 +225,6 @@ fn default_disabled_capability_ids() -> Vec<CapabilityId> {
     ]
 }
 
-pub trait RuntimeTurnStateStore:
-    TurnSpawnTreeStateStore
-    + TurnRunTransitionPort
-    + ironclaw_turns::TurnEventProjectionSource
-    + Send
-    + Sync
-{
-}
-
-impl<T> RuntimeTurnStateStore for T where
-    T: TurnSpawnTreeStateStore
-        + TurnRunTransitionPort
-        + ironclaw_turns::TurnEventProjectionSource
-        + Send
-        + Sync
-{
-}
-
 /// Opaque carrier for the scheduler's wake-pair (notifier + channel).
 ///
 /// Keeps substrate types ([`SchedulerTurnRunWakeNotifier`], [`TurnRunWakeChannel`])
@@ -285,22 +268,17 @@ pub struct DefaultPlannedRuntimeParts<G>
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    pub turn_state: Arc<dyn RuntimeTurnStateStore>,
+    pub process_system: ProcessRuntimeSystem,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
-    pub checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     pub loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    pub subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
-    /// §3 replacement: `subagent_gate_store` split into three trait-object
-    /// handles onto the same underlying await-edge store + resolver pair
-    /// (constructed together in composition, where the `filesystem-goal-store`
-    /// feature is enabled) — kept as trait objects here so `runtime.rs`
-    /// itself stays feature/backend-generic-free.
+    /// Await-edge writer, settlement, and evidence views over the process
+    /// dependency journal.
     pub subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
     pub subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     pub subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -329,7 +307,7 @@ where
     /// record. `None` only for helper/test compositions with no run-state
     /// filesystem (they never raise a durable auth gate); a production `None` is
     /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
-    pub gate_record_store: Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>>,
+    pub gate_record_store: Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -381,16 +359,6 @@ where
     /// When `None` (the default), the notifier and channel are minted internally, which is
     /// correct for standalone and any composition that does not need to pre-mint.
     pub scheduler_wake_wiring: Option<SchedulerWakeWiring>,
-}
-
-pub trait RuntimeSubagentGoalStore:
-    SubagentGoalStorePort + SubagentSpawnGoalStore + Send + Sync
-{
-}
-
-impl<T> RuntimeSubagentGoalStore for T where
-    T: SubagentGoalStorePort + SubagentSpawnGoalStore + Send + Sync
-{
 }
 
 pub struct RebornRuntimeLoopComposition<S, G>
@@ -564,18 +532,18 @@ where
             ProductLiveRuntimeReadinessComponent::CancellationFactory,
         ));
     }
-    let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let agent_turn_runtime: Arc<dyn AgentTurnRuntimePort> =
+        Arc::new(parts.process_system.agent_turn_runtime());
     let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
         parts.subagent_await_edge_evidence.clone();
     parts.loop_exit_evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::clone(&parts.thread_service),
-            turn_state_store,
+            agent_turn_runtime,
             Arc::clone(&parts.loop_checkpoint_store),
             await_dependent_run_evidence,
             parts.thread_scope.clone(),
         )
-        .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
         .with_cancellation_factory(cancellation_factory),
     );
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
@@ -634,6 +602,15 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
+    let process_system = parts.process_system.clone();
+    let agent_turn_runtime = Arc::new(process_system.agent_turn_runtime());
+    let cancellation_factory: Arc<dyn RunCancellationFactory> =
+        parts.cancellation_factory.clone().unwrap_or_else(|| {
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                agent_turn_runtime.clone() as Arc<dyn AgentTurnRuntimePort>,
+            ))
+        });
+
     // Resolve the scheduler wake wiring BEFORE building the coordinator, breaking
     // the coordinator↔scheduler build-order cycle.  The coordinator receives the
     // real notifier immediately; the channel is held in the carrier and passed to
@@ -647,41 +624,30 @@ where
         .scheduler_wake_wiring
         .unwrap_or_else(SchedulerWakeWiring::channel);
     let scheduler_notifier_base: Arc<dyn TurnRunWakeNotifier> = wake_wiring.notifier();
-    // When a cancellation factory is supplied, fan-out each coordinator wake to
-    // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without
-    // this composite, the scheduler still wakes but retained product run handles
-    // never flip on `cancel_run` — breaking end-to-end product-live
-    // cancellation observation.
-    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
-        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
-            scheduler_notifier_base,
-            factory,
-        )),
-        None => scheduler_notifier_base,
-    };
+    // Fan out each coordinator wake to BOTH the scheduler and the exact
+    // cancellation factory installed on the loop host. Without this shared
+    // instance, the scheduler still wakes but retained run handles never flip
+    // on `cancel_run`.
+    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(CompositeTurnRunWakeNotifier::new(
+        scheduler_notifier_base,
+        Arc::clone(&cancellation_factory),
+    ));
     let subagent_await_edge_settler = Arc::clone(&parts.subagent_await_edge_settler);
+    subagent_await_edge_settler
+        .bind_turn_tree_store(agent_turn_runtime.clone() as Arc<dyn AgentTurnSpawnTreeRuntimePort>)
+        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
     let subagent_completion_observer: Arc<dyn TurnCommittedEventObserver> =
         Arc::clone(&subagent_await_edge_settler).as_turn_committed_event_observer();
-    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
-    lifecycle_bus
-        .subscribe_required(Arc::clone(&subagent_completion_observer))
-        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
-    if let Some(turn_event_sink) = parts.turn_event_sink.clone() {
-        lifecycle_bus
-            .subscribe_best_effort(turn_event_sink)
-            .map_err(|error| {
-                DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string())
-            })?;
-    }
-    let turn_state = Arc::new(LifecyclePublishingTurnStateStore::new(
-        Arc::clone(&parts.turn_state),
-        lifecycle_bus,
-    ));
-    let publication_error_port: Arc<dyn LifecyclePublicationErrorPort> = turn_state.clone();
-    let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_state))
+    process_system
+        .subscribe_process_observer(Arc::new(AgentTurnProcessCommitObserver::new(
+            subagent_completion_observer,
+            parts.turn_event_sink.clone(),
+        )))
+        .map_err(DefaultPlannedRuntimeBuildError::SubagentCompletion)?;
+    let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
-        .with_lifecycle_publication_error_port(publication_error_port);
+        .with_process_runtime(agent_turn_runtime.as_ref().clone());
     let base_coordinator_arc = Arc::new(base_coordinator);
     let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
@@ -689,10 +655,10 @@ where
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let turn_state_store: Arc<dyn TurnStateStore> = turn_state.clone();
+    let agent_turn_runtime_port: Arc<dyn AgentTurnRuntimePort> = agent_turn_runtime.clone();
     let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
         Arc::new(GateBackedSubagentPromptMaterialSource::new(
-            Arc::clone(&parts.subagent_goal_store),
+            process_system.inputs(),
             Arc::clone(&parts.thread_service),
         ));
     let subagent_prompt_composer = SubagentPromptComposer::new(Arc::clone(&subagent_prompt_source));
@@ -700,9 +666,9 @@ where
         SubagentSpawnDeps {
             coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
             child_runs,
-            turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
+            agent_turn_runtime: agent_turn_runtime.clone()
+                as Arc<dyn AgentTurnSpawnTreeRuntimePort>,
             thread_service: Arc::clone(&parts.thread_service),
-            goal_store: Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
             await_edge_writer: Arc::clone(&parts.subagent_await_edge_writer),
             definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
             spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
@@ -794,8 +760,7 @@ where
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
         Arc::clone(&parts.model_gateway),
-        parts.checkpoint_state_store,
-        turn_state_store,
+        agent_turn_runtime_port,
         Arc::clone(&parts.loop_checkpoint_store),
         parts.milestone_sink,
         parts.config.host,
@@ -807,9 +772,7 @@ where
     if let Some(resolver) = parts.model_route_resolver {
         host_factory = host_factory.with_model_route_resolver(resolver);
     }
-    if let Some(factory) = parts.cancellation_factory {
-        host_factory = host_factory.with_cancellation_factory(factory);
-    }
+    host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
     }
@@ -841,9 +804,10 @@ where
     }
     let host_factory = Arc::new(host_factory);
 
-    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
+    let process_transition_port: Arc<dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>> =
+        process_system.transitions();
     let loop_exit_applier = Arc::new(LoopExitApplier::new(
-        Arc::clone(&transition_port),
+        Arc::clone(&process_transition_port),
         parts.loop_exit_evidence,
     ));
     let mut executor = RebornTurnRunExecutor::new(
@@ -861,7 +825,11 @@ where
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
         .with_poll_interval(parts.config.poll_interval)
         .with_lease_recovery_interval(parts.config.lease_recovery_interval);
-    let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
+    let scheduler = TurnRunScheduler::new_with_process_runtime(
+        process_system.runtime(),
+        executor,
+        scheduler_config,
+    );
     let scheduler_handle = wake_wiring.start(scheduler);
 
     Ok(
@@ -986,7 +954,10 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, scheduler_permit_count};
+    use super::{
+        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
+        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+    };
     use async_trait::async_trait;
     use ironclaw_host_api::{
         AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
@@ -1007,6 +978,7 @@ mod tests {
     };
 
     use ironclaw_loop_host::{
+        CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory, PerSurfaceCapabilityDenyDecorator,
     };
@@ -1297,6 +1269,70 @@ mod tests {
             self.decorate_calls.fetch_add(1, Ordering::SeqCst);
             inner
         }
+    }
+
+    struct CountingSurfaceResolver {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CapabilitySurfaceProfileResolver for CountingSurfaceResolver {
+        async fn resolve(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CapabilityAllowSet::All)
+        }
+    }
+
+    struct UnusedResultWriter;
+
+    #[async_trait]
+    impl ironclaw_loop_host::LoopCapabilityResultWriter for UnusedResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "unused in profile-resolution test",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn profiled_factory_resolves_allow_set_once_with_tool_disclosure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let inner = Arc::new(InnerPort {
+            label: "inner",
+            log: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(StaticFactory { port: inner }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::clone(&calls),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::clone(&decorate_calls),
+            }),
+            tool_disclosure_decorator: Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+                Arc::new(UnusedResultWriter),
+            ))),
+            deny_decorator: Arc::new(NoopDecorator { decorate_calls }),
+        };
+
+        factory
+            .create_capability_port(&test_run_context().await)
+            .await
+            .expect("profiled capability port should build");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one resolved allow-set must be shared by disclosure and enforcement"
+        );
     }
 
     // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────

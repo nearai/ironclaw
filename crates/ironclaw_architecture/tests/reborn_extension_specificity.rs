@@ -1277,11 +1277,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_product/src/blocked_auth_resume.rs",
+        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product/src/blocked_auth_resume.rs",
+        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
         "slack",
     ),
     (

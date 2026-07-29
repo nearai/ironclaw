@@ -3,11 +3,9 @@ use std::sync::Arc;
 use ironclaw_approvals::PersistentApprovalPolicyStore;
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ResourceScope;
 use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_secrets::{CredentialBroker, SecretStore};
 use ironclaw_triggers::TriggerRepository;
-use ironclaw_turns::{TurnStateRowStore, TurnStateStoreLimits};
 
 use crate::factory::{
     ComposedCapabilityLeaseStore, ComposedPersistentApprovalPolicyStore, ComposedResourceGovernor,
@@ -80,29 +78,6 @@ pub(crate) async fn resolve_explicit_or_keychain_master_key(
     } else {
         ironclaw_secrets::keychain::resolve_master_key_material().await
     }
-}
-
-pub(crate) fn owner_turn_state_filesystem<F>(
-    filesystem: Arc<F>,
-    owner_scope: &ResourceScope,
-) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
-where
-    F: RootFilesystem + 'static,
-{
-    let view = crate::invocation_mount_view(owner_scope)?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
-        filesystem, view,
-    )))
-}
-
-pub(crate) fn production_turn_state_store<F>(
-    filesystem: Arc<ScopedFilesystem<F>>,
-    limits: TurnStateStoreLimits,
-) -> TurnStateRowStore<F>
-where
-    F: RootFilesystem + 'static,
-{
-    TurnStateRowStore::new(filesystem).with_limits(limits)
 }
 
 pub(crate) async fn trigger_repository_for_durable_backend(

@@ -16,11 +16,11 @@
 //!   `RebornStorageInput`. This value carries only the policy request.
 
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
+use ironclaw_processes::ProcessConcurrencyLimits;
 use ironclaw_reborn_event_store::RebornProfile;
 use ironclaw_runtime_policy::{
     EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest,
 };
-use ironclaw_turns::TurnStateStoreLimits;
 
 use std::path::PathBuf;
 
@@ -257,7 +257,7 @@ pub struct DeploymentConfig {
     /// is not known at preset-construction time); the profile→bindings bridge
     /// installs the accurate value.
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
-    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
+    pub(crate) process_concurrency_limits: ProcessConcurrencyLimits,
     pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
@@ -287,7 +287,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -324,7 +324,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -382,7 +382,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -442,7 +442,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,

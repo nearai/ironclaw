@@ -44,17 +44,17 @@ pub(crate) fn build_approval_interaction_service(
         builtin_capability_policy,
         turn_coordinator,
         audit_sink,
-        Arc::clone(&runtime.turn_state) as Arc<dyn TurnRunSnapshotSource>,
+        Arc::clone(&runtime.process_gate_query_source),
     )
 }
 
-/// Testable assembly seam with an injected turn-run snapshot source.
+/// Testable assembly seam with an injected process-gate query source.
 pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     runtime: &RebornRuntimeStores,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
-    turn_run_source: Arc<dyn TurnRunSnapshotSource>,
+    turn_run_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
     let approval_requests = &runtime.approval_requests;
     let capability_leases = &runtime.capability_leases;
@@ -65,7 +65,7 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     let system_extensions_lifecycle_mounts = &runtime.system_extensions_lifecycle_mounts;
     let persistent_approval_policies = &runtime.persistent_approval_policies;
     let tool_permission_overrides = &runtime.tool_permission_overrides;
-    let approval_turn_runs = Arc::new(SnapshotApprovalTurnRunLocator::new(turn_run_source));
+    let approval_turn_runs = Arc::new(ProcessGateApprovalTurnRunLocator::new(turn_run_source));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
         approval_requests.clone(),
         approval_turn_runs,
@@ -102,36 +102,51 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     ))
 }
 
-pub(super) struct SnapshotApprovalTurnRunLocator {
-    turn_state: Arc<dyn TurnRunSnapshotSource>,
+pub(super) struct ProcessGateApprovalTurnRunLocator {
+    gates: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
 }
 
-impl SnapshotApprovalTurnRunLocator {
-    pub(super) fn new(turn_state: Arc<dyn TurnRunSnapshotSource>) -> Self {
-        Self { turn_state }
+impl ProcessGateApprovalTurnRunLocator {
+    pub(super) fn new(gates: Arc<dyn ProcessGateQuerySource<Error = TurnError>>) -> Self {
+        Self { gates }
     }
 
-    async fn snapshot(
+    async fn query(
         &self,
-    ) -> Result<TurnPersistenceSnapshot, ironclaw_product::ProductSurfaceFailure> {
-        self.turn_state.turn_run_snapshot().await.map_err(|error| {
-            tracing::debug!(
-                %error,
-                "approval turn-run locator could not read turn persistence snapshot"
-            );
-            approval_turn_locator_unavailable()
-        })
+        scope: &ApprovalInteractionScope,
+        gate_ref: Option<ironclaw_turns::GateRef>,
+        include_historical: bool,
+    ) -> Result<Vec<ironclaw_processes::ProcessGateRecord>, ironclaw_product::ProductSurfaceFailure>
+    {
+        self.gates
+            .query_process_gates(ProcessGateQuery {
+                scope: scope.to_resource_scope(),
+                gate_kind: ProcessSuspensionKind::Approval,
+                scope_match: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                gate_ref,
+                owner_match: Some(ProcessGateOwnerMatch::ExplicitOrActor),
+                include_historical,
+            })
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    %error,
+                    "approval turn-run locator could not read process gate projection"
+                );
+                approval_turn_locator_unavailable()
+            })
     }
 }
 
 pub(super) struct ApprovalRequestGateEvidence {
-    pub(super) approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub(super) approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
 }
 
 /// Test-only constructor mirroring the production loop-exit evidence store.
 #[cfg(feature = "test-support")]
 pub(crate) fn build_approval_gate_evidence_for_test(
-    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: std::sync::Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
 ) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     std::sync::Arc::new(ApprovalRequestGateEvidence { approval_requests })
 }
@@ -154,7 +169,7 @@ impl ApprovalGateEvidenceStore for ApprovalRequestGateEvidence {
                 reason: format!("approval request evidence lookup failed: {error}"),
             })?;
         Ok(record
-            .map(|record| record.status == ironclaw_run_state::ApprovalStatus::Pending)
+            .map(|record| record.status == ironclaw_approvals::ApprovalStatus::Pending)
             .unwrap_or(false))
     }
 }
@@ -167,36 +182,15 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
 }
 
 #[async_trait::async_trait]
-impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
+impl ApprovalTurnRunLocator for ProcessGateApprovalTurnRunLocator {
     async fn blocked_approval_runs(
         &self,
         scope: &ApprovalInteractionScope,
     ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product::ProductSurfaceFailure> {
-        let turn_scope = TurnScope::new(
-            scope.tenant_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
-            scope.thread_id.clone(),
-        );
-        let actor = TurnActor::new(scope.user_id.clone());
-        let snapshot = self.snapshot().await?;
-        let mut runs = snapshot
-            .runs
-            .iter()
-            .filter(|run| {
-                run.scope.same_thread(&turn_scope)
-                    && run.status == TurnStatus::BlockedApproval
-                    && run.gate_ref.is_some()
-                    && snapshot_run_actor_matches(&snapshot, run, &actor)
-            })
-            .filter_map(|run| {
-                run.gate_ref.clone().map(|gate_ref| ApprovalBlockedTurnRun {
-                    run_id: run.run_id,
-                    gate_ref,
-                })
-            })
+        let runs = current_turn_gate_runs(self.query(scope, None, false).await?)
+            .into_iter()
+            .map(|(run_id, gate_ref)| ApprovalBlockedTurnRun { run_id, gate_ref })
             .collect::<Vec<_>>();
-        runs.sort_by_key(|run| run.run_id.as_uuid());
         Ok(runs)
     }
 
@@ -205,65 +199,10 @@ impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
         scope: &ApprovalInteractionScope,
         gate_ref: &ironclaw_turns::GateRef,
     ) -> Result<Option<TurnRunId>, ironclaw_product::ProductSurfaceFailure> {
-        let turn_scope = TurnScope::new(
-            scope.tenant_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
-            scope.thread_id.clone(),
-        );
-        let actor = TurnActor::new(scope.user_id.clone());
-        let snapshot = self.snapshot().await?;
-        let active = snapshot
-            .runs
-            .iter()
-            .find(|run| {
-                run.scope.same_thread(&turn_scope)
-                    && run.status == TurnStatus::BlockedApproval
-                    && run.gate_ref.as_ref() == Some(gate_ref)
-                    && snapshot_run_actor_matches(&snapshot, run, &actor)
-            })
-            .map(|run| run.run_id);
-        if active.is_some() {
-            return Ok(active);
-        }
-
-        let mut historical = snapshot
-            .checkpoints
-            .iter()
-            .filter(|checkpoint| {
-                checkpoint.status == TurnStatus::BlockedApproval
-                    && &checkpoint.gate_ref == gate_ref
-                    && checkpoint
-                        .scope
-                        .as_ref()
-                        .is_none_or(|stored| stored.same_thread(&turn_scope))
-            })
-            .filter_map(|checkpoint| {
-                snapshot
-                    .runs
-                    .iter()
-                    .find(|run| {
-                        run.run_id == checkpoint.run_id
-                            && run.scope.same_thread(&turn_scope)
-                            && snapshot_run_actor_matches(&snapshot, run, &actor)
-                    })
-                    .map(|run| run.run_id)
-            })
-            .collect::<Vec<_>>();
-        historical.sort_by_key(|run_id| run_id.as_uuid());
-        historical.dedup();
-        Ok(historical.into_iter().next())
+        Ok(first_turn_run_for_gate(
+            self.query(scope, Some(gate_ref.clone()), true).await?,
+        ))
     }
-}
-
-fn snapshot_run_actor_matches(
-    snapshot: &TurnPersistenceSnapshot,
-    run: &TurnRunRecord,
-    actor: &TurnActor,
-) -> bool {
-    snapshot.turns.iter().any(|turn| {
-        turn.turn_id == run.turn_id && turn.scope.same_thread(&run.scope) && turn.actor == *actor
-    })
 }
 
 fn approval_turn_locator_unavailable() -> ironclaw_product::ProductSurfaceFailure {

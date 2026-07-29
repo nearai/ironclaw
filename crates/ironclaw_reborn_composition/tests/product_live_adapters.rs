@@ -39,21 +39,21 @@ use ironclaw_runner::{
     model_routes::{ModelSelectionMode, ModelSlot},
     planned_driver_factory::default_planned_run_profile_resolver,
     runtime::{
-        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
+        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
+        build_product_live_planned_runtime,
     },
     subagent::{
         await_edge::{
             boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
         },
         flavors::StaticSubagentDefinitionResolver,
-        goal_store::{SubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    CheckpointStateStorePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
-    RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    AgentTurnRuntimePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
+    RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
         InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
@@ -62,8 +62,7 @@ use ironclaw_turns::{
     },
 };
 
-use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 
 async fn build_runtime_for_test(input: RebornHostBindings) -> RebornRuntime {
     build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
@@ -81,10 +80,6 @@ fn adapters_from_runtime(
             .expect("runtime exposes host runtime"),
         config,
     )
-}
-
-fn in_memory_subagent_goal_store() -> Arc<SubagentGoalStore<InMemoryBackend>> {
-    Arc::new(in_memory_backed_subagent_goal_store())
 }
 
 async fn write_capability_result_for_test(
@@ -1374,29 +1369,29 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         ))
         .await;
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let turn_state = Arc::new(in_memory_turn_state_store());
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::clone(&turn_state);
+    let turn_state = Arc::new(in_memory_agent_turn_runtime());
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let thread_scope = thread_scope("runtime-gate");
     let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
 
-    let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_state.clone();
+    let turn_state_for_evidence: Arc<dyn AgentTurnRuntimePort> = turn_state.clone();
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
     let await_edge_mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").unwrap(),
-        VirtualPath::new("/turns").unwrap(),
+        MountAlias::new("/processes").unwrap(),
+        VirtualPath::new("/processes").unwrap(),
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
     let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
+        ironclaw_processes::ProcessJournalStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            await_edge_mounts,
+        ))),
     )));
-    let subagent_goal_store = in_memory_subagent_goal_store();
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&await_edge_store),
-        subagent_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-        turn_state.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        turn_state.clone() as Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
         adapters.capability_result_writer.clone(),
         Arc::clone(&thread_service),
     ));
@@ -1407,17 +1402,15 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         gate_record_store: None,
-        turn_state,
+        process_system: ProcessRuntimeSystem::in_memory_ephemeral().expect("process system"),
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
         model_gateway: Arc::new(StubModelGateway),
-        checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStorePort>,
         loop_checkpoint_store,
         milestone_sink,
         capability_factory: adapters.capability_factory,
         capability_surface_resolver: adapters.capability_surface_resolver,
         capability_result_writer: adapters.capability_result_writer,
-        subagent_goal_store,
         subagent_await_edge_writer: await_edge_driver
             as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
         subagent_await_edge_settler: await_edge_resolver
@@ -1530,8 +1523,8 @@ async fn model_route_settings_respect_selection_mode_override() {
     );
 }
 
-fn test_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStorePort> {
-    Arc::new(ironclaw_run_state::GateRecordStore::new(
+fn test_gate_record_store() -> Arc<dyn ironclaw_approvals::GateRecordStorePort> {
+    Arc::new(ironclaw_approvals::GateRecordStore::new(
         ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
     ))
 }

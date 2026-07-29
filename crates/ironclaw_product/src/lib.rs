@@ -35,7 +35,6 @@ mod automation_product_service;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
-mod blocked_auth_resume;
 mod command_admission;
 mod command_dispatch;
 mod commands;
@@ -115,7 +114,6 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
-pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use command_admission::{CommandActorRoleResolver, DirectConversationCommandAdmission};
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,

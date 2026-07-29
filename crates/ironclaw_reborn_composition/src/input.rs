@@ -15,8 +15,9 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
+use ironclaw_processes::ProcessConcurrencyLimits;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
+use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
 use ironclaw_reborn_config::StorageBackend;
@@ -852,13 +853,12 @@ impl RebornHostBindings {
         Ok(self)
     }
 
-    /// Set concurrency limits for the in-memory turn-state store.
-    ///
-    /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
-    /// factory can apply them when constructing the store. Callers should use
-    /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
-        self.deployment.turn_state_store_limits = limits;
+    /// Set claim-time concurrency limits for the process journal.
+    pub(crate) fn with_process_concurrency_limits(
+        mut self,
+        limits: ProcessConcurrencyLimits,
+    ) -> Self {
+        self.deployment.process_concurrency_limits = limits;
         self
     }
 

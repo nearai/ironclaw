@@ -17,10 +17,10 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `InboundTurnService` / `DefaultInboundTurnService` | User-message turn submission path |
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
-| `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by standalone deployments and tests to select tenant and default agent/project scope |
+| `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
 | `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes |
 | `IdempotencyLedger` | Durable action deduplication port |
-| `InMemoryIdempotencyLedger` | Standalone/test ledger with in-flight lease recovery semantics |
+| `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
 | `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
 | `product-surface command operation` | Reborn-native product command execution port for already-admitted typed commands |
@@ -35,8 +35,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 - `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
 - `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership
-- `ironclaw_projects` — durable project records and live membership ACL repository
-- `ironclaw_run_state` — approval request store contract surfaced through approval resolution/read-model ports
+- `ironclaw_approvals` — approval request store contract surfaced through approval resolution/read-model ports
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract
 - `ironclaw_host_api` — canonical identifiers (TenantId, UserId, etc.)

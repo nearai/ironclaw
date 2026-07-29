@@ -10,9 +10,9 @@ use super::*;
 fn build_approval_interaction_service_with_parts(
     parts: &InteractionServiceTestParts,
     turn_coordinator: Arc<dyn TurnCoordinator>,
-    turn_run_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+    turn_run_source: Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = TurnError>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
-    let approval_turn_runs = Arc::new(SnapshotApprovalTurnRunLocator::new(turn_run_source));
+    let approval_turn_runs = Arc::new(ProcessGateApprovalTurnRunLocator::new(turn_run_source));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
         parts.approval_requests.clone(),
         approval_turn_runs,
@@ -67,7 +67,7 @@ impl RebornRuntime {
         build_approval_interaction_service_with_parts(
             parts,
             turn_coordinator,
-            Arc::clone(&self.turn_run_snapshot_source),
+            Arc::clone(&self._process_gate_query_source),
         )
         .map(Some)
     }
@@ -82,66 +82,48 @@ impl RebornRuntime {
     ) -> Option<Arc<dyn AuthInteractionService>> {
         Some(build_webui_auth_interaction_service_with_turn_run_source(
             self.product_auth.as_ref(),
-            Arc::clone(&self.turn_run_snapshot_source),
+            Arc::clone(&self._process_gate_query_source),
             turn_coordinator,
         ))
     }
 
     /// Like [`standalone_approval_interaction_service_for_test`], but lets
-    /// the caller substitute the turn-run snapshot source the interaction
-    /// service's approval locator reads from — for harnesses whose real runs
-    /// live in a DIFFERENT `TurnStateStore` composition than this
-    /// this runtime's own turn state (e.g.
-    /// `RebornIntegrationGroup`, whose runs execute against its own
-    /// `shared.turn_store` via a separate `build_default_planned_runtime`).
-    /// Generic over `F` so any `TurnStateRowStore<F>`-backed store can be
-    /// passed directly, without this crate exposing `TurnRunSnapshotSource`
-    /// outside itself.
+    /// harnesses substitute the process gate source that owns their runs.
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in
     /// production builds.
     ///
     /// [`standalone_approval_interaction_service_for_test`]: Self::standalone_approval_interaction_service_for_test
     #[cfg(feature = "test-support")]
-    pub fn standalone_approval_interaction_service_with_turn_state_for_test<F>(
+    pub fn standalone_approval_interaction_service_with_turn_state_for_test(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::TurnStateRowStore<F>>,
-    ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError>
-    where
-        F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
-    {
+        process_gates: Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = TurnError>>,
+    ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
         let Some(parts) = self.interaction_service_test_parts.as_ref() else {
             return Ok(None);
         };
-        build_approval_interaction_service_with_parts(
-            parts,
-            turn_coordinator,
-            turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
-        )
-        .map(Some)
+        build_approval_interaction_service_with_parts(parts, turn_coordinator, process_gates)
+            .map(Some)
     }
 
     /// Auth-side counterpart of
     /// [`standalone_approval_interaction_service_with_turn_state_for_test`]. See
-    /// that method's doc for why the turn-state override exists.
+    /// that method's documentation for why the process-gate override exists.
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in
     /// production builds.
     ///
     /// [`standalone_approval_interaction_service_with_turn_state_for_test`]: Self::standalone_approval_interaction_service_with_turn_state_for_test
     #[cfg(feature = "test-support")]
-    pub fn standalone_auth_interaction_service_with_turn_state_for_test<F>(
+    pub fn standalone_auth_interaction_service_with_turn_state_for_test(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::TurnStateRowStore<F>>,
-    ) -> Option<Arc<dyn AuthInteractionService>>
-    where
-        F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
-    {
+        process_gates: Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = TurnError>>,
+    ) -> Option<Arc<dyn AuthInteractionService>> {
         Some(build_webui_auth_interaction_service_with_turn_run_source(
             self.product_auth.as_ref(),
-            turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+            process_gates,
             turn_coordinator,
         ))
     }

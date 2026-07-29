@@ -2379,8 +2379,18 @@ fn collect_forbidden_turns_identifier_uses(
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
             continue;
         }
-        let contents = std::fs::read_to_string(&path)
+        if path
+            .components()
+            .any(|component| component.as_os_str() == "process_projection")
+            || path.file_name().and_then(|name| name.to_str()) == Some("process_projection.rs")
+        {
+            continue;
+        }
+        let mut contents = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        if path.file_name().and_then(|name| name.to_str()) == Some("lib.rs") {
+            contents = strip_process_projection_reexport_block(&contents);
+        }
         for pattern in ["InvocationId", "ProcessId"] {
             if contents.contains(pattern) {
                 violations.push(format!(
@@ -2390,6 +2400,29 @@ fn collect_forbidden_turns_identifier_uses(
             }
         }
     }
+}
+
+fn strip_process_projection_reexport_block(contents: &str) -> String {
+    let mut stripped = String::new();
+    let mut skipping = false;
+    for line in contents.lines() {
+        if line
+            .trim_start()
+            .starts_with("pub use process_projection::{")
+        {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if line.trim_start() == "};" {
+                skipping = false;
+            }
+            continue;
+        }
+        stripped.push_str(line);
+        stripped.push('\n');
+    }
+    stripped
 }
 
 fn collect_forbidden_string_uses(
@@ -2629,7 +2662,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2685,7 +2718,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_first_party_extensions",
                 "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2732,7 +2765,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
@@ -2772,7 +2805,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2807,7 +2840,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_runner",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2883,7 +2916,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2936,7 +2969,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -2959,7 +2992,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_mcp",
                 "ironclaw_processes",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -2980,7 +3013,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3001,7 +3034,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3020,7 +3053,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3048,7 +3081,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3080,7 +3113,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3133,7 +3166,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3168,7 +3201,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_safety",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
@@ -3208,7 +3241,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3237,7 +3270,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3260,7 +3293,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3279,7 +3312,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
@@ -3298,26 +3331,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_scripts",
-                "ironclaw_wasm",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_run_state",
-            forbidden: vec![
-                "ironclaw_authorization",
                 "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_dispatcher",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_host_runtime",
-                "ironclaw_secrets",
-                "ironclaw_network",
-                "ironclaw_mcp",
-                "ironclaw_processes",
-                "ironclaw_resources",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3344,7 +3358,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 // ironclaw_safety is permitted: thread/transcript storage
                 // validates provider-originated replay metadata before it can
                 // be persisted or exposed back to a model-visible context.
@@ -3383,7 +3397,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3396,7 +3410,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: TurnStateRowStore
+                // ironclaw_filesystem is permitted for agent-turn projections.
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3405,8 +3419,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
-                "ironclaw_processes",
-                "ironclaw_run_state",
+                // ironclaw_processes is permitted during the process-journal
+                // kernel migration: turns adapts its existing turn-run store
+                // to the canonical process lifecycle vocabulary owned there.
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
@@ -3431,7 +3447,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_processes",
                 "ironclaw_runner",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
@@ -3477,7 +3493,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_traces",
                 "ironclaw_webui",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3511,7 +3527,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_mcp",
                 "ironclaw_processes",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],

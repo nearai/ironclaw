@@ -86,7 +86,6 @@ ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
 ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
@@ -144,7 +143,6 @@ ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test
 # Enables the in-memory-backed process store constructors for tests only.
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
-ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 # Enables the in-memory-backed budget-gate store constructor for tests only.
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 # Enables the `FaultInjecting` backend decorator so store fault paths are tested

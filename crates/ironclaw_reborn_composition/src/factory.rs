@@ -8,8 +8,8 @@ use std::{
 
 use crate::backend_store_assembly::{
     ProductionStoreBundle, SecretCredentialStores, build_filesystem_secret_credential_stores,
-    filesystem_resource_governor, owner_turn_state_filesystem, production_turn_state_store,
-    resolve_explicit_or_keychain_master_key, trigger_repository_for_durable_backend,
+    filesystem_resource_governor, resolve_explicit_or_keychain_master_key,
+    trigger_repository_for_durable_backend,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
@@ -58,6 +58,7 @@ use crate::{
     RebornBuildError, RebornCompositionProfile, RebornHostBindings, RebornReadiness,
     RebornServiceReadiness, RebornWorkerReadiness,
 };
+use ironclaw_approvals::ApprovalRequestStore;
 use ironclaw_approvals::{
     AutoApproveSettingStore, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
 };
@@ -150,12 +151,11 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
-use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
-use ironclaw_processes::ProcessServices;
+use ironclaw_processes::{ProcessConcurrencyLimits, ProcessJournalStore, ProcessServices};
 use ironclaw_product::RebornProjectService;
 use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
@@ -168,7 +168,7 @@ use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, BudgetGateStorePort, FilesystemResourceGovernor,
     ResourceGovernor,
 };
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_runner::runtime::ProcessRuntimeSystem;
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_skills::ScopedSkillManagementPort;
 use ironclaw_threads::FilesystemSessionThreadService;
@@ -179,11 +179,10 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
-    CheckpointStateStorePort, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
+    AgentTurnRuntimePort, GetRunStateRequest, InMemoryRunProfileResolver, TurnScope,
 };
-use ironclaw_turns::{GetRunStateRequest, InMemoryRunProfileResolver, TurnScope, TurnStateStore};
+use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
 mod auth_engine_assembly;
@@ -194,9 +193,10 @@ use auth_engine_assembly::{
     ProductAuthServicesCompositionInput, compose_product_auth_services, compose_provider_client,
 };
 mod trigger_creation_assembly;
-#[cfg(any(test, feature = "test-support"))]
-use trigger_creation_assembly::LateBoundTriggerSourceTurnStateStore;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
+pub(crate) use trigger_creation_assembly::{
+    TriggerSourceReplyTarget, TurnStateTriggerSourceReplyTarget,
+};
 #[cfg(test)]
 use trigger_creation_assembly::{
     pair_trigger_creator, validate_trigger_delivery_target_against_registry,
@@ -219,7 +219,7 @@ pub(crate) use production_backend_assembly::{
 };
 use production_build_assembly::{
     FilesystemProductionHostRuntimeServices, RebornProductionBuildContext, build_production_shaped,
-    planned_run_profile_resolver, substrate_only_default_owner_id,
+    planned_run_profile_resolver,
 };
 pub(crate) use runtime_lane_assembly::apply_production_runtime_process_binding;
 use runtime_lane_assembly::{
@@ -272,26 +272,34 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
-    /// Late-rebindable turn-run source the trigger active-run lookup reads
-    /// (`crate::turn_run_snapshot`). Production points it at this runtime's own
-    /// turn-state store; a `test-support` harness can repoint it at its own
-    /// store so its runs are visible to the trigger subsystem.
+    pub(crate) process_gate_query_source:
+        Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
+    /// Late-rebindable process lifecycle source the trigger active-run lookup
+    /// reads. Production points it at this runtime's process journal; a
+    /// `test-support` harness can repoint it at its own process runtime.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
         dead_code,
         reason = "held for test-support rebinding after runtime construction"
     )]
-    pub(crate) trigger_source_turn_state:
-        Arc<std::sync::RwLock<Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>>>,
-    /// Sibling rebindable slot, `TurnStateStore`-typed, read by the trigger
-    /// delivery-target service; repointed together with the snapshot slot.
+    pub(crate) trigger_process_lifecycle_source: Arc<
+        std::sync::RwLock<
+            Arc<
+                dyn ironclaw_processes::ProcessLifecycleLookupSource<
+                        Error = ironclaw_turns::TurnError,
+                    >,
+            >,
+        >,
+    >,
+    /// Sibling read-only reply-target projection; repointed with the lifecycle
+    /// source by test-support harnesses.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
         dead_code,
         reason = "held for test-support rebinding after runtime construction"
     )]
-    pub(crate) trigger_source_turn_state_store:
-        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::TurnStateStore>>>,
+    pub(crate) trigger_source_reply_target:
+        Arc<std::sync::RwLock<Arc<dyn TriggerSourceReplyTarget>>>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
@@ -327,9 +335,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) turn_state: Arc<TurnStateRowStore<CompositeRootFilesystem>>,
-    pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
-    pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
+    pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
@@ -641,9 +647,9 @@ fn build_budget_sinks() -> BudgetSinks {
 }
 
 /// The `HostRuntimeServices` wiring shared by the standalone and production
-/// build paths (F4): the ten `.with_*` setters both paths always apply, plus
+/// build paths (F4): the shared `.with_*` setters both paths always apply, plus
 /// the fixed `TracingSecurityAuditSink`. Single-sourced as a macro because the
-/// builder is generic over four backend type params and the setters are
+/// builder is generic over backend type params and the setters are
 /// value-generic (e.g. `with_trust_policy<T>`), so a function would have to
 /// thread all of them; the macro defers typing to each expansion site.
 /// Backend-specific setters (approval requests, resource governor, event
@@ -658,8 +664,9 @@ macro_rules! with_shared_host_runtime_wiring {
         persistent_approval_policies = $policies:expr,
         secret_store = $secret:expr,
         credential_broker = $broker:expr,
-        filesystem_run_state = $fs:expr,
-        turn_state_and_transition_port = $turn_state:expr,
+        process_runtime = $process_runtime:expr,
+        approval_filesystem = $fs:expr,
+        turn_state = $turn_state:expr,
         run_profile_resolver = $resolver:expr $(,)?
     ) => {
         $services
@@ -672,8 +679,8 @@ macro_rules! with_shared_host_runtime_wiring {
             ))
             .with_secret_store($secret)
             .with_credential_broker($broker)
-            .with_filesystem_run_state($fs)
-            .with_turn_state_and_transition_port($turn_state)
+            .with_process_journal_invocation_state($process_runtime, $fs)
+            .with_turn_state($turn_state)
             .with_run_profile_resolver($resolver)
     };
 }

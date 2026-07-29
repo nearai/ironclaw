@@ -215,7 +215,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
 
 #[tokio::test]
 async fn auth_resume_json_enriches_auth_required_credential_requirements_from_obligations() {
-    use ironclaw_run_state::{RunStateStorePort, RunStatus};
+    use ironclaw_processes::{ProcessInvocationStatePort, ProcessInvocationStatus};
 
     // A dispatcher that returns AuthRequired with an empty credential_requirements
     // list on every call (simulating a WASM adapter at both invoke and resume time).
@@ -229,11 +229,11 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
     };
     let dispatcher = TestDispatcher::auth_required();
     let handler = PassthroughObligationHandler;
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
 
     let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_obligation_handler(&handler)
-        .with_run_state(&run_state);
+        .with_invocation_state(&run_state);
 
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -262,7 +262,7 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
 
     // Manually block the run so auth_resume_json can act on it.
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::BlockedAuth);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedAuth);
 
     // Phase 2: auth_resume_json → dispatcher returns AuthRequired again →
     // dispatch_resumed_capability enriches from obligations.
