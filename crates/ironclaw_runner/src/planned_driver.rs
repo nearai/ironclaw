@@ -360,6 +360,13 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 detail: None,
             }
         }
+        AgentLoopExecutorError::RecoverySequenceExhausted => {
+            tracing::warn!("planned driver exhausted durable recovery event identity space");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
+                detail: None,
+            }
+        }
         AgentLoopExecutorError::Cancelled => AgentLoopDriverError::Failed {
             reason_kind: "interrupted_unexpectedly".to_string(),
             detail: None,

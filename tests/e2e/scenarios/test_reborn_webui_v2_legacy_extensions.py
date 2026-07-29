@@ -821,6 +821,9 @@ async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
         handle_llm_providers,
     )
 
+    async def abort_catalog_request(route):
+        await route.abort("internetdisconnected")
+
     try:
         async with page.expect_response("**/api/webchat/v2/llm/providers"):
             await page.goto(
@@ -835,7 +838,9 @@ async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
             timeout=15000
         )
 
-        await context.set_offline(True)
+        # Keep the browser online so the lazy Extensions route chunk can load,
+        # then fail only the API calls this scenario owns.
+        await page.route("**/api/webchat/v2/extensions**", abort_catalog_request)
         await page.get_by_role("link", name="Extensions").first.click()
 
         error_banner = page.get_by_role("alert")
@@ -846,11 +851,12 @@ async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
         assert "/api/webchat/v2/extensions/registry" in catalog_requests
         await expect(page.get_by_text("Registry is empty")).to_have_count(0)
 
-        await context.set_offline(False)
+        await page.unroute(
+            "**/api/webchat/v2/extensions**", abort_catalog_request
+        )
         await error_banner.get_by_role("button", name="Retry").click()
         await expect(error_banner).to_have_count(0, timeout=10000)
     finally:
-        await context.set_offline(False)
         await context.close()
 
 
@@ -912,10 +918,10 @@ async def test_reborn_legacy_extensions_multiple_installs_remain_listed(
 
         installed_tool = _card_by_title(page, "Registry Tool")
         installed_mcp = _card_by_title(page, "Registry MCP Server")
-        await expect(installed_tool.get_by_text("installed", exact=True)).to_be_visible(
+        await expect(installed_tool.get_by_text("active", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(installed_mcp.get_by_text("installed", exact=True)).to_be_visible()
+        await expect(installed_mcp.get_by_text("active", exact=True)).to_be_visible()
         await expect(
             installed_tool.get_by_role("button", name="Install")
         ).to_have_count(0)

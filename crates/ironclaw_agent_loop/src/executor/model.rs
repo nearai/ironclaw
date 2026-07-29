@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlocked, LoopBlockedKind, LoopExit, LoopFailureKind,
     run_profile::{
         AgentLoopHostErrorKind, LoopDriverNoteKind, LoopModelCapabilityView, LoopModelRequest,
-        LoopProgressEvent, LoopSafeSummary,
+        LoopProgressEvent, LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     },
 };
 use tracing::debug;
@@ -20,7 +20,8 @@ use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     HostStage, StageContext, exit_id, failed_exit, loop_gate_kind, model_error_class,
-    model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary_or_fallback,
+    model_error_failure_summary, model_preference_to_host, model_recovery_class,
+    sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -204,18 +205,31 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         .recovery()
                         .on_model_error(&state, &summary)
                         .await;
-                    let (recovery, scope, alter, observation) = match recovery_outcome {
+                    let (recovery, scope, alter, observation, disposition) = match recovery_outcome
+                    {
                         RecoveryOutcome::Retry {
                             recovery,
                             scope,
                             alter,
-                        } => (recovery, scope, alter, None),
+                        } => (
+                            recovery,
+                            scope,
+                            alter,
+                            None,
+                            LoopRecoveryDisposition::Retried,
+                        ),
                         RecoveryOutcome::ModelErrorObservation {
                             recovery,
                             scope,
                             alter,
                             observation,
-                        } => (recovery, scope, alter, Some(observation)),
+                        } => (
+                            recovery,
+                            scope,
+                            alter,
+                            Some(observation),
+                            LoopRecoveryDisposition::ModelVisible,
+                        ),
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
                                 detail: "ToolErrorResult on model error",
@@ -250,8 +264,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             )?));
                         }
                     };
-                    state.recovery_state = recovery;
-                    state.pending_model_error_observation = observation;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -259,6 +271,17 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     let retry_action =
                         prepare_model_retry_alteration(&mut state, scope, alter.as_ref())?;
                     request.fallback_index = state.model_state.fallback_index;
+                    state.recovery_state = recovery;
+                    state.pending_model_error_observation = observation;
+                    CheckpointStage
+                        .emit_recovery(
+                            ctx,
+                            &mut state,
+                            LoopRecoveryStage::Model,
+                            model_recovery_class(class),
+                            disposition,
+                        )
+                        .await?;
                     // Persist the consumed retry/observation budget before the
                     // next model attempt. Otherwise a worker restart reloads
                     // the pre-error BeforeModel checkpoint and grants the

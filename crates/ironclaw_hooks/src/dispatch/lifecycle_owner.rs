@@ -81,7 +81,8 @@ pub(crate) fn is_lifecycle_kind(kind: RuntimeEventKind) -> bool {
         | RuntimeEventKind::ProcessStarted
         | RuntimeEventKind::ProcessCompleted
         | RuntimeEventKind::ProcessFailed
-        | RuntimeEventKind::ProcessKilled => false,
+        | RuntimeEventKind::ProcessKilled
+        | RuntimeEventKind::FailureRecovered => false,
     }
 }
 
@@ -253,6 +254,7 @@ mod tests {
             RuntimeEventKind::ProcessCompleted,
             RuntimeEventKind::ProcessFailed,
             RuntimeEventKind::ProcessKilled,
+            RuntimeEventKind::FailureRecovered,
         ];
         for kind in lifecycle {
             assert!(
