@@ -494,15 +494,28 @@ where
         {
             return Err(CompactionError::InjectionDetected);
         }
-        let content = format!(
-            "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
-            escape_xml(output_text)
-        );
+        let escaped_output = escape_xml(output_text);
+        let escaped_redaction = self.redact_leaks(&escaped_output)?;
+        let escaped_output = escaped_redaction
+            .content
+            .as_deref()
+            .unwrap_or(&escaped_output);
+        let content = format!("{ANTI_INJECTION_PREFIX}<summary>{escaped_output}</summary>");
+        if !self.injection_scanner.scan_injection(&content).is_empty() {
+            return Err(CompactionError::InjectionDetected);
+        }
+        if !self.leak_detector.scan_leaks(&content).is_clean() {
+            return Err(CompactionError::LeakRedactionFailed);
+        }
+        let redacted_leak_count = redaction
+            .count
+            .checked_add(escaped_redaction.count)
+            .ok_or(CompactionError::LeakRedactionFailed)?;
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, content.len());
         Ok(SanitizedSummary {
             content,
             compression_ratio_ppm,
-            redacted_leak_count: redaction.count,
+            redacted_leak_count,
         })
     }
 

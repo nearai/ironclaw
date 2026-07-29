@@ -303,7 +303,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Per-sender sessions | ✅ | ✅ | |
 | Global sessions | ✅ | ❌ | Optional shared context |
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions; oversized `sessions.json` rotation removed; entry/age caps enforced at load |
-| Context compaction | ✅ | ✅ | Auto summarization |
+| Context compaction | ✅ | ✅ | Auto summarization with deterministic retention-boundary secret redaction and fail-closed residual checks |
 | Compaction model override | ✅ | ❌ | Use a dedicated provider/model for summarization only; `agents.defaults.compaction.memoryFlush.model` exact override |
 | Compaction mid-turn precheck | ✅ | ❌ | `agents.defaults.compaction.midTurnPrecheck` triggers before next tool call instead of end-of-turn |
 | Post-compaction read audit | ✅ | ❌ | Layer 3: workspace rules appended to summaries |
@@ -766,7 +766,7 @@ CLAUDE.md for the full mapping + gap catalog.
 | Media URL validation | ✅ | ❌ | Reject non-HTTP(S) inbound attachment URLs; reject remote-host `file://` URLs in webchat embedding path |
 | Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization; OpenClaw added chat-template special-token stripping (Qwen/ChatML, Llama, Gemma, Mistral, Phi, GPT-OSS) |
 | Internal scaffolding stripping | ✅ | ❌ | `<system-reminder>`/`<previous_response>` stripped at final delivery boundary |
-| Leak detection | ✅ | ✅ | Secret exfiltration |
+| Leak detection | ✅ | ✅ | Secret exfiltration; complete and malformed private-key blocks are bounded for safe value redaction |
 | Dangerous tool re-enable warning | ✅ | ❌ | Warn when gateway.tools.allow re-enables HTTP tools |
 | OpenGrep static analysis | ✅ | ❌ | Bundled rulepack + source-rule compiler + provenance check; PR/full scan workflows + SARIF upload to GitHub Code Scanning |
 | Logging redaction expansion | ✅ | ❌ | Tencent/Alibaba/HuggingFace/Replicate API keys; payment credential field names; `sk-*`/Bearer/Authorization tokens at console + file sinks |

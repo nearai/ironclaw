@@ -880,6 +880,19 @@ mod tests {
     }
 
     #[test]
+    fn private_key_patterns_leave_public_key_near_misses_clean() {
+        let detector = LeakDetector::new();
+
+        for label in ["RSA PUBLIC KEY", "OPENSSH PUBLIC KEY", "CERTIFICATE"] {
+            let content = format!(
+                "before\n-----BEGIN {label}-----\nPUBLIC_MATERIAL\n-----END {label}-----\nafter"
+            );
+
+            assert!(detector.scan(&content).is_clean(), "label: {label}");
+        }
+    }
+
+    #[test]
     fn unterminated_private_key_redaction_consumes_the_bounded_remainder() {
         let detector = LeakDetector::new();
         let content = concat!(

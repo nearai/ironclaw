@@ -537,6 +537,75 @@ async fn compaction_port_redacts_serialized_in_body_matches_without_crossing_bou
 }
 
 #[tokio::test]
+async fn compaction_port_redacts_serialized_output_matches_before_persistence() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible").await;
+    let port = fixture.port(
+        "safe & safe",
+        Arc::new(CleanInjectionScanner),
+        Arc::new(SerializedEntityLeakScanner),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("serialized output body matches should redact safely");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+
+    assert_eq!(response.redacted_leak_count, 1);
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let summary = history.summary_artifacts.first().expect("summary exists");
+    assert!(
+        summary
+            .content
+            .contains("<summary>safe [REDACTED] safe</summary>")
+    );
+    assert!(!summary.content.contains("&amp;"));
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_serialized_output_cross_boundary_matches() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible").await;
+    let port = fixture.port(
+        "safe summary",
+        Arc::new(CleanInjectionScanner),
+        Arc::new(SummaryBoundaryLeakScanner),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("cross-boundary output matches must fail before persistence");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.summary_artifacts.is_empty(),
+        "cross-boundary output must not be persisted"
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_rejects_serialized_redaction_expansion_over_byte_cap() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user(&"&".repeat(50_000)).await;
@@ -1723,6 +1792,31 @@ impl LeakScanner for SerializedEntityLeakScanner {
                     masked_preview: "[masked]".to_string(),
                 }],
                 should_block: false,
+                redacted_content: None,
+            };
+        }
+        LeakScanResult {
+            matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
+struct SummaryBoundaryLeakScanner;
+
+impl LeakScanner for SummaryBoundaryLeakScanner {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        if let Some(start) = content.find("<summary>") {
+            return LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "summary_boundary".to_string(),
+                    severity: LeakSeverity::Critical,
+                    action: LeakAction::Block,
+                    location: start..start + "<summary>".len() + 1,
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: true,
                 redacted_content: None,
             };
         }
