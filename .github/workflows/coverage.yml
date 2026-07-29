@@ -242,13 +242,10 @@ jobs:
       - name: Build instrumented ironclaw-reborn
         run: |
           set -euo pipefail
-          rm -f target/debug/ironclaw
           cargo build -p ironclaw --bin ironclaw
-          cp target/debug/ironclaw target/debug/ironclaw-default
-          rm -f target/debug/ironclaw
-          cargo build -p ironclaw --bin ironclaw --features e2e-test-support
-          cp target/debug/ironclaw target/debug/ironclaw-e2e-sso
-          cp target/debug/ironclaw-default target/debug/ironclaw
+          cargo build -p ironclaw --bin ironclaw \
+            --features test-support \
+            --target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
+from helpers import sse_stream, wait_for_sse_line
 from reborn_webui_harness import create_thread, reborn_bearer_headers
 
 pytest_plugins = ["reborn_webui_harness"]
@@ -61,29 +62,38 @@ async def _session(base_url: str, token: str) -> httpx.Response:
         )
 
 
-def _assert_cross_user_stream_denied(response: httpx.Response) -> None:
+async def _assert_cross_user_stream_denied(
+    base_url: str,
+    thread_id: str,
+    token: str,
+) -> None:
     # EventSource requires a successful HTTP open. Authorization failures are
     # therefore delivered as one redacted stream_error frame before close.
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    event_names = [
-        line.partition(":")[2].strip()
-        for line in response.text.splitlines()
-        if line.startswith("event:")
-    ]
-    payloads = [
-        json.loads(line.partition(":")[2].strip())
-        for line in response.text.splitlines()
-        if line.startswith("data:")
-    ]
-    assert event_names == ["stream_error"]
-    assert payloads == [
-        {
-            "error": "not_found",
-            "kind": "not_found",
-            "retryable": False,
-        }
-    ]
+    async with sse_stream(
+        base_url,
+        path=f"/api/webchat/v2/threads/{thread_id}/events",
+        token=token,
+        timeout=15,
+    ) as response:
+        assert response.status == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        event_line = await wait_for_sse_line(
+            response,
+            predicate=lambda line: line.startswith("event:"),
+            timeout=10,
+        )
+        data_line = await wait_for_sse_line(
+            response,
+            predicate=lambda line: line.startswith("data:"),
+            timeout=10,
+        )
+
+    assert event_line.partition(":")[2].strip() == "stream_error"
+    assert json.loads(data_line.partition(":")[2].strip()) == {
+        "error": "not_found",
+        "kind": "not_found",
+        "retryable": False,
+    }
 
 
 async def test_reborn_v2_sso_login_logout_and_multi_user_scope_isolation(
@@ -173,16 +183,16 @@ async def test_reborn_v2_sso_login_logout_and_multi_user_scope_isolation(
         assert alice_reads_bob.status_code == 404
         assert bob_reads_alice.status_code == 404
 
-        alice_streams_bob = await alice.get(
-            f"{base_url}/api/webchat/v2/threads/{bob_thread}/events",
-            timeout=15,
+        await _assert_cross_user_stream_denied(
+            base_url,
+            bob_thread,
+            alice_token,
         )
-        bob_streams_alice = await bob.get(
-            f"{base_url}/api/webchat/v2/threads/{alice_thread}/events",
-            timeout=15,
+        await _assert_cross_user_stream_denied(
+            base_url,
+            alice_thread,
+            bob_token,
         )
-        _assert_cross_user_stream_denied(alice_streams_bob)
-        _assert_cross_user_stream_denied(bob_streams_alice)
 
         logout = await alice.post(f"{base_url}/auth/logout", timeout=15)
         assert logout.status_code == 204
