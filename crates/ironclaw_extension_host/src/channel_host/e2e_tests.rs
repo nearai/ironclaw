@@ -139,6 +139,32 @@ fn slack_manifest_from_bundled_inventory() -> String {
         .into_owned()
 }
 
+/// Overwrite the bundled manifest's `key = [...]` array declaration with
+/// `values`, independent of the array's CURRENT contents. A literal-text
+/// `.replace("key = [\"current-value\"]", ...)` would silently no-op the
+/// moment the bundled manifest's declared value changes underneath it (no
+/// match, no replacement, override never applied) — exactly what would have
+/// happened here when Task 5 changed `commands` from `["status"]` to
+/// `["model", "status"]`.
+fn replace_toml_array(manifest: &str, key: &str, values: &[&str]) -> String {
+    let prefix = format!("{key} = [");
+    let start = manifest
+        .find(&prefix)
+        .unwrap_or_else(|| panic!("manifest declares `{key} = [...]`")); // safety: test fixture asserts the bundled manifest's fixed shape.
+    let close = manifest[start..]
+        .find(']')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("`{key}` array is closed")); // safety: test fixture asserts the bundled manifest's fixed shape.
+    let mut patched = String::with_capacity(manifest.len());
+    patched.push_str(&manifest[..start]);
+    patched.push_str(&format!(
+        "{key} = {}",
+        serde_json::to_string(values).expect("serialize test array values") // safety: test-only string slices serialize without failure.
+    ));
+    patched.push_str(&manifest[close + 1..]);
+    patched
+}
+
 /// The canonical generic-ingress path the fixtures post to: the single
 /// `extension_ingress_route_mount` serves
 /// `/webhooks/extensions/{extension_id}/{route_suffix}` for every active
@@ -292,6 +318,11 @@ struct HarnessOptions {
     /// (empty `list_pending`) so bare gate replies exercise the
     /// delivered-gate-route fallback.
     foreign_scope_approvals: bool,
+    /// Admin-users role seeded for the harness's bound user (`USER`) — see
+    /// `build_harness_with_options`. Defaults to `Member` so admin-audience
+    /// command actions (`/model set`, `set-provider`) deny by default;
+    /// scenarios proving the admin path override this to an admin role.
+    actor_role: AdminUserRole,
 }
 
 impl HarnessOptions {
@@ -302,6 +333,7 @@ impl HarnessOptions {
             auth_challenges: None,
             manifest_commands: None,
             foreign_scope_approvals: false,
+            actor_role: AdminUserRole::Member,
         }
     }
 }
@@ -467,7 +499,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             },
         }),
         channel_pairing: None,
-        admin_users: Arc::new(FakeAdminUsers::default()),
+        admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
@@ -674,13 +706,7 @@ async fn slack_test_extension_host_with_manifest_commands(
         let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
         let mut manifest = slack_manifest_from_bundled_inventory();
         if let Some(commands) = manifest_commands {
-            manifest = manifest.replace(
-                "commands = [\"status\"]",
-                &format!(
-                    "commands = {}",
-                    serde_json::to_string(commands).expect("serialize test commands") // safety: test-only string slices serialize without failure.
-                ),
-            );
+            manifest = replace_toml_array(&manifest, "commands", commands);
         }
         ironclaw_extensions::ExtensionManifestRecord::from_toml(
             manifest,
@@ -3434,14 +3460,28 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
     }
 }
 
-/// Harness admin-users directory (Task 4): the bundled test manifest only
-/// declares `status` (user-audience), so admin-audience role gating is not
-/// yet observable here — `get_user` exists so the assembly's admission
-/// construction has a real handle to build; list/create/update/delete are
-/// unreachable from these scenarios.
-#[derive(Default)]
+/// Harness admin-users directory (Task 5): seeds exactly the harness's bound
+/// user (`USER`, resolved through `identity_lookup` — see
+/// `build_harness_with_options`) with `HarnessOptions.actor_role`, so the
+/// bundled manifest's admin-audience command actions (`/model set`,
+/// `set-provider`) are admitted or denied by role. `get_user` treats any
+/// other user id as `AdminUserRole::Member` (fail-closed default);
+/// list/create/update/delete are unreachable from these scenarios.
 struct FakeAdminUsers {
     roles: Mutex<std::collections::HashMap<String, AdminUserRole>>,
+}
+
+impl FakeAdminUsers {
+    /// Seed a single actor -> role mapping. Every other user id resolves to
+    /// `AdminUserRole::Member` via `get_user`'s fail-closed default.
+    fn seeded(user_id: &str, role: AdminUserRole) -> Self {
+        Self {
+            roles: Mutex::new(std::collections::HashMap::from([(
+                user_id.to_string(),
+                role,
+            )])),
+        }
+    }
 }
 
 #[async_trait]
@@ -3632,6 +3672,14 @@ const DM_COMMAND: &str = r#"{
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/status","ts":"1710000000.000021"}
 	}"#;
 
+const DM_MODEL_SET: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-model-set",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model set fake-model","ts":"1710000000.000027"}
+	}"#;
+
 const DM_UNKNOWN_COMMAND: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
@@ -3639,14 +3687,6 @@ const DM_UNKNOWN_COMMAND: &str = r#"{
   "event_id":"Ev-command-unknown",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/notacommand","ts":"1710000000.000022"}
 	}"#;
-
-const DM_DISABLED_MODEL_COMMAND: &str = r#"{
-  "type":"event_callback",
-  "team_id":"T-A",
-  "api_app_id":"A-slack",
-  "event_id":"Ev-command-model-disabled",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model set-provider openai --model gpt-5","ts":"1710000000.000024"}
-}"#;
 
 const DM_DISABLED_EXTENSION_COMMAND: &str = r#"{
   "type":"event_callback",
@@ -4806,6 +4846,66 @@ async fn dm_slash_command_executes_and_delivers_rendered_result() {
     );
 }
 
+/// `/model` is a declared, User-listing-audience command, but its `set`
+/// action's EXECUTION audience is Admin (`required_audience`). A `Member`
+/// actor clears the "is this command declared" gate and is denied at the
+/// admin-users role gate instead — the fixed admin notice, never the
+/// undeclared-command help text, and never an execution.
+#[tokio::test]
+async fn member_dm_model_set_is_denied_with_admin_notice_and_no_execution() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(DM_MODEL_SET).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "admin-account command denial",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text == "This command requires an admin account.")
+        },
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "denied commands are not turns"
+    );
+}
+
+/// The same actor with an `Owner` admin-users role clears the admin-users
+/// role gate and executes `/model set` through the product command surface.
+#[tokio::test]
+async fn admin_dm_model_set_executes_via_command_surface() {
+    let mut options = HarnessOptions::new(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    });
+    options.actor_role = AdminUserRole::Owner;
+    let harness = build_harness_with_options(options).await;
+
+    let response = harness.post_event(DM_MODEL_SET).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let invokes = harness.command_executions.invokes();
+    assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
+    assert_eq!(invokes[0].0, "product.model.command");
+    assert_eq!(invokes[0].1, USER, "caller is the bound user");
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "product commands are not turns"
+    );
+}
+
 #[tokio::test]
 async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
     let harness = build_harness(TurnMode::Complete {
@@ -4821,11 +4921,10 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
         wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
             payload["text"]
                 .as_str()
-                .is_some_and(|text| text == "Available commands:\n/status")
+                .is_some_and(|text| text == "Available commands:\n/model\n/status")
         })
         .await;
     let text = feedback[0]["text"].as_str().expect("feedback text");
-    assert!(!text.contains("/model"));
     assert!(!text.contains("/extension_configure"));
     assert!(!text.contains("/skill_remove"));
     assert_eq!(feedback[0]["channel"], CHANNEL);
@@ -4833,6 +4932,15 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
 }
 
+/// `extension_configure` and `skill_remove` are real, Admin-audience product
+/// commands that remain undeclared for this channel's manifest (unlike
+/// `model`, which Task 5 declared) — both still fall into the generic
+/// undeclared-command help path, not the admin-notice path.
+/// (`/model set-provider`'s equivalent disabled-then-role-gated transition is
+/// covered by `member_dm_model_set_is_denied_with_admin_notice_and_no_execution`
+/// / `admin_dm_model_set_executes_via_command_surface` above; the per-action
+/// Admin-audience mapping for `Set` and `SetProvider` is pinned at the unit
+/// tier by `execution_audience_is_per_action`.)
 #[tokio::test]
 async fn disabled_dm_slash_commands_are_rejected_without_execution() {
     let harness = build_harness(TurnMode::Complete {
@@ -4840,11 +4948,7 @@ async fn disabled_dm_slash_commands_are_rejected_without_execution() {
     })
     .await;
 
-    for payload in [
-        DM_DISABLED_MODEL_COMMAND,
-        DM_DISABLED_EXTENSION_COMMAND,
-        DM_DISABLED_SKILL_COMMAND,
-    ] {
+    for payload in [DM_DISABLED_EXTENSION_COMMAND, DM_DISABLED_SKILL_COMMAND] {
         let response = harness.post_event(payload).await;
         assert_eq!(response.status(), StatusCode::OK);
         harness.drain().await;
@@ -4853,9 +4957,9 @@ async fn disabled_dm_slash_commands_are_rejected_without_execution() {
     let scoped_help = harness
         .slack_messages()
         .into_iter()
-        .filter(|payload| payload["text"] == "Available commands:\n/status")
+        .filter(|payload| payload["text"] == "Available commands:\n/model\n/status")
         .count();
-    assert_eq!(scoped_help, 3, "one scoped rejection per disabled command");
+    assert_eq!(scoped_help, 2, "one scoped rejection per disabled command");
     assert!(harness.command_executions.invokes().is_empty());
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
 }
