@@ -13,8 +13,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{FailureFate, FailureKind};
 use ironclaw_turns::{
-    LoopDiagnosticRef, LoopFailureKind, ModelInvalidOutputDetailReason,
-    run_profile::LoopSafeSummary,
+    LoopFailureKind, ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary,
 };
 
 use crate::state::{
@@ -101,7 +100,7 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 }
 
 /// Sanitized capability error — the unified [`FailureKind`] plus a safe
-/// summary string and an opaque diagnostic ref. Strategies never see raw
+/// summary string. Strategies never see raw
 /// provider errors, host paths, or secrets; sanitization happens at the host
 /// port boundary before recovery strategy code runs.
 ///
@@ -112,15 +111,13 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 pub(crate) struct CapabilityErrorSummary {
     pub(crate) kind: FailureKind,
     pub(crate) safe_summary: SanitizedStrategySummary,
-    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
-/// Sanitized model error — class + safe summary + opaque diagnostic ref.
+/// Sanitized model error — class + safe summary.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelErrorSummary {
     pub(crate) class: ModelErrorClass,
     pub(crate) safe_summary: SanitizedStrategySummary,
-    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
 /// Wire-stable model error classification.
@@ -177,8 +174,11 @@ pub(crate) enum RecoveryOutcome {
     ToolErrorResult {
         recovery: RecoveryStrategyState,
     },
-    /// Retry once with a typed, host-authored model-error observation after
-    /// the ordinary per-class retry budget has been exhausted.
+    /// Retry once with a typed, host-authored model-error observation.
+    ///
+    /// Most errors reach this after exhausting their per-class retry budget;
+    /// `OutsideCapabilitySurface` uses it immediately so the model can repair
+    /// its capability choice without blind retries.
     ModelErrorObservation {
         recovery: RecoveryStrategyState,
         scope: RetryScope,
@@ -217,8 +217,10 @@ pub(crate) enum RetryScope {
 /// - Retries capability transient, unavailable, and internal errors up to
 ///   [`Self::max_attempts_per_class`] times with `Backoff`, then returns a
 ///   model-visible tool error result.
-/// - Retries model invalid-output errors up to the same budget, then gives the
-///   model one typed observation-assisted repair attempt before aborting.
+/// - Gives `OutsideCapabilitySurface` invalid output one immediate typed
+///   observation-assisted repair attempt. Other invalid-output errors first
+///   retry up to the same per-class budget, then get one typed observation
+///   before aborting.
 /// - Retries model transient, unavailable, and internal errors on the much
 ///   deeper [`Self::max_model_availability_attempts`] budget with a
 ///   longer-capped backoff schedule, then aborts the run. Provider outages
@@ -350,6 +352,16 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
             ModelErrorClass::InvalidOutput => {
                 let reason =
                     ModelInvalidOutputDetailReason::from_safe_summary(err.safe_summary.as_str());
+                if reason == Some(ModelInvalidOutputDetailReason::OutsideCapabilitySurface) {
+                    // A blind shape-repair retry cannot tell the model which
+                    // advertised-tool constraint it violated. Spend the one
+                    // typed observation attempt immediately instead.
+                    return observe_once_or_abort(
+                        state,
+                        RetryScope::Call,
+                        ModelErrorRecoveryObservation::invalid_output(reason),
+                    );
+                }
                 retry_observe_or_abort(
                     state,
                     self.max_attempts_per_class,
@@ -819,7 +831,6 @@ mod tests {
         let summary = CapabilityErrorSummary {
             kind: FailureKind::Transient,
             safe_summary: SanitizedStrategySummary::new("upstream timed out").expect("valid"),
-            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:cap-1").expect("valid")),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -836,7 +847,6 @@ mod tests {
         let summary = ModelErrorSummary {
             class: ModelErrorClass::ContextOverflow,
             safe_summary: SanitizedStrategySummary::new("context window exceeded").expect("valid"),
-            diagnostic_ref: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -988,8 +998,8 @@ mod tests {
     mod default_recovery_strategy {
         use ironclaw_host_api::{TenantId, ThreadId};
         use ironclaw_turns::{
-            AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
-            TurnScope,
+            AgentLoopDriverDescriptor, ModelInvalidOutputDetailReason, RunProfileId,
+            RunProfileVersion, TurnId, TurnRunId, TurnScope,
             run_profile::{
                 CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
                 CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
@@ -1110,7 +1120,6 @@ mod tests {
             CapabilityErrorSummary {
                 kind,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
-                diagnostic_ref: None,
             }
         }
 
@@ -1118,7 +1127,6 @@ mod tests {
             ModelErrorSummary {
                 class,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
-                diagnostic_ref: None,
             }
         }
 
@@ -1551,6 +1559,49 @@ mod tests {
                 .await;
             assert!(matches!(
                 outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::InvalidModelOutput,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn model_outside_capability_surface_observes_immediately_before_abort() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let error = ModelErrorSummary {
+                class: ModelErrorClass::InvalidOutput,
+                safe_summary: SanitizedStrategySummary::from_trusted_static(
+                    ModelInvalidOutputDetailReason::OutsideCapabilitySurface.safe_summary(),
+                ),
+            };
+
+            let outcome = strategy
+                .on_model_error(&state_with_no_attempts(), &error)
+                .await;
+            let recovery = match outcome {
+                RecoveryOutcome::ModelErrorObservation {
+                    recovery,
+                    scope,
+                    alter,
+                    observation,
+                } => {
+                    assert_eq!(scope, RetryScope::Call);
+                    assert_eq!(alter, None);
+                    assert_eq!(
+                        observation.model_instruction(),
+                        "model error observation: invalid_output \
+                         reason=outside_capability_surface; repair the response and continue"
+                    );
+                    recovery
+                }
+                other => panic!("expected immediate model-visible observation, got {other:?}"),
+            };
+
+            let mut state = state_with_no_attempts();
+            state.recovery_state = recovery;
+            assert!(matches!(
+                strategy.on_model_error(&state, &error).await,
                 RecoveryOutcome::Abort {
                     failure_kind: LoopFailureKind::InvalidModelOutput,
                     ..

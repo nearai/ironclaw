@@ -239,6 +239,10 @@ name = "reborn_group_skills"
 path = "tests/integration/group_skills/main.rs"
 
 [[test]]
+name = "reborn_generated_gate_sequences"
+path = "tests/integration/generated_gate_sequences.rs"
+
+[[test]]
 name = "reborn_group_journeys"
 path = "tests/integration/group_journeys/main.rs"
 

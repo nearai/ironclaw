@@ -110,6 +110,13 @@ external services.
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
+`reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
+requests, the merge queue candidate check, and main. The standalone
+`reborn-playwright.yml` schedule owns the broader six-shard browser matrix; it
+is post-merge nightly coverage, not a required merge check. Failed nightly
+shards upload server logs, Playwright traces, screenshots, and videos, and the
+nightly watchdog owns alerting for that workflow.
+
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
 the configuration:

@@ -9,6 +9,7 @@
 pub(crate) struct Asset {
     pub bytes: &'static [u8],
     pub content_type: &'static str,
+    pub etag: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/assets_generated.rs"));

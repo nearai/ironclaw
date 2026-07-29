@@ -174,7 +174,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             kind: error.kind,
                             safe_summary,
                             reason_kind: error.reason_kind,
-                            diagnostic_ref: error.diagnostic_ref,
                             detail,
                         });
                     };
@@ -194,7 +193,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     let summary = ModelErrorSummary {
                         class,
                         safe_summary,
-                        diagnostic_ref: error.diagnostic_ref,
                     };
                     last_error_summary = Some(summary.clone());
                     last_error_detail.clone_from(&model_failure_detail);
@@ -243,7 +241,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 failure_kind,
                                 Some(checked.checkpoint_id),
                                 FailedExitDetails {
-                                    diagnostic_ref: summary.diagnostic_ref.clone(),
                                     safe_summary: Some(safe_failure),
                                     explanation_message_ref: None,
                                 },
@@ -321,7 +318,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     safe_failure = safe_failure.with_detail(detail);
                 }
                 FailedExitDetails {
-                    diagnostic_ref: summary.diagnostic_ref.clone(),
                     safe_summary: Some(safe_failure),
                     explanation_message_ref: None,
                 }

@@ -18,6 +18,12 @@ class JourneyIngress(StrEnum):
     SLACK = "slack"
     TELEGRAM = "telegram"
     SCHEDULED_TRIGGER = "scheduled_trigger"
+    #: The vendor-neutral mount every channel extension rides,
+    #: `/webhooks/extensions/{extension_id}/{route_suffix}`. Listed separately
+    #: from the named channels because it is the surface a *new* extension
+    #: arrives on: its evidence has to hold for an extension the host has
+    #: never heard of, which is what the acme fixture exists to prove.
+    EXTENSION_WEBHOOK = "extension_webhook"
 
 
 class JourneyExecution(StrEnum):
@@ -29,6 +35,11 @@ class JourneyDeliveryTarget(StrEnum):
     WEBUI = "webui"
     SLACK = "slack"
     TELEGRAM = "telegram"
+    #: The journey ends before any reply is delivered. Ingress proofs that
+    #: stop at durable turn admission use this rather than naming a target
+    #: they never reach -- claiming one would make the inventory read as
+    #: delivery evidence it does not have.
+    NONE = "none"
 
 
 class ObservableAssertion(StrEnum):

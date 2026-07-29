@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
@@ -217,13 +216,6 @@ async def _choose_permission(page, name: str, label: str):
     await expect(listbox).to_be_visible(timeout=5000)
     await listbox.get_by_role("option", name=label).click()
     return button
-
-
-@pytest.fixture
-def reborn_approval_artifact_cleanup():
-    yield
-    for label in ("first", "second"):
-        Path(f"reborn-approval-{label}.txt").unlink(missing_ok=True)
 
 
 async def _set_real_auto_approve(reborn_v2_server: str, enabled: bool):
@@ -508,14 +500,13 @@ async def test_reborn_legacy_tool_permission_real_api_persists_and_rejects_locke
 
 async def test_reborn_legacy_always_approve_survives_reborn_restart(
     reborn_v2_restartable_server,
-    reborn_approval_artifact_cleanup,
 ):
     state, start_server, stop_server = reborn_v2_restartable_server
     capability_id = "builtin.write_file"
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         base_url = state["base_url"]
-        reset = await client.post(
+        force_first_prompt = await client.post(
             f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
             # The profile default is allowed to evolve. This scenario needs a
             # deterministic first gate before it can prove that "always allow"
@@ -523,8 +514,10 @@ async def test_reborn_legacy_always_approve_survives_reborn_restart(
             json={"state": "ask_each_time"},
             timeout=15,
         )
-        reset.raise_for_status()
-        assert reset.json()["entry"]["value"]["state"] == "ask_each_time"
+        force_first_prompt.raise_for_status()
+        assert (
+            force_first_prompt.json()["entry"]["value"]["state"] == "ask_each_time"
+        )
         thread_id = await create_thread(client, base_url)
 
     first_prompt = await _wait_for_gate_prompt_after_send(

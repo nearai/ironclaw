@@ -12,6 +12,9 @@ from pathlib import Path
 import pytest
 
 from journey_cases import (
+    _HISTORICAL_MUTATING_PROVIDER_TOOLS,
+    _MUTATING_PROVIDER_TOOLS,
+    _TOOL_WORLD_PREFIXES,
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
@@ -21,6 +24,7 @@ from journey_cases import (
     required_ingresses,
     shared_world_provider_journey_runs,
     uncovered_surfaces,
+    unreset_mutating_tools,
 )
 from journey_types import (
     CargoEvidence,
@@ -781,3 +785,79 @@ def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
             source_path,
             root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Provider-world baseline gate (#6524 workstream 3)
+#
+# A journey that writes to a provider world must declare that world, because
+# the declaration is what triggers the reset afterwards. Without it, whatever
+# the journey created survives into the next test and the leak guards this
+# workstream added never run.
+#
+# Which tools write is not a judgement call: production says so, as the
+# `external_write` effect on each manifest tool. The harness used to restate
+# that as a hand-kept list of five names while production declared seventy.
+# Nothing detected the drift, because a journey using an undeclared write
+# simply resets nothing and passes.
+# ---------------------------------------------------------------------------
+
+
+def test_every_production_provider_write_maps_to_a_resettable_world():
+    """No production write can run without a world that gets reset."""
+    unreset = unreset_mutating_tools()
+    assert not unreset, (
+        "these production tools declare `external_write` but belong to no "
+        f"provider world the harness can reset: {sorted(unreset)}. A journey "
+        "using one would mutate a world that nothing restores, and the next "
+        "test would inherit the result. Add the world to _TOOL_WORLD_PREFIXES "
+        "with a reset path, or give the tool a world that has one."
+    )
+
+
+def test_provider_write_derivation_still_finds_the_tools_it_replaced():
+    """The derivation cannot quietly collapse to nothing.
+
+    This is the gate on the gate. Deriving the set from manifests removes the
+    drift risk but adds a worse one: a manifest key rename would empty the
+    mapping, every journey would declare no mutable world, every reset would
+    be skipped, and the whole suite would still pass. The five names below are
+    the ones the hand-kept list carried, so they are a floor the derivation
+    must always clear.
+    """
+    missing = sorted(_HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS))
+    assert not missing, (
+        f"the derivation stopped recognising known provider writes: {missing}. "
+        "It reads the `external_write` effect from "
+        "crates/ironclaw_first_party_extensions/assets/*/manifest.toml -- check "
+        "whether that key or the tool ids were renamed. Until this is fixed no "
+        "journey resets its provider world."
+    )
+    # A count alone is a weak check: discovery could break for one provider
+    # and still clear any global floor on the strength of the others. Assert
+    # per world instead, so a single provider's manifests going unread fails
+    # here and names that provider.
+    derived_by_world: dict[str, list[str]] = {}
+    for tool_name, world in _MUTATING_PROVIDER_TOOLS.items():
+        derived_by_world.setdefault(str(world), []).append(tool_name)
+    resettable_worlds = {str(world) for world in _TOOL_WORLD_PREFIXES.values()}
+    empty_worlds = sorted(resettable_worlds - set(derived_by_world))
+    assert not empty_worlds, (
+        f"no provider writes were derived for {empty_worlds}, but every world "
+        "the harness can reset ships write tools. Journeys touching those "
+        "providers would declare no mutable world and skip their reset. Check "
+        "whether those manifests moved or their tool ids were renamed."
+    )
+
+    # Production currently declares 70 provider writes. Hold the floor close
+    # to that rather than at a token value: a partial discovery failure that
+    # still finds most tools is exactly what a low floor would wave through.
+    # Deliberately removing write tools should require moving this number, and
+    # noticing that you are.
+    assert len(_MUTATING_PROVIDER_TOOLS) >= 60, (
+        f"only {len(_MUTATING_PROVIDER_TOOLS)} provider writes were derived from "
+        "the shipped manifests; production declares about 70. Either the "
+        "derivation is reading the wrong manifests or key, or write tools were "
+        "removed -- if the removal is intentional, lower this floor in the same "
+        "change so the drop is reviewed rather than absorbed."
+    )

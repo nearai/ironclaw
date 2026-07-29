@@ -66,7 +66,7 @@ use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage,
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopDiagnosticRef, LoopExit,
+    LoopCancelledReasonKind, LoopExit,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
         AgentLoopHostErrorReasonKind, LoopInputAckToken, LoopSafeSummary,
@@ -110,7 +110,6 @@ pub enum AgentLoopExecutorError {
         kind: AgentLoopHostErrorKind,
         safe_summary: LoopSafeSummary,
         reason_kind: Option<AgentLoopHostErrorReasonKind>,
-        diagnostic_ref: Option<LoopDiagnosticRef>,
         /// Secret-scrubbed model-visible raw cause carried from the host error
         /// so the runner/explainer can surface the real fault instead of a
         /// generic category. See [`AgentLoopHostError::detail`].
@@ -145,14 +144,12 @@ fn debug_host_unavailable(stage: HostStage, error: &AgentLoopHostError) {
         Ok(safe_summary) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            diagnostic_ref = ?error.diagnostic_ref,
             safe_summary = %safe_summary,
             "agent loop host call unavailable"
         ),
         Err(validation_error) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            diagnostic_ref = ?error.diagnostic_ref,
             validation_error = %validation_error,
             "agent loop host call unavailable with invalid safe summary"
         ),

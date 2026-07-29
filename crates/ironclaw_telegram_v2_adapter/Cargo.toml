@@ -28,6 +28,8 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
+# Property testing for the ingress boundary (#6524 workstream 9).
+proptest = "1"
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
 # used by the `adapter::tests` mod. `host-auth-mint` exposes
 # `mark_shared_secret_header_verified` used by `payload::tests` to mint

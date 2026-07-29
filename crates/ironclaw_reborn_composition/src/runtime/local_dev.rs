@@ -7,8 +7,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExecutionContext, ExtensionId, InvocationId, MountView,
-    ResourceScope, RuntimeKind, TrustClass, UserId,
+    CapabilityId, EffectKind, ExecutionContext, ExtensionId, FailureKind, InvocationId, MountView,
+    Resolution, ResourceScope, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
@@ -31,10 +31,11 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use ironclaw_turns::{
     ExternalToolCatalog, LoopResultRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ProviderToolCall,
-        ToolObservationDetail, ToolObservationStatus,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
+        LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
+        ToolObservationStatus, resolution,
     },
 };
 
@@ -81,6 +82,14 @@ pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 pub(super) use refreshing_capability_port::create_refreshing_capability_port_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use result_read::wrap_result_read_capability_for_test;
+
+fn diagnostic_failure(error_kind: FailureKind, safe_summary: String) -> Resolution {
+    resolution::failed(
+        error_kind,
+        safe_summary.clone(),
+        CapabilityFailureDetail::Diagnostic { text: safe_summary },
+    )
+}
 
 pub(super) struct CapabilityPortWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -1259,8 +1268,16 @@ pub(crate) fn assert_recoverable_failure(
 ) {
     match resolution {
         ironclaw_host_api::Resolution::Done(outcome) => {
-            let expected_verdict = ironclaw_host_api::ToolVerdict::recoverable_failure(expected);
-            assert_eq!(outcome.verdict, expected_verdict); // safety: test-only assertion helper
+            assert_eq!(outcome.verdict.error_kind(), Some(&expected));
+            let detail = outcome
+                .verdict
+                .diagnostic()
+                .and_then(ironclaw_host_api::ModelFailureDiagnostic::model_visible_text)
+                .expect("recoverable failures must carry a model-visible cause");
+            assert!(
+                !detail.trim().is_empty(),
+                "recoverable failure detail must be actionable"
+            );
         }
         other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
     }
