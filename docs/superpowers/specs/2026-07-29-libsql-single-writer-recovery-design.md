@@ -91,8 +91,9 @@ already-migrated `Arc<LibSqlRootFilesystem>` to the event store instead of
 reopening `path_or_url`.
 
 The standalone `RebornEventStoreConfig::Libsql { ... }` path remains available
-for local/test callers that intentionally own an independent database
-composition.
+for callers that intentionally configure an independent event database. A
+prebuilt state-database handle has unknown provenance, so composition preserves
+that explicit target unless the caller selected shared-database composition.
 
 This removes the second production filesystem pool and guarantees event-log
 writes use the same writer lane as all other `RootFilesystem` consumers.
@@ -217,7 +218,8 @@ failing test that is observed before production code changes.
 - Filesystem and trigger writes constructed from one runtime serialize against
   each other while reads remain available.
 - Production libSQL composition passes one runtime to filesystem, triggers, and
-  event logs; it does not reopen the configured target.
+  event logs when they share a configured database; it does not reopen that
+  target. An explicitly separate event database owns its own runtime.
 - Standalone constructors remain compatible.
 
 ### `ironclaw_turns`

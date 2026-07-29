@@ -273,9 +273,10 @@ pub(crate) enum PostgresPoolSource {
 }
 
 /// Declarative libSQL connection config (Phase B). `path_or_url` is retained
-/// after opening for production durability/transport validation; `auth_token`
-/// is used only to open a remote handle. The event store reuses that handle's
-/// shared filesystem rather than reopening this target.
+/// after opening for production durability/transport validation. Production
+/// opens one shared runtime from this config. A caller-supplied prebuilt
+/// database has unknown provenance, so its separately configured event target
+/// remains authoritative instead of being silently replaced by that handle.
 #[derive(Clone)]
 pub(crate) struct LibsqlConnectionConfig {
     pub(crate) path_or_url: String,

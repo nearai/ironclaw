@@ -51,6 +51,46 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
 }
 
 #[tokio::test]
+async fn local_dev_libsql_trigger_repository_uses_the_filesystem_writer_lane() {
+    let root = tempfile::tempdir().expect("local-dev root");
+    let mut composite = CompositeRootFilesystem::new();
+    let backend = build_default_local_dev_database_roots(root.path(), &mut composite)
+        .await
+        .expect("build local-dev libsql roots");
+    let DurableBackend::LibSql {
+        runtime,
+        filesystem,
+    } = backend
+    else {
+        panic!("local-dev default backend must be libsql");
+    };
+
+    let held_writer = runtime.write().await.expect("hold shared writer lane");
+    let repository_runtime = Arc::clone(&runtime);
+    let repository_filesystem = Arc::clone(&filesystem);
+    let mut repository_build = tokio::spawn(async move {
+        local_dev_trigger_repository(&DurableBackend::LibSql {
+            runtime: repository_runtime,
+            filesystem: repository_filesystem,
+        })
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut repository_build)
+            .await
+            .is_err(),
+        "trigger migrations must queue behind the filesystem's sole writer lane"
+    );
+    drop(held_writer);
+    tokio::time::timeout(std::time::Duration::from_secs(1), repository_build)
+        .await
+        .expect("trigger repository resumes after writer release")
+        .expect("trigger repository task")
+        .expect("trigger repository build");
+}
+
+#[tokio::test]
 async fn production_store_bundle_new_validates_runtime_storage_before_store_assembly() {
     let filesystem = empty_composite_filesystem();
     let error = match ProductionStoreBundle::new(

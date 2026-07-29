@@ -63,13 +63,10 @@ where
     /// Reset the hot cache after a mutation the embedded engine REJECTED (a
     /// domain error such as `ThreadBusy` / `InvalidTransition`).
     ///
-    /// The op ran against the shared cached engine, so it may have left a
-    /// partial mutation; that must be discarded. Durable LAGS the cache
-    /// (un-acked non-critical ops), so a reload-from-durable would silently
-    /// drop acked-but-unflushed ops the caller was told succeeded. Instead,
-    /// rebuild the embedded engine from the cached snapshot (which still
-    /// includes those un-flushed ops), discarding only the failed op's
-    /// partial mutation.
+    /// Mutations run against an isolated engine, so the accepted cached
+    /// authority is already unchanged. Rebuilding from its snapshot keeps
+    /// this defensive reset valid if a rejected operation exposed any
+    /// engine-internal state that is not represented in the snapshot.
     pub(super) fn reset_cache_after_rejected_mutation(
         &self,
         guard: &mut Option<RowSnapshotState>,

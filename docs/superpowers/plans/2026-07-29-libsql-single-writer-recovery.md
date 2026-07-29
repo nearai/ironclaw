@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Route every production libSQL write through one shared writer lane and make retryable turn-journal contention recover without a process restart.
+**Goal:** Route every production libSQL write through one shared writer lane per database and make retryable turn-journal contention recover without a process restart.
 
-**Architecture:** Add a libSQL-only substrate that owns separate pooled reader and single-connection writer lanes. Production composition shares one runtime across the filesystem, trigger repository, and event store; backend-neutral turn persistence retains and retries an atomic batch only when `FilesystemError::BackendBusy` says replay is safe.
+**Architecture:** Add a libSQL-only substrate that owns separate pooled reader and single-connection writer lanes. Production composition shares one runtime across the filesystem, trigger repository, and event store when they use the same configured database, while preserving explicitly separate event databases; backend-neutral turn persistence retains and retries an atomic batch only when `FilesystemError::BackendBusy` says replay is safe.
 
 **Tech Stack:** Rust 2024, Tokio, libSQL 0.9, deadpool 0.12, async-trait, tracing, Cargo workspace tests.
 

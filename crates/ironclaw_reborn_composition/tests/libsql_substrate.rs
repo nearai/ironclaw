@@ -61,6 +61,10 @@ impl Drop for EnvVarGuard {
 async fn libsql_substrate_builder_wires_production_components_without_local_only_seams() {
     let fixture = build_libsql_test_services().await;
 
+    assert!(
+        fixture.events_db_path.exists(),
+        "the substrate builder must preserve an explicitly separate event-store target"
+    );
     let production_config = ProductionWiringConfig::new([])
         .require_runtime_http_egress()
         .require_credential_broker();
@@ -250,6 +254,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 
 struct LibSqlTestServices {
     _dir: tempfile::TempDir,
+    events_db_path: std::path::PathBuf,
     services: ironclaw_reborn_composition::LibSqlProductionHostRuntimeServices,
 }
 
@@ -287,6 +292,7 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
 
     LibSqlTestServices {
         _dir: dir,
+        events_db_path,
         services,
     }
 }

@@ -3235,6 +3235,195 @@ async fn write_behind_backpressure_bounds_the_unacked_window() {
     check_internal_invariants(&snapshot).unwrap();
 }
 
+/// A mutation cancelled while waiting for a full cap-one write-behind window
+/// must discard only its own in-place engine changes. It must preserve the
+/// previously accepted hot snapshot whose durable append is still owned by the
+/// flusher.
+#[tokio::test]
+async fn write_behind_apply_timeout_preserves_prior_accepted_hot_snapshot() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let first_scope = scope_bp(100);
+    let second_scope = scope_bp(101);
+    let first_run = TurnRunId::new();
+    let second_run = TurnRunId::new();
+
+    {
+        let setup = open_row_store(Arc::clone(&scoped));
+        for (scope, run_id, key) in [
+            (&first_scope, first_run, "idem-timeout-preserve-first"),
+            (&second_scope, second_run, "idem-timeout-preserve-second"),
+        ] {
+            setup
+                .submit_turn(
+                    submit_request(scope.clone(), run_id, key),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+                .expect("submit setup run");
+        }
+        setup.drain().await.expect("durable setup");
+    }
+
+    let store = TurnStateRowStore::new(Arc::clone(&scoped))
+        .with_limits(limits().set_max_pending_write_behind_deltas(1))
+        .with_apply_timeout(std::time::Duration::from_millis(40));
+    let stall = backend.append_gate().lock_owned().await;
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(first_scope.clone()),
+        })
+        .await
+        .expect("first claim query")
+        .expect("first claim accepted into the hot snapshot");
+
+    let timed_out = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(second_scope),
+        })
+        .await;
+    assert!(
+        matches!(timed_out, Err(TurnError::Unavailable { .. })),
+        "the second mutation must time out behind the cap-one pending window"
+    );
+
+    let first_state = store
+        .get_run_state(GetRunStateRequest {
+            scope: first_scope,
+            run_id: first_run,
+        })
+        .await
+        .expect("previously accepted hot state remains readable");
+    assert_eq!(
+        first_state.status,
+        TurnStatus::Running,
+        "timing out a later mutation must not roll back a prior accepted hot write"
+    );
+
+    drop(stall);
+    tokio::time::timeout(std::time::Duration::from_secs(2), store.drain())
+        .await
+        .expect("first retained append unstalls")
+        .expect("first retained append commits");
+}
+
+/// A caller already queued on `snapshot_state` when another mutation times out
+/// must start from the last accepted engine, not from the cancelled caller's
+/// in-place speculative changes.
+#[tokio::test]
+async fn write_behind_waiter_does_not_observe_timed_out_speculative_mutation() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let first_scope = scope_bp(102);
+    let waiting_scope = scope_bp(103);
+    let first_run = TurnRunId::new();
+    let waiting_run = TurnRunId::new();
+
+    {
+        let setup = open_row_store(Arc::clone(&scoped));
+        for (scope, run_id, key) in [
+            (&first_scope, first_run, "idem-timeout-waiter-first"),
+            (&waiting_scope, waiting_run, "idem-timeout-waiter-target"),
+        ] {
+            setup
+                .submit_turn(
+                    submit_request(scope.clone(), run_id, key),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+                .expect("submit setup run");
+        }
+        setup.drain().await.expect("durable setup");
+    }
+
+    let store = Arc::new(
+        TurnStateRowStore::new(Arc::clone(&scoped))
+            .with_limits(limits().set_max_pending_write_behind_deltas(1))
+            .with_apply_timeout(std::time::Duration::from_millis(300)),
+    );
+    let stall = backend.append_gate().lock_owned().await;
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(first_scope),
+        })
+        .await
+        .expect("first claim query")
+        .expect("first claim fills the pending write-behind window");
+
+    let timed_out_runner = TurnRunnerId::new();
+    let timed_out_lease = TurnLeaseToken::new();
+    let timed_out_store = Arc::clone(&store);
+    let timed_out_scope = waiting_scope.clone();
+    let timed_out = tokio::spawn(async move {
+        timed_out_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: timed_out_runner,
+                lease_token: timed_out_lease,
+                scope_filter: Some(timed_out_scope),
+            })
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+
+    let waiting_runner = TurnRunnerId::new();
+    let waiting_lease = TurnLeaseToken::new();
+    let waiting_store = Arc::clone(&store);
+    let waiter = tokio::spawn(async move {
+        waiting_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: waiting_runner,
+                lease_token: waiting_lease,
+                scope_filter: Some(waiting_scope),
+            })
+            .await
+    });
+
+    // The first speculative mutation reaches its outer timeout at 300 ms.
+    // Release the retained append after that cancellation but before the
+    // waiter's own later timeout, allowing the waiter to persist its claim.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    drop(stall);
+
+    let timed_out = timed_out.await.expect("timed-out mutation task");
+    assert!(
+        matches!(timed_out, Err(TurnError::Unavailable { .. })),
+        "the first waiting mutation must time out behind the full pending window"
+    );
+
+    let claimed = waiter
+        .await
+        .expect("queued waiter task")
+        .expect("queued waiter mutation")
+        .expect("queued waiter must still see and claim the queued run");
+    assert_eq!(claimed.state.run_id, waiting_run);
+    assert_eq!(claimed.runner_id, waiting_runner);
+    assert_eq!(claimed.lease_token, waiting_lease);
+
+    store.drain().await.expect("queued waiter claim is durable");
+    drop(store);
+
+    let reopened = open_row_store(scoped);
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: scope_bp(103),
+            run_id: waiting_run,
+        })
+        .await
+        .expect("reopen waiter-owned run");
+    assert_eq!(state.status, TurnStatus::Running);
+}
+
 /// #6263 Step 3 (IronLoop f1) — `CancelRequested` is recoverability-critical.
 /// Under write-behind, `request_cancel` on a Running run is a durability
 /// barrier: a crash immediately after the (acked) cancel must recover the run

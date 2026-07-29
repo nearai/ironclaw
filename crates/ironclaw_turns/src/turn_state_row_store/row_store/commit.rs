@@ -59,20 +59,14 @@ where
         Ok(false)
     }
 
-    /// Acquire the long-lived embedded authority with the runner-lease overlay
-    /// applied, without rebuilding it from a full-snapshot clone.
+    /// Capture an isolated mutation baseline and any targeted runner-lease
+    /// overlay input from the last accepted hot state.
     ///
-    /// For [`RunnerLeaseOverlay::None`] and [`RunnerLeaseOverlay::Run`] this
-    /// reuses the cached authority in place (the `Run` case overlays a single
-    /// run record's live lease heartbeat onto it) — an O(1) reuse rather than a
-    /// per-op O(store-size) `from_persistence_snapshot` rebuild. Only
-    /// [`RunnerLeaseOverlay::All`] (expired-lease recovery) still rebuilds from
-    /// an overlaid snapshot clone, because it must overlay every run's lease.
-    /// Capture the runner-lease overlay inputs from the current cached state
-    /// for one `apply` iteration: an `All` overlay needs the whole snapshot
-    /// re-overlaid (baseline `Some`), a `Run` overlay needs just that run's
-    /// record patched onto the shared cached engine, and `None` needs neither.
-    /// Shared by both the whole-snapshot and targeted-delta apply paths.
+    /// Mutations must never receive the accepted cached engine itself: an
+    /// outer timeout can cancel the future after it has changed that engine
+    /// but before the mutation is accepted, allowing a queued waiter to
+    /// observe speculative state. The targeted-delta path still avoids a full
+    /// post-mutation snapshot diff; only the mutation engine is forked.
     fn overlay_inputs(
         state: &RowSnapshotState,
         overlay: RunnerLeaseOverlay,
@@ -100,11 +94,12 @@ where
                 .await?;
             Ok(Arc::new(self.build_in_memory_store(overlaid_snapshot)?))
         } else {
+            let store = Arc::new(cached_store.fork_for_speculative_mutation());
             if let Some(run) = overlay_run {
                 let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
-                cached_store.overlay_runner_lease_record(overlaid)?;
+                store.overlay_runner_lease_record(overlaid)?;
             }
-            Ok(cached_store)
+            Ok(store)
         }
     }
 
@@ -161,6 +156,9 @@ where
                     }
                 };
                 if new_snapshot == baseline {
+                    if let Some(state) = guard.as_mut() {
+                        state.store = store;
+                    }
                     return Ok(RowApplyOutcome::Ready(value));
                 }
 
@@ -221,7 +219,6 @@ where
         let outcome = match tokio::time::timeout(self.apply_timeout, critical).await {
             Ok(result) => result?,
             Err(_) => {
-                self.clear_snapshot_cache().await;
                 return Err(TurnError::Unavailable {
                     reason: "turn state row-store apply timed out".to_string(),
                 });
@@ -334,6 +331,21 @@ where
                     }
                     return Ok(PendingRowCommit { value, ack: None });
                 }
+                // Bound the pending window BEFORE enqueue (#6263 Step 3): see the
+                // twin reservation in the whole-snapshot apply path above. Do
+                // not advance the accepted snapshot before this await: the
+                // outer timeout may cancel us while the cap is full.
+                if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
+                    *guard = None;
+                    return Err(error);
+                }
+                let ack = match self.enqueue_delta(persist_delta) {
+                    Ok(ack) => ack,
+                    Err(error) => {
+                        *guard = None;
+                        return Err(error);
+                    }
+                };
                 if let Some(state) = guard.as_mut() {
                     if let Err(error) = state.apply_delta(delta, reservation_seq) {
                         *guard = None;
@@ -352,19 +364,6 @@ where
                     };
                     *guard = Some(next_state);
                 }
-                // Bound the pending window BEFORE enqueue (#6263 Step 3): see the
-                // twin reservation in the whole-snapshot apply path above.
-                if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
-                    *guard = None;
-                    return Err(error);
-                }
-                let ack = match self.enqueue_delta(persist_delta) {
-                    Ok(ack) => ack,
-                    Err(error) => {
-                        *guard = None;
-                        return Err(error);
-                    }
-                };
                 let ack = self
                     .track_write_behind_ack_if_async(delta_critical, ack)
                     .await;
@@ -375,7 +374,6 @@ where
         let pending = match tokio::time::timeout(self.apply_timeout, critical).await {
             Ok(result) => result?,
             Err(_) => {
-                self.clear_snapshot_cache().await;
                 return Err(TurnError::Unavailable {
                     reason: "turn state row-store targeted apply timed out".to_string(),
                 });

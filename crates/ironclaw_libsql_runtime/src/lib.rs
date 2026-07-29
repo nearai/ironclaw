@@ -31,7 +31,7 @@ const LIBSQL_CONNECTION_PRAGMAS: &str = "\
 type LibSqlPool = Pool<LibSqlConnectionManager>;
 
 /// Identifies the admission lane without exposing a database target.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibSqlLane {
     Read,
     Write,
@@ -42,6 +42,32 @@ impl fmt::Display for LibSqlLane {
         match self {
             Self::Read => formatter.write_str("read"),
             Self::Write => formatter.write_str("write"),
+        }
+    }
+}
+
+/// Stable classification for pool-checkout failures. Adapters use this typed
+/// reason to distinguish retryable writer admission pressure from broken
+/// runtime infrastructure without parsing error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibSqlCheckoutFailureReason {
+    Timeout,
+    Closed,
+    RuntimeUnavailable,
+    PostCreateHook,
+    ConnectionAttemptsExhausted,
+}
+
+impl fmt::Display for LibSqlCheckoutFailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout => formatter.write_str("timeout"),
+            Self::Closed => formatter.write_str("closed"),
+            Self::RuntimeUnavailable => formatter.write_str("runtime unavailable"),
+            Self::PostCreateHook => formatter.write_str("post-create hook"),
+            Self::ConnectionAttemptsExhausted => {
+                formatter.write_str("connection attempts exhausted")
+            }
         }
     }
 }
@@ -58,7 +84,7 @@ pub enum LibSqlRuntimeError {
     #[error("libSQL {lane} connection checkout failed ({reason})")]
     Checkout {
         lane: LibSqlLane,
-        reason: &'static str,
+        reason: LibSqlCheckoutFailureReason,
     },
 }
 
@@ -179,19 +205,19 @@ fn map_pool_error(error: PoolError<LibSqlRuntimeError>, lane: LibSqlLane) -> Lib
         PoolError::Backend(error) => error,
         PoolError::Timeout(_) => LibSqlRuntimeError::Checkout {
             lane,
-            reason: "timeout",
+            reason: LibSqlCheckoutFailureReason::Timeout,
         },
         PoolError::Closed => LibSqlRuntimeError::Checkout {
             lane,
-            reason: "closed",
+            reason: LibSqlCheckoutFailureReason::Closed,
         },
         PoolError::NoRuntimeSpecified => LibSqlRuntimeError::Checkout {
             lane,
-            reason: "runtime unavailable",
+            reason: LibSqlCheckoutFailureReason::RuntimeUnavailable,
         },
         PoolError::PostCreateHook(_) => LibSqlRuntimeError::Checkout {
             lane,
-            reason: "post-create hook",
+            reason: LibSqlCheckoutFailureReason::PostCreateHook,
         },
     }
 }
@@ -232,7 +258,7 @@ where
         }),
         None => Err(LibSqlRuntimeError::Checkout {
             lane: LibSqlLane::Read,
-            reason: "connection attempts exhausted",
+            reason: LibSqlCheckoutFailureReason::ConnectionAttemptsExhausted,
         }),
     }
 }
@@ -329,9 +355,58 @@ mod tests {
             error,
             LibSqlRuntimeError::Checkout {
                 lane: LibSqlLane::Write,
-                reason: "timeout",
+                reason: LibSqlCheckoutFailureReason::Timeout,
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn dropped_immediate_transaction_rolls_back_before_writer_reuse() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("transaction-drop.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let runtime = LibSqlRuntime::new(database);
+        let connection = runtime.write().await.expect("writer");
+        connection
+            .execute("CREATE TABLE cancellation_safety (value TEXT NOT NULL)", ())
+            .await
+            .expect("create table");
+
+        {
+            let transaction = connection
+                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                .await
+                .expect("begin immediate transaction");
+            transaction
+                .execute(
+                    "INSERT INTO cancellation_safety (value) VALUES ('uncommitted')",
+                    (),
+                )
+                .await
+                .expect("insert uncommitted row");
+        }
+
+        assert!(
+            connection.is_autocommit(),
+            "dropping the transaction must release the writer lock"
+        );
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM cancellation_safety", ())
+            .await
+            .expect("query rolled-back table");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("read count")
+            .expect("count row")
+            .get(0)
+            .expect("count");
+        assert_eq!(count, 0, "dropped transaction must roll back its write");
     }
 
     #[tokio::test]

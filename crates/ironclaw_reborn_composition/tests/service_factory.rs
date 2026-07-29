@@ -1346,8 +1346,8 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
 
     assert!(services.host_runtime_for_test().is_some());
     assert!(
-        !legacy_event_db.exists(),
-        "production event logs must reuse the state filesystem instead of reopening the target"
+        legacy_event_db.exists(),
+        "a caller-supplied database handle must not silently replace the separately configured event-store target"
     );
 
     let conn = db.connect().expect("connect libsql state db");

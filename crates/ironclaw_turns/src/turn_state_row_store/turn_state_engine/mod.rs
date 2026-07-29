@@ -166,7 +166,7 @@ struct TreeReservationState {
     released_children: BTreeSet<TurnRunId>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Inner {
     cursor: u64,
     turns: HashMap<crate::TurnId, TurnRecord>,
@@ -497,6 +497,34 @@ impl TurnStateEngine {
         match self.inner.lock() {
             Ok(inner) => inner.persistence_snapshot(),
             Err(poisoned) => poisoned.into_inner().persistence_snapshot(),
+        }
+    }
+
+    /// Fork the complete accepted in-memory authority for one speculative
+    /// row-store mutation.
+    ///
+    /// Rebuilding from a persistence snapshot would omit accepted hot-only
+    /// bookkeeping such as in-flight idempotency state and pruning queues.
+    /// Cloning the complete inner state preserves those semantics while
+    /// ensuring cancellation cannot mutate the accepted cached engine.
+    pub(crate) fn fork_for_speculative_mutation(&self) -> Self {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let gate_persisted_runs = match self.gate_persisted_runs.lock() {
+            Ok(runs) => runs.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        Self {
+            inner: Mutex::new(inner),
+            submit_idempotency_ready: Notify::new(),
+            admission_limit_provider: Arc::clone(&self.admission_limit_provider),
+            block_persistence: self.block_persistence.clone(),
+            persist_lock: AsyncMutex::new(()),
+            persist_seq: AtomicU64::new(self.persist_seq.load(Ordering::Acquire)),
+            last_persisted_seq: AtomicU64::new(self.last_persisted_seq.load(Ordering::Acquire)),
+            gate_persisted_runs: Mutex::new(gate_persisted_runs),
         }
     }
 

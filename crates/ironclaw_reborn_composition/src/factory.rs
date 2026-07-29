@@ -781,11 +781,10 @@ impl RebornAuthContinuationDispatcher for AuthContinuationFromProduct {
 }
 
 /// Output of [`build_local_runtime_root_filesystem`]: the composed local-dev
-/// root filesystem and, when libSQL is the substrate, a clone of the raw
-/// libSQL handle. The handle backs both the local-dev trigger repository
-/// and the canonical Reborn identity store, so each rides the same
-/// `reborn-local-dev.db` rather than opening a second handle to the file
-/// (see `RebornRuntime::open_reborn_identity_resolver`).
+/// root filesystem and the backend-specific durable substrate. The libSQL
+/// variant retains the shared runtime and filesystem so local-dev state,
+/// triggers, and events all use one writer admission lane for
+/// `reborn-local-dev.db`.
 struct RootFilesystemBundle {
     filesystem: Arc<CompositeRootFilesystem>,
     durable_backend: DurableBackend,
@@ -795,7 +794,10 @@ struct RootFilesystemBundle {
 // `pub(crate)` for the `test_support` accessor): a `pub(crate)` fn returning a
 // private enum trips `private_interfaces`. The enum stays crate-internal.
 pub(crate) enum DurableBackend {
-    LibSql(Arc<libsql::Database>),
+    LibSql {
+        runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+        filesystem: Arc<LibSqlRootFilesystem>,
+    },
     Postgres(deadpool_postgres::Pool),
 }
 
@@ -1590,8 +1592,9 @@ async fn local_dev_trigger_repository(
     backend: &DurableBackend,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
     match backend {
-        DurableBackend::LibSql(database) => {
-            let repository = ironclaw_triggers::LibSqlTriggerRepository::new(Arc::clone(database));
+        DurableBackend::LibSql { runtime, .. } => {
+            let repository =
+                ironclaw_triggers::LibSqlTriggerRepository::from_runtime(Arc::clone(runtime));
             repository
                 .run_migrations()
                 .await
@@ -2132,10 +2135,14 @@ pub(crate) async fn build_default_local_dev_database_roots(
 ) -> Result<DurableBackend, RebornBuildError> {
     {
         let db = open_local_dev_libsql_database(root).await?;
-        let database = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+        let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db));
+        let database = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
         database.run_migrations().await?;
-        mount_local_dev_database_roots(composite, database)?;
-        Ok(DurableBackend::LibSql(db))
+        mount_local_dev_database_roots(composite, Arc::clone(&database))?;
+        Ok(DurableBackend::LibSql {
+            runtime,
+            filesystem: database,
+        })
     }
 }
 
@@ -3544,6 +3551,7 @@ async fn build_production_shaped(
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             // Phase B: prefer the test-supplied handle; otherwise open the
             // database from the declarative connection config at build time.
+            let reuse_database_for_events = prebuilt_db.is_none();
             let db = match prebuilt_db {
                 Some(db) => db,
                 None => open_libsql_database_from_connection(&connection).await?,
@@ -3580,6 +3588,8 @@ async fn build_production_shaped(
                 context,
                 db,
                 connection.path_or_url,
+                connection.auth_token,
+                reuse_database_for_events,
                 secret_master_key,
                 process_local_resource_governor_singleton,
             )
@@ -3757,14 +3767,16 @@ async fn build_local_storage_production_shaped(
     let trigger_repository =
         local_dev_trigger_repository(&filesystem_bundle.durable_backend).await?;
     let refresh_lock_pool = match &filesystem_bundle.durable_backend {
-        DurableBackend::LibSql(_) => None,
+        DurableBackend::LibSql { .. } => None,
         DurableBackend::Postgres(pool) => Some(pool.clone()),
     };
     let event_store = match &filesystem_bundle.durable_backend {
-        DurableBackend::LibSql(_) => ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
-            path_or_url: local_dev_db_path(&root).to_string_lossy().into_owned(),
-            auth_token: None,
-        },
+        DurableBackend::LibSql { filesystem, .. } => {
+            ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem: Arc::clone(filesystem),
+                path_or_url: local_dev_db_path(&root).to_string_lossy().into_owned(),
+            }
+        }
         DurableBackend::Postgres(pool) => {
             ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool: pool.clone() }
         }
@@ -3989,22 +4001,13 @@ where
     let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(config.database));
     let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(runtime));
     filesystem.run_migrations().await?;
-    let event_store = match config.event_store {
-        ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql { path_or_url, .. } => {
-            ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
-                filesystem: Arc::clone(&filesystem),
-                path_or_url,
-            }
-        }
-        other => other,
-    };
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
             resource_governor,
-            event_store: ProductionEventStoresInput::Config(event_store),
+            event_store: ProductionEventStoresInput::Config(config.event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -5684,6 +5687,8 @@ async fn build_libsql_production(
     context: RebornProductionBuildContext,
     db: Arc<libsql::Database>,
     path_or_url: String,
+    auth_token: Option<ironclaw_secrets::SecretMaterial>,
+    reuse_database_for_events: bool,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
@@ -5706,15 +5711,23 @@ async fn build_libsql_production(
         Arc::clone(&database_filesystem),
         "production-libsql-reborn-state",
     )?;
+    let event_store_config = if reuse_database_for_events {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+            filesystem: database_filesystem,
+            path_or_url,
+        }
+    } else {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
+            path_or_url,
+            auth_token,
+        }
+    };
     finish_production_backend(
         context,
         filesystem,
         trigger_repository,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
-            filesystem: database_filesystem,
-            path_or_url,
-        },
+        event_store_config,
         ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
     )
     .await
