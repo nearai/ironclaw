@@ -391,7 +391,6 @@ fn pairing_ingress(service: Arc<ChannelPairingService>) -> Arc<GenericChannelInb
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
@@ -412,7 +411,6 @@ fn pairing_ingress_with_outcomes(
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })

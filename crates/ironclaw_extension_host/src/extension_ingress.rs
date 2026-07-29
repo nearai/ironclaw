@@ -19,13 +19,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
-    IngressPortError, IngressSecretsPort, VerificationCandidate,
+    IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
 use ironclaw_product::{
-    AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
-    NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductSourceChannel, ProtocolAuthEvidence,
+    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
+    ProtocolAuthEvidence, classify_channel_inbound_text,
 };
 use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
@@ -66,13 +66,6 @@ pub trait PostAdmissionObserver: Send + Sync {
     }
 }
 
-/// Optional protocol-specific reclassification of a normalized message into
-/// a richer channel payload classification (today: gate-resolution replies like
-/// `approve` / `deny gate:<ref>` / `auth deny <ref>`). Transitional debt:
-/// deleted when gate replies become a host-generic channel concern.
-pub type InboundPayloadClassifier =
-    dyn Fn(&NormalizedInboundMessage) -> Option<ChannelInboundClassification> + Send + Sync;
-
 /// How the sink mints the trusted auth claim for admitted messages —
 /// mirrors the ingress verification recipe the router executed.
 #[derive(Debug, Clone)]
@@ -104,10 +97,12 @@ impl VerifiedEvidenceMint {
     }
 }
 
-/// One extension's inbound wiring: verification secrets + the durable
-/// admission sink (+ optional drain hook for post-admission tasks).
+/// One extension's inbound wiring: verification secrets, non-secret
+/// installation configuration, and the durable admission sink (+ optional
+/// drain hook for post-admission tasks).
 pub struct ChannelIngressRegistration {
     pub secrets: Arc<dyn IngressSecretsPort>,
+    pub configuration: Arc<dyn IngressConfigurationPort>,
     pub sink: Arc<dyn InboundSink>,
     /// Awaited on graceful shutdown after ingress stops accepting requests.
     pub drain: Option<Arc<dyn ChannelIngressDrain>>,
@@ -274,6 +269,25 @@ impl IngressSecretsPort for ExtensionIngressRegistry {
 }
 
 #[async_trait]
+impl IngressConfigurationPort for ExtensionIngressRegistry {
+    async fn non_secret_config(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError> {
+        let Some(entry) = self.registration(extension_id) else {
+            return Err(IngressPortError {
+                reason: format!("extension `{extension_id}` has no ingress registration"),
+            });
+        };
+        entry
+            .configuration
+            .non_secret_config(extension_id, installation_id)
+            .await
+    }
+}
+
+#[async_trait]
 impl InboundSink for ExtensionIngressRegistry {
     async fn admit(
         &self,
@@ -320,8 +334,6 @@ pub struct ChannelInboundSinkConfig {
     pub adapter_id: ProductAdapterId,
     /// Auth-claim shape matching the executed verification recipe.
     pub evidence: VerifiedEvidenceMint,
-    /// Optional protocol-specific payload reclassification (gate replies).
-    pub classifier: Option<Arc<InboundPayloadClassifier>>,
     /// The typed channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
     pub surface: Arc<dyn ChannelInboundProductSurface>,
@@ -485,11 +497,7 @@ impl InboundSink for GenericChannelInboundSink {
             installation_id: installation,
             evidence,
             received_at: Utc::now(),
-            classification: self
-                .config
-                .classifier
-                .as_ref()
-                .and_then(|classify| classify(&message)),
+            classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
         };
         let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
@@ -574,6 +582,29 @@ impl IngressSecretsPort for StaticIngressSecrets {
     }
 }
 
+/// Fixed non-secret configuration for tests and lane-owned registrations.
+#[derive(Default)]
+pub struct StaticIngressConfiguration {
+    values: Vec<(String, String)>,
+}
+
+impl StaticIngressConfiguration {
+    pub fn new(values: Vec<(String, String)>) -> Self {
+        Self { values }
+    }
+}
+
+#[async_trait]
+impl IngressConfigurationPort for StaticIngressConfiguration {
+    async fn non_secret_config(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError> {
+        Ok(self.values.clone())
+    }
+}
+
 // ── The composed router parts + serve mount ─────────────────────────────────
 
 /// The composed generic ingress: the deployment-first router (with an active
@@ -605,6 +636,7 @@ pub fn build_extension_ingress(
             watch,
             ironclaw_extension_host::ingress::ExtensionIngressRouterDeps {
                 secrets: Arc::clone(&registry) as Arc<dyn IngressSecretsPort>,
+                configuration: Arc::clone(&registry) as Arc<dyn IngressConfigurationPort>,
                 sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
                 reply_context: Arc::clone(&reply_context),
             },
@@ -784,7 +816,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_host_api::UserId;
-    use ironclaw_product::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
+    use ironclaw_product::{
+        AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, InboundCommandPayload,
+    };
     use ironclaw_product::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
         ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
@@ -796,17 +831,26 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
+        classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
     }
 
     impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
+                classifications: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
+        }
+
+        fn classifications(&self) -> Vec<Option<ChannelInboundClassification>> {
+            self.classifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         }
     }
 
@@ -816,6 +860,10 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
         ) -> ChannelInboundSurfaceOutcome {
+            self.classifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.classification.clone());
             self.submissions.fetch_add(1, Ordering::SeqCst);
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
@@ -900,7 +948,6 @@ mod tests {
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::clone(&workflow) as Arc<dyn ChannelInboundProductSurface>,
             observer: None,
         })
@@ -934,6 +981,7 @@ mod tests {
                 installation_id: "install".to_string(),
                 secret: secret.to_vec(),
             }])),
+            configuration: Arc::new(StaticIngressConfiguration::default()),
             sink: Arc::new(FailingSink),
             drain: None,
         }
@@ -1048,5 +1096,39 @@ mod tests {
         sink.drain().await;
         assert_eq!(workflow.submit_count(), 1);
         assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
+    }
+
+    #[tokio::test]
+    async fn generic_sink_classifies_gate_replies_commands_and_plain_text() {
+        let cases = [
+            (
+                "auth deny gate:auth-1",
+                Some(ChannelInboundClassification::AuthResolution(
+                    AuthResolutionPayload::new("gate:auth-1", AuthResolutionResult::Denied)
+                        .expect("valid auth payload")
+                        .with_source_trigger(ProductTriggerReason::DirectChat),
+                )),
+            ),
+            (
+                "/model openai/gpt-5",
+                Some(ChannelInboundClassification::Command(
+                    InboundCommandPayload::new(
+                        "model",
+                        "openai/gpt-5",
+                        ProductTriggerReason::DirectChat,
+                    )
+                    .expect("valid command"),
+                )),
+            ),
+            ("approve gate:approval-1 but do not run it", None),
+            ("deny gate:approval-1 because the scope changed", None),
+            ("hello", None),
+        ];
+
+        for (text, expected) in cases {
+            let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+            sink.admit(admission_for(text)).await.expect("admitted");
+            assert_eq!(surface.classifications(), vec![expected]);
+        }
     }
 }

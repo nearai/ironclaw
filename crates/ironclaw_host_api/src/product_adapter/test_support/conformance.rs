@@ -48,7 +48,7 @@ pub struct ChannelAdapterConformance {
     #[allow(clippy::type_complexity)]
     pub vendor_responses:
         Arc<dyn Fn(&RestrictedEgressRequest) -> RestrictedEgressResponse + Send + Sync>,
-    /// Non-secret operator config for the activation/cleanup context.
+    /// Non-secret operator config supplied to inbound and lifecycle contexts.
     pub config: Vec<(String, String)>,
     /// Whether free target listing (no query) is expected to fail cleanly
     /// with `Unsupported` (adapters with real listing set this false and
@@ -125,6 +125,7 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         .inbound(VerifiedInbound {
             extension_id: &extension_id,
             installation_id: &installation_id,
+            config: &config,
             body: &message_inbound.body,
             headers: &message_inbound.headers,
         })
@@ -155,6 +156,7 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         match adapter.inbound(VerifiedInbound {
             extension_id: &extension_id,
             installation_id: &installation_id,
+            config: &config,
             body: garbage,
             headers: &[],
         }) {
@@ -180,6 +182,7 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             .inbound(VerifiedInbound {
                 extension_id: &extension_id,
                 installation_id: &installation_id,
+                config: &config,
                 body: &challenge.body,
                 headers: &challenge.headers,
             })

@@ -102,10 +102,11 @@ pub enum ProductTriggerReason {
 /// it enters the product surface.
 ///
 /// `None` at the call site means the normalized message is an ordinary user
-/// message. These variants cover only protocol-specific interaction replies
-/// that should not become user turns.
+/// message. These variants cover channel-neutral interaction replies and
+/// slash commands that should not become user turns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelInboundClassification {
+    Command(InboundCommandPayload),
     ApprovalResolution(ApprovalResolutionPayload),
     ScopedApprovalResolution(ScopedApprovalResolutionPayload),
     AuthResolution(AuthResolutionPayload),
@@ -115,6 +116,7 @@ pub enum ChannelInboundClassification {
 impl From<ChannelInboundClassification> for ProductInboundPayload {
     fn from(classification: ChannelInboundClassification) -> Self {
         match classification {
+            ChannelInboundClassification::Command(payload) => Self::Command(payload),
             ChannelInboundClassification::ApprovalResolution(payload) => {
                 Self::ApprovalResolution(payload)
             }
@@ -253,6 +255,12 @@ pub fn parse_product_slash_command(
         .unwrap_or(without_slash.len());
     let command_slice = &without_slash[..command_end];
     let arguments_slice = without_slash[command_end..].trim_start();
+    // Vendor adapters remove an address only when it names the verified
+    // current bot. A surviving `@target` therefore belongs to another bot and
+    // must remain ordinary conversation text, not become an Ironclaw command.
+    if command_slice.contains('@') {
+        return Ok(None);
+    }
     validate_command_name(command_slice)
         .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
     validate_payload_string(
@@ -267,6 +275,43 @@ pub fn parse_product_slash_command(
     InboundCommandPayload::new(command, arguments, trigger)
         .map(Some)
         .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))
+}
+
+/// Classify channel text reserved for product interactions or commands.
+///
+/// Returns `None` when text remains an ordinary user message. Confident
+/// reserved syntax that cannot be parsed is classified as `NoOp` so the
+/// channel ingress fails closed rather than forwarding malformed control text.
+pub fn classify_channel_inbound_text(
+    text: &str,
+    trigger: ProductTriggerReason,
+) -> Option<ChannelInboundClassification> {
+    match crate::product_adapter::interaction_commands::parse_interaction_resolution_text(
+        crate::product_adapter::interaction_commands::strip_wrapping_inline_code(text),
+        trigger,
+    ) {
+        Ok(Some(ProductInboundPayload::ApprovalResolution(payload))) => {
+            return Some(ChannelInboundClassification::ApprovalResolution(payload));
+        }
+        Ok(Some(ProductInboundPayload::ScopedApprovalResolution(payload))) => {
+            return Some(ChannelInboundClassification::ScopedApprovalResolution(
+                payload,
+            ));
+        }
+        Ok(Some(ProductInboundPayload::AuthResolution(payload))) => {
+            return Some(ChannelInboundClassification::AuthResolution(payload));
+        }
+        Ok(Some(ProductInboundPayload::NoOp)) | Err(_) => {
+            return Some(ChannelInboundClassification::NoOp);
+        }
+        Ok(Some(_)) | Ok(None) => {}
+    }
+
+    match parse_product_slash_command(text, trigger) {
+        Ok(Some(command)) => Some(ChannelInboundClassification::Command(command)),
+        Ok(None) => None,
+        Err(_) => Some(ChannelInboundClassification::NoOp),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1191,6 +1236,78 @@ mod tests {
             "trigger": "bot_command"
         });
         assert!(serde_json::from_value::<InboundCommandPayload>(forged_slash).is_err());
+    }
+
+    #[test]
+    fn channel_inbound_classifier_routes_interactions_and_commands() {
+        assert!(matches!(
+            classify_channel_inbound_text(
+                "`auth deny gate:auth-1`",
+                ProductTriggerReason::DirectChat,
+            ),
+            Some(ChannelInboundClassification::AuthResolution(_))
+        ));
+        assert!(matches!(
+            classify_channel_inbound_text(
+                "approve gate:approval-1",
+                ProductTriggerReason::BotMention,
+            ),
+            Some(ChannelInboundClassification::ApprovalResolution(_))
+        ));
+        match classify_channel_inbound_text(
+            "/model set-provider openai --model gpt-5",
+            ProductTriggerReason::DirectChat,
+        ) {
+            Some(ChannelInboundClassification::Command(command)) => {
+                assert_eq!(command.command, "model");
+                assert_eq!(command.arguments, "set-provider openai --model gpt-5");
+                assert_eq!(command.trigger, ProductTriggerReason::DirectChat);
+            }
+            other => panic!("expected command classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_inbound_classifier_preserves_natural_language_and_fails_closed() {
+        for text in [
+            "hello",
+            "approve this design",
+            "approve gate:approval-1 but do not run it",
+            "deny gate:approval-1 because the scope changed",
+            "auth deny",
+            "auth deny this",
+            "/model@other_bot",
+            "/model@other_bot openai/gpt-5",
+        ] {
+            assert_eq!(
+                classify_channel_inbound_text(text, ProductTriggerReason::DirectChat),
+                None,
+                "{text:?} must remain an ordinary user message"
+            );
+        }
+        for text in [
+            "auth deny gate:",
+            "approve gate:",
+            "auth deny gate:bad\0ref",
+            "/bad\\command",
+        ] {
+            assert_eq!(
+                classify_channel_inbound_text(text, ProductTriggerReason::DirectChat),
+                Some(ChannelInboundClassification::NoOp),
+                "{text:?} is confident reserved syntax and must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_command_classification_converts_to_product_payload() {
+        let command =
+            InboundCommandPayload::new("model", "openai/gpt-5", ProductTriggerReason::BotCommand)
+                .expect("valid command");
+        assert!(matches!(
+            ProductInboundPayload::from(ChannelInboundClassification::Command(command)),
+            ProductInboundPayload::Command(_)
+        ));
     }
 
     #[test]
