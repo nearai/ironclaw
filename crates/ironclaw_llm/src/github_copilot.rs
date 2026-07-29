@@ -184,9 +184,10 @@ impl GithubCopilotProvider {
 
         if !status.is_success() {
             // Use shared retry-after parser (supports HTTP-date, default 60s)
-            let retry_after = Some(crate::retry::parse_retry_after(
+            let retry_after = crate::retry::retry_after_for_status(
+                status.as_u16(),
                 response.headers().get(reqwest::header::RETRY_AFTER),
-            ));
+            );
 
             let response_text = response
                 .text()

@@ -282,6 +282,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Fail the primary vendor route as unavailable and let the real loop
+    /// recovery and provider chain advance to scripted fallback index one.
+    pub fn advance_fallback_after_unavailable(mut self) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvance;
+        self
+    }
+
     /// Report one provider content-filter finish reason, then resume scripted
     /// playback through the real model gateway and recovery path.
     pub fn content_filter_model_once(mut self) -> Self {
@@ -701,6 +708,9 @@ pub struct RebornIntegrationHarness {
     /// Requests captured by the recoverable-failure provider wrapper before it
     /// either injects a failure or delegates to `scripted_llm`.
     pub(crate) model_provider_call_probe: Option<ModelProviderCallProbe>,
+    /// Primary/fallback route calls captured at the two scripted vendor seams.
+    pub(crate) fallback_provider_call_probe:
+        Option<super::scripted_provider::FallbackProviderCallProbe>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and

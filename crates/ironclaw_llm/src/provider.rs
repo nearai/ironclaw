@@ -365,6 +365,13 @@ impl CompletionRequest {
         );
     }
 
+    /// Return the host-selected ordered fallback index, when present.
+    pub fn fallback_index(&self) -> Option<u32> {
+        self.metadata
+            .get(FALLBACK_INDEX_METADATA_KEY)
+            .and_then(|value| value.parse().ok())
+    }
+
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
@@ -647,6 +654,13 @@ impl ToolCompletionRequest {
     pub fn take_model_override(&mut self) -> Option<String> {
         let model = self.model.take();
         normalized_model_override(model.as_deref()).map(str::to_string)
+    }
+
+    /// Return the host-selected ordered fallback index, when present.
+    pub fn fallback_index(&self) -> Option<u32> {
+        self.metadata
+            .get(FALLBACK_INDEX_METADATA_KEY)
+            .and_then(|value| value.parse().ok())
     }
 }
 

@@ -338,7 +338,21 @@ pub(crate) fn contains_status_code(lower: &str, code: &str) -> bool {
 }
 
 fn first_standalone_http_status(lower: &str) -> Option<u16> {
-    (400_u16..=599).find(|status| contains_status_code(lower, &status.to_string()))
+    (400_u16..=599)
+        .filter_map(|status| {
+            let code = status.to_string();
+            let bytes = lower.as_bytes();
+            lower.match_indices(&code).find_map(|(start, matched)| {
+                let before_is_digit = start
+                    .checked_sub(1)
+                    .is_some_and(|index| bytes[index].is_ascii_digit());
+                let end = start + matched.len();
+                let after_is_digit = bytes.get(end).is_some_and(u8::is_ascii_digit);
+                (!before_is_digit && !after_is_digit).then_some((start, status))
+            })
+        })
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, status)| status)
 }
 
 pub(crate) fn context_length_error(status_code: u16, response_text: &str) -> Option<LlmError> {
@@ -748,6 +762,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn message_mapper_uses_first_status_in_provider_text() {
+        let error = map_provider_message_error(
+            "fixture",
+            "fixture-model",
+            "upstream returned 503 after an earlier request used option 400",
+        );
+        assert!(matches!(
+            error,
+            LlmError::BadGateway {
+                provider,
+                status: 503,
+                retry_after: None
+            } if provider == "fixture"
+        ));
     }
 
     #[test]

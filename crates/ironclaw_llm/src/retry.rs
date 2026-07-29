@@ -143,6 +143,20 @@ pub fn parse_retry_after_value(header: &reqwest::header::HeaderValue) -> Duratio
 
 const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
 
+/// Preserve whether a provider supplied `Retry-After`, except that HTTP 429
+/// retains the historical 60-second floor when the header is absent.
+pub(crate) fn retry_after_for_status(
+    status: u16,
+    header: Option<&reqwest::header::HeaderValue>,
+) -> Option<Duration> {
+    let parsed = header.map(parse_retry_after_value);
+    if status == 429 {
+        parsed.or(Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)))
+    } else {
+        parsed
+    }
+}
+
 /// Configuration for the retry decorator.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -1025,6 +1039,15 @@ mod tests {
         assert_eq!(
             cap_retry_after(Duration::from_secs(0)),
             Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn retry_after_presence_is_preserved_for_gateway_errors() {
+        assert_eq!(retry_after_for_status(503, None), None);
+        assert_eq!(
+            retry_after_for_status(429, None),
+            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
         );
     }
 

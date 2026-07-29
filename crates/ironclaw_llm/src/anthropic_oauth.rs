@@ -199,9 +199,10 @@ impl AnthropicOAuthProvider {
 
         if !status.is_success() {
             // Parse Retry-After header before consuming the body.
-            let retry_after = Some(crate::retry::parse_retry_after(
+            let retry_after = crate::retry::retry_after_for_status(
+                status.as_u16(),
                 response.headers().get("retry-after"),
-            ));
+            );
 
             let response_text = response
                 .text()
@@ -253,9 +254,10 @@ impl AnthropicOAuthProvider {
                             }
                         });
                     }
-                    let retry_after = Some(crate::retry::parse_retry_after(
+                    let retry_after = crate::retry::retry_after_for_status(
+                        retry_status.as_u16(),
                         retry.headers().get("retry-after"),
-                    ));
+                    );
                     let retry_text = retry
                         .text()
                         .await

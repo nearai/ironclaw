@@ -1277,25 +1277,26 @@ where
                     effective_fallback_index,
                 } = response;
                 if effective_fallback_index != request.fallback_index {
-                    return Err(AgentLoopHostError::new(
+                    Err(AgentLoopHostError::new(
                         AgentLoopHostErrorKind::Internal,
                         "model gateway returned mismatched fallback route evidence",
-                    ));
+                    ))
+                } else {
+                    let chunks = safe_text_deltas
+                        .into_iter()
+                        .map(|safe_text_delta| ModelStreamChunk {
+                            safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                        })
+                        .collect::<Vec<_>>();
+                    let loop_response = LoopModelResponse {
+                        chunks,
+                        safe_reasoning_deltas,
+                        output,
+                        effective_model_profile_id: model_profile_id.clone(),
+                        usage,
+                    };
+                    Ok(loop_response)
                 }
-                let chunks = safe_text_deltas
-                    .into_iter()
-                    .map(|safe_text_delta| ModelStreamChunk {
-                        safe_text_delta: sanitize_model_visible_text(safe_text_delta),
-                    })
-                    .collect::<Vec<_>>();
-                let loop_response = LoopModelResponse {
-                    chunks,
-                    safe_reasoning_deltas,
-                    output,
-                    effective_model_profile_id: model_profile_id.clone(),
-                    usage,
-                };
-                Ok(loop_response)
             }
             Err(error) => Err(model_gateway_error(error)),
         };

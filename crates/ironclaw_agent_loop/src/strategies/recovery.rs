@@ -1483,6 +1483,24 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn rate_limit_class_caps_oversized_provider_backoff_hint() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Transient);
+            error.retry_after_ms = Some(BackoffDelayMs::MAX_DELAY_MS + 1);
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            match outcome {
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff { delay_ms }),
+                    ..
+                } => assert_eq!(delay_ms.as_u64(), BackoffDelayMs::MAX_DELAY_MS),
+                other => panic!("expected bounded rate-limit backoff, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
         async fn provider_unavailable_class_advances_fallback_even_with_retry_hint() {
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();

@@ -1017,6 +1017,16 @@ pub(crate) async fn apply_decorator_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    apply_decorator_chain_with_fallback(raw, None, config, session).await
+}
+
+async fn apply_decorator_chain_with_fallback(
+    raw: Arc<dyn LlmProvider>,
+    fallback_override: Option<Arc<dyn LlmProvider>>,
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let mut single_attempt_llm = Arc::clone(&raw);
     let llm = raw;
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
@@ -1044,6 +1054,7 @@ pub(crate) async fn apply_decorator_chain(
                     config.backend
                 ),
             })?;
+        let single_attempt_cheap = Arc::clone(&cheap);
         let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(cheap, retry_config.clone()))
         } else {
@@ -1054,14 +1065,23 @@ pub(crate) async fn apply_decorator_chain(
             cheap = %cheap.model_name(),
             "Smart routing enabled"
         );
-        Arc::new(SmartRoutingProvider::new(
+        let routed: Arc<dyn LlmProvider> = Arc::new(SmartRoutingProvider::new(
             llm,
             cheap,
             SmartRoutingConfig {
                 cascade_enabled: config.smart_routing_cascade,
                 ..SmartRoutingConfig::default()
             },
-        ))
+        ));
+        single_attempt_llm = Arc::new(SmartRoutingProvider::new(
+            single_attempt_llm,
+            single_attempt_cheap,
+            SmartRoutingConfig {
+                cascade_enabled: config.smart_routing_cascade,
+                ..SmartRoutingConfig::default()
+            },
+        ));
+        routed
     } else {
         llm
     };
@@ -1075,16 +1095,20 @@ pub(crate) async fn apply_decorator_chain(
         }
         let mut fallback_config = config.nearai.clone();
         fallback_config.model = fallback_model.clone();
-        let fallback = create_llm_provider_with_config(
-            &fallback_config,
-            session.clone(),
-            config.request_timeout_secs,
-        )?;
+        let fallback = match fallback_override {
+            Some(fallback) => fallback,
+            None => create_llm_provider_with_config(
+                &fallback_config,
+                session.clone(),
+                config.request_timeout_secs,
+            )?,
+        };
         tracing::debug!(
             primary = %llm.model_name(),
             fallback = %fallback.model_name(),
             "LLM failover enabled"
         );
+        let single_attempt_fallback = Arc::clone(&fallback);
         let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(fallback, retry_config.clone()))
         } else {
@@ -1094,8 +1118,9 @@ pub(crate) async fn apply_decorator_chain(
             cooldown_duration: std::time::Duration::from_secs(config.nearai.failover_cooldown_secs),
             failure_threshold: config.nearai.failover_cooldown_threshold,
         };
-        Arc::new(FailoverProvider::with_cooldown(
+        Arc::new(FailoverProvider::with_cooldown_and_explicit_routes(
             vec![llm, fallback],
+            Some(vec![single_attempt_llm, single_attempt_fallback]),
             cooldown_config,
         )?)
     } else {

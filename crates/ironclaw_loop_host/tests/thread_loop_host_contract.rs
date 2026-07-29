@@ -3150,13 +3150,15 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
 #[tokio::test]
 async fn model_port_rejects_mismatched_fallback_route_evidence() {
     let fixture = ThreadFixture::new().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingGateway::reply_with_fallback("model says hi", 1));
-    let port = ThreadBackedLoopModelPort::new(
+    let port = ThreadBackedLoopModelPort::with_milestone_sink(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
         fixture.run_context.clone(),
         gateway.clone(),
         16,
+        milestone_sink.clone(),
     );
     let messages = user_model_messages(&fixture);
     issue_prompt_grant(&fixture.run_context, &messages);
@@ -3181,6 +3183,14 @@ async fn model_port_rejects_mismatched_fallback_route_evidence() {
     let calls = gateway.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].fallback_index, 2);
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        LoopHostMilestoneKind::ModelFailed {
+            reason_kind: AgentLoopHostErrorKind::Internal
+        }
+    ));
 }
 
 #[tokio::test]

@@ -112,6 +112,12 @@ impl ProviderCooldown {
 /// without that metadata retain the legacy automatic failover behavior.
 pub struct FailoverProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
+    /// Equivalent provider routes without the per-provider retry decorator.
+    ///
+    /// Host-managed requests already carry an explicit route and return
+    /// failures to the loop's recovery policy. Using these providers prevents
+    /// an inner retry decorator from duplicating the selected vendor call.
+    explicit_route_providers: Option<Vec<Arc<dyn LlmProvider>>>,
     /// Index of the provider that last handled a request successfully.
     /// Used by `model_name()` and `cost_per_token()` so downstream cost
     /// tracking reflects the provider that actually served the request.
@@ -146,10 +152,27 @@ impl FailoverProvider {
         providers: Vec<Arc<dyn LlmProvider>>,
         cooldown_config: CooldownConfig,
     ) -> Result<Self, LlmError> {
+        Self::with_cooldown_and_explicit_routes(providers, None, cooldown_config)
+    }
+
+    pub(crate) fn with_cooldown_and_explicit_routes(
+        providers: Vec<Arc<dyn LlmProvider>>,
+        explicit_route_providers: Option<Vec<Arc<dyn LlmProvider>>>,
+        cooldown_config: CooldownConfig,
+    ) -> Result<Self, LlmError> {
         if providers.is_empty() {
             return Err(LlmError::RequestFailed {
                 provider: "failover".to_string(),
                 reason: "FailoverProvider requires at least one provider".to_string(),
+            });
+        }
+        if explicit_route_providers
+            .as_ref()
+            .is_some_and(|routes| routes.len() != providers.len())
+        {
+            return Err(LlmError::InvalidRequest {
+                provider: "failover".to_string(),
+                reason: "explicit failover routes must match the provider chain length".to_string(),
             });
         }
         let cooldowns = (0..providers.len())
@@ -157,6 +180,7 @@ impl FailoverProvider {
             .collect();
         Ok(Self {
             providers,
+            explicit_route_providers,
             last_used: AtomicUsize::new(0),
             cooldowns,
             epoch: Instant::now(),
@@ -214,8 +238,11 @@ impl FailoverProvider {
         if let Some(requested_index) = requested_index {
             let index = usize::try_from(requested_index)
                 .map_err(|_| self.missing_fallback_error(requested_index, None))?;
-            let provider = self
-                .providers
+            let route_providers = self
+                .explicit_route_providers
+                .as_ref()
+                .unwrap_or(&self.providers);
+            let provider = route_providers
                 .get(index)
                 .ok_or_else(|| self.missing_fallback_error(requested_index, None))?;
             return match call(Arc::clone(provider)).await {
