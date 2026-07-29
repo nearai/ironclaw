@@ -5209,7 +5209,8 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
         ._channel_host_assembly
         .as_ref()
         .expect("local-dev runtime composes the production channel host");
-    let lander = assembly.inbound_attachment_lander_for_test();
+    let lander =
+        ironclaw_extension_host::channel_host::test_support::inbound_attachment_lander(assembly);
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-channel-attachment-tenant").unwrap(),
         agent_id: AgentId::new("runtime-channel-attachment-agent").unwrap(),
