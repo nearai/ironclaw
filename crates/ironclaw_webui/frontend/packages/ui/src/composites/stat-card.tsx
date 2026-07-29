@@ -51,16 +51,8 @@ export function StatCard({
         className
       )}
     >
-      {/*
-       * The Badge is `shrink-0` and a tone-name chip runs ~90px wide, which is
-       * over half the width of a card in a six-across summary strip. Without
-       * `flex-wrap` + a text basis, the text column collapses to ~40px: `detail`
-       * wraps one word per line and an unbreakable label ("UNVERIFIED") spills
-       * over the chip. Wrapping drops the chip onto its own line only when the
-       * two genuinely cannot share one, so wider cards are unchanged.
-       */}
-      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-        <div className="min-w-0 flex-1 basis-40">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
           <div
             className="font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]"
           >
