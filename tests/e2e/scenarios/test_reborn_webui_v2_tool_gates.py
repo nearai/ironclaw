@@ -14,6 +14,7 @@ import uuid
 from urllib.parse import quote
 
 import httpx
+import pytest
 
 from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
@@ -126,6 +127,80 @@ async def _wait_for_run_artifact_status(
     raise AssertionError(
         f"Run artifact did not reach {expected_status}; last={last_artifact}"
     )
+
+
+async def _set_tool_permission(
+    client: httpx.AsyncClient,
+    base_url: str,
+    capability_id: str,
+    state: str,
+) -> None:
+    response = await client.post(
+        f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
+        json={"state": state},
+        timeout=15,
+    )
+    assert response.status_code == 200, response.text
+
+
+async def _read_tool_permission(
+    client: httpx.AsyncClient,
+    base_url: str,
+    capability_id: str,
+) -> tuple[str, str]:
+    response = await client.get(
+        f"{base_url}/api/webchat/v2/settings/tools",
+        timeout=15,
+    )
+    assert response.status_code == 200, response.text
+    key = f"tool.{capability_id}"
+    entry = next(
+        (item for item in response.json().get("entries", []) if item.get("key") == key),
+        None,
+    )
+    assert entry is not None, response.text
+    assert entry.get("mutable") is True, entry
+    value = entry.get("value") or {}
+    state = value.get("state")
+    assert state in {"always_allow", "ask_each_time", "disabled"}, entry
+    effective_source = value.get("effective_source")
+    assert effective_source in {"default", "global", "override"}, entry
+    return state, effective_source
+
+
+@pytest.fixture
+async def reborn_v2_echo_approval_server(reborn_v2_server):
+    """Pin echo to ask-each-time and restore the shared server state afterward."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        prior_state, prior_source = await _read_tool_permission(
+            client,
+            reborn_v2_server,
+            "builtin.echo",
+        )
+        restore_state = (
+            "default" if prior_source in {"default", "global"} else prior_state
+        )
+        await _set_tool_permission(
+            client,
+            reborn_v2_server,
+            "builtin.echo",
+            "ask_each_time",
+        )
+        try:
+            yield reborn_v2_server
+        finally:
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.echo",
+                restore_state,
+            )
+            restored_state, restored_source = await _read_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.echo",
+            )
+            assert (restored_state, restored_source) == (prior_state, prior_source)
 
 
 async def _set_llm_delay(mock_llm_server: str, marker: str) -> None:
@@ -274,27 +349,22 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
 
 
 async def test_reborn_v2_approval_gate_resolves_and_resumes(
-    reborn_v2_server,
+    reborn_v2_echo_approval_server,
 ):
     marker = f"approval-{uuid.uuid4().hex[:8]}"
+    base_url = reborn_v2_echo_approval_server
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
-        permission = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/settings/tools/builtin.echo",
-            json={"state": "ask_each_time"},
-            timeout=15,
-        )
-        assert permission.status_code == 200, permission.text
-        thread_id = await create_thread(client, reborn_v2_server)
+        thread_id = await create_thread(client, base_url)
 
         async with sse_stream(
-            reborn_v2_server,
+            base_url,
             path=f"/api/webchat/v2/threads/{thread_id}/events",
             token=REBORN_V2_AUTH_TOKEN,
             timeout=90,
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
-                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
+                f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
                 json={
                     "client_action_id": client_action_id(),
                     "content": f"reborn builtin echo {marker}",
@@ -308,7 +378,7 @@ async def test_reborn_v2_approval_gate_resolves_and_resumes(
             assert prompt["approval_context"]["tool_name"] == "builtin.echo"
 
             resolved = await client.post(
-                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}"
+                f"{base_url}/api/webchat/v2/threads/{thread_id}"
                 f"/runs/{prompt['turn_run_id']}"
                 f"/gates/{quote(prompt['gate_ref'], safe='')}/resolve",
                 json={
@@ -323,38 +393,33 @@ async def test_reborn_v2_approval_gate_resolves_and_resumes(
 
         assistant = await wait_for_assistant_message(
             client,
-            reborn_v2_server,
+            base_url,
             thread_id,
             timeout=60,
         )
-        timeline = await fetch_timeline(client, reborn_v2_server, thread_id)
+        timeline = await fetch_timeline(client, base_url, thread_id)
 
     assert assistant.get("status") == "finalized", assistant
     assert _tool_result_references(timeline), timeline
 
 
 async def test_reborn_v2_approval_gate_decline_has_no_successful_tool_result(
-    reborn_v2_server,
+    reborn_v2_echo_approval_server,
 ):
     marker = f"approval-decline-{uuid.uuid4().hex[:8]}"
+    base_url = reborn_v2_echo_approval_server
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
-        permission = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/settings/tools/builtin.echo",
-            json={"state": "ask_each_time"},
-            timeout=15,
-        )
-        assert permission.status_code == 200, permission.text
-        thread_id = await create_thread(client, reborn_v2_server)
+        thread_id = await create_thread(client, base_url)
 
         async with sse_stream(
-            reborn_v2_server,
+            base_url,
             path=f"/api/webchat/v2/threads/{thread_id}/events",
             token=REBORN_V2_AUTH_TOKEN,
             timeout=90,
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
-                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
+                f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
                 json={
                     "client_action_id": client_action_id(),
                     "content": f"reborn builtin echo {marker}",
@@ -376,7 +441,7 @@ async def test_reborn_v2_approval_gate_decline_has_no_successful_tool_result(
             assert prompt["approval_context"]["tool_name"] == "builtin.echo"
 
             resolved = await client.post(
-                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}"
+                f"{base_url}/api/webchat/v2/threads/{thread_id}"
                 f"/runs/{run_id}/gates/{quote(prompt['gate_ref'], safe='')}/resolve",
                 json={
                     "client_action_id": client_action_id(),
@@ -389,18 +454,18 @@ async def test_reborn_v2_approval_gate_decline_has_no_successful_tool_result(
 
         artifact = await _wait_for_run_artifact_status(
             client,
-            reborn_v2_server,
+            base_url,
             thread_id,
             run_id,
             "Completed",
         )
         assistant = await wait_for_assistant_message(
             client,
-            reborn_v2_server,
+            base_url,
             thread_id,
             timeout=60,
         )
-        timeline = await fetch_timeline(client, reborn_v2_server, thread_id)
+        timeline = await fetch_timeline(client, base_url, thread_id)
 
     assistant_content = assistant.get("content")
     assert isinstance(assistant_content, str), assistant
