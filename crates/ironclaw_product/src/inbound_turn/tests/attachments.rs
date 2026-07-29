@@ -754,7 +754,6 @@ async fn missing_transfer_support_fails_closed_without_landing() {
 #[tokio::test]
 async fn mixed_inline_and_channel_sources_fail_before_fetch_or_landing() {
     let source = channel_attachment_ref("channel-image-0", None);
-    let adapter = Arc::new(FetchingChannelAdapter::new([]));
     let lander = Arc::new(CapturingLander::default());
     let service = DefaultInboundTurnService::new(
         LandingBindingStub,
@@ -784,7 +783,6 @@ async fn mixed_inline_and_channel_sources_fail_before_fetch_or_landing() {
             ..
         })
     ));
-    assert_eq!(adapter.fetch_count(), 0);
     assert!(lander.landed.lock().expect("landed lock").is_empty());
 }
 

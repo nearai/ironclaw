@@ -309,6 +309,18 @@ fn channel_attachment_refs_must_match_descriptors_and_stay_transient() {
         .expect("payload"),
     );
 
+    let non_user_envelope = ProductInboundEnvelope::from_trusted_parse(
+        sample_context(),
+        sample_parsed(ProductInboundPayload::NoOp),
+    )
+    .expect("non-user envelope");
+    assert!(
+        non_user_envelope
+            .with_channel_attachment_refs(vec![source.clone()])
+            .is_err(),
+        "channel attachment refs require a user-message payload"
+    );
+
     // Mismatched refs fail closed before any transfer authority exists.
     let mismatched = ChannelAttachmentRef {
         descriptor: crate::product_adapter::external::ProductAttachmentDescriptor::new(

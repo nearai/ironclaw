@@ -252,6 +252,15 @@ pub enum CoordinatedDeliveryError {
     PreMaterializedWorkspaceAttachment,
 }
 
+fn workspace_materialization_failure_kind(error: &CoordinatedDeliveryError) -> DeliveryFailureKind {
+    match error {
+        CoordinatedDeliveryError::WorkspaceAttachmentRead(ProjectFsError::Unavailable) => {
+            DeliveryFailureKind::TransportUnavailable
+        }
+        _ => DeliveryFailureKind::Rejected,
+    }
+}
+
 /// Retry policy for retryable per-part outcomes (bounded, jitter-free by
 /// default — tests inject zero delays).
 #[derive(Debug, Clone)]
@@ -544,12 +553,9 @@ impl DeliveryCoordinator {
         let parts = match materialize_workspace_file_parts(materialization, parts).await {
             Ok(parts) => parts,
             Err(error) => {
-                self.mark_terminal(
-                    &attempt,
-                    OutboundDeliveryStatus::Failed,
-                    Some(DeliveryFailureKind::Rejected),
-                )
-                .await;
+                let failure_kind = workspace_materialization_failure_kind(&error);
+                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(failure_kind))
+                    .await;
                 return Err(error);
             }
         };

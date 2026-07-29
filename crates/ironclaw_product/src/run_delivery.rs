@@ -368,27 +368,6 @@ pub(crate) fn thread_scope_from_binding(
     })
 }
 
-/// Project-filesystem authority scope for an already-resolved turn scope.
-/// Outbound materialization of `/workspace/...` references resolves through
-/// the same thread scope the turn runs under; the turn scope is its canonical
-/// source, so this is a view, never a second identity.
-pub(crate) fn thread_scope_from_turn_scope(
-    scope: &TurnScope,
-) -> Result<ironclaw_threads::ThreadScope, ProductSurfaceFailure> {
-    let Some(agent_id) = scope.agent_id.clone() else {
-        return Err(ProductSurfaceFailure::BindingResolutionFailed {
-            reason: "turn scope missing agent_id required for delivery thread scope".to_string(),
-        });
-    };
-    Ok(ironclaw_threads::ThreadScope {
-        tenant_id: scope.tenant_id.clone(),
-        agent_id,
-        project_id: scope.project_id.clone(),
-        owner_user_id: scope.explicit_owner_user_id().cloned(),
-        mission_id: None,
-    })
-}
-
 pub(crate) fn turn_scope_from_thread_scope(
     binding: &ResolvedBinding,
     thread_scope: &ironclaw_threads::ThreadScope,

@@ -1180,6 +1180,31 @@ async fn coordinator_fails_closed_when_workspace_file_is_missing_or_denied() {
 }
 
 #[tokio::test]
+async fn coordinator_classifies_unavailable_workspace_reader_as_transport_unavailable() {
+    let files = ScriptedProjectFilesystem::default();
+    files.insert_error("/workspace/report.pdf", ProjectFsError::Unavailable);
+    let (outcome, adapter, store, scope) =
+        coordinate_workspace_reply(&files, "attachment: /workspace/report.pdf", Vec::new()).await;
+
+    assert!(matches!(
+        outcome,
+        Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
+            ProjectFsError::Unavailable
+        ))
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+    let attempts = store.list_delivery_attempts(scope).await.expect("attempts");
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+    );
+}
+
+#[tokio::test]
 async fn coordinator_enforces_workspace_file_count_per_file_and_total_budgets() {
     let too_many = (0..=DEFAULT_ATTACHMENT_BUDGETS.max_count)
         .map(|index| format!("/workspace/file-{index}.txt"))

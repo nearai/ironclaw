@@ -25,7 +25,7 @@ use ironclaw_outbound::{
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
     ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
 };
-use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
+use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
 use ironclaw_turns::{
     GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
     TurnRunState, TurnScope, TurnStatus,
@@ -38,7 +38,7 @@ use super::{
     HintSeenSet, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
     blocked_actionable_marker, cancel_auth_blocked_run, delivered_messages_from_outcome,
     gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
-    thread_scope_from_turn_scope, turn_scope_from_thread_scope,
+    turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
@@ -59,6 +59,13 @@ struct ActionableNotification {
     /// and auth prompts, so a bare reply next to the prompt resolves the
     /// gate. `None` for other kinds.
     gate_ref_for_routing: Option<String>,
+}
+
+struct RunNotificationDeliveryContext<'a> {
+    envelope: &'a ProductInboundEnvelope,
+    scope: &'a TurnScope,
+    thread_scope: &'a ThreadScope,
+    actor: &'a TurnActor,
 }
 
 /// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
@@ -486,9 +493,12 @@ impl RunDeliveryObserver {
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
             let delivered_messages = self
                 .deliver_run_notification(
-                    &envelope,
-                    &scope,
-                    &actor,
+                    RunNotificationDeliveryContext {
+                        envelope: &envelope,
+                        scope: &scope,
+                        thread_scope: &thread_scope,
+                        actor: &actor,
+                    },
                     run_id,
                     &actionable_state,
                     notification,
@@ -749,13 +759,17 @@ impl RunDeliveryObserver {
 
     async fn deliver_run_notification(
         &self,
-        envelope: &ProductInboundEnvelope,
-        scope: &TurnScope,
-        actor: &TurnActor,
+        context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
         state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
+        let RunNotificationDeliveryContext {
+            envelope,
+            scope,
+            thread_scope,
+            actor,
+        } = context;
         let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
@@ -792,7 +806,6 @@ impl RunDeliveryObserver {
             projection_ref,
             attempted_at: Utc::now(),
         };
-        let thread_scope = thread_scope_from_turn_scope(scope)?;
         let outcome = self
             .services
             .coordinator
@@ -816,7 +829,7 @@ impl RunDeliveryObserver {
                     // (`triggered.rs` passes true for auth prompts).
                     require_direct_message_target: false,
                     extension_id: &self.services.extension_id,
-                    thread_scope: &thread_scope,
+                    thread_scope,
                 },
             )
             .await?;
