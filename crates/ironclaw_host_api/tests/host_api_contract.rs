@@ -149,6 +149,36 @@ fn runtime_credential_target_serializes_path_placeholder() {
 }
 
 #[test]
+fn runtime_body_credential_limit_defaults_compatibly_and_round_trips_when_derived() {
+    let legacy_wire = json!({
+        "type": "body_json_pointer",
+        "pointer": "/secret_token"
+    });
+    let legacy = serde_json::from_value::<RuntimeCredentialTarget>(legacy_wire.clone()).unwrap();
+    assert_eq!(
+        legacy,
+        RuntimeCredentialTarget::BodyJsonPointer {
+            pointer: "/secret_token".to_string(),
+            post_injection_body_limit_bytes: None,
+        }
+    );
+    assert_eq!(serde_json::to_value(legacy).unwrap(), legacy_wire);
+
+    let bounded = RuntimeCredentialTarget::BodyJsonPointer {
+        pointer: "/secret_token".to_string(),
+        post_injection_body_limit_bytes: Some(256),
+    };
+    assert_eq!(
+        serde_json::to_value(&bounded).unwrap(),
+        json!({
+            "type": "body_json_pointer",
+            "pointer": "/secret_token",
+            "post_injection_body_limit_bytes": 256
+        })
+    );
+}
+
+#[test]
 fn extension_id_rejects_path_like_or_uppercase_values() {
     assert!(ExtensionId::new("github").is_ok());
     assert!(ExtensionId::new("github-mcp.v1").is_ok());

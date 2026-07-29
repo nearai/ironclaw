@@ -184,7 +184,7 @@ impl ChannelDescriptor {
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
-                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer, .. } => {
                         pointer.starts_with('/')
                     }
                 };
@@ -415,7 +415,8 @@ pub struct ChannelEgressDescriptor {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_prefixes: Vec<String>,
     /// Maximum request body size for this target. `None` preserves the
-    /// pre-v3-declaration behavior; declared limits are enforced before I/O.
+    /// pre-v3-declaration behavior; declared limits are enforced both before
+    /// approval and after host-side credential injection, before I/O.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_limit_bytes: Option<u64>,
     /// Maximum response body size for this target. The channel host also

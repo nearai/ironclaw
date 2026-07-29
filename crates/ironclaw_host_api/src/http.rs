@@ -147,6 +147,11 @@ pub enum RuntimeCredentialTarget {
     /// request closed.
     BodyJsonPointer {
         pointer: String,
+        /// Host-derived cap checked after every credential has been injected
+        /// and the JSON body has been re-serialized. Callers that do not own a
+        /// narrower request-body contract leave this unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_injection_body_limit_bytes: Option<u64>,
     },
 }
 
@@ -197,7 +202,7 @@ impl RuntimeCredentialTarget {
             Self::PathPlaceholder { placeholder } => {
                 validate_runtime_credential_path_placeholder(placeholder)?;
             }
-            Self::BodyJsonPointer { pointer } => {
+            Self::BodyJsonPointer { pointer, .. } => {
                 validate_runtime_credential_body_pointer(pointer)?;
             }
         }

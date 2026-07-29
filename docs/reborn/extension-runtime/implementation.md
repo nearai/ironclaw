@@ -197,8 +197,9 @@ already exists.
   - `egress.rs` — `RestrictedEgress` implementation: scheme/host/method
     allowlist from the resolved contract, credential injection by handle
     (adapter-supplied `Authorization` rejected where injection is declared),
-    response size caps, redirect denial across hosts, private-IP/DNS-rebind
-    denial (reuse existing network policy), deadlines.
+    request size caps checked before approval and again after host-side body
+    credential injection, response size caps, redirect denial across hosts,
+    private-IP/DNS-rebind denial (reuse existing network policy), deadlines.
 - Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` and passes it
   into composition; composition constructs `ExtensionHost` with stores +
   loaders and injects resolver handles into dispatcher/workflow/engine/router.

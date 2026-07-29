@@ -89,6 +89,10 @@ pub struct ApprovedChannelEgress {
     /// manifest-declared `BodyJsonPointer` target. Resolution and insertion
     /// are the transport's job, host-side.
     pub body_credentials: Vec<ApprovedChannelCredential>,
+    /// Manifest-declared request-body cap. The policy layer checks the
+    /// adapter-supplied body before approval; the host runtime must check the
+    /// final body again after credential injection.
+    pub request_body_limit: Option<u64>,
     pub response_body_limit: u64,
     pub timeout_ms: u64,
 }
@@ -210,6 +214,7 @@ impl PolicyEnforcedChannelEgress {
                 handle: handle.clone(),
                 target: RuntimeCredentialTarget::BodyJsonPointer {
                     pointer: declared_binding.pointer.clone(),
+                    post_injection_body_limit_bytes: None,
                 },
             });
         }
@@ -230,6 +235,7 @@ impl PolicyEnforcedChannelEgress {
             host,
             credential,
             body_credentials,
+            request_body_limit: declared.request_body_limit_bytes,
             response_body_limit: declared
                 .response_body_limit_bytes
                 .unwrap_or(CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
@@ -503,6 +509,7 @@ mod tests {
     #[tokio::test]
     async fn declared_body_credential_is_approved_with_its_declared_pointer() {
         let mut declared = declared_vendor();
+        declared[0].request_body_limit_bytes = Some(256);
         declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
             handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
             pointer: "/secret_token".to_string(),
@@ -517,10 +524,12 @@ mod tests {
             approved[0].body_credentials[0].handle.as_str(),
             "vendor_webhook_secret"
         );
+        assert_eq!(approved[0].request_body_limit, Some(256));
         assert!(
             matches!(
                 &approved[0].body_credentials[0].target,
-                RuntimeCredentialTarget::BodyJsonPointer { pointer } if pointer == "/secret_token"
+                RuntimeCredentialTarget::BodyJsonPointer { pointer, .. }
+                    if pointer == "/secret_token"
             ),
             "the pointer comes from the DECLARATION, never from the adapter"
         );
