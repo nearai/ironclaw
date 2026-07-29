@@ -37,20 +37,27 @@ crates/
 tools/             developer diagnostics & excluded helpers
 ```
 
-## Family roles and responsibilities (summary)
+## The ten families
 
-| Family (spec) | Role | Owns | Must never contain |
-|---|---|---|---|
-| [`contracts/`](families/contracts.md) — 6 crates | shared vocabulary + ports every tier may see | IDs/scopes, capability/decision/approval vocabulary, the sealed `Authorized` witness + dispatch port, loop/extension/product port sets, wire DTO homes | impls, frameworks, persistence, vendor names, behavior |
-| [`substrate/`](families/substrate.md) — 5 crates | privileged mechanisms (storage fabric, secrets, network policy, safety scanning, tracing macros) | containment, CAS, leases, egress hardening, redaction primitives | authority decisions, domain records, product behavior |
-| [`events/`](families/events.md) — 4 crates | durable evidence, derived read models, transport-neutral streams | canonical redacted events; backend selection + fail-closed profiles; rebuildable projections; admission-checked streams | transports, product views, any projection *writing* state |
-| [`domains/`](families/domains.md) — 15 crates | typed domain owners over `ScopedFilesystem` | record grammar, domain services/factories, sealed domain trust types (outbound grants, trigger minting) | backend selection, authority decisions, HTTP surfaces, vendor branches (llm/auth vendor scope excepted by charter) |
-| [`kernel/`](families/kernel.md) — 9 crates | the security perimeter: every stage of the mediated effect pipeline | trust ceilings, grants/leases, exact-invocation approvals, reservations, lane policy, `CapabilityHost`, process lifecycle, turn admission, mediated services | product UX, loop strategy, vendor code, lane mechanics |
-| [`lanes/`](families/lanes.md) — 4 crates | how authorized work executes | runtime loading/isolation/metering, normalized outcomes | authorization, ambient network/secrets, product behavior, parallel lifecycles |
-| [`loop/`](families/loop.md) — 4 crates | replaceable agent behavior + the adapters hosting it | executor/strategies (sealed), host-port impls, driver registry, hook middleware | authority (everything privileged crosses ports into the kernel) |
-| [`extensions/`](families/extensions.md) — 3 crates + `packages/` | the four extension responsibilities, colocated | manifests/registry/records; generic hosting (ingress verify, binding, egress transport); product-side management; concrete packages | vendor names outside `packages/`; registry-as-dispatcher; host absorbing product workflow |
-| [`product/`](families/product.md) — 5 crates | the supported first-party experience | ProductSurface impl, admission/bindings/idempotency, delivery semantics, operator control plane, transports (webui/openai) | authority decisions, lane mechanics, vendor protocol, assembly |
-| [`app/`](families/app.md) — 4 crates | deployment selection, wiring, the binary, enforcement | builders-of-owners, binding tables, boot config, architecture tests | any domain behavior, policy content, prompts, vendor flows |
+**[`contracts/`](families/contracts.md) — 6 crates.** The shared vocabulary and ports every tier may see: identities and scopes, the capability/decision/approval vocabulary, the sealed `Authorized` witness and dispatch port, and the loop, extension, and product port sets. Nothing here executes, persists, or names a vendor — a contracts crate defines shapes and seals constructors; implementations always live above it.
+
+**[`substrate/`](families/substrate.md) — 5 crates.** The privileged mechanisms the kernel mediates: the storage fabric with mount containment and CAS, encrypted secrets with one-shot leases, hardened network policy and egress, safety scanning and redaction, and the tracing macros. Substrates enforce local invariants but never make authority decisions and never hold domain records or product behavior.
+
+**[`events/`](families/events.md) — 4 crates.** What already happened, kept in three deliberately separate contracts: canonical redacted evidence (vocabulary plus durable backends with fail-closed production profiles), rebuildable read models derived by replay, and transport-neutral streams with admission control. Projections and streams can never write state or become authority, and no transport framing lives here.
+
+**[`domains/`](families/domains.md) — 15 crates.** The typed record and service domains behind the kernel — threads, conversations, triggers, memory, skills, auth, attachments, projects, identity, llm, traces, outbound, and friends — each owning its record grammar and invariants over a `ScopedFilesystem`. Domains never select storage backends, never decide authority, and never expose HTTP; vendor code appears only under the two chartered exceptions (llm providers, auth recipes-as-data).
+
+**[`kernel/`](families/kernel.md) — 9 crates.** The security perimeter, one crate per stage of the mediated effect pipeline: trust ceilings, grant matching and leases, exact-invocation approvals, resource reservation, runtime policy, the `CapabilityHost` membrane, the process lifecycle authority, turn admission, and the mediated host services. The kernel decides and mediates; it contains no product UX, no loop strategy, no vendor code, and no lane mechanics.
+
+**[`lanes/`](families/lanes.md) — 4 crates.** How already-authorized work executes: the WASM sandbox, MCP, and the container sandbox, each receiving sealed invocations and mediated services and returning normalized outcomes. A lane never authorizes anything and never holds ambient network or secrets.
+
+**[`loop/`](families/loop.md) — 4 crates.** Replaceable agent behavior and the adapters that host it: the sealed executor and strategy families, the host-port implementations, the driver registry, and the hook middleware. A shipped loop is not trusted — everything privileged crosses ports into the kernel.
+
+**[`extensions/`](families/extensions.md) — 3 crates + `packages/`.** Everything "installable package," with the four responsibilities kept apart: the manifest registry and installation records, the generic host (ingress verification, binding, egress transport), the product-side manager, and the concrete packages themselves. Vendor names exist only under `packages/`; the registry never dispatches, and the host never absorbs product workflow.
+
+**[`product/`](families/product.md) — 5 crates.** The supported first-party experience: the `ProductSurface` implementation, admission/bindings/idempotency, delivery semantics, the operator control plane, and the transports (WebUI, OpenAI-compatible). Product asks the kernel for privileged work — it never decides authority, never touches lane mechanics, and never speaks a vendor protocol.
+
+**[`app/`](families/app.md) — 4 crates.** Assembly and enforcement: composition selects deployments and wires owners, the binary supplies the concrete binding tables, config owns the boot contract, and the architecture tests keep all of the above mechanical. Nothing else in the workspace may contain wiring, and app may contain nothing but wiring — no domain behavior, no policy content, no prompts, no vendor flows.
 
 ## The five decisions reviewers should weigh
 
