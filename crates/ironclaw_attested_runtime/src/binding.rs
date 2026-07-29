@@ -20,7 +20,46 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_attestation::{DecodedTransaction, RenderingSchemaVersion};
 use ironclaw_chain_signing::{ChainKeyId, recompute_approved_hash};
-use ironclaw_signing_provider::{ApprovedTxHash, GateRef, ProviderId, SigningContext};
+use ironclaw_signing_provider::{ApprovedTxHash, GateRef, ProviderId, SigningContext, TenantId};
+
+/// The tenant-qualified identity of a gate binding.
+///
+/// Mirrors `LedgerKey { tenant, gate_ref }` and `GrantKey`'s tenant-first
+/// keying: a binding is owned by exactly one `(tenant, gate_ref)`. Adding the
+/// tenant axis at the store layer is defense-in-depth on top of
+/// [`validate_binding`] (which pins the key to the binding's OWN
+/// `context.gate_ref`) and the resolve-layer `assert_binding_owner` user check —
+/// two tenants can never collide on, or read each other's, binding even if a
+/// `gate_ref` were ever reused across tenants.
+///
+/// The synchronous resume read ([`SyncBindingRead::get_sync`]) stays keyed by
+/// `gate_ref` alone: the crypto-free `ironclaw_turns` resume contract carries no
+/// tenant, and the binding's persisted `context.tenant` plus the ownership
+/// checks already bind it. The tenant axis is enforced on the async
+/// driver/ingress paths, which always have a [`SigningContext`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BindingKey {
+    /// Tenant boundary that owns the binding.
+    pub tenant: TenantId,
+    /// The gate the binding is for.
+    pub gate_ref: GateRef,
+}
+
+impl BindingKey {
+    /// Construct a binding key from its tenant and gate.
+    pub fn new(tenant: TenantId, gate_ref: GateRef) -> Self {
+        Self { tenant, gate_ref }
+    }
+
+    /// Derive the binding key from a [`SigningContext`]: the binding is owned by
+    /// the context's tenant and keyed by its gate.
+    pub fn from_context(context: &SigningContext) -> Self {
+        Self {
+            tenant: context.tenant.clone(),
+            gate_ref: context.gate_ref.clone(),
+        }
+    }
+}
 
 /// Errors a binding write can fail closed with. A binding is authoritative —
 /// the resume port and driver trust it — so creation is INSERT-ONLY (CAS) and
@@ -35,6 +74,10 @@ pub enum BindingError {
     /// The store key does not equal `binding.context.gate_ref` — the binding
     /// would be retrievable under a gate_ref it does not describe.
     GateRefMismatch,
+    /// The store key's `tenant` does not equal `binding.context.tenant` — the
+    /// binding would be filed under a tenant it does not describe (cross-tenant
+    /// mis-binding). Fail closed.
+    TenantMismatch,
     /// The bound `approved_tx_hash` does not equal the hash recomputed from the
     /// binding's own decoded tx + schema (the binding contradicts itself).
     ApprovedHashMismatch,
@@ -55,6 +98,7 @@ impl std::fmt::Display for BindingError {
         match self {
             Self::AlreadyExists => write!(f, "a binding already exists for this gate_ref"),
             Self::GateRefMismatch => write!(f, "store key does not match binding context gate_ref"),
+            Self::TenantMismatch => write!(f, "store key does not match binding context tenant"),
             Self::ApprovedHashMismatch => {
                 write!(f, "approved hash does not match the decoded transaction")
             }
@@ -151,6 +195,23 @@ pub fn validate_binding(key: &GateRef, binding: &AttestedGateBinding) -> Result<
     Ok(())
 }
 
+/// Validate a binding write against its full tenant-qualified [`BindingKey`].
+///
+/// Runs [`validate_binding`] (gate_ref + self-consistency) AND additionally
+/// requires `key.tenant` to equal the binding's own `context.tenant`, so a
+/// binding can never be filed under, or read back through, a tenant it does not
+/// describe. Every [`AttestedGateBindingStore`] uses this so the tenant axis is
+/// enforced uniformly across the in-memory and durable backends.
+pub fn validate_binding_key(
+    key: &BindingKey,
+    binding: &AttestedGateBinding,
+) -> Result<(), BindingError> {
+    if key.tenant.as_str() != binding.context.tenant.as_str() {
+        return Err(BindingError::TenantMismatch);
+    }
+    validate_binding(&key.gate_ref, binding)
+}
+
 /// Store of authoritative attested-gate bindings, keyed by `gate_ref`.
 ///
 /// One binding per `gate_ref`, created when the gate is raised and then
@@ -159,25 +220,30 @@ pub fn validate_binding(key: &GateRef, binding: &AttestedGateBinding) -> Result<
 /// backends (PR12) carry identical semantics.
 #[async_trait]
 pub trait AttestedGateBindingStore: SyncBindingRead {
-    /// Persist the authoritative binding for a freshly-raised attested gate.
+    /// Persist the authoritative binding for a freshly-raised attested gate,
+    /// keyed by `(tenant, gate_ref)`.
     ///
     /// INSERT-ONLY: errors [`BindingError::AlreadyExists`] if a binding already
-    /// exists for `gate_ref` (no overwrite, ever). Validates the binding
-    /// ([`validate_binding`]) before persisting.
-    async fn put(
-        &self,
-        gate_ref: GateRef,
-        binding: AttestedGateBinding,
-    ) -> Result<(), BindingError>;
+    /// exists for `key` (no overwrite, ever). Validates the binding
+    /// ([`validate_binding`]) before persisting, and requires `key.tenant` to
+    /// equal the binding's own `context.tenant` (defense-in-depth: a binding can
+    /// never be filed under a tenant it does not describe).
+    async fn put(&self, key: BindingKey, binding: AttestedGateBinding) -> Result<(), BindingError>;
 
-    /// Read the authoritative binding for `gate_ref`, if one exists.
-    async fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding>;
+    /// Read the authoritative binding for `(tenant, gate_ref)`, if one exists.
+    async fn get(&self, key: &BindingKey) -> Option<AttestedGateBinding>;
 }
 
 /// In-memory [`AttestedGateBindingStore`].
+///
+/// Keyed by the tenant-qualified [`BindingKey`] for the async driver/ingress
+/// paths. A secondary `gate_ref -> BindingKey` index serves the synchronous
+/// resume read ([`SyncBindingRead::get_sync`]), which has no tenant in the
+/// crypto-free `ironclaw_turns` resume contract.
 #[derive(Default)]
 pub struct InMemoryAttestedGateBindingStore {
-    bindings: Mutex<HashMap<GateRef, AttestedGateBinding>>,
+    bindings: Mutex<HashMap<BindingKey, AttestedGateBinding>>,
+    by_gate_ref: Mutex<HashMap<GateRef, BindingKey>>,
 }
 
 impl InMemoryAttestedGateBindingStore {
@@ -189,38 +255,47 @@ impl InMemoryAttestedGateBindingStore {
 
 impl SyncBindingRead for InMemoryAttestedGateBindingStore {
     /// Synchronous read used by the resume port, which runs inside the turn
-    /// store's sync critical section and therefore cannot `.await`. The async
-    /// trait method is for the driver / ingress paths.
+    /// store's sync critical section and therefore cannot `.await`. Resolves the
+    /// gate_ref to its owning [`BindingKey`] via the index, then reads the
+    /// binding. The async trait method ([`AttestedGateBindingStore::get`]) is the
+    /// tenant-qualified read for the driver / ingress paths.
     fn get_sync(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
+        let key = self.by_gate_ref.lock().ok()?.get(gate_ref).cloned()?;
         self.bindings
             .lock()
             .ok()
-            .and_then(|map| map.get(gate_ref).cloned())
+            .and_then(|map| map.get(&key).cloned())
     }
 }
 
 #[async_trait]
 impl AttestedGateBindingStore for InMemoryAttestedGateBindingStore {
-    async fn put(
-        &self,
-        gate_ref: GateRef,
-        binding: AttestedGateBinding,
-    ) -> Result<(), BindingError> {
-        // Validate before taking the lock so a malformed binding never even
-        // races for the slot.
-        validate_binding(&gate_ref, &binding)?;
+    async fn put(&self, key: BindingKey, binding: AttestedGateBinding) -> Result<(), BindingError> {
+        // Validate (gate_ref + tenant + self-consistency) before taking the lock
+        // so a malformed/mis-tenanted binding never even races for the slot.
+        validate_binding_key(&key, &binding)?;
         let mut map = self.bindings.lock().map_err(|_| BindingError::Poisoned)?;
+        let mut index = self
+            .by_gate_ref
+            .lock()
+            .map_err(|_| BindingError::Poisoned)?;
         // INSERT-ONLY CAS: a binding is authoritative and immutable. The first
-        // write for a gate_ref wins; any later write fails closed so it can
-        // never mutate the binding the port + driver already trust.
-        if map.contains_key(&gate_ref) {
+        // write for a (tenant, gate_ref) wins; any later write fails closed so it
+        // can never mutate the binding the port + driver already trust. A second
+        // tenant cannot reuse the same gate_ref either — the gate_ref index is
+        // also insert-only.
+        if map.contains_key(&key) || index.contains_key(&key.gate_ref) {
             return Err(BindingError::AlreadyExists);
         }
-        map.insert(gate_ref, binding);
+        index.insert(key.gate_ref.clone(), key.clone());
+        map.insert(key, binding);
         Ok(())
     }
 
-    async fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-        self.get_sync(gate_ref)
+    async fn get(&self, key: &BindingKey) -> Option<AttestedGateBinding> {
+        self.bindings
+            .lock()
+            .ok()
+            .and_then(|map| map.get(key).cloned())
     }
 }

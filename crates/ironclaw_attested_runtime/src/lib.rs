@@ -52,10 +52,20 @@ mod binding;
 mod driver;
 mod port;
 mod ship_gate;
+mod trust;
+
+#[cfg(any(test, feature = "unsafe-always-trust-near"))]
+pub use trust::AlwaysTrustNearAccessKeyVerifier;
+pub use trust::{
+    BindingKey as TrustBindingKey, BindingStatus, CsprngNonceSource, EnrollmentState,
+    InMemoryTrustStore, NearAccessKeyVerifier, NonceSource, SignedChallenge, TrustChallenge,
+    TrustEnrollment, TrustError, TrustKind, TrustRegistrar, TrustStore, TrustedSignerBinding,
+    VerifiedControl,
+};
 
 pub use binding::{
-    AttestedGateBinding, AttestedGateBindingStore, BindingError, InMemoryAttestedGateBindingStore,
-    SyncBindingRead, validate_binding,
+    AttestedGateBinding, AttestedGateBindingStore, BindingError, BindingKey,
+    InMemoryAttestedGateBindingStore, SyncBindingRead, validate_binding, validate_binding_key,
 };
 pub use driver::{
     AttestedSignerContinuationDriver, BindingOwner, BroadcastDisposition, BroadcastOutcome,

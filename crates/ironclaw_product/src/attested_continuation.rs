@@ -114,12 +114,22 @@ pub enum AttestedContinuationRejection {
     LedgerGuard,
     /// The proof payload was malformed and could not be decoded.
     MalformedProof,
-    /// The continuation port is not wired on this deployment.
+    /// A post-verification, server-side (recoverable) failure: the proof was
+    /// already verified and the one-shot grant claimed, but the broadcast tail
+    /// failed (e.g. RPC timeout). The broadcast is ledger-idempotent, so this is
+    /// retryable for the broadcast tail only — it must NOT be surfaced as a
+    /// proof-validation error.
     Unavailable,
     /// An infrastructure/runtime backend failed (chain-signing backend error,
     /// broadcast/RPC outage). This is a service-health failure, not a client
     /// input failure, so it must surface as a retryable 503 rather than a 400.
     BackendUnavailable,
+    /// The caller-supplied turn scope / run / gate_ref did not match the
+    /// authoritative binding context recorded when the gate was raised
+    /// (tenant or gate-ref divergence). Defense-in-depth against driving a
+    /// binding raised for one tenant/gate with a continuation request bearing
+    /// another's identity. Fail closed.
+    ContextMismatch,
 }
 
 impl AttestedContinuationRejection {
@@ -133,6 +143,56 @@ impl AttestedContinuationRejection {
             Self::MalformedProof => "attested_malformed_proof",
             Self::Unavailable => "attested_unavailable",
             Self::BackendUnavailable => "attested_backend_unavailable",
+            Self::ContextMismatch => "attested_context_mismatch",
+        }
+    }
+
+    /// Whether this rejection is safe to auto-retry.
+    ///
+    /// # The rule (codified to prevent drift between #4060 and #3997)
+    ///
+    /// The continuation has two phases that fail very differently:
+    ///
+    /// * **Broadcast-tail failure where the grant is already claimed and the
+    ///   ledger advance is idempotent** (e.g. a transient RPC error reaching a
+    ///   broadcaster that has NOT yet driven the ledger past
+    ///   `BroadcastSubmitted`): the one-shot grant CAS and the ledger guard make
+    ///   a re-drive safe — a retry cannot double-submit, it re-enters the same
+    ///   idempotent advance. This surfaces as [`Self::BackendUnavailable`] and is
+    ///   **retryable**.
+    /// * **A broadcast failure that drove the ledger to the `Unknown` /
+    ///   terminal state** (the submit may or may not have landed): an automatic
+    ///   retry with a fresh nonce/blockhash risks a DOUBLE-SUBMISSION. Those
+    ///   outcomes are surfaced as terminal rejections ([`Self::LedgerGuard`],
+    ///   [`Self::ProofRejected`]) and are **NOT retryable** — they require
+    ///   out-of-band resolution, never an auto-retry.
+    ///
+    /// Everything that fails BEFORE any broadcast (missing/mis-tenanted binding,
+    /// provider mismatch, malformed proof) is a client/input or wiring failure
+    /// and is non-retryable as-is. [`Self::Unavailable`] (port not wired) is a
+    /// deployment failure, also non-retryable from the continuation's view.
+    ///
+    /// NOTE: this is the *idempotency-safety* disposition of the rejection. The
+    /// WebUI HTTP mapping (`map_attested_continuation_rejection` in
+    /// `reborn_services`) may still present a category as non-retryable to the
+    /// *client* when the resume guard has already consumed the one-shot — a
+    /// client-visible retry would be rejected at the resume CAS. The two are
+    /// deliberately distinct: this method states whether re-driving the
+    /// continuation is double-submit-safe, not whether the client should retry.
+    pub fn retryable(&self) -> bool {
+        match self {
+            // Broadcast-tail / infra failure, grant claimed + ledger-idempotent:
+            // a re-drive cannot double-submit, so it is safe to retry.
+            Self::BackendUnavailable => true,
+            // Pre-broadcast input/wiring failures and terminal/double-submit-risk
+            // outcomes: never auto-retry.
+            Self::MissingBinding
+            | Self::ProviderMismatch
+            | Self::ProofRejected
+            | Self::LedgerGuard
+            | Self::MalformedProof
+            | Self::ContextMismatch
+            | Self::Unavailable => false,
         }
     }
 }
@@ -222,4 +282,45 @@ pub trait AttestedGateContinuationPort: Send + Sync {
         gate_ref: &GateRef,
         verified: VerifiedAttestedContinuation,
     ) -> Result<AttestedContinuationOutcome, AttestedContinuationRejection>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_pins_both_arms_of_the_broadcast_rule() {
+        // Broadcast-tail / infra failure with the grant already claimed and the
+        // ledger advance idempotent: a re-drive cannot double-submit, so it is
+        // retryable (#4060).
+        assert!(
+            AttestedContinuationRejection::BackendUnavailable.retryable(),
+            "an idempotent broadcast-tail failure must be retryable"
+        );
+
+        // A broadcast failure that drove the ledger to a terminal / Unknown
+        // state is surfaced as a terminal rejection and must NOT auto-retry, or
+        // a fresh-nonce retry risks a double-submission (#3997).
+        assert!(
+            !AttestedContinuationRejection::LedgerGuard.retryable(),
+            "a terminal ledger-guard outcome must not auto-retry (double-submit risk)"
+        );
+        assert!(
+            !AttestedContinuationRejection::ProofRejected.retryable(),
+            "a proof rejection is terminal and must not auto-retry"
+        );
+
+        // Pre-broadcast input/wiring failures are never retryable as-is.
+        for non_retryable in [
+            AttestedContinuationRejection::MissingBinding,
+            AttestedContinuationRejection::ProviderMismatch,
+            AttestedContinuationRejection::MalformedProof,
+            AttestedContinuationRejection::Unavailable,
+        ] {
+            assert!(
+                !non_retryable.retryable(),
+                "{non_retryable:?} must not be retryable"
+            );
+        }
+    }
 }

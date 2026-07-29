@@ -188,8 +188,7 @@ async fn custodial_request_signature_raises_gate_and_existing_resolve_path_conti
     let signing_gate_ref = SigningGateRef::new(gate_ref_str);
     let binding = composition
         .bindings()
-        .get(&signing_gate_ref)
-        .await
+        .get_sync(&signing_gate_ref)
         .expect("authoritative binding persisted on raise");
     // The persisted decoded tx is exactly what resolve recomputes the hash from.
     assert_eq!(binding.decoded, decoded);
@@ -232,6 +231,120 @@ async fn custodial_request_signature_raises_gate_and_existing_resolve_path_conti
         replay.is_err(),
         "replayed continuation must fail closed (grant/ledger guard)"
     );
+}
+
+#[tokio::test]
+async fn malformed_request_signature_params_fail_closed() {
+    // The raise path must fail closed (Failed/InvalidInput) — never panic or
+    // raise a half-formed gate — when the agent-supplied params cannot be
+    // deserialized into RequestSignatureParams. Covers missing fields, wrong
+    // types, and a non-object body.
+    let priv_bytes = [0x33u8; 32];
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    let (_tx, decoded) = sample_evm();
+
+    let composition = composition_with_keystore(Arc::clone(&keystore));
+    let hook = RebornAttestedRaiseHook::new(Arc::clone(&composition));
+    let capability_id = CapabilityId::new("builtin.request_signature").unwrap();
+
+    let malformed_inputs = vec![
+        // Missing `decoded` field.
+        json!({ "provider_hint": "custodial", "signer_account": account }),
+        // Missing `signer_account` field.
+        json!({ "provider_hint": "custodial", "decoded": decoded }),
+        // Unknown provider_hint value (not a valid enum tag).
+        json!({ "provider_hint": "bogus", "signer_account": account, "decoded": decoded }),
+        // Wrong type for signer_account (number instead of string).
+        json!({ "provider_hint": "custodial", "signer_account": 42, "decoded": decoded }),
+        // Body is not a JSON object at all.
+        json!("not an object"),
+        json!(null),
+    ];
+
+    for input in malformed_inputs {
+        let outcome = hook
+            .raise(AttestedRaiseRequest::new(
+                capability_id.clone(),
+                execution_context(owner_scope()),
+                input.clone(),
+            ))
+            .await;
+
+        match outcome {
+            RuntimeCapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.capability_id, capability_id);
+                assert_eq!(
+                    failure.kind,
+                    FailureKind::InputEncode,
+                    "malformed input {input} should map to InvalidInput"
+                );
+            }
+            other => panic!("expected Failed for malformed input {input}, got {other:?}"),
+        }
+    }
+
+    // No binding was persisted for any malformed raise: a fabricated gate ref
+    // has no binding, so resolve fails closed with MissingBinding.
+    let signing_gate_ref = SigningGateRef::new("gate:attested-malformed-none");
+    let proof = SigningProof::WebAuthnAssertionProof(vec![]);
+    let err = composition
+        .driver()
+        .continue_after_resolved(&signing_gate_ref, &proof)
+        .await
+        .expect_err("no binding persisted for any malformed raise");
+    assert!(matches!(
+        err,
+        ironclaw_attested_runtime::ContinuationError::MissingBinding
+    ));
+}
+
+#[tokio::test]
+async fn signing_context_uses_user_id_when_no_project_or_agent() {
+    // When the execution context has no project_id and no agent_id, the signing
+    // context's scope label and actor label both fall back to the user_id. The
+    // raise still succeeds end-to-end (custodial) and persists a binding whose
+    // signing context reflects the fallback.
+    let priv_bytes = [0x44u8; 32];
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    let (_tx, decoded) = sample_evm();
+
+    let composition = composition_with_keystore(Arc::clone(&keystore));
+    let hook = RebornAttestedRaiseHook::new(Arc::clone(&composition));
+    let capability_id = CapabilityId::new("builtin.request_signature").unwrap();
+
+    // Owner scope (so the keystore key is found) but with no project + no agent.
+    let mut scope = owner_scope();
+    scope.project_id = None;
+    scope.agent_id = None;
+    let user_id = scope.user_id.as_str().to_string();
+
+    let input = json!({
+        "provider_hint": "custodial",
+        "signer_account": account,
+        "decoded": decoded,
+    });
+    let outcome = hook
+        .raise(AttestedRaiseRequest::new(
+            capability_id.clone(),
+            execution_context(scope),
+            input,
+        ))
+        .await;
+
+    let gate = match outcome {
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => gate,
+        other => panic!("expected AttestedSigningRequired, got {other:?}"),
+    };
+
+    let signing_gate_ref = SigningGateRef::new(format!("gate:attested-{}", gate.gate_id.as_str()));
+    let binding = composition
+        .bindings()
+        .get_sync(&signing_gate_ref)
+        .expect("binding persisted on raise");
+    // Both fall back to the user id when project/agent are absent.
+    assert_eq!(binding.context.scope.as_str(), user_id);
+    assert_eq!(binding.context.actor.as_str(), user_id);
+    assert_eq!(binding.context.user.as_str(), user_id);
 }
 
 #[tokio::test]
@@ -423,8 +536,7 @@ async fn concurrent_register_of_same_gate_serializes_to_one_winner() {
     let gate_ref = SigningGateRef::new(format!("gate:attested-{}", gate.gate_id.as_str()));
     let binding = seed
         .bindings()
-        .get(&gate_ref)
-        .await
+        .get_sync(&gate_ref)
         .expect("seed binding persisted");
 
     // Fresh composition that has never seen this gate. Two concurrent

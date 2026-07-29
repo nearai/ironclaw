@@ -103,7 +103,7 @@ impl SealedGrantStore for BackendErrorGrantStore {
         Ok(())
     }
 
-    async fn claim(&self, _key: &GrantKey) -> Result<ClaimedGrant, GrantError> {
+    async fn claim(&self, _key: &GrantKey, _now_ms: i64) -> Result<ClaimedGrant, GrantError> {
         Err(GrantError::Backend {
             reason: "simulated backend failure".to_string(),
         })

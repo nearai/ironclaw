@@ -416,10 +416,16 @@ where
     where
         S: CustodialSignerLike,
     {
+        // The continuation is identified by `gate_ref` alone (the resolved-gate
+        // ref carried through the turn); the tenant is not on this path. Read via
+        // the gate_ref-keyed sync index — the same authoritative binding the
+        // resume port verified. The tenant axis on the binding store guards the
+        // WRITE (a binding can never be filed under a foreign tenant) and the
+        // async tenant-qualified reads on the ingress paths; here we trust the
+        // binding's own persisted `context.tenant`, exactly as before.
         let binding = self
             .bindings
-            .get(gate_ref)
-            .await
+            .get_sync(gate_ref)
             .ok_or(ContinuationError::MissingBinding)?;
 
         match binding.provider_id {
@@ -452,11 +458,22 @@ where
         gate_ref: &GateRef,
         caller: BindingOwner<'_>,
     ) -> Result<(), ContinuationError> {
+        // Read through the CALLER's tenant: the binding store is keyed
+        // `(tenant, gate_ref)`, so a caller from another tenant cannot even
+        // address this row — the lookup misses and yields `MissingBinding`
+        // (no existence oracle) rather than reaching the identity comparison.
+        let key = crate::BindingKey::new(
+            ironclaw_signing_provider::TenantId::new(caller.tenant_id),
+            gate_ref.clone(),
+        );
         let binding = self
             .bindings
-            .get(gate_ref)
+            .get(&key)
             .await
             .ok_or(ContinuationError::MissingBinding)?;
+        // Defence in depth: the tenant axis is already enforced by the key, but
+        // re-assert both axes so a store that ignored the tenant still cannot
+        // let a foreign caller drive someone else's continuation.
         if binding.context.tenant.as_str() != caller.tenant_id
             || binding.context.user.as_str() != caller.user_id
         {

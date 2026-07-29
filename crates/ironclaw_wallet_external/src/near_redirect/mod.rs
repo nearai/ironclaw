@@ -303,7 +303,10 @@ impl SigningProvider for NearRedirectSigningProvider {
         // 6. One-shot grant (threat #1): claim the sealed grant atomically. A
         //    replay of an already-claimed grant fails closed here.
         let key = GrantKey::from_context(context, *approved_tx_hash);
-        self.grants.claim(&key).await.map_err(map_grant_error)?;
+        self.grants
+            .claim(&key, ironclaw_attestation::now_unix_millis())
+            .await
+            .map_err(map_grant_error)?;
 
         Ok(VerifiedProof::new(self, *approved_tx_hash, proof.clone()))
     }
@@ -443,11 +446,15 @@ fn validate_access_key_scope(
 /// Map a [`GrantError`] onto the provider error taxonomy, fail-closed.
 fn map_grant_error(err: GrantError) -> SigningProviderError {
     match err {
-        // Replay / missing / lost-CAS all collapse to a single fail-closed
-        // grant-claim failure; the distinction is not safe to leak to a caller.
+        // Replay / missing / lost-CAS / expired all collapse to a single
+        // fail-closed grant-claim failure; the distinction is not safe to leak
+        // to a caller. The construction-time timestamp/expiry rejects (from the
+        // sealed-grant hardening) collapse to the same failure for the same
+        // reason.
         GrantError::AlreadyClaimed
         | GrantError::NotFound
         | GrantError::AlreadySealed
+        | GrantError::Expired { .. }
         | GrantError::InvalidTimestamp { .. }
         | GrantError::InvalidExpiry { .. } => SigningProviderError::GrantClaimFailed,
         GrantError::Backend { reason } => SigningProviderError::Provider { reason },
