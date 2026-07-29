@@ -86,6 +86,9 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
             "The agent runtime rejected the request before producing a reply."
         }
         "scheduler_executor_panic" => "The agent runtime stopped unexpectedly.",
+        "crash_retry_exhausted" => {
+            "The run could not be recovered after repeated runner crashes. Retry the request, and contact support if it happens again."
+        }
         "host_creation_failed" => {
             "The run failed while preparing the runtime host. Retry the run, and contact support if startup keeps failing."
         }

@@ -87,18 +87,14 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
             # Runtime is an implementation badge (`runtime`), never taxonomy;
             # the retired `kind` wire string is gone (NEA-25).
             assert installed["runtime"] == "first_party"
-            # Membership plus readiness is the complete public lifecycle.
-            # A setup-free extension becomes active as part of install; there
-            # is no caller-visible activation checkpoint.
+            # Installation state and the compatibility readiness fields must
+            # describe the same setup-free active extension.
             assert installed["installation_state"] == "active"
-            for retired in (
-                "authenticated",
-                "active",
-                "needs_setup",
-                "has_auth",
-                "onboarding_state",
-            ):
-                assert retired not in installed
+            assert installed["authenticated"] is True
+            assert installed["active"] is True
+            assert installed["needs_setup"] is False
+            assert installed["has_auth"] is False
+            assert installed.get("onboarding_state") is None
 
             setup = await client.get(
                 f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/setup",

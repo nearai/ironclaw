@@ -109,7 +109,6 @@ impl ExitStage {
                     LoopFailureKind::NoProgressDetected,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        diagnostic_ref: None,
                         safe_summary: None,
                         explanation_message_ref,
                     },
@@ -131,7 +130,6 @@ impl ExitStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        diagnostic_ref: None,
                         safe_summary: None,
                         explanation_message_ref,
                     },

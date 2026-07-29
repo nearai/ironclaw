@@ -1024,10 +1024,7 @@ mod tests {
         let cost = ModelCost {
             input_per_token: dec!(0.10),
             output_per_token: dec!(0.10),
-            // 100 tokens × $0.10 = $10 × 1.20 factor = $12 → over 90% of $10
-            // but the hard cap is also exceeded. Adjust to push into the
-            // approval band by sizing max_output to land at ~$9.
-            max_output_tokens: 75,
+            max_output_tokens: 27,
         };
         let accountant = GovernorBackedAccountant::new(governor, Arc::new(CostStub(cost)))
             .with_overestimate_factor(dec!(1.0));
@@ -1036,15 +1033,9 @@ mod tests {
             .pre_model_call(&context, &request)
             .await
             .unwrap_err();
-        // 75 × 0.10 = $7.50; input_tokens=64*0.10=$6.40; total=$13.90 → over hard cap.
-        // We expect SpendBudgetExceeded since utilization > 100%, OR
-        // BudgetApprovalRequired if just below. Either is acceptable —
-        // confirm we got a budget-class outcome, not Internal.
-        assert!(matches!(
-            err.kind,
-            AgentLoopHostErrorKind::SpendBudgetExceeded
-                | AgentLoopHostErrorKind::BudgetApprovalRequired
-        ));
+        // 27 × $0.10 + 64 × $0.10 = $9.10: above the 90% pause threshold,
+        // below the $10 hard cap.
+        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetApprovalRequired);
     }
 
     #[tokio::test]

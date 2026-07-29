@@ -1,6 +1,6 @@
 use ironclaw_turns::{
-    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopDiagnosticRef,
-    LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopMessageRef, SanitizedFailure,
+    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitId, LoopFailed, LoopFailureKind, LoopMessageRef, SanitizedFailure,
     run_profile::{AgentLoopDriverHost, LoopCancelReasonKind, LoopCancellationSignal},
 };
 
@@ -43,7 +43,6 @@ pub(super) fn failed_exit(
         reason_kind,
         checkpoint_id,
         model_usage,
-        diagnostic_ref: details.diagnostic_ref,
         exit_id: exit_id(host, "failed")?,
         explanation_message_refs: failure_message_refs(&state, details.explanation_message_ref),
         safe_summary: details.safe_summary,
@@ -52,7 +51,6 @@ pub(super) fn failed_exit(
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct FailedExitDetails {
-    pub(super) diagnostic_ref: Option<LoopDiagnosticRef>,
     pub(super) safe_summary: Option<SanitizedFailure>,
     pub(super) explanation_message_ref: Option<LoopMessageRef>,
 }

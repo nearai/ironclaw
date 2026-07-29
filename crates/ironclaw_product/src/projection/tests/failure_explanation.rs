@@ -1,13 +1,13 @@
 use super::*;
 use ironclaw_runner::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
-    MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
-    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY, HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY, HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY, HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, MODEL_STAGE_POLICY_DENIED_CATEGORY,
+    MODEL_STAGE_REQUEST_INVALID_CATEGORY, MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
 };
 use ironclaw_turns::LoopFailureKind;
 
@@ -79,6 +79,16 @@ async fn product_event_stream_projects_scheduler_executor_panic_summary() {
         "webui-events-scheduler-panic-thread",
         "scheduler_executor_panic",
         "The agent runtime stopped unexpectedly.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn product_event_stream_projects_crash_retry_exhausted_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-crash-retry-exhausted-thread",
+        "crash_retry_exhausted",
+        "The run could not be recovered after repeated runner crashes. Retry the request, and contact support if it happens again.",
     )
     .await;
 }
@@ -196,6 +206,10 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         (
             MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        (
+            MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+            "The run stopped because its configured model spend budget was exhausted. Increase the budget or start a new run.",
         ),
         (
             BUDGET_ACCOUNTING_FAILED_CATEGORY,
