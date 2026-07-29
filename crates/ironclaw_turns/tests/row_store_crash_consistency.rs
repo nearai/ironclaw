@@ -73,8 +73,8 @@ use ironclaw_turns::{
     TurnStateStoreLimits, TurnStatus, is_recoverability_critical,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
-        BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        BlockRunRequest, ClaimRunRequest, ClaimRunsRequest, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
 
@@ -3417,6 +3417,219 @@ async fn write_behind_waiter_does_not_observe_timed_out_speculative_mutation() {
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: scope_bp(103),
+            run_id: waiting_run,
+        })
+        .await
+        .expect("reopen waiter-owned run");
+    assert_eq!(state.status, TurnStatus::Running);
+}
+
+/// Aborting a targeted-delta mutation from outside the row store must repair
+/// its in-place engine changes before the queued waiter can acquire
+/// `snapshot_state`.
+#[tokio::test]
+async fn write_behind_targeted_waiter_does_not_observe_aborted_speculative_mutation() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let first_scope = scope_bp(104);
+    let waiting_scope = scope_bp(105);
+    let first_run = TurnRunId::new();
+    let waiting_run = TurnRunId::new();
+
+    {
+        let setup = open_row_store(Arc::clone(&scoped));
+        for (scope, run_id, key) in [
+            (&first_scope, first_run, "idem-abort-targeted-first"),
+            (&waiting_scope, waiting_run, "idem-abort-targeted-waiter"),
+        ] {
+            setup
+                .submit_turn(
+                    submit_request(scope.clone(), run_id, key),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+                .expect("submit setup run");
+        }
+        setup.drain().await.expect("durable setup");
+    }
+
+    let store = Arc::new(
+        TurnStateRowStore::new(Arc::clone(&scoped))
+            .with_limits(limits().set_max_pending_write_behind_deltas(1))
+            .with_apply_timeout(std::time::Duration::from_secs(5)),
+    );
+    let stall = backend.append_gate().lock_owned().await;
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(first_scope),
+        })
+        .await
+        .expect("first claim query")
+        .expect("first claim fills the pending write-behind window");
+
+    let aborted_store = Arc::clone(&store);
+    let aborted_scope = waiting_scope.clone();
+    let aborted = tokio::spawn(async move {
+        aborted_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(aborted_scope),
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+
+    let waiting_runner = TurnRunnerId::new();
+    let waiting_lease = TurnLeaseToken::new();
+    let waiting_store = Arc::clone(&store);
+    let waiter = tokio::spawn(async move {
+        waiting_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: waiting_runner,
+                lease_token: waiting_lease,
+                scope_filter: Some(waiting_scope),
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+
+    aborted.abort();
+    assert!(
+        aborted
+            .await
+            .expect_err("aborted targeted mutation task")
+            .is_cancelled(),
+        "the speculative targeted mutation must be cancelled externally"
+    );
+    drop(stall);
+
+    let claimed = waiter
+        .await
+        .expect("queued waiter task")
+        .expect("queued waiter mutation")
+        .expect("queued waiter must claim the run after targeted cancellation");
+    assert_eq!(claimed.state.run_id, waiting_run);
+    assert_eq!(claimed.runner_id, waiting_runner);
+    assert_eq!(claimed.lease_token, waiting_lease);
+
+    store.drain().await.expect("queued waiter claim is durable");
+    drop(store);
+
+    let reopened = open_row_store(scoped);
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: scope_bp(105),
+            run_id: waiting_run,
+        })
+        .await
+        .expect("reopen waiter-owned run");
+    assert_eq!(state.status, TurnStatus::Running);
+}
+
+/// The whole-snapshot apply engine must provide the same external-cancellation
+/// isolation as the targeted-delta engine.
+#[tokio::test]
+async fn write_behind_whole_snapshot_waiter_does_not_observe_aborted_speculative_mutation() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let first_scope = scope_bp(106);
+    let waiting_scope = scope_bp(107);
+    let first_run = TurnRunId::new();
+    let waiting_run = TurnRunId::new();
+
+    {
+        let setup = open_row_store(Arc::clone(&scoped));
+        for (scope, run_id, key) in [
+            (&first_scope, first_run, "idem-abort-whole-first"),
+            (&waiting_scope, waiting_run, "idem-abort-whole-waiter"),
+        ] {
+            setup
+                .submit_turn(
+                    submit_request(scope.clone(), run_id, key),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+                .expect("submit setup run");
+        }
+        setup.drain().await.expect("durable setup");
+    }
+
+    let store = Arc::new(
+        TurnStateRowStore::new(Arc::clone(&scoped))
+            .with_limits(limits().set_max_pending_write_behind_deltas(1))
+            .with_apply_timeout(std::time::Duration::from_secs(5)),
+    );
+    let stall = backend.append_gate().lock_owned().await;
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(first_scope),
+        })
+        .await
+        .expect("first claim query")
+        .expect("first claim fills the pending write-behind window");
+
+    let aborted_store = Arc::clone(&store);
+    let aborted_scope = waiting_scope.clone();
+    let aborted = tokio::spawn(async move {
+        aborted_store
+            .claim_next_runs(ClaimRunsRequest {
+                runner_id: TurnRunnerId::new(),
+                scope_filter: Some(aborted_scope),
+                max_runs: 1,
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+
+    let waiting_runner = TurnRunnerId::new();
+    let waiting_lease = TurnLeaseToken::new();
+    let waiting_store = Arc::clone(&store);
+    let waiter = tokio::spawn(async move {
+        waiting_store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: waiting_runner,
+                lease_token: waiting_lease,
+                scope_filter: Some(waiting_scope),
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+
+    aborted.abort();
+    assert!(
+        aborted
+            .await
+            .expect_err("aborted whole-snapshot mutation task")
+            .is_cancelled(),
+        "the speculative whole-snapshot mutation must be cancelled externally"
+    );
+    drop(stall);
+
+    let claimed = waiter
+        .await
+        .expect("queued waiter task")
+        .expect("queued waiter mutation")
+        .expect("queued waiter must claim the run after whole-snapshot cancellation");
+    assert_eq!(claimed.state.run_id, waiting_run);
+    assert_eq!(claimed.runner_id, waiting_runner);
+    assert_eq!(claimed.lease_token, waiting_lease);
+
+    store.drain().await.expect("queued waiter claim is durable");
+    drop(store);
+
+    let reopened = open_row_store(scoped);
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: scope_bp(107),
             run_id: waiting_run,
         })
         .await

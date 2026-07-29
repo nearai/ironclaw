@@ -3,7 +3,10 @@
 //! transition wrappers for [`TurnStateRowStore`]. Moved verbatim from
 //! the module root during the #6263 decomposition; behavior is unchanged.
 
-use std::sync::Arc;
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use ironclaw_filesystem::RootFilesystem;
 use tracing::Instrument;
@@ -25,6 +28,85 @@ use super::{
     },
     delta_is_recoverability_critical, turn_state_write_span,
 };
+
+/// Owns the exact snapshot mutex guard for one in-place engine mutation.
+///
+/// While armed, every exit path—including caller-driven future cancellation—
+/// restores the engine from the last accepted snapshot before releasing the
+/// mutex to a waiter. Accepted branches disarm only after installing their
+/// accepted snapshot/store state.
+struct SnapshotMutationGuard<'a, F>
+where
+    F: RootFilesystem,
+{
+    owner: &'a TurnStateRowStore<F>,
+    guard: tokio::sync::MutexGuard<'a, Option<RowSnapshotState>>,
+    armed: bool,
+}
+
+impl<'a, F> SnapshotMutationGuard<'a, F>
+where
+    F: RootFilesystem,
+{
+    fn new(
+        owner: &'a TurnStateRowStore<F>,
+        guard: tokio::sync::MutexGuard<'a, Option<RowSnapshotState>>,
+    ) -> Self {
+        Self {
+            owner,
+            guard,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<F> Deref for SnapshotMutationGuard<'_, F>
+where
+    F: RootFilesystem,
+{
+    type Target = Option<RowSnapshotState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<F> DerefMut for SnapshotMutationGuard<'_, F>
+where
+    F: RootFilesystem,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<F> Drop for SnapshotMutationGuard<'_, F>
+where
+    F: RootFilesystem,
+{
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(state) = self.guard.as_mut() else {
+            return;
+        };
+        match self.owner.build_in_memory_store(state.snapshot.clone()) {
+            Ok(store) => state.store = Arc::new(store),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "failed to rebuild turn-state hot cache after cancelled mutation"
+                );
+                *self.guard = None;
+            }
+        }
+    }
+}
 
 impl<F> TurnStateRowStore<F>
 where
@@ -112,7 +194,7 @@ where
     {
         self.ensure_mutation_admitted().await?;
         let deadline = tokio::time::Instant::now() + self.apply_timeout;
-        let mut guard = match tokio::time::timeout_at(deadline, self.snapshot_state.lock()).await {
+        let guard = match tokio::time::timeout_at(deadline, self.snapshot_state.lock()).await {
             Ok(guard) => guard,
             Err(_) => {
                 return Err(TurnError::Unavailable {
@@ -120,6 +202,7 @@ where
                 });
             }
         };
+        let mut guard = SnapshotMutationGuard::new(self, guard);
         let critical = async {
             let mut refreshed_after_stale_error = false;
             loop {
@@ -156,14 +239,15 @@ where
                             refreshed_after_stale_error = true;
                             continue;
                         }
-                        self.reset_cache_after_rejected_mutation(&mut guard)?;
                         return Err(error);
                     }
                 };
                 if new_snapshot == baseline {
-                    if let Some(state) = guard.as_mut() {
-                        state.store = store;
-                    }
+                    let state = guard.as_mut().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
+                    })?;
+                    state.store = store;
+                    guard.disarm();
                     return Ok(RowApplyOutcome::Ready(value));
                 }
 
@@ -190,6 +274,7 @@ where
                     let next_state =
                         RowSnapshotState::new(new_snapshot, store, current_journal_seq)?;
                     *guard = Some(next_state);
+                    guard.disarm();
                     return Ok(RowApplyOutcome::Ready(value));
                 }
                 let delta_critical = delta_is_recoverability_critical(&baseline, &persist_delta);
@@ -214,6 +299,7 @@ where
                     }
                 };
                 *guard = Some(next_state);
+                guard.disarm();
                 let ack = self
                     .track_write_behind_ack_if_async(delta_critical, ack)
                     .await;
@@ -224,7 +310,6 @@ where
         let outcome = match tokio::time::timeout_at(deadline, critical).await {
             Ok(result) => result?,
             Err(_) => {
-                self.reset_cache_after_rejected_mutation(&mut guard)?;
                 return Err(TurnError::Unavailable {
                     reason: "turn state row-store apply timed out".to_string(),
                 });
@@ -260,7 +345,7 @@ where
     {
         self.ensure_mutation_admitted().await?;
         let deadline = tokio::time::Instant::now() + self.apply_timeout;
-        let mut guard = match tokio::time::timeout_at(deadline, self.snapshot_state.lock()).await {
+        let guard = match tokio::time::timeout_at(deadline, self.snapshot_state.lock()).await {
             Ok(guard) => guard,
             Err(_) => {
                 return Err(TurnError::Unavailable {
@@ -268,6 +353,7 @@ where
                 });
             }
         };
+        let mut guard = SnapshotMutationGuard::new(self, guard);
         let critical = async {
             let mut build_delta = Some(build_delta);
             let mut refreshed_after_stale_error = false;
@@ -302,7 +388,6 @@ where
                             refreshed_after_stale_error = true;
                             continue;
                         }
-                        self.reset_cache_after_rejected_mutation(&mut guard)?;
                         return Err(error);
                     }
                 };
@@ -336,14 +421,16 @@ where
                 // (#6263). Apply the hot-cache delta at the CURRENT seq (no
                 // advance), enqueue nothing, and return.
                 if persist_delta.is_empty() {
-                    if let Some(state) = guard.as_mut() {
-                        let current_seq = state.journal_seq;
-                        if let Err(error) = state.apply_delta(delta, current_seq) {
-                            *guard = None;
-                            return Err(error);
-                        }
-                        state.store = store;
+                    let state = guard.as_mut().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
+                    })?;
+                    let current_seq = state.journal_seq;
+                    if let Err(error) = state.apply_delta(delta, current_seq) {
+                        *guard = None;
+                        return Err(error);
                     }
+                    state.store = store;
+                    guard.disarm();
                     return Ok(PendingRowCommit { value, ack: None });
                 }
                 // Bound the pending window BEFORE enqueue (#6263 Step 3): see the
@@ -379,6 +466,7 @@ where
                     };
                     *guard = Some(next_state);
                 }
+                guard.disarm();
                 let ack = self
                     .track_write_behind_ack_if_async(delta_critical, ack)
                     .await;
@@ -389,7 +477,6 @@ where
         let pending = match tokio::time::timeout_at(deadline, critical).await {
             Ok(result) => result?,
             Err(_) => {
-                self.reset_cache_after_rejected_mutation(&mut guard)?;
                 return Err(TurnError::Unavailable {
                     reason: "turn state row-store targeted apply timed out".to_string(),
                 });

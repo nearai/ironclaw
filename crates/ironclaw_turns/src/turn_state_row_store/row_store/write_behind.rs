@@ -4,15 +4,13 @@
 //! verbatim from the module root during the #6263 decomposition; behavior is
 //! unchanged.
 
-use std::sync::Arc;
-
 use ironclaw_filesystem::RootFilesystem;
 
 use crate::TurnError;
 
 use super::{
     PendingRowCommit, TurnStateRowStore,
-    delta::{RowSnapshotState, SnapshotDelta},
+    delta::SnapshotDelta,
     journal::{DeltaAck, DeltaJournal, DeltaJournalHealth},
 };
 
@@ -58,23 +56,6 @@ where
     /// using the hot snapshot.
     pub(super) fn can_serve_hot_snapshot(&self) -> bool {
         self.delta_journal.health() != DeltaJournalHealth::FailedFatal
-    }
-
-    /// Reset the hot cache after a mutation the embedded engine REJECTED (a
-    /// domain error such as `ThreadBusy` / `InvalidTransition`).
-    ///
-    /// Mutations run against an isolated engine, so the accepted cached
-    /// authority is already unchanged. Rebuilding from its snapshot keeps
-    /// this defensive reset valid if a rejected operation exposed any
-    /// engine-internal state that is not represented in the snapshot.
-    pub(super) fn reset_cache_after_rejected_mutation(
-        &self,
-        guard: &mut Option<RowSnapshotState>,
-    ) -> Result<(), TurnError> {
-        if let Some(state) = guard.as_mut() {
-            state.store = Arc::new(self.build_in_memory_store(state.snapshot.clone())?);
-        }
-        Ok(())
     }
 
     /// Fail new mutation admission while the journal is recovering an accepted
