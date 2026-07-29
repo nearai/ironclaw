@@ -10,18 +10,16 @@ from pathlib import Path
 
 import httpx
 import pytest
-
-from provider_capability_inventory import (
-    ALL_CLASSIFIED_CAPABILITY_IDS,
-    EMULATE_SUPPORTED_TOOLS,
-    LIVE_ONLY_TOOLS,
-    PROVIDER_WIRE_PREFIXES,
-    capability_id_to_wire_name,
-)
-from mock_llm import (
+from mock_llm_trace import (
     _capture_trace_tool_call_id_aliases,
     _resolve_trace_result_bindings,
     _trace_tool_results_with_recorded_ids,
+)
+from provider_capability_inventory import (
+    ALL_CLASSIFIED_CAPABILITY_IDS,
+    LIVE_ONLY_TOOLS,
+    PROVIDER_WIRE_PREFIXES,
+    capability_id_to_wire_name,
 )
 
 pytest_plugins = ["reborn_webui_harness"]
@@ -29,6 +27,7 @@ pytest_plugins = ["reborn_webui_harness"]
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
+
 
 def _model_cases() -> list[str]:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -134,9 +133,7 @@ def test_exact_trace_result_binding_uses_results_from_prior_user_turns():
         {
             "role": "tool",
             "tool_call_id": "runtime_create",
-            "content": json.dumps(
-                {"document": {"documentId": "fresh-document"}}
-            ),
+            "content": json.dumps({"document": {"documentId": "fresh-document"}}),
         },
         {"role": "user", "content": "Now read that document"},
     ]
@@ -338,9 +335,7 @@ async def test_trace_install_rejects_missing_tool_call_id(mock_llm_server):
         )
 
     assert response.status_code == 400
-    assert response.json()["error"] == (
-        "trace.steps[1].tool_calls[0] is invalid"
-    )
+    assert response.json()["error"] == ("trace.steps[1].tool_calls[0] is invalid")
 
 
 async def test_trace_install_rejects_duplicate_tool_call_id(mock_llm_server):
@@ -493,7 +488,9 @@ async def _replay_every_response(
             assert len(actual_calls) == len(expected_calls), case
             for actual, recorded in zip(actual_calls, expected_calls, strict=True):
                 assert actual["function"]["name"] == recorded["name"]
-                assert json.loads(actual["function"]["arguments"]) == recorded["arguments"]
+                assert (
+                    json.loads(actual["function"]["arguments"]) == recorded["arguments"]
+                )
 
             messages.append(
                 {
@@ -635,7 +632,7 @@ async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
                             "id": "call_create_other_document",
                             "name": "google-docs__create_document",
                             "arguments": {"title": "other"},
-                        }
+                        },
                     ],
                 }
             },
@@ -710,9 +707,7 @@ async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
         read.raise_for_status()
 
     arguments = json.loads(
-        read.json()["choices"][0]["message"]["tool_calls"][0]["function"][
-            "arguments"
-        ]
+        read.json()["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
     )
     assert arguments == {"document_id": "doc-created-locally"}
 

@@ -6,11 +6,10 @@ import json
 import os
 import re
 import subprocess
-import tomllib
 from pathlib import Path
 
 import pytest
-
+import tomllib
 from journey_cases import (
     _HISTORICAL_MUTATING_PROVIDER_TOOLS,
     _MUTATING_PROVIDER_TOOLS,
@@ -34,11 +33,98 @@ from journey_types import (
     PytestEvidence,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
+from provider_journey_trace import (
+    MISSING_SLACK_CHANNEL_ID,
+    compile_provider_journey_trace,
+    load_recorded_trace,
+    recorded_provider_calls,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
 _DISABLING_PYTEST_MARKS = {"skip", "skipif", "xfail"}
+_JOURNEY_RUNNER_SOURCES = (
+    ROOT / "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
+    ROOT / "tests/e2e/scenarios/test_reborn_qa_trace_replay.py",
+    *sorted((ROOT / "tests/e2e").glob("provider_journey_*.py")),
+)
+_EXPECTED_COMPILED_PROVIDER_CALLS = {
+    "qa_2d_calendar_prep_live_chat": (
+        "google-calendar__list_events",
+        "google-calendar__list_events",
+        "google-drive__list_files",
+        "google-drive__download_file",
+    ),
+    "qa_2f_calendar_prep_email_delivery": (
+        "google-calendar__list_events",
+        "gmail__send_message",
+    ),
+    "qa_4e_github_release_email_delivery": ("gmail__send_message",),
+    "qa_5d_slack_strategy_doc_answer": (
+        "google-drive__upload_file",
+        "google-drive__download_file",
+        "google-drive__download_file",
+    ),
+    "qa_6c_gmail_to_sheet_live_chat": (
+        "gmail__list_messages",
+        "google-drive__list_files",
+        "gmail__get_message",
+        "google-sheets__get_spreadsheet",
+        "google-sheets__read_values",
+    ),
+    "qa_6e_gmail_to_sheet_delivery": (
+        "gmail__list_messages",
+        "google-sheets__create_spreadsheet",
+        "gmail__get_message",
+        "google-sheets__append_values",
+    ),
+    "qa_7c_slack_bug_logger_routine": (
+        "google-sheets__get_spreadsheet",
+        "google-sheets__read_values",
+    ),
+    "qa_7e_slack_bug_sheet_delivery": (
+        "google-sheets__create_spreadsheet",
+        "google-sheets__rename_sheet",
+        "google-sheets__write_values",
+        "google-sheets__get_spreadsheet",
+        "google-sheets__read_values",
+        "google-sheets__append_values",
+    ),
+    "qa_10a_slack_self_attribution": (
+        "slack__whoami",
+        "slack__get_conversation_history",
+    ),
+    "qa_10b_slack_ooo_status": (
+        "slack__whoami",
+        "slack__get_user_info",
+    ),
+    "qa_10c_slack_thread_replies": (
+        "slack__get_conversation_info",
+        "slack__get_conversation_history",
+        "slack__get_thread_replies",
+    ),
+    "qa_10d_slack_channel_membership": ("slack__list_conversations",),
+    "qa_10e_slack_error_honesty": ("slack__get_conversation_history",),
+    "qa_10f_slack_mention_encoding": (
+        "slack__get_conversation_info",
+        "slack__send_message",
+    ),
+    "qa_10g_slack_last_message_sent": ("slack__get_conversation_history",),
+    "qa_10g_slack_last_message_sent_global": (
+        "slack__whoami",
+        "slack__search_messages",
+    ),
+    "qa_10h_slack_email_hallucination_guard": (
+        "slack__list_conversations",
+        "slack__get_user_info",
+    ),
+    "qa_10i_slack_raw_entity_hygiene": (
+        "slack__get_conversation_info",
+        "slack__search_messages",
+        "slack__get_conversation_history",
+    ),
+}
 
 
 def _manifest_provider_journeys() -> set[str]:
@@ -57,6 +143,220 @@ def _manifest_provider_journeys() -> set[str]:
         ):
             cases.add(case_id)
     return cases
+
+
+def _case_name_branches(source_path: Path) -> list[int]:
+    """Find runner control flow or dispatch keyed by journey identity."""
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    offenders = []
+
+    def _reads_case_identity(node: ast.AST) -> bool:
+        return any(
+            isinstance(child, ast.Attribute)
+            and child.attr in {"case_id", "stem", "trace"}
+            and isinstance(child.value, ast.Name)
+            and (child.value.id == "case" or child.value.id.endswith("_case"))
+            for child in ast.walk(node)
+        )
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.IfExp)):
+            selector = node.test
+        elif isinstance(node, ast.Match):
+            selector = node.subject
+        else:
+            continue
+        children = tuple(ast.walk(selector))
+        embeds_case_name = any(
+            isinstance(child, ast.Constant)
+            and isinstance(child.value, str)
+            and child.value.startswith("qa_")
+            for child in children
+        )
+        reads_case_identity = any(
+            (
+                isinstance(child, ast.Attribute)
+                and child.attr in {"case_id", "stem", "trace"}
+                and isinstance(child.value, ast.Name)
+                and (child.value.id == "case" or child.value.id.endswith("_case"))
+            )
+            or (isinstance(child, ast.Name) and child.id in {"case_id", "case_name"})
+            or (
+                isinstance(child, ast.Compare)
+                and isinstance(child.left, ast.Name)
+                and child.left.id == "journey_case"
+            )
+            for child in children
+        )
+        if embeds_case_name or reads_case_identity:
+            offenders.append(node.lineno)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            arguments = node.args
+        elif isinstance(node, ast.Subscript):
+            arguments = (node.slice,)
+        else:
+            continue
+        if any(_reads_case_identity(argument) for argument in arguments):
+            offenders.append(node.lineno)
+    return offenders
+
+
+def test_journey_runners_do_not_branch_on_case_names():
+    """Journey-specific execution facts belong in typed declarations."""
+    offenders = {
+        str(source.relative_to(ROOT)): lines
+        for source in _JOURNEY_RUNNER_SOURCES
+        if (lines := _case_name_branches(source))
+    }
+    assert not offenders, f"journey-name branches found in runners: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "bad_runner",
+    [
+        (
+            "def run(case):\n"
+            "    if case.case_id == 'qa_new_special_case':\n"
+            "        return 'special'\n"
+        ),
+        (
+            "SPECIAL = '10e_slack_error_honesty.json'\n"
+            "def run(journey_case):\n"
+            "    if journey_case.trace.endswith(SPECIAL):\n"
+            "        return 'special'\n"
+        ),
+        (
+            "TIMEOUTS = {'qa_new_special_case': 180}\n"
+            "def run(journey_case):\n"
+            "    return TIMEOUTS.get(journey_case.case_id, 120)\n"
+        ),
+        (
+            "SPECIAL = object()\n"
+            "def run(journey_case):\n"
+            "    if journey_case == SPECIAL:\n"
+            "        return 'special'\n"
+        ),
+    ],
+)
+def test_case_name_branch_detector_fails_loudly(tmp_path, bad_runner):
+    source = tmp_path / "bad_runner.py"
+    source.write_text(bad_runner, encoding="utf-8")
+    assert _case_name_branches(source)
+
+
+@pytest.mark.parametrize(
+    "case",
+    PROVIDER_JOURNEY_CASES,
+    ids=lambda case: case.case_id,
+)
+def test_provider_trace_compilation_keeps_recording_immutable(case):
+    trace_path = ROOT / case.trace
+    fixture_before = trace_path.read_bytes()
+    recorded = load_recorded_trace(trace_path)
+    before = json.dumps(recorded, sort_keys=True)
+    compiled = compile_provider_journey_trace(
+        recorded,
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state={
+            "channel_id": "C_SEEDED",
+            "reviewer_id": "U_REVIEWER",
+            "thread_ts": "1234.5",
+            "channel_name": "reborn-alerts",
+        },
+    )
+
+    assert json.dumps(recorded, sort_keys=True) == before
+    assert trace_path.read_bytes() == fixture_before
+    assert compiled.trace is not recorded
+
+
+def test_provider_trace_compilation_declares_expected_failure():
+    case = next(
+        case
+        for case in PROVIDER_JOURNEY_CASES
+        if case.replay.expected_capability_failure is not None
+    )
+    trace_path = ROOT / case.trace
+    compiled = compile_provider_journey_trace(
+        load_recorded_trace(trace_path),
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state={
+            "channel_id": "C_SEEDED",
+            "reviewer_id": "U_REVIEWER",
+            "thread_ts": "1234.5",
+            "channel_name": "reborn-alerts",
+        },
+    )
+
+    assert MISSING_SLACK_CHANNEL_ID in json.dumps(compiled.trace)
+    assert compiled.trace["steps"][-1]["request_hint"] == {
+        "expected_failed_tool_result_contains": (
+            case.replay.expected_capability_failure
+        )
+    }
+
+
+def test_provider_trace_compilation_preserves_provider_call_inventory():
+    actual = {}
+    slack_state = {
+        "channel_id": "C_SEEDED",
+        "reviewer_id": "U_REVIEWER",
+        "thread_ts": "1234.5",
+        "channel_name": "reborn-alerts",
+    }
+    for case in PROVIDER_JOURNEY_CASES:
+        trace_path = ROOT / case.trace
+        compiled = compile_provider_journey_trace(
+            load_recorded_trace(trace_path),
+            source=trace_path.name,
+            facts=case.replay,
+            provider_tools=EMULATE_SUPPORTED_TOOLS,
+            slack_state=slack_state,
+        )
+        actual[case.case_id] = tuple(
+            call["name"]
+            for call in recorded_provider_calls(compiled.trace, EMULATE_SUPPORTED_TOOLS)
+        )
+
+    assert actual == _EXPECTED_COMPILED_PROVIDER_CALLS
+
+
+def test_provider_trace_compilation_uses_declared_google_seed():
+    case = next(
+        case
+        for case in PROVIDER_JOURNEY_CASES
+        if case.case_id == "qa_7c_slack_bug_logger_routine"
+    )
+    trace_path = ROOT / case.trace
+    compiled = compile_provider_journey_trace(
+        load_recorded_trace(trace_path),
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state={
+            "channel_id": "C_SEEDED",
+            "reviewer_id": "U_REVIEWER",
+            "thread_ts": "1234.5",
+            "channel_name": "reborn-alerts",
+        },
+    )
+    sheet_calls = [
+        call
+        for call in recorded_provider_calls(compiled.trace, EMULATE_SUPPORTED_TOOLS)
+        if call["name"].startswith("google-sheets__")
+    ]
+
+    assert sheet_calls
+    assert {
+        call["arguments"]["spreadsheet_id"]
+        for call in sheet_calls
+        if "spreadsheet_id" in call["arguments"]
+    } == {case.replay.google_spreadsheet_id}
 
 
 def _cargo_test_config(manifest_path: Path) -> tuple[dict[str, dict], bool]:
@@ -428,9 +728,7 @@ def test_alone_lane_lists_every_mutating_journey():
     spec.loader.exec_module(module)
 
     expected = [
-        case.case_id
-        for case in PROVIDER_JOURNEY_CASES
-        if case.mutable_provider_worlds
+        case.case_id for case in PROVIDER_JOURNEY_CASES if case.mutable_provider_worlds
     ]
     assert expected, "no mutating journeys: the alone lane would test nothing"
     assert module.mutating_journey_ids() == expected
@@ -459,8 +757,7 @@ def test_alone_lane_rejects_failed_or_empty_inventory(
     )
     assert step, "missing isolated journey replay workflow step"
     script = "\n".join(
-        line.removeprefix("          ")
-        for line in step.group("script").splitlines()
+        line.removeprefix("          ") for line in step.group("script").splitlines()
     )
 
     python_stub = tmp_path / "python"
@@ -825,7 +1122,9 @@ def test_provider_write_derivation_still_finds_the_tools_it_replaced():
     the ones the hand-kept list carried, so they are a floor the derivation
     must always clear.
     """
-    missing = sorted(_HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS))
+    missing = sorted(
+        _HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS)
+    )
     assert not missing, (
         f"the derivation stopped recognising known provider writes: {missing}. "
         "It reads the `external_write` effect from "

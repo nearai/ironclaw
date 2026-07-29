@@ -273,11 +273,22 @@ provider world.
 `JourneyCase` is the small composition layer above those operation contracts.
 It declares the trace (when recorded), provider worlds, ingress, execution
 lane, delivery target, observable assertions, and exact executable evidence.
-The harvested provider runner consumes these declarations directly; provider
-setup, normalization, and readback remain in provider-owned helpers rather
-than moving into a generic DSL. The journey coverage gate derives channel
+The harvested provider runner consumes these declarations directly. Its small
+`ProviderJourneyReplayFacts` sidecar owns the few deterministic fixture choices
+that differ by journey; runners must not branch on case names. Recorded JSON is
+loaded as immutable input and compiled into an execution copy by
+`provider_journey_trace.py`. Provider setup and readback live in the
+`provider_journey_{google,github,slack}.py` helpers and the reusable
+`provider_journey_world.py` builder rather than moving into a generic DSL.
+`test_journey_coverage.py` blocks case-name branches and verifies compilation
+does not mutate the recording. The journey coverage gate derives channel
 ingress and delivery requirements from shipped manifests and adds the built-in
 WebUI and scheduled-trigger surfaces.
+
+Recorded-model parsing, request matching, exact result binding, and the
+`/__mock/llm_trace` routes live in `mock_llm_trace.py`; `mock_llm.py` owns the
+generic canned/scripted server and composes that trace module. Keep new replay
+semantics with the trace owner instead of growing the server file again.
 `ProviderFaultProfile` places a transparent proxy between that Reborn process
 and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
 timeout, connection reset, malformed/truncated/missing-field responses, and a
