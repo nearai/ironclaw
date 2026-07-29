@@ -425,6 +425,18 @@ impl NearAiChatProvider {
                 return Err(error);
             }
 
+            // HTTP 400 "model not found / not a valid model" — a permanent client
+            // error (e.g. NEARAI_MODEL=auto against a gateway with no `auto`
+            // alias). Map to the non-retryable ModelNotAvailable so the run fails
+            // fast with a clear message instead of retry-looping into a
+            // multi-minute silent hang (the "answer never appears" report).
+            if let Some(model) = crate::error::invalid_model_error(status_code, &response_text) {
+                return Err(LlmError::ModelNotAvailable {
+                    provider: "nearai_chat".to_string(),
+                    model,
+                });
+            }
+
             // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
             // so the retry layer backs off, the circuit breaker counts a
             // transient failure, and the channel boundary produces a user-safe
