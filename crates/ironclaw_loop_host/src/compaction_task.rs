@@ -667,7 +667,7 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
             safe_summary: safe("injection detected"),
         },
         CompactionError::LeakRedactionFailed => LoopCompactionError::SecurityRejected {
-            safe_summary: safe("leak detected"),
+            safe_summary: safe("leak redaction failed"),
         },
         CompactionError::InferenceFailed { safe_summary } => {
             LoopCompactionError::InferenceFailed { safe_summary }

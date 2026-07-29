@@ -562,7 +562,8 @@ async fn compaction_port_rejects_residual_output_match_after_redaction() {
 
     assert!(matches!(
         error,
-        LoopCompactionError::SecurityRejected { .. }
+        LoopCompactionError::SecurityRejected { ref safe_summary }
+            if safe_summary.as_str() == "leak redaction failed"
     ));
     assert!(
         scanner.redacted_marker_scans.load(Ordering::SeqCst) > 0,
