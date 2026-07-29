@@ -149,6 +149,12 @@ async fn normalized_user_memberships_survive_runtime_restart_and_soft_removal() 
         .await;
         assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
     }
+    // Neither user's next assertion is a phase check (Alice is about to be
+    // removed, and Bob isn't touched again until after restart), so presence
+    // here is the thing actually under test, not an implied side effect of a
+    // following `assert_user_phase` call.
+    fixture.assert_user_present(fixture.alice()).await;
+    fixture.assert_user_present(fixture.bob()).await;
 
     let (status, body) = post_json(
         fixture.member_router(fixture.alice()),
@@ -714,6 +720,14 @@ impl LifecycleIsolationFixture {
         assert_extension_absent(&body, EXTENSION_ID, &label);
     }
 
+    async fn assert_user_present(&self, user_id: UserId) {
+        let label = user_id.as_str().to_string();
+        let (status, body) =
+            get_json(self.member_router(user_id), "/api/webchat/v2/extensions").await;
+        assert_eq!(status, StatusCode::OK, "{label} list response: {body}");
+        assert_extension_present(&body, EXTENSION_ID, &label);
+    }
+
     async fn shutdown(self) {
         let Self { runtime, webui, .. } = self;
         drop(webui);
@@ -730,6 +744,14 @@ fn extension_entry<'a>(body: &'a Value, extension_id: &str, label: &str) -> &'a 
                 .find(|extension| extension["package_ref"]["id"] == extension_id)
         })
         .unwrap_or_else(|| panic!("{label} must see {extension_id}: {body}"))
+}
+
+/// Mirror of `assert_extension_absent`: proves `extension_id` IS present in
+/// `body["extensions"]`, independent of its `installation_state` (use
+/// `extension_entry(..)["installation_state"]` — as `assert_user_phase`
+/// does — when the specific phase matters).
+fn assert_extension_present(body: &Value, extension_id: &str, label: &str) {
+    extension_entry(body, extension_id, label);
 }
 
 fn assert_extension_absent(body: &Value, extension_id: &str, label: &str) {

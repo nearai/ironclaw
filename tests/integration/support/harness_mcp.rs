@@ -16,16 +16,18 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, PermissionMode,
-    RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
+    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
+    PermissionMode, ProjectId, RequestedTrustClass, ResourceScope, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, builtin_first_party_handlers,
 };
 use ironclaw_mcp::{
-    McpHostHttpClient, McpHostHttpEgressPlan, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
+    McpClient, McpClientError, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan,
+    McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter, McpToolDiscoveryOutput,
     StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -89,6 +91,53 @@ pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
     .with_mcp_runtime(mcp_runtime)
     .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(mcp_provider_id)?));
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Run the real hosted-MCP discovery client (`McpHostHttpClient::discover_tools`
+/// — the same path `discover_hosted_mcp_package`
+/// (`crates/ironclaw_extension_host/src/mcp_discovery.rs`) drives at extension
+/// install time) directly against a loopback `MockMcpServer`, bypassing the
+/// `RebornIntegrationHarness`/`McpRuntime` capability-dispatch machinery
+/// entirely. For tests that need to observe the client's `tools/list`
+/// discovery *output* — e.g. against a paginated mock server — rather than a
+/// full turn.
+pub async fn discover_tools_via_loopback(
+    mcp_url: &str,
+    provider_id: &str,
+    capability_id: &str,
+) -> Result<McpToolDiscoveryOutput, McpClientError> {
+    let mcp_egress = Arc::new(
+        LoopbackMcpRuntimeHttpEgress::new(mcp_url)
+            .map_err(|e| McpClientError::client(e.to_string()))?,
+    );
+    let adapter = McpRuntimeHttpAdapter::new(Arc::clone(&mcp_egress));
+    let planner = StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan::default());
+    let client = McpHostHttpClient::new(adapter, planner);
+    let request = McpClientRequest {
+        provider: ExtensionId::new(provider_id)
+            .map_err(|e| McpClientError::client(e.to_string()))?,
+        capability_id: CapabilityId::new(capability_id)
+            .map_err(|e| McpClientError::client(e.to_string()))?,
+        scope: ResourceScope {
+            tenant_id: TenantId::new("tenant1")
+                .map_err(|e| McpClientError::client(e.to_string()))?,
+            user_id: UserId::new("user1").map_err(|e| McpClientError::client(e.to_string()))?,
+            agent_id: None,
+            project_id: Some(
+                ProjectId::new("project1").map_err(|e| McpClientError::client(e.to_string()))?,
+            ),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        },
+        transport: "http".to_string(),
+        command: None,
+        args: Vec::new(),
+        url: Some(mcp_url.to_string()),
+        input: serde_json::Value::Null,
+        max_output_bytes: 10_000_000,
+    };
+    client.discover_tools(request, 128).await
 }
 
 /// Build an `ExtensionPackage` describing a hosted MCP extension backed by the
