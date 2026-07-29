@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
+
+const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
+
 /// Errors that occur while assembling LLM configuration from settings/env.
 ///
 /// Distinct from [`LlmError`] (runtime / request errors): these fire before
@@ -141,6 +145,35 @@ pub(crate) struct ProviderHttpError<'a> {
     pub(crate) retry_after: Option<Duration>,
 }
 
+/// Read only a bounded preview of an untrusted provider error response.
+///
+/// The content length only informs a capped initial allocation. Both declared
+/// and lengthless responses are streamed only until the cap.
+pub(crate) async fn read_bounded_provider_error_body(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, reqwest::Error> {
+    let capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(MAX_PROVIDER_ERROR_BODY_BYTES);
+    let mut body = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = MAX_PROVIDER_ERROR_BODY_BYTES.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        if chunk.len() >= remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 pub(crate) fn map_provider_http_error(error: ProviderHttpError<'_>) -> LlmError {
     let provider = error.adapter.provider_id();
     if let Some(context_error) = context_length_error(error.status, error.body) {
@@ -255,14 +288,19 @@ pub(crate) fn map_provider_message_error(
 }
 
 fn bounded_provider_message_reason(message: &str) -> String {
-    ironclaw_common::truncate_for_preview(message, 512)
+    bounded_redacted_provider_text(message)
 }
 
 fn bounded_provider_reason(status: u16, body: &str) -> String {
-    format!(
-        "HTTP {status}: {}",
-        ironclaw_common::truncate_for_preview(body, 512)
-    )
+    format!("HTTP {status}: {}", bounded_redacted_provider_text(body))
+}
+
+fn bounded_redacted_provider_text(text: &str) -> String {
+    let bounded = ironclaw_common::truncate_for_preview(text, 512);
+    let display_safe = ironclaw_safety::sanitize_display_text(&bounded);
+    ironclaw_safety::LeakDetector::default()
+        .redact_all_secrets(&display_safe)
+        .0
 }
 
 pub(crate) fn is_model_not_available_message(lower: &str) -> bool {
@@ -824,6 +862,73 @@ mod tests {
             assert!(!reason.contains("TAIL_MARKER"));
             assert!(reason.len() < message.len());
         }
+    }
+
+    #[test]
+    fn provider_error_reasons_redact_untrusted_tokens_urls_and_paths() {
+        let secret = "ghp_012345678901234567890123456789012345";
+        let unsafe_message = format!(
+            "provider transport failed token: {secret} at /home/runner/private.json via https://internal.example/v1?access_token={secret}"
+        );
+        let error = map_provider_message_error("fixture", "fixture-model", &unsafe_message);
+        let reason = match error {
+            LlmError::RequestFailed { reason, .. } => reason,
+            other => panic!("expected request failure, got {other:?}"),
+        };
+        assert!(reason.contains("[redacted]"));
+        assert!(!reason.contains(secret));
+        assert!(!reason.contains("/home/runner/private.json"));
+        assert!(!reason.contains("access_token="));
+
+        let error = map_provider_http_error(ProviderHttpError {
+            adapter: ProductionModelAdapter::NearAiChat,
+            model: "fixture-model",
+            status: 400,
+            body: &unsafe_message,
+            retry_after: None,
+        });
+        let reason = match error {
+            LlmError::InvalidRequest { reason, .. } => reason,
+            other => panic!("expected invalid request, got {other:?}"),
+        };
+        assert!(reason.contains("[redacted]"));
+        assert!(!reason.contains(secret));
+        assert!(!reason.contains("/home/runner/private.json"));
+        assert!(!reason.contains("access_token="));
+    }
+
+    #[tokio::test]
+    async fn provider_error_body_reader_stops_at_hard_cap() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let oversized_body = vec![b'x'; MAX_PROVIDER_ERROR_BODY_BYTES + 4_096];
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let headers = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                oversized_body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write headers");
+            let _ = socket.write_all(&oversized_body).await;
+        });
+
+        let response = reqwest::get(format!("http://{address}"))
+            .await
+            .expect("loopback response");
+        let body = read_bounded_provider_error_body(response)
+            .await
+            .expect("bounded body");
+        server.await.expect("loopback server");
+
+        assert_eq!(body.len(), MAX_PROVIDER_ERROR_BODY_BYTES);
+        assert!(body.iter().all(|byte| *byte == b'x'));
     }
 
     #[test]

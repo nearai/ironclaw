@@ -986,8 +986,7 @@ impl GeminiOauthProvider {
         response: reqwest::Response,
     ) -> Result<LlmError, LlmError> {
         let status = response.status();
-        let body_bytes = response
-            .bytes()
+        let body_bytes = crate::error::read_bounded_provider_error_body(response)
             .await
             .map_err(|error| LlmError::RequestFailed {
                 provider: "gemini_oauth".to_string(),

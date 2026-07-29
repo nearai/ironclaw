@@ -494,15 +494,19 @@ impl CodexChatGptProvider {
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .map(crate::retry::parse_retry_after_value);
-        let body = tokio::time::timeout(Duration::from_secs(5), response.text())
-            .await
-            .unwrap_or(Ok(String::new()))
-            .unwrap_or_default();
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::error::read_bounded_provider_error_body(response),
+        )
+        .await
+        .unwrap_or(Ok(Vec::new()))
+        .unwrap_or_default();
+        let body = String::from_utf8_lossy(&body);
         crate::error::map_provider_http_error(crate::error::ProviderHttpError {
             adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
             model: request_model,
             status: status.as_u16(),
-            body: &body,
+            body: body.as_ref(),
             retry_after,
         })
     }
