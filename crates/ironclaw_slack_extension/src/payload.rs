@@ -1284,3 +1284,127 @@ mod tests {
         }
     }
 }
+
+/// Property tests for the Slack ingress boundary (#6524 workstream 9:
+/// "focused fuzzing for untrusted ingress").
+///
+/// Everything here arrives over the public webhook endpoint before any
+/// signature has been trusted, so these functions see whatever the internet
+/// sends. The example tests above cover payload shapes Slack documents; these
+/// cover the ones it does not.
+#[cfg(test)]
+mod ingress_properties {
+    use super::*;
+    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
+    use proptest::prelude::*;
+
+    fn verified_evidence() -> ProtocolAuthEvidence {
+        mark_request_signature_verified(
+            "X-Slack-Signature",
+            Some("X-Slack-Request-Timestamp".to_string()),
+            "T123",
+        )
+    }
+
+    fn unverified_evidence() -> ProtocolAuthEvidence {
+        ProtocolAuthEvidence::failed(
+            ironclaw_host_api::product_adapter::ProtocolAuthFailure::Missing,
+        )
+    }
+
+    fn install() -> AdapterInstallationId {
+        AdapterInstallationId::new("slack_install_property").expect("valid")
+    }
+
+    /// Payload bytes: mostly Slack-shaped, plus arbitrary noise.
+    ///
+    /// Biased on purpose. Uniform random bytes are rejected by the JSON parser
+    /// almost immediately, so they exercise only the outermost guard — the
+    /// interesting branches need input that parses far enough to reach them.
+    fn payload_bytes() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..256),
+            "\\PC{0,200}".prop_map(|s| s.into_bytes()),
+            (
+                "[a-z_]{0,16}",
+                "[A-Za-z0-9]{0,12}",
+                "[A-Za-z0-9]{0,12}",
+                "\\PC{0,40}"
+            )
+                .prop_map(|(kind, event_id, channel, text)| {
+                    serde_json::json!({
+                        "type": kind,
+                        "event_id": event_id,
+                        "event": {
+                            "type": "message",
+                            "channel": channel,
+                            "text": text,
+                        }
+                    })
+                    .to_string()
+                    .into_bytes()
+                }),
+            "\\{[^}]{0,80}".prop_map(|s| s.into_bytes()),
+        ]
+    }
+
+    proptest! {
+        /// No payload whatsoever is parsed without verified auth evidence.
+        ///
+        /// This is the security property of the pair: the signature check is
+        /// what stops anyone who can reach the endpoint from injecting a turn.
+        /// A parser that inspected the body first and only then checked the
+        /// evidence would still pass every example test in this file.
+        #[test]
+        fn unverified_evidence_rejects_every_payload(raw in payload_bytes()) {
+            let outcome = parse_slack_event(&raw, &unverified_evidence(), &install());
+            prop_assert!(
+                matches!(outcome, Err(SlackPayloadParseError::UnauthenticatedPayload)),
+                "unverified payload was not rejected: {outcome:?}"
+            );
+        }
+
+        /// Same for the URL-verification handshake, which runs before setup
+        /// completes and is therefore the most exposed entry point of all.
+        #[test]
+        fn unverified_evidence_rejects_every_challenge(raw in payload_bytes()) {
+            let outcome = parse_slack_url_verification_challenge(&raw, &unverified_evidence());
+            prop_assert!(
+                matches!(outcome, Err(SlackPayloadParseError::UnauthenticatedPayload)),
+                "unverified challenge was not rejected: {outcome:?}"
+            );
+        }
+
+        /// Verified evidence plus arbitrary bytes parses or errors, never panics.
+        #[test]
+        fn verified_evidence_never_panics(raw in payload_bytes()) {
+            let _ = parse_slack_event(&raw, &verified_evidence(), &install());
+            let _ = parse_slack_url_verification_challenge(&raw, &verified_evidence());
+            let _ = normalize_slack_event(&raw, &install());
+        }
+    }
+
+    /// Oversized bodies are refused on length, before any parsing.
+    ///
+    /// Checked with a real over-limit buffer rather than a generated one: the
+    /// limit is 1 MB, and a strategy that produced megabyte payloads would
+    /// dominate the runtime of the whole suite for one boundary.
+    #[test]
+    fn payloads_over_the_size_limit_are_rejected() {
+        let mut oversized = Vec::with_capacity(MAX_SLACK_PAYLOAD_BYTES + 32);
+        oversized.extend_from_slice(br#"{"type":"event_callback","event_id":"Ev1","padding":""#);
+        oversized.resize(MAX_SLACK_PAYLOAD_BYTES + 16, b'a');
+        oversized.extend_from_slice(br#""}"#);
+
+        for outcome in [
+            parse_slack_event(&oversized, &verified_evidence(), &install()).err(),
+            normalize_slack_event(&oversized, &install()).err(),
+        ] {
+            let err = outcome.expect("an over-limit payload must be rejected");
+            assert!(
+                matches!(err, SlackPayloadParseError::InvalidJson { .. }),
+                "unexpected rejection reason: {err:?}"
+            );
+        }
+    }
+}

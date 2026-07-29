@@ -402,7 +402,8 @@ fn capability_activity_status_for_event(
         | RuntimeEventKind::LoopFailed
         | RuntimeEventKind::HookDispatched
         | RuntimeEventKind::HookDecisionEmitted
-        | RuntimeEventKind::HookFailed => None,
+        | RuntimeEventKind::HookFailed
+        | RuntimeEventKind::FailureRecovered => None,
     }
 }
 
@@ -442,7 +443,8 @@ fn run_status_for_event(
         | RuntimeEventKind::HookFailed
         | RuntimeEventKind::CapabilityActivityRequested
         | RuntimeEventKind::CapabilityActivitySucceeded
-        | RuntimeEventKind::CapabilityActivityFailed => {
+        | RuntimeEventKind::CapabilityActivityFailed
+        | RuntimeEventKind::FailureRecovered => {
             current_status.unwrap_or(RunProjectionStatus::Running)
         }
     }
