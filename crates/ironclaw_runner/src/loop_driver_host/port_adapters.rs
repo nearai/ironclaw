@@ -481,7 +481,12 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             LoopProgressEvent::CompactionLeakDetected {
                 task_id,
                 reason_kind,
-            } => emitter.compaction_leak_detected(task_id, reason_kind).await,
+                redacted_leak_count,
+            } => {
+                emitter
+                    .compaction_leak_detected(task_id, reason_kind, redacted_leak_count)
+                    .await
+            }
             // Goal refresh has event types reserved in the run-profile surface,
             // but no producer path in the current loop.
             LoopProgressEvent::GoalRefreshStarted { .. }

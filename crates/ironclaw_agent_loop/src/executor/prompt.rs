@@ -584,6 +584,19 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         // measured ~250K wasted API calls/day from exactly this
         // compact-recompact doom loop before adding a breaker.
         state.compaction_state.pending_effectiveness_baseline = Some(effectiveness_baseline);
+        if response.redacted_leak_count > 0 {
+            CheckpointStage
+                .emit_progress(
+                    self.ctx,
+                    LoopProgressEvent::CompactionLeakDetected {
+                        task_id,
+                        reason_kind: LoopSafeSummary::new("redacted")
+                            .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                        redacted_leak_count: response.redacted_leak_count,
+                    },
+                )
+                .await;
+        }
         CheckpointStage
             .emit_progress(
                 self.ctx,

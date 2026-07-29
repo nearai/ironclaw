@@ -54,21 +54,24 @@ async fn content_filtered_completion_recovers_with_model_visible_observation() {
 async fn context_overflow_recovers_with_model_visible_observation() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.
+    let input_secret = concat!("AKIA", "IOSFODNN7EXAMPLE");
+    let first_setup_turn = format!("first setup turn credential {input_secret}");
     let oversized_setup_turn = format!("third setup turn {}", "history ".repeat(5_000));
+    let compacted_summary = "compacted recovery history credential [REDACTED] retained";
     let harness = RebornIntegrationHarness::test_default()
         .context_overflow_model_after(3, 3)
         .script([
             RebornScriptedReply::text("first setup reply"),
             RebornScriptedReply::text("second setup reply"),
             RebornScriptedReply::text("third setup reply"),
-            RebornScriptedReply::text("compacted recovery history"),
+            RebornScriptedReply::text(compacted_summary),
             RebornScriptedReply::text("recovered after context overflow"),
         ])
         .build()
         .await
         .expect("harness builds");
     harness
-        .submit_turn("first setup turn")
+        .submit_turn(&first_setup_turn)
         .await
         .expect("first setup turn establishes compactable history");
     harness
@@ -79,6 +82,10 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .submit_turn(&oversized_setup_turn)
         .await
         .expect("third setup turn establishes compactable history");
+    let before_recovery_milestones = harness
+        .milestone_len()
+        .await
+        .expect("milestone len readable");
     harness
         .submit_turn("answer after compacting")
         .await
@@ -97,6 +104,30 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .assert_model_message_content_contains("compacted recovery history")
         .await
         .expect("the final recovery request carries the persisted compaction summary");
+    harness
+        .assert_text_model_message_content_not_contains(input_secret)
+        .await
+        .expect("compaction inference input redacts the transcript secret");
+    harness
+        .assert_text_model_message_content_contains("[REDACTED]")
+        .await
+        .expect("compaction inference input carries the deterministic redaction marker");
+    harness
+        .assert_last_interactive_model_message_content_not_contains(input_secret)
+        .await
+        .expect("the next interactive request does not rehydrate the transcript secret");
+    harness
+        .assert_compaction_redacted_once_since(before_recovery_milestones)
+        .await
+        .expect("the applied compaction emits one typed redaction milestone");
+    harness
+        .assert_summary_artifacts_lack(input_secret)
+        .await
+        .expect("the durable compaction summary does not persist the transcript secret");
+    harness
+        .assert_summary_artifact_contains("[REDACTED]")
+        .await
+        .expect("the durable compaction summary contains only redaction markers");
     harness
         .assert_interactive_model_provider_call_count(7)
         .await

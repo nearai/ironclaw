@@ -158,6 +158,8 @@ pub enum LoopHostMilestoneKind {
     CompactionLeakDetected {
         task_id: SystemInferenceTaskId,
         reason_kind: LoopSafeSummary,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        redacted_leak_count: u32,
     },
     AssistantReplyFinalized {
         message_ref: LoopMessageRef,
@@ -286,6 +288,10 @@ impl LoopHostMilestoneKind {
             Self::HookFailed { .. } => "hook_failed",
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[async_trait]
@@ -654,10 +660,12 @@ where
         &self,
         task_id: SystemInferenceTaskId,
         reason_kind: LoopSafeSummary,
+        redacted_leak_count: u32,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CompactionLeakDetected {
             task_id,
             reason_kind,
+            redacted_leak_count,
         })
         .await
     }

@@ -99,6 +99,8 @@ pub enum LoopProgressEvent {
     CompactionLeakDetected {
         task_id: SystemInferenceTaskId,
         reason_kind: LoopSafeSummary,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        redacted_leak_count: u32,
     },
     GoalRefreshStarted {
         task_id: SystemInferenceTaskId,
@@ -225,6 +227,10 @@ impl LoopRecoveryDisposition {
             Self::ModelVisible => "model_visible",
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -403,6 +403,56 @@ impl RebornIntegrationHarness {
         Err(format!("model message content unexpectedly contained {needle:?}").into())
     }
 
+    /// Assert text-only system inference never received `needle`. This is the
+    /// compaction-input trust-boundary assertion; interactive requests are
+    /// intentionally excluded because an original user turn may legitimately
+    /// have carried the value before compaction.
+    pub async fn assert_text_model_message_content_not_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        if !probe.text_message_content_contains(needle) {
+            return Ok(());
+        }
+        Err("text-only model message content contained forbidden content".into())
+    }
+
+    /// Assert a text-only system-inference request received expected safe
+    /// content such as a redaction marker.
+    pub async fn assert_text_model_message_content_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        if probe.text_message_content_contains(needle) {
+            return Ok(());
+        }
+        Err("text-only model message content omitted expected safe content".into())
+    }
+
+    /// Assert the next interactive request after compaction does not rehydrate
+    /// a secret from the persisted summary.
+    pub async fn assert_last_interactive_model_message_content_not_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        if !probe.last_interactive_message_content_contains(needle) {
+            return Ok(());
+        }
+        Err("last interactive model message content contained forbidden content".into())
+    }
+
     /// Assert some SINGLE model request contains EVERY needle in `needles`
     /// (all in one request, not spread across several) — the multi-turn "sees
     /// prior context" proof: an earlier-turn needle plus a current-turn needle
@@ -732,6 +782,43 @@ impl RebornIntegrationHarness {
         let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
         Err(format!(
             "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
+    }
+
+    /// Assert one, and only one, typed redaction milestone was emitted for the
+    /// applied compaction since `baseline`.
+    pub async fn assert_compaction_redacted_once_since(
+        &self,
+        baseline: usize,
+    ) -> HarnessResult<()> {
+        let milestones = self.loop_milestones();
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        let count = since
+            .iter()
+            .filter(|milestone| {
+                matches!(
+                    &milestone.kind,
+                    LoopHostMilestoneKind::CompactionLeakDetected {
+                        reason_kind,
+                        redacted_leak_count: 1,
+                        ..
+                    } if reason_kind.as_str() == "redacted"
+                )
+            })
+            .count();
+        if count == 1 {
+            return Ok(());
+        }
+        let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
+        Err(format!(
+            "expected exactly one redacted compaction milestone since baseline {baseline}, saw {count}: {seen:?}"
         )
         .into())
     }
@@ -1195,6 +1282,41 @@ impl RebornIntegrationHarness {
             .thread_harness
             .history(self.binding.thread_id.clone())
             .await?)
+    }
+
+    /// Assert a durable compaction summary contains expected safe content.
+    pub async fn assert_summary_artifact_contains(&self, needle: &str) -> HarnessResult<()> {
+        let summaries = self
+            .thread_harness
+            .summary_artifacts(self.binding.thread_id.clone())
+            .await?;
+        if summaries
+            .iter()
+            .any(|summary| summary.content.contains(needle))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no durable summary artifact contained expected safe content; saw {} artifact(s)",
+            summaries.len()
+        )
+        .into())
+    }
+
+    /// Assert no durable compaction summary contains forbidden content. The
+    /// diagnostic deliberately omits `needle` and summary bodies.
+    pub async fn assert_summary_artifacts_lack(&self, needle: &str) -> HarnessResult<()> {
+        let summaries = self
+            .thread_harness
+            .summary_artifacts(self.binding.thread_id.clone())
+            .await?;
+        if summaries
+            .iter()
+            .all(|summary| !summary.content.contains(needle))
+        {
+            return Ok(());
+        }
+        Err("durable summary artifact contained forbidden content".into())
     }
 
     /// Number of persisted thread-history messages right now. Capture this at

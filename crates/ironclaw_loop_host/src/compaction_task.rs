@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
@@ -30,7 +30,7 @@ pub(crate) enum CompactionError {
     InputTooLarge { cap: usize, observed_bytes: usize },
     #[error("compaction content contains injection markers")]
     InjectionDetected,
-    #[error("compaction output contains leaked secret markers")]
+    #[error("compaction content contains residual secret markers")]
     LeakDetected,
     #[error("compaction inference failed: {safe_summary}")]
     InferenceFailed { safe_summary: LoopSafeSummary },
@@ -127,11 +127,13 @@ struct ValidatedCompactionMessage {
 
 struct CompactionInput {
     text: String,
+    redacted_leak_count: u32,
 }
 
 struct SanitizedSummary {
     content: String,
     compression_ratio_ppm: u32,
+    redacted_leak_count: u32,
 }
 
 impl<S> HostManagedLoopCompactionPort<S>
@@ -258,8 +260,13 @@ where
         };
         let input = self.build_input(&range)?;
         let input_bytes = input.text.len();
+        let input_redacted_leak_count = input.redacted_leak_count;
         let response = self.run_inference(&request, input).await?;
-        let summary = self.sanitize_summary(&response, input_bytes)?;
+        let mut summary = self.sanitize_summary(&response, input_bytes)?;
+        summary.redacted_leak_count = summary
+            .redacted_leak_count
+            .checked_add(input_redacted_leak_count)
+            .ok_or(CompactionError::LeakDetected)?;
         self.persist_summary(range, summary)
             .await
             .map(LoopCompactionOutcome::Compacted)
@@ -387,21 +394,27 @@ where
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
         let mut text = String::new();
+        let mut body_ranges = Vec::with_capacity(range.messages.len());
+        let mut redacted_leak_count = 0_u32;
         for message in &range.messages {
             let body = message.body.as_str();
             if !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
             }
-            if !self.leak_detector.scan_leaks(body).is_clean() {
-                return Err(CompactionError::LeakDetected);
+            let (body, message_redacted_leak_count) = self.redact_leaks(body, None)?;
+            if !self.injection_scanner.scan_injection(&body).is_empty() {
+                return Err(CompactionError::InjectionDetected);
             }
-            append_escaped_message_checked(
+            redacted_leak_count = redacted_leak_count
+                .checked_add(message_redacted_leak_count)
+                .ok_or(CompactionError::LeakDetected)?;
+            body_ranges.push(append_escaped_message_checked(
                 &mut text,
                 message.sequence,
                 message.kind,
-                body,
+                &body,
                 self.max_input_bytes,
-            )?;
+            )?);
         }
         // The raw per-message scan is the primary guard. This second pass is
         // intentionally over the exact serialized input that reaches system
@@ -410,10 +423,24 @@ where
         if !self.injection_scanner.scan_injection(&text).is_empty() {
             return Err(CompactionError::InjectionDetected);
         }
-        if !self.leak_detector.scan_leaks(&text).is_clean() {
-            return Err(CompactionError::LeakDetected);
+        let (text, serialized_redacted_leak_count) =
+            self.redact_leaks(&text, Some(&body_ranges))?;
+        if text.len() > self.max_input_bytes {
+            return Err(CompactionError::InputTooLarge {
+                cap: self.max_input_bytes,
+                observed_bytes: text.len(),
+            });
         }
-        Ok(CompactionInput { text })
+        if !self.injection_scanner.scan_injection(&text).is_empty() {
+            return Err(CompactionError::InjectionDetected);
+        }
+        redacted_leak_count = redacted_leak_count
+            .checked_add(serialized_redacted_leak_count)
+            .ok_or(CompactionError::LeakDetected)?;
+        Ok(CompactionInput {
+            text,
+            redacted_leak_count,
+        })
     }
 
     async fn run_inference(
@@ -451,22 +478,59 @@ where
         {
             return Err(CompactionError::InjectionDetected);
         }
+        let (output_text, redacted_leak_count) = self.redact_leaks(&response.output_text, None)?;
         if !self
-            .leak_detector
-            .scan_leaks(&response.output_text)
-            .is_clean()
+            .injection_scanner
+            .scan_injection(&output_text)
+            .is_empty()
         {
-            return Err(CompactionError::LeakDetected);
+            return Err(CompactionError::InjectionDetected);
         }
         let content = format!(
             "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
-            escape_xml(&response.output_text)
+            escape_xml(&output_text)
         );
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, content.len());
         Ok(SanitizedSummary {
             content,
             compression_ratio_ppm,
+            redacted_leak_count,
         })
+    }
+
+    fn redact_leaks(
+        &self,
+        content: &str,
+        allowed_ranges: Option<&[Range<usize>]>,
+    ) -> Result<(String, u32), CompactionError> {
+        // Compaction is a retention boundary, so every declared action
+        // (Block, Redact, or Warn) becomes deterministic value redaction.
+        // Observability is the aggregate count returned to the loop; match
+        // names, previews, ranges, and values never leave this method.
+        let scan = self.leak_detector.scan_leaks(content);
+        if scan.is_clean() {
+            return Ok((content.to_string(), 0));
+        }
+        if let Some(allowed_ranges) = allowed_ranges
+            && scan.matches.iter().any(|leak_match| {
+                !allowed_ranges.iter().any(|allowed| {
+                    allowed.start <= leak_match.location.start
+                        && leak_match.location.end <= allowed.end
+                })
+            })
+        {
+            return Err(CompactionError::LeakDetected);
+        }
+        let redacted_leak_count =
+            u32::try_from(scan.matches.len()).map_err(|_| CompactionError::LeakDetected)?;
+        let redacted = scan
+            .redact_all_matches(content)
+            .map_err(|_| CompactionError::LeakDetected)?
+            .ok_or(CompactionError::LeakDetected)?;
+        if !self.leak_detector.scan_leaks(&redacted).is_clean() {
+            return Err(CompactionError::LeakDetected);
+        }
+        Ok((redacted, redacted_leak_count))
     }
 
     async fn persist_summary(
@@ -498,6 +562,7 @@ where
                     safe_summary: safe("summary artifact id is invalid"),
                 })?,
             compression_ratio_ppm: summary.compression_ratio_ppm,
+            redacted_leak_count: summary.redacted_leak_count,
         })
     }
 }
@@ -654,14 +719,17 @@ fn append_escaped_message_checked(
     kind: MessageKind,
     body: &str,
     cap: usize,
-) -> Result<(), CompactionError> {
+) -> Result<Range<usize>, CompactionError> {
     push_checked(output, "<message sequence=\"", cap)?;
     push_checked(output, &sequence.to_string(), cap)?;
     push_checked(output, "\" kind=\"", cap)?;
     push_checked(output, message_kind_name(kind), cap)?;
     push_checked(output, "\">", cap)?;
+    let body_start = output.len();
     append_escaped_xml_checked(output, body, cap)?;
-    push_checked(output, "</message>\n", cap)
+    let body_end = output.len();
+    push_checked(output, "</message>\n", cap)?;
+    Ok(body_start..body_end)
 }
 
 fn message_kind_name(kind: MessageKind) -> &'static str {

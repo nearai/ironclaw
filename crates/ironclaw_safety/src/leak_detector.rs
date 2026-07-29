@@ -128,6 +128,32 @@ impl LeakScanResult {
     pub fn max_severity(&self) -> Option<LeakSeverity> {
         self.matches.iter().map(|m| m.severity).max()
     }
+
+    /// Redact every matched range, regardless of its configured action.
+    ///
+    /// Consumers such as compaction use this when retaining surrounding
+    /// context is safe but no detected secret value may cross the boundary.
+    /// Match ranges are validated before slicing so a malformed scanner
+    /// implementation fails closed instead of panicking or returning partially
+    /// redacted content.
+    pub fn redact_all_matches(&self, content: &str) -> Result<Option<String>, LeakRedactionError> {
+        if self.matches.is_empty() {
+            return Ok(None);
+        }
+        let mut ranges = Vec::with_capacity(self.matches.len());
+        for leak_match in &self.matches {
+            let range = leak_match.location.clone();
+            if range.start >= range.end
+                || range.end > content.len()
+                || !content.is_char_boundary(range.start)
+                || !content.is_char_boundary(range.end)
+            {
+                return Err(LeakRedactionError::InvalidMatchRange);
+            }
+            ranges.push(range);
+        }
+        Ok(Some(apply_redactions(content, &ranges)))
+    }
 }
 
 /// Detector for secret leaks in output data.
@@ -377,6 +403,13 @@ impl Default for LeakDetector {
 pub enum LeakDetectionError {
     #[error("Secret leak blocked: pattern '{pattern}' matched '{preview}'")]
     SecretLeakBlocked { pattern: String, preview: String },
+}
+
+/// A scanner supplied a match range that cannot be safely redacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LeakRedactionError {
+    #[error("leak scanner returned an invalid match range")]
+    InvalidMatchRange,
 }
 
 /// Mask a secret for safe display.
@@ -716,7 +749,10 @@ fn default_patterns() -> Vec<LeakPattern> {
 
 #[cfg(test)]
 mod tests {
-    use crate::leak_detector::{LeakDetector, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN};
+    use crate::leak_detector::{
+        LeakAction, LeakDetector, LeakMatch, LeakRedactionError, LeakScanResult, LeakSeverity,
+        MAX_BARE_JWT_CANDIDATE_LEN,
+    };
 
     #[test]
     fn test_detect_openai_key() {
@@ -911,6 +947,51 @@ mod tests {
             "status code must survive: {redacted}"
         );
         assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_matches_masks_block_redact_and_warn_actions() {
+        let content = "prefix TEST_SECRET suffix";
+        let start = content.find("TEST_SECRET").unwrap();
+
+        for action in [LeakAction::Block, LeakAction::Redact, LeakAction::Warn] {
+            let scan = LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "synthetic".to_string(),
+                    severity: LeakSeverity::High,
+                    action,
+                    location: start..start + "TEST_SECRET".len(),
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: action == LeakAction::Block,
+                redacted_content: None,
+            };
+
+            assert_eq!(
+                scan.redact_all_matches(content).unwrap(),
+                Some("prefix [REDACTED] suffix".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn redact_all_matches_rejects_invalid_scanner_ranges() {
+        let scan = LeakScanResult {
+            matches: vec![LeakMatch {
+                pattern_name: "synthetic".to_string(),
+                severity: LeakSeverity::High,
+                action: LeakAction::Redact,
+                location: 0..usize::MAX,
+                masked_preview: "[masked]".to_string(),
+            }],
+            should_block: false,
+            redacted_content: None,
+        };
+
+        assert_eq!(
+            scan.redact_all_matches("safe"),
+            Err(LeakRedactionError::InvalidMatchRange)
+        );
     }
 
     #[test]

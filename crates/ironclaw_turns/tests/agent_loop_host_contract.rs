@@ -55,6 +55,7 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
             .try_into()
             .expect("valid summary id"),
         compression_ratio_ppm: 250_000,
+        redacted_leak_count: 0,
     });
     let compacted_json = serde_json::to_value(&compacted).expect("compacted should serialize");
     assert_eq!(
@@ -69,6 +70,25 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
     let restored_compacted: LoopCompactionOutcome =
         serde_json::from_value(compacted_json).expect("compacted should deserialize");
     assert_eq!(restored_compacted, compacted);
+
+    let redacted = LoopCompactionOutcome::Compacted(LoopCompactionResponse {
+        summary_artifact_id: "summary:redacted"
+            .to_string()
+            .try_into()
+            .expect("valid summary id"),
+        compression_ratio_ppm: 200_000,
+        redacted_leak_count: 2,
+    });
+    assert_eq!(
+        serde_json::to_value(redacted).expect("redacted compaction should serialize"),
+        serde_json::json!({
+            "compacted": {
+                "summary_artifact_id": "summary:redacted",
+                "compression_ratio_ppm": 200000,
+                "redacted_leak_count": 2
+            }
+        })
+    );
 
     let deferred = LoopCompactionOutcome::Deferred {
         safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")

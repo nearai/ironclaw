@@ -443,7 +443,7 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
 }
 
 #[tokio::test]
-async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
+async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_final_bundle() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_indexes(vec![
             vec![
@@ -459,6 +459,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 2,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
@@ -521,11 +522,27 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
         vec![
             "prompt_bundle_built",
             "compaction_started",
+            "compaction_leak_detected",
             "compaction_completed",
             "checkpoint_written",
             "prompt_bundle_built",
         ]
     );
+    assert!(matches!(
+        host.progress_events().as_slice(),
+        [
+            _,
+            _,
+            LoopProgressEvent::CompactionLeakDetected {
+                reason_kind,
+                redacted_leak_count: 2,
+                ..
+            },
+            _,
+            _,
+            _
+        ] if reason_kind.as_str() == "redacted"
+    ));
 }
 
 #[tokio::test]
@@ -589,6 +606,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
@@ -693,6 +711,7 @@ async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
@@ -851,6 +870,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
@@ -1309,6 +1329,7 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .with_compaction_delay(std::time::Duration::from_millis(50));
     let host_for_cancel = host.clone();
@@ -1353,6 +1374,7 @@ async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_se
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .with_compaction_delay(std::time::Duration::from_secs(1))
         .cancel_on_compaction_start();
@@ -1395,6 +1417,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .cancel_after_compaction_success();
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
@@ -1448,6 +1471,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
             summary_artifact_id: LoopSummaryArtifactId::new("summary:overflow-retry")
                 .expect("valid summary id"),
             compression_ratio_ppm: 100_000,
+            redacted_leak_count: 0,
         }));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -6151,6 +6175,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-f12").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
 
     let executor = CanonicalAgentLoopExecutor;

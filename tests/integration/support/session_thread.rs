@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
 };
 use ironclaw_threads::{
-    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
+    FilesystemSessionThreadService, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
 };
 use thiserror::Error;
@@ -75,6 +75,20 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
             })
             .await?
             .messages)
+    }
+
+    pub async fn summary_artifacts(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<SummaryArtifact>, RebornThreadHarnessError> {
+        Ok(self
+            .service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: self.scope.clone(),
+                thread_id,
+            })
+            .await?
+            .summary_artifacts)
     }
 
     pub async fn assert_final_reply(

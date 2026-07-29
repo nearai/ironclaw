@@ -275,6 +275,21 @@ impl ModelProviderCallProbe {
             .flatten()
             .any(|content| content.contains(needle))
     }
+
+    pub fn text_message_content_contains(&self, needle: &str) -> bool {
+        lock(&self.0)
+            .text_requests
+            .iter()
+            .flatten()
+            .any(|content| content.contains(needle))
+    }
+
+    pub fn last_interactive_message_content_contains(&self, needle: &str) -> bool {
+        lock(&self.0)
+            .interactive_requests
+            .last()
+            .is_some_and(|messages| messages.iter().any(|content| content.contains(needle)))
+    }
 }
 
 /// A raw provider that reports a configured failure for interactive,

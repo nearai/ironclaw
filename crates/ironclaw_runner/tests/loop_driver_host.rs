@@ -986,6 +986,7 @@ async fn progress_event_serde_roundtrip_all_variants() {
         LoopProgressEvent::CompactionLeakDetected {
             task_id,
             reason_kind: LoopSafeSummary::new("leak detected").unwrap(),
+            redacted_leak_count: 1,
         },
         LoopProgressEvent::GoalRefreshStarted { task_id },
         LoopProgressEvent::GoalRefreshCompleted { task_id },
