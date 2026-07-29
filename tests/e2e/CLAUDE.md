@@ -83,13 +83,13 @@ final page screenshots, a screenshot-only Playwright trace (DOM snapshots and
 source capture are disabled), and 960×540 video. The nightly workflow uploads
 these diagnostics only when its shard fails.
 
-Browser artifacts have a 256 MiB per-shard default budget. Override it with a
-positive byte count in `IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Once the budget is
-reached, the harness removes the oldest context bundles first; if the newest
-bundle alone exceeds the budget, its largest files are removed until it fits.
-Server logs remain outside this browser budget so startup and process failures
-retain textual evidence even when a browser bundle is pruned; nightly servers
-run at warn-level logging to limit that volume.
+The complete uploaded artifact tree has a 256 MiB per-shard default budget.
+Override it with a positive byte count in
+`IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Server stdout and stderr streams retain
+bounded tails while the process is running. Once the shard-wide budget is
+reached, the harness removes the oldest browser context bundles first, then
+the largest remaining files until the complete upload tree fits. Nightly
+servers also run at warn-level logging to limit volume.
 
 ## Test Scenarios
 

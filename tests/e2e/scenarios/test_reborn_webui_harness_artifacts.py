@@ -1,12 +1,16 @@
 """Contract tests for bounded Reborn Playwright diagnostic artifacts."""
 
+import asyncio
 import os
 
 import pytest
 
+import reborn_webui_harness as harness
 from reborn_webui_harness import (
+    _ArtifactContext,
     _artifact_max_bytes,
     _directory_size,
+    _drain_stream_to_bounded_file,
     _enforce_artifact_budget,
 )
 
@@ -21,28 +25,92 @@ def _write_bundle(root, name: str, sizes: list[int], mtime: int):
 
 
 def test_artifact_budget_removes_oldest_context_bundle(tmp_path):
-    browser_root = tmp_path / "browser"
-    browser_root.mkdir()
+    artifact_root = tmp_path / "artifacts"
+    browser_root = artifact_root / "browser"
+    browser_root.mkdir(parents=True)
     oldest = _write_bundle(browser_root, "oldest", [8], 1)
     current = _write_bundle(browser_root, "current", [8], 2)
 
-    _enforce_artifact_budget(browser_root, 10, current)
+    _enforce_artifact_budget(artifact_root, 10, current)
 
     assert not oldest.exists()
     assert current.exists()
-    assert _directory_size(browser_root) <= 10
+    assert _directory_size(artifact_root) <= 10
 
 
 def test_artifact_budget_prunes_largest_file_from_oversized_current_bundle(tmp_path):
-    browser_root = tmp_path / "browser"
-    browser_root.mkdir()
+    artifact_root = tmp_path / "artifacts"
+    browser_root = artifact_root / "browser"
+    browser_root.mkdir(parents=True)
     current = _write_bundle(browser_root, "current", [3, 9], 1)
 
-    _enforce_artifact_budget(browser_root, 7, current)
+    _enforce_artifact_budget(artifact_root, 7, current)
 
     assert (current / "artifact-0.bin").exists()
     assert not (current / "artifact-1.bin").exists()
-    assert _directory_size(browser_root) <= 7
+    assert _directory_size(artifact_root) <= 7
+
+
+def test_artifact_budget_includes_server_logs_in_uploaded_tree(tmp_path):
+    artifact_root = tmp_path / "artifacts"
+    browser_root = artifact_root / "browser"
+    server_log_root = artifact_root / "server-logs" / "server"
+    browser_root.mkdir(parents=True)
+    server_log_root.mkdir(parents=True)
+    current = _write_bundle(browser_root, "current", [6], 2)
+    (server_log_root / "stderr.log").write_bytes(b"x" * 8)
+
+    _enforce_artifact_budget(artifact_root, 10, current)
+
+    assert current.exists()
+    assert _directory_size(artifact_root) <= 10
+
+
+async def test_server_log_drain_retains_a_bounded_tail(tmp_path):
+    stream = asyncio.StreamReader()
+    stream.feed_data(b"0123456789abcdef")
+    stream.feed_eof()
+    log_path = tmp_path / "server.log"
+
+    await _drain_stream_to_bounded_file(stream, log_path, 8)
+
+    assert log_path.stat().st_size <= 8
+    assert log_path.read_bytes() == b"cdef"
+
+
+class _FakeTracing:
+    async def stop(self, *, path):
+        del path
+
+
+class _FakeContext:
+    def __init__(self):
+        self.pages = []
+        self.tracing = _FakeTracing()
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+async def test_artifact_cleanup_error_does_not_mask_scenario_result(
+    monkeypatch,
+    tmp_path,
+):
+    context = _FakeContext()
+    artifact_dir = tmp_path / "artifacts" / "browser" / "current"
+    artifact_dir.mkdir(parents=True)
+
+    def fail_cleanup(*args):
+        del args
+        raise PermissionError("cleanup denied")
+
+    monkeypatch.setattr(harness, "_enforce_artifact_budget", fail_cleanup)
+    wrapped = _ArtifactContext(context, artifact_dir, tmp_path / "artifacts", 10)
+
+    await wrapped.close()
+
+    assert context.closed
 
 
 @pytest.mark.parametrize("raw_value", ["0", "not-a-number"])
