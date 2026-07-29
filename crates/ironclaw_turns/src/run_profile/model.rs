@@ -134,6 +134,8 @@ pub struct LoopModelGatewayError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_ref: Option<LoopGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
     /// Secret-value-scrubbed cause text for model recovery and failure
     /// explanation. Unlike `safe_summary`, path and payload delimiters are
@@ -152,6 +154,7 @@ impl LoopModelGatewayError {
             safe_summary: LoopSafeSummary::new(safe_summary)?,
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
             diagnostic_ref: None,
             detail: None,
         })
@@ -168,6 +171,7 @@ impl LoopModelGatewayError {
             safe_summary: LoopSafeSummary::model_gateway_timed_out(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
             diagnostic_ref: None,
             detail: None,
         }
@@ -180,6 +184,11 @@ impl LoopModelGatewayError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
+        self
+    }
+
+    pub fn with_retry_after_ms(mut self, retry_after_ms: u64) -> Self {
+        self.retry_after_ms = Some(retry_after_ms);
         self
     }
 
@@ -200,6 +209,9 @@ impl LoopModelGatewayError {
         }
         if let Some(gate_ref) = self.gate_ref {
             error = error.with_gate_ref(gate_ref);
+        }
+        if let Some(retry_after_ms) = self.retry_after_ms {
+            error = error.with_retry_after_ms(retry_after_ms);
         }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);

@@ -997,6 +997,14 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.effective_model_name(requested_model)
     }
 
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.primary.fallback_route(fallback_index, requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.primary.active_model_name()
     }

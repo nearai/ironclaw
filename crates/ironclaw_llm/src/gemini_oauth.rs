@@ -1309,27 +1309,31 @@ impl GeminiOauthProvider {
                     );
                     if let Err(e) = self.cred_manager.force_refresh().await {
                         error!("Failed to force-refresh token: {}", e);
-                        return Err(LlmError::RequestFailed {
+                        return Err(LlmError::SessionRenewalFailed {
                             provider: "gemini_oauth".to_string(),
-                            reason: format!("Auth error 401 and refresh failed: {}", e),
+                            reason: format!("OAuth refresh after HTTP 401 failed: {e}"),
                         });
                     }
                     allow_retry = false;
                     continue;
                 }
 
-                if status.as_u16() == 429 {
-                    let retry_after = Self::parse_retry_after(err_msg);
-                    return Err(LlmError::RateLimited {
+                if status.is_success() {
+                    return Err(LlmError::InvalidResponse {
                         provider: "gemini_oauth".to_string(),
-                        retry_after,
+                        reason: err_msg.to_string(),
                     });
                 }
 
-                return Err(LlmError::InvalidResponse {
-                    provider: "gemini_oauth".to_string(),
-                    reason: format!("HTTP {}: {}", status.as_u16(), err_msg),
-                });
+                return Err(crate::error::map_provider_http_error(
+                    crate::error::ProviderHttpError {
+                        adapter: crate::error::ProductionModelAdapter::GeminiOauth,
+                        model: &self.config.model,
+                        status: status.as_u16(),
+                        body: err_msg,
+                        retry_after: Self::parse_retry_after(err_msg),
+                    },
+                ));
             }
 
             return Ok(final_response);

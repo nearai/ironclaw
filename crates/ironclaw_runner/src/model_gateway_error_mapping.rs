@@ -11,6 +11,7 @@ pub(crate) fn host_error_to_model_gateway_error(
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
     let gate_ref = error.gate_ref;
+    let retry_after_ms = error.retry_after_ms;
     let existing_detail = error
         .detail
         .map(ironclaw_loop_host::scrub_model_visible_detail);
@@ -29,6 +30,7 @@ pub(crate) fn host_error_to_model_gateway_error(
                         safe_summary: LoopSafeSummary::model_gateway_failed(),
                         reason_kind: None,
                         gate_ref: None,
+                        retry_after_ms: None,
                         diagnostic_ref: None,
                         detail: None,
                     },
@@ -44,6 +46,9 @@ pub(crate) fn host_error_to_model_gateway_error(
     }
     if let Some(gate_ref) = gate_ref {
         converted = converted.with_gate_ref(gate_ref);
+    }
+    if let Some(retry_after_ms) = retry_after_ms {
+        converted = converted.with_retry_after_ms(retry_after_ms);
     }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);

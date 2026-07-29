@@ -224,7 +224,8 @@ impl CircuitBreakerProvider {
 /// auth infrastructure trouble.
 ///
 /// Excludes client errors that are the caller's problem, not backend trouble:
-/// `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+/// `InvalidRequest`, `AuthFailed`, `ContextLengthExceeded`,
+/// `ModelNotAvailable`, `QuotaExceeded`, `Json`.
 ///
 /// See also `retry::is_retryable()` which answers a different question:
 /// "could retrying this exact request succeed?"
@@ -302,6 +303,14 @@ impl LlmProvider for CircuitBreakerProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {

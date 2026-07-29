@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::config::RegistryProviderConfig;
@@ -35,6 +35,7 @@ use ironclaw_common::llm_costs as costs;
 /// an HTTP 400 whose body matches a context-overflow pattern, and `None`
 /// otherwise. Delegates to the shared `crate::error::context_length_error`
 /// helper so detection stays consistent across direct-HTTP providers.
+#[cfg(test)]
 fn context_length_error_for_status(status_code: u16, response_text: &str) -> Option<LlmError> {
     crate::error::context_length_error(status_code, response_text)
 }
@@ -112,6 +113,43 @@ impl GithubCopilotProvider {
         strip_unsupported_tool_params(&self.unsupported_params, req);
     }
 
+    fn map_token_error(error: crate::github_copilot_auth::GithubCopilotAuthError) -> LlmError {
+        tracing::warn!(error = %error, "Copilot: token exchange failed");
+        match error {
+            crate::github_copilot_auth::GithubCopilotAuthError::AccessDenied
+            | crate::github_copilot_auth::GithubCopilotAuthError::Expired => LlmError::AuthFailed {
+                provider: "github_copilot".to_string(),
+            },
+            _ => LlmError::RequestFailed {
+                provider: "github_copilot".to_string(),
+                reason: format!("Token exchange failed: {error}"),
+            },
+        }
+    }
+
+    async fn send_authenticated_request(
+        &self,
+        url: &str,
+        token: &SecretString,
+        body: &impl Serialize,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut request = self
+            .client
+            .post(url)
+            .bearer_auth(token.expose_secret())
+            .header("Content-Type", "application/json");
+        for (key, value) in &self.extra_headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+        request.json(body).send().await.map_err(|error| {
+            tracing::warn!(error = %error, "Copilot: HTTP request failed");
+            LlmError::RequestFailed {
+                provider: "github_copilot".to_string(),
+                reason: error.to_string(),
+            }
+        })
+    }
+
     async fn send_request<R: for<'de> Deserialize<'de>>(
         &self,
         body: &impl Serialize,
@@ -119,40 +157,28 @@ impl GithubCopilotProvider {
         let url = self.api_url();
         // Distinguish permanent auth errors (non-retryable) from transient
         // network failures (retryable) so RetryProvider handles them correctly.
-        let token = self.token_manager.get_token().await.map_err(|e| {
-            tracing::warn!(error = %e, "Copilot: token exchange failed");
-            match &e {
-                crate::github_copilot_auth::GithubCopilotAuthError::AccessDenied
-                | crate::github_copilot_auth::GithubCopilotAuthError::Expired => {
-                    LlmError::AuthFailed {
-                        provider: "github_copilot".to_string(),
-                    }
-                }
-                _ => LlmError::RequestFailed {
-                    provider: "github_copilot".to_string(),
-                    reason: format!("Token exchange failed: {e}"),
-                },
-            }
-        })?;
+        let token = self
+            .token_manager
+            .get_token()
+            .await
+            .map_err(Self::map_token_error)?;
+        let mut response = self.send_authenticated_request(&url, &token, body).await?;
 
-        let mut request = self
-            .client
-            .post(&url)
-            .bearer_auth(token.expose_secret())
-            .header("Content-Type", "application/json");
-
-        // Inject Copilot identity headers
-        for (key, value) in &self.extra_headers {
-            request = request.header(key.as_str(), value.as_str());
+        if response.status().as_u16() == 401 {
+            tracing::warn!(
+                "Copilot: 401 Unauthorized — refreshing the session token and retrying once"
+            );
+            let _ = response.text().await;
+            self.token_manager.invalidate().await;
+            let refreshed = self
+                .token_manager
+                .get_token()
+                .await
+                .map_err(Self::map_token_error)?;
+            response = self
+                .send_authenticated_request(&url, &refreshed, body)
+                .await?;
         }
-
-        let response = request.json(body).send().await.map_err(|e| {
-            tracing::warn!(error = %e, "Copilot: HTTP request failed");
-            LlmError::RequestFailed {
-                provider: "github_copilot".to_string(),
-                reason: e.to_string(),
-            }
-        })?;
 
         let status = response.status();
 
@@ -173,37 +199,15 @@ impl GithubCopilotProvider {
                 "Copilot: API error response"
             );
 
-            if status.as_u16() == 401 {
-                // Invalidate the cached session token so the next attempt
-                // (driven by RetryProvider) gets a fresh one. We don't retry
-                // inline to avoid nested retries with the outer RetryProvider.
-                tracing::warn!("Copilot: 401 Unauthorized — invalidating session token for retry");
-                self.token_manager.invalidate().await;
-                return Err(LlmError::RequestFailed {
-                    provider: "github_copilot".to_string(),
-                    reason: "HTTP 401 Unauthorized".to_string(),
-                });
-            }
-            if status.as_u16() == 429 {
-                tracing::warn!(retry_after = ?retry_after, "Copilot: rate limited");
-                return Err(LlmError::RateLimited {
-                    provider: "github_copilot".to_string(),
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::GithubCopilot,
+                    model: &self.active_model_name(),
+                    status: status.as_u16(),
+                    body: &response_text,
                     retry_after,
-                });
-            }
-            // A too-large prompt (HTTP 413, or a 400 whose body says the context
-            // window was exceeded) must map to ContextLengthExceeded so the
-            // loop's context-shrink recovery can compact and retry instead of
-            // borking on a generic RequestFailed.
-            if let Some(error) = context_length_error_for_status(status.as_u16(), &response_text) {
-                tracing::warn!("Copilot: context length exceeded");
-                return Err(error);
-            }
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "github_copilot".to_string(),
-                reason: format!("HTTP {status}: {truncated}"),
-            });
+                },
+            ));
         }
 
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {

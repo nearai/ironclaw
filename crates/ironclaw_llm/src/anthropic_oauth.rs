@@ -74,6 +74,7 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
 /// an HTTP 400 whose body matches a context-overflow pattern, and `None`
 /// otherwise. Delegates to the shared `crate::error::context_length_error`
 /// helper so detection stays consistent across direct-HTTP providers.
+#[cfg(test)]
 fn context_length_error_for_status(status_code: u16, response_text: &str) -> Option<LlmError> {
     crate::error::context_length_error(status_code, response_text)
 }
@@ -233,7 +234,8 @@ impl AnthropicOAuthProvider {
                             provider: "anthropic_oauth".to_string(),
                             reason: e.to_string(),
                         })?;
-                    if retry.status().is_success() {
+                    let retry_status = retry.status();
+                    if retry_status.is_success() {
                         // Persist the refreshed token so subsequent requests
                         // don't hit 401 again (fixes #1136).
                         self.update_token(fresh_token);
@@ -251,34 +253,40 @@ impl AnthropicOAuthProvider {
                             }
                         });
                     }
+                    let retry_after = Some(crate::retry::parse_retry_after(
+                        retry.headers().get("retry-after"),
+                    ));
+                    let retry_text = retry
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("(failed to read error body: {e})"));
                     tracing::warn!(
                         "Anthropic OAuth 401 retry with refreshed token also failed ({})",
-                        retry.status()
+                        retry_status
                     );
+                    return Err(crate::error::map_provider_http_error(
+                        crate::error::ProviderHttpError {
+                            adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                            model: &self.active_model_name(),
+                            status: retry_status.as_u16(),
+                            body: &retry_text,
+                            retry_after,
+                        },
+                    ));
                 }
                 return Err(LlmError::AuthFailed {
                     provider: "anthropic_oauth".to_string(),
                 });
             }
-            if status.as_u16() == 429 {
-                return Err(LlmError::RateLimited {
-                    provider: "anthropic_oauth".to_string(),
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    model: &self.active_model_name(),
+                    status: status.as_u16(),
+                    body: &response_text,
                     retry_after,
-                });
-            }
-            // A too-large prompt (HTTP 413, or a 400 whose body says the context
-            // window was exceeded) must map to ContextLengthExceeded so the
-            // loop's context-shrink recovery can compact and retry instead of
-            // borking on a generic RequestFailed.
-            if let Some(error) = context_length_error_for_status(status.as_u16(), &response_text) {
-                tracing::warn!("Anthropic OAuth: context length exceeded");
-                return Err(error);
-            }
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
-                reason: format!("HTTP {}: {}", status, truncated),
-            });
+                },
+            ));
         }
 
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {

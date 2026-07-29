@@ -120,6 +120,7 @@ pub(crate) struct CapabilityErrorSummary {
 pub(crate) struct ModelErrorSummary {
     pub(crate) class: ModelErrorClass,
     pub(crate) safe_summary: SanitizedStrategySummary,
+    pub(crate) retry_after_ms: Option<u64>,
     pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -219,11 +220,9 @@ pub(crate) enum RetryScope {
 ///   model-visible tool error result.
 /// - Retries model invalid-output errors up to the same budget, then gives the
 ///   model one typed observation-assisted repair attempt before aborting.
-/// - Retries model transient, unavailable, and internal errors on the much
-///   deeper [`Self::max_model_availability_attempts`] budget with a
-///   longer-capped backoff schedule, then aborts the run. Provider outages
-///   (5xx storms) routinely outlast a couple of quick retries; a long-running
-///   agentic turn must ride them out rather than discard all prior work.
+/// - Advances the host-resolved ordered fallback chain for model
+///   unavailability. Transient and internal failures use the much deeper
+///   [`Self::max_model_availability_attempts`] backoff budget.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`, then
 ///   gives the compacted prompt one observation-assisted attempt before aborting.
 /// - Retries `StaleRequest` at iteration scope (rebuilding the capability
@@ -238,8 +237,9 @@ pub struct DefaultRecoveryStrategy {
     pub max_attempts_per_class: u32,
     /// Max consecutive retries for availability-class model errors
     /// (transient / unavailable / internal) before aborting the run.
-    /// Default `12`, which with [`availability_backoff_for`] rides out
-    /// roughly seven minutes of sustained provider failure.
+    /// Default `12`. Transient/internal failures use
+    /// [`availability_backoff_for`]; unavailable failures consume ordered
+    /// fallback entries.
     pub max_model_availability_attempts: u32,
 }
 
@@ -358,9 +358,24 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     ModelErrorRecoveryObservation::invalid_output(reason),
                 )
             }
-            ModelErrorClass::Transient
-            | ModelErrorClass::Unavailable
-            | ModelErrorClass::Internal => {
+            ModelErrorClass::Unavailable => {
+                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
+                    return RecoveryOutcome::Abort {
+                        recovery: state.recovery_state.cleared_attempts(),
+                        failure_kind: LoopFailureKind::DriverBug,
+                    };
+                };
+                retry_or_abort(
+                    state,
+                    attempt_class,
+                    self.max_model_availability_attempts,
+                    kind,
+                    RetryScope::Call,
+                    |_| Some(RetryAlteration::AdvanceFallback),
+                )
+            }
+            ModelErrorClass::Transient | ModelErrorClass::Internal => {
+                let retry_after_ms = err.retry_after_ms;
                 let Some(attempt_class) = model_retry_attempt_class(err.class) else {
                     return RecoveryOutcome::Abort {
                         recovery: state.recovery_state.cleared_attempts(),
@@ -375,7 +390,9 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     RetryScope::Call,
                     |attempts| {
                         Some(RetryAlteration::Backoff {
-                            delay_ms: availability_backoff_for(attempts),
+                            delay_ms: retry_after_ms
+                                .map(BackoffDelayMs::from_provider_hint)
+                                .unwrap_or_else(|| availability_backoff_for(attempts)),
                         })
                     },
                 )
@@ -684,8 +701,7 @@ fn availability_backoff_for(attempt: u32) -> BackoffDelayMs {
     BackoffDelayMs(ms.min(BackoffDelayMs::MAX_DELAY_MS))
 }
 
-/// Strategy hint about WHAT to alter on retry. Prompt-shape alteration is
-/// supported; model-route swap is reserved for future fallback routing.
+/// Strategy hint about WHAT to alter on retry.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "alteration")]
@@ -698,9 +714,7 @@ pub(crate) enum RetryAlteration {
     /// hint. Used when the provider/model returned an empty or structurally
     /// invalid response for the active loop contract.
     RepairInvalidModelOutput,
-    /// Reserved for future `ModelRouteChain` landing. Skeleton executor MUST
-    /// reject this alteration with `LoopFailureKind::DriverBug` until the
-    /// chain mechanism lands.
+    /// Advance to the next entry in the host-resolved ordered fallback chain.
     AdvanceFallback,
 }
 
@@ -724,6 +738,10 @@ impl BackoffDelayMs {
 
     pub(crate) fn as_u64(self) -> u64 {
         self.0
+    }
+
+    fn from_provider_hint(delay_ms: u64) -> Self {
+        Self(delay_ms.min(Self::MAX_DELAY_MS))
     }
 }
 
@@ -836,6 +854,7 @@ mod tests {
         let summary = ModelErrorSummary {
             class: ModelErrorClass::ContextOverflow,
             safe_summary: SanitizedStrategySummary::new("context window exceeded").expect("valid"),
+            retry_after_ms: None,
             diagnostic_ref: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
@@ -1118,6 +1137,7 @@ mod tests {
             ModelErrorSummary {
                 class,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
+                retry_after_ms: None,
                 diagnostic_ref: None,
             }
         }
@@ -1407,16 +1427,29 @@ mod tests {
                 for attempts in 0..strategy.max_model_availability_attempts {
                     let state = state_with_attempts_for(attempts, attempt_class);
                     let outcome = strategy.on_model_error(&state, &model_err(class)).await;
-                    assert!(
-                        matches!(
-                            outcome,
-                            RecoveryOutcome::Retry {
-                                alter: Some(RetryAlteration::Backoff { .. }),
-                                ..
-                            }
+                    match class {
+                        ModelErrorClass::Unavailable => assert!(
+                            matches!(
+                                outcome,
+                                RecoveryOutcome::Retry {
+                                    alter: Some(RetryAlteration::AdvanceFallback),
+                                    ..
+                                }
+                            ),
+                            "{class:?} at attempts={attempts} should advance, got {outcome:?}"
                         ),
-                        "{class:?} at attempts={attempts} should retry, got {outcome:?}"
-                    );
+                        ModelErrorClass::Transient | ModelErrorClass::Internal => assert!(
+                            matches!(
+                                outcome,
+                                RecoveryOutcome::Retry {
+                                    alter: Some(RetryAlteration::Backoff { .. }),
+                                    ..
+                                }
+                            ),
+                            "{class:?} at attempts={attempts} should back off, got {outcome:?}"
+                        ),
+                        other => panic!("unexpected availability class {other:?}"),
+                    }
                 }
 
                 let state = state_with_attempts_for(
@@ -1429,6 +1462,42 @@ mod tests {
                     "{class:?} past the availability budget should abort, got {outcome:?}"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn rate_limit_class_honors_provider_backoff_hint_without_advancing_fallback() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Transient);
+            error.retry_after_ms = Some(17_000);
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            match outcome {
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff { delay_ms }),
+                    ..
+                } => assert_eq!(delay_ms.as_u64(), 17_000),
+                other => panic!("expected rate-limit backoff, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn provider_unavailable_class_advances_fallback_even_with_retry_hint() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Unavailable);
+            error.retry_after_ms = Some(17_000);
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::AdvanceFallback),
+                    ..
+                }
+            ));
         }
 
         #[tokio::test]

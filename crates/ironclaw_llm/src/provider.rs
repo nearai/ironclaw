@@ -357,6 +357,14 @@ impl CompletionRequest {
         self
     }
 
+    /// Select an already-resolved entry in an ordered provider fallback chain.
+    pub fn set_fallback_index(&mut self, fallback_index: u32) {
+        self.metadata.insert(
+            FALLBACK_INDEX_METADATA_KEY.to_string(),
+            fallback_index.to_string(),
+        );
+    }
+
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
@@ -686,6 +694,17 @@ pub struct ModelMetadata {
     pub context_length: Option<u32>,
 }
 
+/// Metadata key used by host-managed callers to select one route from an
+/// ordered provider fallback chain.
+pub(crate) const FALLBACK_INDEX_METADATA_KEY: &str = "ironclaw_fallback_index";
+
+/// Deterministic selection evidence for an ordered provider fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFallbackRoute {
+    pub fallback_index: u32,
+    pub model: String,
+}
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -749,6 +768,30 @@ pub trait LlmProvider: Send + Sync {
         normalized_model_override(requested_model)
             .map(std::borrow::ToOwned::to_owned)
             .unwrap_or_else(|| self.active_model_name())
+    }
+
+    /// Resolve an ordered fallback index without making a model call.
+    ///
+    /// Leaf providers expose only index zero. Ordered provider decorators
+    /// override this method and wrappers delegate it so host routing can fail
+    /// deterministically before dispatch when a requested fallback is absent.
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        if fallback_index == 0 {
+            return Ok(ModelFallbackRoute {
+                fallback_index,
+                model: self.effective_model_name(requested_model),
+            });
+        }
+        Err(LlmError::ModelNotAvailable {
+            provider: self.model_name().to_string(),
+            model: normalized_model_override(requested_model)
+                .map(str::to_string)
+                .unwrap_or_else(|| self.active_model_name()),
+        })
     }
 
     /// Get the currently active model name.

@@ -81,9 +81,9 @@ pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
-    FinishReason, ImageUrl, LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
-    generate_tool_call_id, normalized_model_override,
+    FinishReason, ImageUrl, LlmProvider, ModelFallbackRoute, ModelMetadata, ReasoningDetail,
+    ReasoningDetails, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     ActionPlan, CommunicationPresentationPolicy, Reasoning, ReasoningContext, RespondOutput,
@@ -450,6 +450,7 @@ fn create_openai_compat_from_registry(
         extra_headers,
     };
     let adapter = RigAdapter::new(model, &config.model)
+        .with_provider_id(config.provider_id.clone())
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))
@@ -553,6 +554,7 @@ fn create_anthropic_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_cache_retention(cache_retention)
             .with_unsupported_params(config.unsupported_params.clone())
             .with_model_listing(models_endpoint),
@@ -604,6 +606,7 @@ fn create_ollama_from_registry(
     };
 
     let mut adapter = RigAdapter::new(model, &config.model)
+        .with_provider_id(config.provider_id.clone())
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     // Ollama's /api/chat enables extended reasoning via `think: true`, but
@@ -667,6 +670,7 @@ fn create_deepseek_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -758,6 +762,7 @@ fn create_openrouter_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -822,6 +827,7 @@ fn create_gemini_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }

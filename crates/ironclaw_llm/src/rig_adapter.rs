@@ -43,6 +43,7 @@ use ironclaw_common::llm_costs as costs;
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
     model: M,
+    provider_id: String,
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
@@ -248,6 +249,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             costs::model_cost(&name).unwrap_or_else(costs::default_cost);
         Self {
             model,
+            provider_id: name.clone(),
             model_name: name,
             input_cost,
             output_cost,
@@ -256,6 +258,16 @@ impl<M: CompletionModel> RigAdapter<M> {
             default_additional_params: None,
             models_endpoint: None,
         }
+    }
+
+    /// Set the stable provider identity used in typed provider errors.
+    ///
+    /// The model name and provider id are distinct payload fields. Keeping this
+    /// explicit prevents a missing-model error from reporting the model slug as
+    /// its provider.
+    pub(crate) fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
     }
 
     /// Enable model discovery for [`LlmProvider::list_models`].
@@ -331,7 +343,7 @@ impl<M: CompletionModel> RigAdapter<M> {
     ) -> Result<DrainedStreamingResponse, LlmError> {
         let mut streamed_reasoning = StreamedReasoningAccumulator::default();
         while let Some(chunk) = stream.next().await {
-            match chunk.map_err(|e| map_rig_error(&self.model_name, e))? {
+            match chunk.map_err(|e| map_rig_error_for(&self.provider_id, &self.model_name, e))? {
                 StreamedAssistantContent::Text(text) if !text.text.is_empty() => {
                     sink.text_delta(text.text).await;
                 }
@@ -1173,7 +1185,7 @@ where
             .model
             .completion(rig_req)
             .await
-            .map_err(|e| map_rig_error(&self.model_name, e))?;
+            .map_err(|e| map_rig_error_for(&self.provider_id, &self.model_name, e))?;
 
         let raw_response = serialize_raw_response(&response.raw_response);
         let provider_finish = extract_finish_reason(raw_response.as_ref());
@@ -1233,7 +1245,7 @@ where
             .model
             .stream(rig_req)
             .await
-            .map_err(|e| map_rig_error(&self.model_name, e))?;
+            .map_err(|e| map_rig_error_for(&self.provider_id, &self.model_name, e))?;
         let drained = self.drain_streaming_response(stream, sink).await?;
 
         let resp = CompletionResponse {
@@ -1293,7 +1305,7 @@ where
             .model
             .completion(rig_req)
             .await
-            .map_err(|e| map_rig_error(&self.model_name, e))?;
+            .map_err(|e| map_rig_error_for(&self.provider_id, &self.model_name, e))?;
 
         let raw_response = serialize_raw_response(&response.raw_response);
         let provider_finish = extract_finish_reason(raw_response.as_ref());
@@ -1383,7 +1395,7 @@ where
             .model
             .stream(rig_req)
             .await
-            .map_err(|e| map_rig_error(&self.model_name, e))?;
+            .map_err(|e| map_rig_error_for(&self.provider_id, &self.model_name, e))?;
         let mut drained = self.drain_streaming_response(stream, sink).await?;
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
@@ -1457,69 +1469,17 @@ where
 /// Detects context-length / payload-size errors in the error message and maps
 /// them to `ContextLengthExceeded` so the dispatcher can trigger compaction
 /// instead of retrying the same oversized payload.
+#[cfg(test)]
 fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
-    let msg = e.to_string();
-    let lower = msg.to_ascii_lowercase();
-
-    // Context-length is checked first so a 413/context error is never
-    // misread as an auth failure.
-    if crate::error::is_context_length_error_message(&lower) {
-        let (used, limit) = crate::error::parse_context_token_counts(&lower);
-        return LlmError::ContextLengthExceeded { used, limit };
-    }
-
-    // Auth failures (bad/expired key, 401/403) must not be treated as
-    // transient: AuthFailed is neither retried nor trips the circuit breaker,
-    // whereas the RequestFailed fallback below is both.
-    if is_auth_error_message(&lower) {
-        return LlmError::AuthFailed {
-            provider: model_name.to_string(),
-        };
-    }
-
-    // A model that does not exist will not appear between attempts. Without
-    // this, a 404 fell into `RequestFailed` below — which IS retryable — so a
-    // typo'd or decommissioned model id was retried 12x before failing.
-    // `LlmError::ModelNotAvailable` had ZERO producers, leaving its consumers
-    // (`retry::is_retryable`, `circuit_breaker::is_transient`, the gateway's
-    // `=> PolicyDenied` arm) dead. #6284 WS5.
-    if is_model_not_available_message(&lower) {
-        return LlmError::ModelNotAvailable {
-            provider: model_name.to_string(),
-            model: model_name.to_string(),
-        };
-    }
-
-    LlmError::RequestFailed {
-        provider: model_name.to_string(),
-        reason: msg,
-    }
+    map_rig_error_for(model_name, model_name, e)
 }
 
-/// Detect "this model does not exist" in a lowercased provider error message.
-///
-/// Checked AFTER auth: a 403 naming a model is a permission problem, not a
-/// missing model. Conservative — a bare `404` is only treated as a missing
-/// model when the message also mentions the model, so an unrelated 404 (a
-/// proxy path, a health endpoint) still falls through to `RequestFailed`.
-fn is_model_not_available_message(lower: &str) -> bool {
-    const MODEL_MISSING_PHRASES: &[&str] = &[
-        "model not found",
-        "model_not_found",
-        "does not exist",
-        "unknown model",
-        "invalid model",
-        "no such model",
-        "model is not supported",
-        "unsupported model",
-    ];
-    if MODEL_MISSING_PHRASES
-        .iter()
-        .any(|phrase| lower.contains(phrase))
-    {
-        return true;
-    }
-    contains_status_code(lower, "404") && lower.contains("model")
+fn map_rig_error_for(
+    provider_id: &str,
+    model_name: &str,
+    error: impl std::fmt::Display,
+) -> LlmError {
+    crate::error::map_provider_message_error(provider_id, model_name, error.to_string())
 }
 
 /// Detect authentication/authorization failures in a lowercased provider
@@ -1538,39 +1498,9 @@ fn is_model_not_available_message(lower: &str) -> bool {
 /// `24019`. The run then terminated telling the user to fix their API key —
 /// for what was usually a rate limit, the single most common transient
 /// provider error. #6284 WS5.
-fn contains_status_code(lower: &str, code: &str) -> bool {
-    let bytes = lower.as_bytes();
-    lower.match_indices(code).any(|(start, matched)| {
-        let before_is_digit = start
-            .checked_sub(1)
-            .is_some_and(|i| bytes[i].is_ascii_digit());
-        let end = start + matched.len();
-        let after_is_digit = bytes.get(end).is_some_and(u8::is_ascii_digit);
-        !before_is_digit && !after_is_digit
-    })
-}
-
+#[cfg(test)]
 fn is_auth_error_message(lower: &str) -> bool {
-    // Status codes are matched on digit boundaries; see `contains_status_code`.
-    if ["401", "403"]
-        .iter()
-        .any(|code| contains_status_code(lower, code))
-    {
-        return true;
-    }
-
-    const AUTH_PATTERNS: &[&str] = &[
-        "unauthorized",
-        "invalid api key",
-        "incorrect api key",
-        "invalid_api_key",
-        "authentication",
-        "permission denied",
-        "missing api key",
-        "no api key",
-    ];
-
-    AUTH_PATTERNS.iter().any(|pattern| lower.contains(pattern))
+    crate::error::is_auth_error_message(lower)
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -1824,6 +1754,20 @@ mod tests {
             matches!(err, LlmError::AuthFailed { provider } if provider == "openai"),
             "401/invalid api key should map to AuthFailed, got a different variant",
         );
+    }
+
+    #[test]
+    fn map_rig_error_keeps_provider_and_model_identity_distinct() {
+        let error = map_rig_error_for(
+            "openai",
+            "gpt-5-fixture",
+            "HTTP 404: requested model does not exist",
+        );
+        assert!(matches!(
+            error,
+            LlmError::ModelNotAvailable { provider, model }
+                if provider == "openai" && model == "gpt-5-fixture"
+        ));
     }
 
     #[test]
@@ -4059,8 +4003,8 @@ mod tests {
         // and request IDs.
         let err = map_rig_error("nearai", "Rate limit: 413 requests per minute exceeded");
         assert!(
-            matches!(err, LlmError::RequestFailed { .. }),
-            "Bare 413 in rate limit message should not be ContextLengthExceeded: {err:?}"
+            matches!(err, LlmError::RateLimited { .. }),
+            "rate-limit wording should stay typed without treating bare 413 as payload status: {err:?}"
         );
 
         let err = map_rig_error("nearai", "Error at 2026-04-13T10:00:00Z");

@@ -35,10 +35,11 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
 /// `SessionRenewalFailed`, `Http`, `Io`.
 ///
-/// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
-/// `ModelNotAvailable`, `Json`.
+/// Non-retryable: `InvalidRequest`, `AuthFailed`, `SessionExpired`,
+/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
 /// - `ModelNotAvailable` — the model won't appear between attempts
+/// - `QuotaExceeded` — billing or credits require user action
 /// - `Json` — a serde parse bug, not a transient failure
 ///
 /// See also `circuit_breaker::is_transient()` which answers a different
@@ -424,6 +425,14 @@ impl LlmProvider for RetryProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {

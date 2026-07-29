@@ -230,6 +230,15 @@ impl LlmProvider for SwappableLlmProvider {
         self.current().effective_model_name(requested_model)
     }
 
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.current()
+            .fallback_route(fallback_index, requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         read(&self.state).active_model_name.to_string()
     }

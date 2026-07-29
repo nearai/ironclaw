@@ -320,6 +320,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version.clone()),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -433,6 +434,7 @@ async fn text_only_host_stream_model_publishes_progress_before_completion() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -511,6 +513,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -586,6 +589,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         messages: prompt_bundle.messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -1544,6 +1548,7 @@ async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
             content: "Use OPENAI_API_KEY in the environment".to_string(),
         }),
         usage: None,
+        effective_fallback_index: 0,
     }));
     let driver = TextOnlyModelReplyDriver::default();
     assign_driver_to_fixture(&mut fixture, driver.descriptor());
@@ -1701,6 +1706,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1753,6 +1759,7 @@ async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3481,6 +3488,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -4786,6 +4794,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -4966,6 +4975,7 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
                 .messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -5266,6 +5276,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
             messages: prompt_bundle.messages,
             surface_version: Some(surface_version.clone()),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -5595,6 +5606,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -5699,6 +5711,7 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
             messages: bundle.messages,
             surface_version: Some(surface_version),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -5770,6 +5783,7 @@ async fn text_only_host_factory_does_not_block_on_slow_optional_user_profile_sou
             messages: bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -6457,6 +6471,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
         messages: prompt_bundle.messages,
         surface_version: Some(surface.version),
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -8995,6 +9010,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -9121,6 +9137,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -9889,6 +9906,7 @@ impl RecordingGateway {
             safe_text_deltas: Vec::new(),
             safe_reasoning_deltas: Vec::new(),
             usage: None,
+            effective_fallback_index: 0,
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
                     activity_id: ironclaw_turns::CapabilityActivityId::new(),
@@ -9918,6 +9936,7 @@ fn capability_call_response() -> HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
+        effective_fallback_index: 0,
         output: ParentLoopOutput::CapabilityCalls(vec![
             ironclaw_turns::run_profile::CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),

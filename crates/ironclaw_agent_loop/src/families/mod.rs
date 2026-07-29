@@ -223,6 +223,7 @@ mod tests {
         let err = ModelErrorSummary {
             class: ModelErrorClass::Unavailable,
             safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
+            retry_after_ms: None,
             diagnostic_ref: None,
         };
 

@@ -287,6 +287,14 @@ impl LlmProvider for CachedProvider {
         self.inner.effective_model_name(requested_model)
     }
 
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.inner.active_model_name()
     }

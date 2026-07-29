@@ -406,34 +406,7 @@ impl NearAiChatProvider {
                         });
                     }
                 }
-                return Err(LlmError::AuthFailed {
-                    provider: "nearai_chat".to_string(),
-                });
             }
-
-            if status_code == 429 {
-                // Preserve existing rate-limit behavior: fall back to a 60s
-                // default when the server omits Retry-After. Long sleeps are
-                // appropriate for rate-limit backpressure.
-                return Err(LlmError::RateLimited {
-                    provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
-                });
-            }
-
-            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
-                return Err(error);
-            }
-
-            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
-            // so the retry layer backs off, the circuit breaker counts a
-            // transient failure, and the channel boundary produces a user-safe
-            // message. HTTP 500 is the most important case for the #2546
-            // traceback-leak report: upstream application errors frequently
-            // return 500 with a Python traceback in the body. 502/503/504 are
-            // the proxy-layer variants. The `status` field preserves the
-            // specific code for operators; the body is logged at debug and
-            // never carried on the error.
             if matches!(status_code, 500..=599) {
                 tracing::debug!(
                     provider = "nearai_chat",
@@ -442,18 +415,20 @@ impl NearAiChatProvider {
                         ironclaw_common::truncate_for_preview(&response_text, 512).as_str(),
                     "NEAR AI Chat upstream 5xx response"
                 );
-                return Err(LlmError::BadGateway {
-                    provider: "nearai_chat".to_string(),
-                    status: status_code,
-                    retry_after: retry_after_header,
-                });
             }
-
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, truncated),
-            });
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::NearAiChat,
+                    model: &self.active_model_name(),
+                    status: status_code,
+                    body: &response_text,
+                    retry_after: if status_code == 429 {
+                        retry_after_header.or(Some(Duration::from_secs(60)))
+                    } else {
+                        retry_after_header
+                    },
+                },
+            ));
         }
 
         serde_json::from_str(&response_text).map_err(|e| {
@@ -525,29 +500,15 @@ impl NearAiChatProvider {
                 reason: format!("Failed to read response body: {}", e),
             })?;
             let status_code = status.as_u16();
-            if status_code == 401 {
-                if !self.uses_api_key() {
-                    let lower = response_text.to_lowercase();
-                    let is_session_expired = lower.contains("session")
-                        && (lower.contains("expired") || lower.contains("invalid"));
-                    if is_session_expired {
-                        return Err(LlmError::SessionExpired {
-                            provider: "nearai_chat".to_string(),
-                        });
-                    }
+            if status_code == 401 && !self.uses_api_key() {
+                let lower = response_text.to_lowercase();
+                let is_session_expired = lower.contains("session")
+                    && (lower.contains("expired") || lower.contains("invalid"));
+                if is_session_expired {
+                    return Err(LlmError::SessionExpired {
+                        provider: "nearai_chat".to_string(),
+                    });
                 }
-                return Err(LlmError::AuthFailed {
-                    provider: "nearai_chat".to_string(),
-                });
-            }
-            if status_code == 429 {
-                return Err(LlmError::RateLimited {
-                    provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
-                });
-            }
-            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
-                return Err(error);
             }
             if matches!(status_code, 500..=599) {
                 tracing::debug!(
@@ -557,17 +518,20 @@ impl NearAiChatProvider {
                         ironclaw_common::truncate_for_preview(&response_text, 512).as_str(),
                     "NEAR AI Chat upstream 5xx streaming response"
                 );
-                return Err(LlmError::BadGateway {
-                    provider: "nearai_chat".to_string(),
-                    status: status_code,
-                    retry_after: retry_after_header,
-                });
             }
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, truncated),
-            });
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::NearAiChat,
+                    model: &self.active_model_name(),
+                    status: status_code,
+                    body: &response_text,
+                    retry_after: if status_code == 429 {
+                        retry_after_header.or(Some(Duration::from_secs(60)))
+                    } else {
+                        retry_after_header
+                    },
+                },
+            ));
         }
 
         let mut stream = response

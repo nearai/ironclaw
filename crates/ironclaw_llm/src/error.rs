@@ -29,6 +29,9 @@ pub enum LlmError {
     #[error("Provider {provider} request failed: {reason}")]
     RequestFailed { provider: String, reason: String },
 
+    #[error("Provider {provider} rejected the request: {reason}")]
+    InvalidRequest { provider: String, reason: String },
+
     #[error("Provider {provider} rate limited, retry after {retry_after:?}")]
     RateLimited {
         provider: String,
@@ -61,6 +64,9 @@ pub enum LlmError {
     #[error("Model {model} not available on provider {provider}")]
     ModelNotAvailable { provider: String, model: String },
 
+    #[error("Provider {provider} quota or billing is exhausted: {reason}")]
+    QuotaExceeded { provider: String, reason: String },
+
     #[error(
         "Authentication failed for provider '{provider}'. {}",
         auth_guidance(provider)
@@ -81,6 +87,258 @@ pub enum LlmError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "Rig and Bedrock use message/SDK mapping; all variants form the test conformance matrix"
+)]
+pub(crate) enum ProductionModelAdapter {
+    Rig,
+    NearAiChat,
+    AnthropicOauth,
+    GeminiOauth,
+    GithubCopilot,
+    Bedrock,
+    OpenAiCodex,
+    CodexChatGpt,
+}
+
+impl ProductionModelAdapter {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Rig,
+        Self::NearAiChat,
+        Self::AnthropicOauth,
+        Self::GeminiOauth,
+        Self::GithubCopilot,
+        Self::Bedrock,
+        Self::OpenAiCodex,
+        Self::CodexChatGpt,
+    ];
+
+    pub(crate) const fn provider_id(self) -> &'static str {
+        match self {
+            Self::Rig => "rig",
+            Self::NearAiChat => "nearai_chat",
+            Self::AnthropicOauth => "anthropic_oauth",
+            Self::GeminiOauth => "gemini_oauth",
+            Self::GithubCopilot => "github_copilot",
+            Self::Bedrock => "bedrock",
+            Self::OpenAiCodex => "openai_codex",
+            Self::CodexChatGpt => "codex_chatgpt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProviderHttpError<'a> {
+    pub(crate) adapter: ProductionModelAdapter,
+    pub(crate) model: &'a str,
+    pub(crate) status: u16,
+    pub(crate) body: &'a str,
+    pub(crate) retry_after: Option<Duration>,
+}
+
+pub(crate) fn map_provider_http_error(error: ProviderHttpError<'_>) -> LlmError {
+    let provider = error.adapter.provider_id();
+    if let Some(context_error) = context_length_error(error.status, error.body) {
+        return context_error;
+    }
+    if is_quota_or_billing_error(error.status, error.body) {
+        return LlmError::QuotaExceeded {
+            provider: provider.to_string(),
+            reason: bounded_provider_reason(error.status, error.body),
+        };
+    }
+    if matches!(error.status, 401 | 403) {
+        return LlmError::AuthFailed {
+            provider: provider.to_string(),
+        };
+    }
+    if error.status == 429 {
+        return LlmError::RateLimited {
+            provider: provider.to_string(),
+            retry_after: error.retry_after,
+        };
+    }
+    if matches!(error.status, 400 | 404)
+        && is_model_not_available_message(&error.body.to_ascii_lowercase())
+    {
+        return LlmError::ModelNotAvailable {
+            provider: provider.to_string(),
+            model: error.model.to_string(),
+        };
+    }
+    if matches!(error.status, 500..=599) {
+        tracing::debug!(
+            adapter = ?error.adapter,
+            status = error.status,
+            body = %ironclaw_common::truncate_for_preview(error.body, 512),
+            "provider returned an upstream server error"
+        );
+        return LlmError::BadGateway {
+            provider: provider.to_string(),
+            status: error.status,
+            retry_after: error.retry_after,
+        };
+    }
+    if error.status == 400 {
+        return LlmError::InvalidRequest {
+            provider: provider.to_string(),
+            reason: bounded_provider_reason(error.status, error.body),
+        };
+    }
+    LlmError::RequestFailed {
+        provider: provider.to_string(),
+        reason: bounded_provider_reason(error.status, error.body),
+    }
+}
+
+pub(crate) fn map_provider_message_error(
+    provider: &str,
+    model: &str,
+    message: impl Into<String>,
+) -> LlmError {
+    let message = message.into();
+    let lower = message.to_ascii_lowercase();
+    if is_context_length_error_message(&lower) {
+        let (used, limit) = parse_context_token_counts(&lower);
+        return LlmError::ContextLengthExceeded { used, limit };
+    }
+    if is_quota_or_billing_error(
+        first_standalone_http_status(&lower).unwrap_or_default(),
+        &lower,
+    ) {
+        return LlmError::QuotaExceeded {
+            provider: provider.to_string(),
+            reason: message,
+        };
+    }
+    if is_auth_error_message(&lower) {
+        return LlmError::AuthFailed {
+            provider: provider.to_string(),
+        };
+    }
+    if is_rate_limit_message(&lower) {
+        return LlmError::RateLimited {
+            provider: provider.to_string(),
+            retry_after: None,
+        };
+    }
+    if is_model_not_available_message(&lower) {
+        return LlmError::ModelNotAvailable {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        };
+    }
+    if let Some(status) = first_standalone_http_status(&lower)
+        && matches!(status, 500..=599)
+    {
+        return LlmError::BadGateway {
+            provider: provider.to_string(),
+            status,
+            retry_after: None,
+        };
+    }
+    if first_standalone_http_status(&lower) == Some(400) {
+        return LlmError::InvalidRequest {
+            provider: provider.to_string(),
+            reason: message,
+        };
+    }
+    LlmError::RequestFailed {
+        provider: provider.to_string(),
+        reason: message,
+    }
+}
+
+fn bounded_provider_reason(status: u16, body: &str) -> String {
+    format!(
+        "HTTP {status}: {}",
+        ironclaw_common::truncate_for_preview(body, 512)
+    )
+}
+
+pub(crate) fn is_model_not_available_message(lower: &str) -> bool {
+    const MODEL_MISSING_PHRASES: &[&str] = &[
+        "model not found",
+        "model_not_found",
+        "unknown model",
+        "invalid model",
+        "no such model",
+        "model is not supported",
+        "unsupported model",
+    ];
+    MODEL_MISSING_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+        || (contains_status_code(lower, "404") && lower.contains("model"))
+        || (lower.contains("model") && lower.contains("does not exist"))
+}
+
+pub(crate) fn is_auth_error_message(lower: &str) -> bool {
+    if ["401", "403"]
+        .iter()
+        .any(|code| contains_status_code(lower, code))
+    {
+        return true;
+    }
+    const AUTH_PATTERNS: &[&str] = &[
+        "unauthorized",
+        "invalid api key",
+        "incorrect api key",
+        "invalid_api_key",
+        "authentication",
+        "permission denied",
+        "access denied",
+        "missing api key",
+        "no api key",
+    ];
+    AUTH_PATTERNS.iter().any(|pattern| lower.contains(pattern))
+}
+
+fn is_quota_or_billing_error(status: u16, message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    status == 402
+        || [
+            "payment required",
+            "insufficient credit",
+            "insufficient credits",
+            "not enough credit",
+            "not enough credits",
+            "credits exhausted",
+            "out of credits",
+            "insufficient_quota",
+            "billing hard limit",
+            "billing limit",
+        ]
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
+fn is_rate_limit_message(lower: &str) -> bool {
+    lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("too many requests")
+        || lower.contains("resource_exhausted")
+}
+
+pub(crate) fn contains_status_code(lower: &str, code: &str) -> bool {
+    let bytes = lower.as_bytes();
+    lower.match_indices(code).any(|(start, matched)| {
+        let before_is_digit = start
+            .checked_sub(1)
+            .is_some_and(|i| bytes[i].is_ascii_digit());
+        let end = start + matched.len();
+        let after_is_digit = bytes.get(end).is_some_and(u8::is_ascii_digit);
+        !before_is_digit && !after_is_digit
+    })
+}
+
+fn first_standalone_http_status(lower: &str) -> Option<u16> {
+    (400_u16..=599).find(|status| contains_status_code(lower, &status.to_string()))
 }
 
 pub(crate) fn context_length_error(status_code: u16, response_text: &str) -> Option<LlmError> {
@@ -242,6 +500,255 @@ fn auth_guidance(provider: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ProviderErrorFixture {
+        name: &'static str,
+        status: u16,
+        body: &'static str,
+        retry_after: Option<Duration>,
+        assert_error: fn(&LlmError, ProductionModelAdapter),
+    }
+
+    fn assert_auth(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::AuthFailed { provider }
+                    if provider == adapter.provider_id()
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_context(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::ContextLengthExceeded {
+                    used: 150_000,
+                    limit: 128_000
+                }
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_context_without_counts(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(error, LlmError::ContextLengthExceeded { used: 0, limit: 0 }),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_model_missing(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::ModelNotAvailable { provider, model }
+                    if provider == adapter.provider_id() && model == "fixture-model"
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_quota(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::QuotaExceeded { provider, reason }
+                    if provider == adapter.provider_id()
+                        && reason.contains("insufficient_quota")
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_rate_limit(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::RateLimited {
+                    provider,
+                    retry_after: Some(delay)
+                } if provider == adapter.provider_id() && *delay == Duration::from_secs(17)
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_bad_gateway(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::BadGateway {
+                    provider,
+                    status: 500 | 503 | 504,
+                    ..
+                } if provider == adapter.provider_id()
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_service_unavailable_retry(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::BadGateway {
+                    provider,
+                    status: 503,
+                    retry_after: Some(delay)
+                } if provider == adapter.provider_id() && *delay == Duration::from_secs(17)
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_invalid_request(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::InvalidRequest { provider, reason }
+                    if provider == adapter.provider_id()
+                        && reason.contains("unsupported request option")
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    fn assert_request_failed(error: &LlmError, adapter: ProductionModelAdapter) {
+        assert!(
+            matches!(
+                error,
+                LlmError::RequestFailed { provider, reason }
+                    if provider == adapter.provider_id()
+                        && reason.contains("resource does not exist")
+            ),
+            "{adapter:?}: {error:?}"
+        );
+    }
+
+    #[test]
+    fn production_adapters_conform_to_provider_error_fixture_matrix() {
+        let fixtures = [
+            ProviderErrorFixture {
+                name: "401 authentication",
+                status: 401,
+                body: r#"{"error":"unauthorized"}"#,
+                retry_after: None,
+                assert_error: assert_auth,
+            },
+            ProviderErrorFixture {
+                name: "403 authorization",
+                status: 403,
+                body: r#"{"error":"permission denied"}"#,
+                retry_after: None,
+                assert_error: assert_auth,
+            },
+            ProviderErrorFixture {
+                name: "400 context length",
+                status: 400,
+                body: "maximum context length is 128000 tokens; messages resulted in 150000 tokens",
+                retry_after: None,
+                assert_error: assert_context,
+            },
+            ProviderErrorFixture {
+                name: "413 Gemini OAuth payload",
+                status: 413,
+                body: r#"{"error":{"status":"INVALID_ARGUMENT","message":"request too large"}}"#,
+                retry_after: None,
+                assert_error: assert_context_without_counts,
+            },
+            ProviderErrorFixture {
+                name: "400 model missing",
+                status: 400,
+                body: r#"{"error":{"code":"model_not_found"}}"#,
+                retry_after: None,
+                assert_error: assert_model_missing,
+            },
+            ProviderErrorFixture {
+                name: "404 model missing",
+                status: 404,
+                body: r#"{"error":"model does not exist"}"#,
+                retry_after: None,
+                assert_error: assert_model_missing,
+            },
+            ProviderErrorFixture {
+                name: "unrelated 404",
+                status: 404,
+                body: r#"{"error":"resource does not exist"}"#,
+                retry_after: None,
+                assert_error: assert_request_failed,
+            },
+            ProviderErrorFixture {
+                name: "402 billing",
+                status: 402,
+                body: r#"{"error":{"code":"insufficient_quota"}}"#,
+                retry_after: None,
+                assert_error: assert_quota,
+            },
+            ProviderErrorFixture {
+                name: "403 billing exhaustion",
+                status: 403,
+                body: r#"{"error":{"code":"insufficient_quota"}}"#,
+                retry_after: None,
+                assert_error: assert_quota,
+            },
+            ProviderErrorFixture {
+                name: "429 retry metadata",
+                status: 429,
+                body: r#"{"error":"too many requests"}"#,
+                retry_after: Some(Duration::from_secs(17)),
+                assert_error: assert_rate_limit,
+            },
+            ProviderErrorFixture {
+                name: "500 upstream",
+                status: 500,
+                body: "sensitive upstream traceback",
+                retry_after: None,
+                assert_error: assert_bad_gateway,
+            },
+            ProviderErrorFixture {
+                name: "503 retry metadata",
+                status: 503,
+                body: "temporarily unavailable",
+                retry_after: Some(Duration::from_secs(17)),
+                assert_error: assert_service_unavailable_retry,
+            },
+            ProviderErrorFixture {
+                name: "504 gateway timeout",
+                status: 504,
+                body: "gateway timeout",
+                retry_after: None,
+                assert_error: assert_bad_gateway,
+            },
+            ProviderErrorFixture {
+                name: "generic 400",
+                status: 400,
+                body: r#"{"error":"unsupported request option"}"#,
+                retry_after: None,
+                assert_error: assert_invalid_request,
+            },
+        ];
+
+        for adapter in ProductionModelAdapter::ALL {
+            for fixture in &fixtures {
+                let error = map_provider_http_error(ProviderHttpError {
+                    adapter,
+                    model: "fixture-model",
+                    status: fixture.status,
+                    body: fixture.body,
+                    retry_after: fixture.retry_after,
+                });
+                (fixture.assert_error)(&error, adapter);
+                assert!(
+                    !error.to_string().contains("sensitive upstream traceback"),
+                    "{} leaked a 5xx body for {adapter:?}",
+                    fixture.name
+                );
+            }
+        }
+    }
 
     #[test]
     fn auth_failed_error_includes_guidance() {

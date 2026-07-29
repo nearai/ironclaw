@@ -500,6 +500,11 @@ impl CodexChatGptProvider {
             model = %body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
             "Codex ChatGPT: sending request"
         );
+        let request_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(self.configured_model.as_str())
+            .to_string();
 
         let api_key = self.api_key.read().await.clone();
         let resp =
@@ -525,22 +530,24 @@ impl CodexChatGptProvider {
                     .await?;
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
+                        let retry_after = retry_resp
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .map(crate::retry::parse_retry_after_value);
                         let body_text =
                             tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
                                 .await
                                 .unwrap_or(Ok(String::new()))
                                 .unwrap_or_default();
-                        if let Some(error) =
-                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
-                        {
-                            return Err(error);
-                        }
-                        return Err(LlmError::RequestFailed {
-                            provider: "codex_chatgpt".to_string(),
-                            reason: format!(
-                                "HTTP {retry_status} from {url} (after concurrent token refresh): {body_text}"
-                            ),
-                        });
+                        return Err(crate::error::map_provider_http_error(
+                            crate::error::ProviderHttpError {
+                                adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
+                                model: &request_model,
+                                status: retry_status.as_u16(),
+                                body: &body_text,
+                                retry_after,
+                            },
+                        ));
                     }
                     return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
                 }
@@ -566,22 +573,24 @@ impl CodexChatGptProvider {
 
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
+                        let retry_after = retry_resp
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .map(crate::retry::parse_retry_after_value);
                         let body_text =
                             tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
                                 .await
                                 .unwrap_or(Ok(String::new()))
                                 .unwrap_or_default();
-                        if let Some(error) =
-                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
-                        {
-                            return Err(error);
-                        }
-                        return Err(LlmError::RequestFailed {
-                            provider: "codex_chatgpt".to_string(),
-                            reason: format!(
-                                "HTTP {retry_status} from {url} (after token refresh): {body_text}"
-                            ),
-                        });
+                        return Err(crate::error::map_provider_http_error(
+                            crate::error::ProviderHttpError {
+                                adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
+                                model: &request_model,
+                                status: retry_status.as_u16(),
+                                body: &body_text,
+                                retry_after,
+                            },
+                        ));
                     }
 
                     return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
@@ -601,21 +610,24 @@ impl CodexChatGptProvider {
         }
 
         if !status.is_success() {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .map(crate::retry::parse_retry_after_value);
             // Read the error body with a timeout to avoid hanging
             let body_text = tokio::time::timeout(Duration::from_secs(5), resp.text())
                 .await
                 .unwrap_or(Ok(String::new()))
                 .unwrap_or_default();
-            // Context-overflow (HTTP 413, or a 400 whose body names a
-            // context-length error) must surface as ContextLengthExceeded so
-            // the loop's context-shrink recovery fires.
-            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
-                return Err(error);
-            }
-            return Err(LlmError::RequestFailed {
-                provider: "codex_chatgpt".to_string(),
-                reason: format!("HTTP {status} from {url}: {body_text}",),
-            });
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::CodexChatGpt,
+                    model: &request_model,
+                    status: status.as_u16(),
+                    body: &body_text,
+                    retry_after,
+                },
+            ));
         }
 
         Self::parse_sse_response_stream(resp, self.request_timeout).await

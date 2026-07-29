@@ -203,6 +203,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         messages: Vec::new(),
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -260,6 +261,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -314,6 +316,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -407,6 +410,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1328,6 +1332,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1368,6 +1373,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1410,6 +1416,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1454,6 +1461,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1725,6 +1733,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1827,6 +1836,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1915,6 +1925,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1962,6 +1973,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2162,6 +2174,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2230,6 +2243,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3109,6 +3123,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3130,6 +3145,77 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
     assert_eq!(calls[0].turn_id, fixture.run_context.turn_id);
     assert_eq!(calls[0].messages[0].role, HostManagedModelMessageRole::User);
     assert_eq!(calls[0].messages[0].content, "hello reborn");
+}
+
+#[tokio::test]
+async fn model_port_rejects_mismatched_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback("model says hi", 1));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 2,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    assert_eq!(
+        error.safe_summary,
+        "model gateway returned mismatched fallback route evidence"
+    );
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fallback_index, 2);
+}
+
+#[tokio::test]
+async fn model_port_accepts_matching_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback(
+        "fallback model says hi",
+        2,
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 2,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.chunks[0].safe_text_delta, "fallback model says hi");
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fallback_index, 2);
 }
 
 /// Records every storage key the model port asks it to read and returns a fixed
@@ -3210,6 +3296,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3256,6 +3343,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3300,6 +3388,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3371,6 +3460,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3493,6 +3583,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3543,6 +3634,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3586,6 +3678,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             inline_messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3629,6 +3722,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
                     .model_profile_id
                     .clone(),
             ),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3687,6 +3781,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3745,6 +3840,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3786,6 +3882,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3825,6 +3922,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3854,6 +3952,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3889,6 +3988,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3948,6 +4048,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -4854,6 +4955,17 @@ impl RecordingGateway {
             response: Ok(HostManagedModelResponse::assistant_reply(
                 content.to_string(),
             )),
+        }
+    }
+
+    fn reply_with_fallback(content: &str, fallback_index: u32) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(
+                HostManagedModelResponse::assistant_reply(content.to_string())
+                    .with_effective_fallback_index(fallback_index),
+            ),
         }
     }
 
