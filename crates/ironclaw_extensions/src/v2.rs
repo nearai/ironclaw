@@ -152,6 +152,75 @@ impl ManifestSource {
     }
 }
 
+/// One reserved extension-id prefix plus the predicate that authorizes a
+/// [`ManifestSource`] to declare an id in it.
+///
+/// The predicate is a function pointer, not a `ManifestSource` compared by
+/// equality — the two rules enforced today are semantically different kinds
+/// of check and must stay that way:
+/// - `ironclaw.` is gated on [`ManifestSource::allows_first_party`], a
+///   *capability* predicate that today happens to equal
+///   `matches!(source, ManifestSource::HostBundled)` but is free to widen
+///   independently of this table;
+/// - `mcp-` is gated on `source == ManifestSource::UserRegistered`, an
+///   *identity* check.
+///
+/// Flattening both into `(prefix, ManifestSource)` compared by `==` would
+/// silently narrow the host-bundled rule the moment `allows_first_party()`
+/// ever admits a second source, so each entry carries its own predicate.
+struct ReservedIdPrefixRule {
+    prefix: &'static str,
+    permitted: fn(ManifestSource) -> bool,
+    /// Human-readable description of who *is* permitted, used verbatim in
+    /// the rejection message (e.g. "host-bundled only").
+    permitted_description: &'static str,
+}
+
+/// The full reserved-prefix table. Add a new rule here — never re-derive a
+/// third parallel `if` block in either parser.
+const RESERVED_ID_PREFIX_RULES: &[ReservedIdPrefixRule] = &[
+    ReservedIdPrefixRule {
+        prefix: RESERVED_HOST_BUNDLED_ID_PREFIX,
+        permitted: ManifestSource::allows_first_party,
+        permitted_description: "host-bundled only",
+    },
+    ReservedIdPrefixRule {
+        prefix: RESERVED_MCP_ID_PREFIX,
+        permitted: |source| matches!(source, ManifestSource::UserRegistered),
+        permitted_description: "user-registered only",
+    },
+];
+
+/// A reserved id-prefix rule was violated: `id` starts with `prefix`, but
+/// `source` is not among the sources `permitted_description` names.
+pub(crate) struct ReservedIdPrefixViolation {
+    pub id: ExtensionId,
+    pub prefix: &'static str,
+    pub permitted_description: &'static str,
+}
+
+/// Enforce every entry of [`RESERVED_ID_PREFIX_RULES`] against `id`/`source`.
+///
+/// Shared by both manifest parsers — v2's [`ExtensionManifestV2::from_raw`]
+/// and v3's [`crate::v3::parse_v3`] — so the reserved namespace enforced here
+/// can never drift between schema versions: every manifest reaches this one
+/// function regardless of which `schema_version` it declares.
+pub(crate) fn check_reserved_id_prefix(
+    id: &ExtensionId,
+    source: ManifestSource,
+) -> Result<(), ReservedIdPrefixViolation> {
+    for rule in RESERVED_ID_PREFIX_RULES {
+        if id.as_str().starts_with(rule.prefix) && !(rule.permitted)(source) {
+            return Err(ReservedIdPrefixViolation {
+                id: id.clone(),
+                prefix: rule.prefix,
+                permitted_description: rule.permitted_description,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Per-capability surface visibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -700,10 +769,14 @@ pub enum ManifestV2Error {
         manifest_source: ManifestSource,
         kind: RuntimeKind,
     },
-    #[error("extension id '{id}' uses the reserved '{prefix}' prefix, which is host-bundled only")]
+    #[error(
+        "extension id '{id}' uses the reserved '{prefix}' prefix, which is \
+         {permitted_description}"
+    )]
     ReservedIdForInstalledSource {
         id: ExtensionId,
         prefix: &'static str,
+        permitted_description: &'static str,
     },
     #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
@@ -946,11 +1019,11 @@ impl ExtensionManifestV2 {
         }
 
         let id = ExtensionId::new(raw.id)?;
-        if !source.allows_first_party() && id.as_str().starts_with(RESERVED_HOST_BUNDLED_ID_PREFIX)
-        {
+        if let Err(violation) = check_reserved_id_prefix(&id, source) {
             return Err(ManifestV2Error::ReservedIdForInstalledSource {
-                id,
-                prefix: RESERVED_HOST_BUNDLED_ID_PREFIX,
+                id: violation.id,
+                prefix: violation.prefix,
+                permitted_description: violation.permitted_description,
             });
         }
 

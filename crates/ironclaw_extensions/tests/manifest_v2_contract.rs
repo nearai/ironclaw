@@ -779,6 +779,43 @@ fn rejects_reserved_id_prefix_for_installed_source() {
     );
 }
 
+/// A v2-schema manifest is the schema that still exercises the legacy
+/// `ExtensionManifestV2::from_raw` path (anything whose `schema_version`
+/// isn't the v3 constant routes here from
+/// `ExtensionManifestRecord::from_toml`). The reserved `mcp-` namespace must
+/// be closed on this path too, not just `parse_v3` — a non-`UserRegistered`
+/// source declaring an `mcp-` id must be rejected.
+#[test]
+fn rejects_reserved_mcp_prefix_for_non_user_registered_source() {
+    let toml = third_party_wasm_manifest("mcp-foo", "mcp-foo.echo");
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::ReservedIdForInstalledSource { .. }),
+        "{err:?}"
+    );
+}
+
+/// A `UserRegistered` v2-schema manifest is still allowed to declare an
+/// `mcp-` id.
+#[test]
+fn allows_reserved_mcp_prefix_for_user_registered_source() {
+    let toml = third_party_wasm_manifest("mcp-foo", "mcp-foo.echo");
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::UserRegistered,
+        &catalog(),
+        &contracts(),
+    )
+    .expect("user-registered source may declare an mcp- id");
+    assert_eq!(manifest.id.as_str(), "mcp-foo");
+}
+
 #[test]
 fn rejects_capability_id_without_provider_prefix() {
     let toml = third_party_wasm_manifest("acme-tools", "other.echo");

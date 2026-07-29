@@ -33,8 +33,8 @@ use crate::ExtensionAdminConfigurationDescriptor;
 use crate::resolved::{ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration};
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
-    MAX_MANIFEST_BYTES, ManifestSource, RESERVED_HOST_BUNDLED_ID_PREFIX, RESERVED_MCP_ID_PREFIX,
-    RawCapabilityV2, RawRuntimeCredentialV2, requested_trust_to_descriptor_trust,
+    MAX_MANIFEST_BYTES, ManifestSource, RawCapabilityV2, RawRuntimeCredentialV2,
+    requested_trust_to_descriptor_trust,
 };
 
 /// Required value of the `schema_version` field for v3 manifests.
@@ -253,23 +253,15 @@ pub(crate) fn parse_v3(
     }
 
     let id = ExtensionId::new(raw.id)?;
-    if !source.allows_first_party() && id.as_str().starts_with(RESERVED_HOST_BUNDLED_ID_PREFIX) {
+    // Both reserved-prefix rules (`ironclaw.` = host-bundled only, `mcp-` =
+    // user-registered only) are enforced by one shared table
+    // (`crate::v2::check_reserved_id_prefix`) so v2's `from_raw` and this
+    // parser can never drift apart on the reservation.
+    if let Err(violation) = crate::v2::check_reserved_id_prefix(&id, source) {
         return Err(ManifestV3Error::Invalid {
             reason: format!(
-                "extension id `{id}` uses the reserved `{RESERVED_HOST_BUNDLED_ID_PREFIX}` \
-                 prefix, which is host-bundled only"
-            ),
-        });
-    }
-    // The `mcp-` namespace is reserved for user-registered MCP servers: only
-    // a `ManifestSource::UserRegistered` manifest may declare an id in it.
-    // A single arm here, ahead of any per-schema branching, so every import
-    // path that reaches `parse_v3` inherits the rule without duplication.
-    if id.as_str().starts_with(RESERVED_MCP_ID_PREFIX) && source != ManifestSource::UserRegistered {
-        return Err(ManifestV3Error::Invalid {
-            reason: format!(
-                "extension id `{id}` uses the reserved `{RESERVED_MCP_ID_PREFIX}` prefix, which \
-                 is user-registered only"
+                "extension id `{}` uses the reserved `{}` prefix, which is {}",
+                violation.id, violation.prefix, violation.permitted_description
             ),
         });
     }
