@@ -57,12 +57,12 @@ metadata, `GET/POST` WebUI command routes, and the composer slash menu.
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Fate of #6678 | **Rebase it** onto main as the PR-2 vehicle; main's landed shapes win every conflict. |
-| 2 | Slack-native naming | **Per-command registration.** Where a name collides with a Slack built-in, register the existing alias (`/progress` for `status`; `/status` is a Slack built-in and cannot be claimed). `/model` registers directly. |
+| 2 | Slack-native naming | **Single `/ironclaw` dispatcher** (`/ironclaw status`, `/ironclaw model set …`). Slack's command namespace is workspace-global, built-ins (`/status`) cannot be overridden, and the ecosystem convention is an app-named dispatcher (`/github …`, `/jira …`). No aliases registered; future commands need zero Slack app changes. Direct `/model` registration stays available as a purely additive later option. |
 | 3 | Admin commands | **Role-gate now** (product decision remove-vs-gate is pending with Sergey; gating was chosen so either outcome is reachable — see Contingency). Per-**action** granularity: `/model` bare read is User; `set`/`set-provider` and the lifecycle family are Admin. |
 | 4 | Visibility | **Role-filtered everywhere**: WebUI inventory filtered by caller role; Slack natively registers only user-facing commands; channel help text lists only what the actor may run. Admission denial is the backstop — hiding is never the control. |
 | 5 | Train order | **Gate → Palette → Slack** (PR-1 → PR-2 → PR-3, stacked). No window where the browser or a manifest exposes ungated tenant controls. |
 | 6 | WebUI results | **Ephemeral** system-notice bubble (Slack-like, #6678's shape). Explicitly ephemeral per the gateway-events rule; not a durable timeline event. Durable rendering is a future decision. |
-| 7 | Bundled manifests | Declare `["model", "status"]` (in PR-1, same PR as gating). Lifecycle commands stay undeclared on bundled channels; admins manage extensions from the WebUI. Third-party manifests may declare them; admission gates. PR-3 additionally declares `progress` on Slack (see below — declarations are exact tokens; aliases are never implicitly enabled). |
+| 7 | Bundled manifests | Declare `["model", "status"]` (in PR-1, same PR as gating). Lifecycle commands stay undeclared on bundled channels; admins manage extensions from the WebUI. Third-party manifests may declare them; admission gates. The `progress` registry alias stays (typed path, Telegram) but is not Slack-registered and not declared. |
 
 ## PR-1 — Role-gated command admission
 
@@ -183,17 +183,37 @@ body regardless of content type. No manifest-schema or host changes.
 shapes: JSON → existing event path; form-encoded with `command` → slash
 invocation; form-encoded `ssl_check=1` → immediate empty 200.
 
-### Normalization
+### Normalization (dispatcher mapping)
 
-A slash invocation becomes the same normalized inbound message events
-produce: `text = "{command} {args}"` (alias text passes through as typed;
-registry alias resolution maps `/progress` → `status`), actor from
-`user_id`, conversation from `channel_id`, `DirectChat` trigger, event id
-derived from `trigger_id` (unique per invocation; Slack does not redeliver
-slash commands). Downstream — classification, pairing, PR-1 admission,
-dispatch, observer bot-DM delivery — is identical to the space-prefixed
-path. Ingress ACK is the immediate empty 200 (Slack's ≤3s rule); the visible
-result is the bot's DM message.
+The single registered command is `/ironclaw`; its `text` is the real
+command. The adapter maps the form payload to the same normalized inbound
+message events produce:
+
+- `command="/ironclaw"`, `text="status …"` → normalized text `"/status …"`
+  (prepend `/` to the trimmed text; defensively strip a leading `/` the user
+  may have typed, so `/ironclaw /status` also works).
+- Bare `/ironclaw` or `/ironclaw help` → normalized text `"/help"` — not a
+  registered command, so it deterministically takes the existing
+  unknown-command rejection path, which delivers the role-filtered
+  "Available commands" help. (If a real `help` command ever joins the
+  registry, this mapping upgrades gracefully into executing it.)
+- Actor from `user_id`, conversation from `channel_id`, `DirectChat`
+  trigger, event id derived from `trigger_id` (unique per invocation; Slack
+  does not redeliver slash commands).
+
+Downstream — classification, pairing, PR-1 admission, dispatch, observer
+bot-DM delivery — is identical to the space-prefixed path. Ingress ACK is
+the immediate empty 200 (Slack's ≤3s rule); the visible result is the bot's
+DM message.
+
+### Help rendering: per-channel invocation prefix
+
+Neutral help renders `/model`, but typing `/model` bare in Slack fails
+(client-intercepted). `ChannelDescriptor` presentation gains an optional
+command display prefix; Slack's manifest sets `/ironclaw ` so help and
+rejection notices render `/ironclaw model` there. Other channels keep the
+plain `/name` rendering. The space-typed ` /model` path keeps working as an
+undocumented fallback.
 
 ### Behavioral edges
 
@@ -206,29 +226,30 @@ result is the bot's DM message.
   role-filtered help. Declaration is the single source of truth; Slack
   registration is presentation only.
 
-### Registration (docs, not code) and the alias-declaration rule
+### Registration (docs, not code)
 
 `docs/reborn/setup-slack-for-reborn-binary.md` + `docs/channels/slack.mdx`
-gain an app-manifest snippet registering `/model` and `/progress` (name,
-description, usage hint — Slack renders these in autocomplete) pointing at
-the events URL, with the built-in-collision rule stated. Admin/lifecycle
-commands are not registered (Decision 4).
-
-Because manifest declarations are **exact tokens** and enabling `status`
-deliberately does not enable its `progress` alias (the landed allowlist
-contract), PR-3 adds `progress` to the Slack manifest's declared set —
-`commands = ["model", "status", "progress"]` — so the natively registered
-`/progress` passes the exact-token admission check. Telegram is unchanged.
+gain one app-manifest entry registering `/ironclaw` (description + usage
+hint `status | model set <model> | help` — Slack renders these in
+autocomplete) pointing at the events URL, with the rationale stated: the
+namespace is workspace-global, built-ins like `/status` cannot be
+overridden, and the app-named dispatcher is the ecosystem convention.
+Admin/lifecycle commands gain no registration or usage-hint mention
+(Decision 4). The Slack manifest's declared set stays `["model", "status"]`
+— declarations govern the underlying commands, not the dispatcher spelling.
+Telegram is unchanged.
 
 ### Tests
 
-- Adapter conformance: slash form payload → normalized message (fields,
-  alias text, trigger, event id); `ssl_check` short-circuit; malformed form
-  rejected; JSON events unaffected.
+- Adapter conformance: dispatcher mapping (`/ironclaw status …` →
+  `"/status …"`, leading-slash strip, bare/`help` → `"/help"`, fields,
+  trigger, event id); `ssl_check` short-circuit; malformed form rejected;
+  JSON events unaffected.
 - Channel-host e2e: signed slash-shaped body for a paired DM runs
-  `/progress` end-to-end → rendered status result delivered, zero turns;
-  non-DM slash → direct-only denial; signature failure still rejects at
-  ingress (pin extended over form bodies).
+  `/ironclaw status` end-to-end → rendered status result delivered, zero
+  turns; bare `/ironclaw` → help notice rendered with the `/ironclaw `
+  display prefix; non-DM slash → direct-only denial; signature failure still
+  rejects at ingress (pin extended over form bodies).
 
 ## Cross-cutting error handling
 
@@ -252,6 +273,8 @@ contract), PR-3 adds `progress` to the Slack manifest's declared set —
   `/model set`. Nothing in PR-2/PR-3 changes.
 - **Telegram native commands:** `setMyCommands` can register the command
   menu programmatically — cheap sibling of PR-3 if wanted.
+- **Direct `/model` Slack registration:** no built-in collision; purely
+  additive beside the dispatcher if the shorter spelling is ever wanted.
 - **`response_url` delivery** for out-of-DM slash rejections.
 - **Durable command results** in the WebUI timeline (Decision 6 revisit).
 - **Future user commands** (`/new`, `/stop`, `/compact`, Telegram `/start`
