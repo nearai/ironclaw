@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add validated all-action leak redaction for retention boundaries.
+
+### Fixed
+
+- Redact complete bounded PEM and SSH private-key blocks instead of only their
+  begin sentinels, and keep private-key diagnostic previews constant.
+
 ## [0.2.2](https://github.com/nearai/ironclaw/compare/ironclaw_safety-v0.2.1...ironclaw_safety-v0.2.2) - 2026-04-29
 
 ### Added

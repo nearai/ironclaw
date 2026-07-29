@@ -30,8 +30,8 @@ pub(crate) enum CompactionError {
     InputTooLarge { cap: usize, observed_bytes: usize },
     #[error("compaction content contains injection markers")]
     InjectionDetected,
-    #[error("compaction content contains residual secret markers")]
-    LeakDetected,
+    #[error("compaction leak redaction failed or left unsafe content")]
+    LeakRedactionFailed,
     #[error("compaction inference failed: {safe_summary}")]
     InferenceFailed { safe_summary: LoopSafeSummary },
     #[error("compaction was cancelled")]
@@ -134,6 +134,11 @@ struct SanitizedSummary {
     content: String,
     compression_ratio_ppm: u32,
     redacted_leak_count: u32,
+}
+
+struct LeakRedaction {
+    content: Option<String>,
+    count: u32,
 }
 
 impl<S> HostManagedLoopCompactionPort<S>
@@ -266,7 +271,7 @@ where
         summary.redacted_leak_count = summary
             .redacted_leak_count
             .checked_add(input_redacted_leak_count)
-            .ok_or(CompactionError::LeakDetected)?;
+            .ok_or(CompactionError::LeakRedactionFailed)?;
         self.persist_summary(range, summary)
             .await
             .map(LoopCompactionOutcome::Compacted)
@@ -401,18 +406,19 @@ where
             if !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
             }
-            let (body, message_redacted_leak_count) = self.redact_leaks(body, None)?;
-            if !self.injection_scanner.scan_injection(&body).is_empty() {
+            let redaction = self.redact_leaks(body, None)?;
+            let body = redaction.content.as_deref().unwrap_or(body);
+            if redaction.count > 0 && !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
             }
             redacted_leak_count = redacted_leak_count
-                .checked_add(message_redacted_leak_count)
-                .ok_or(CompactionError::LeakDetected)?;
+                .checked_add(redaction.count)
+                .ok_or(CompactionError::LeakRedactionFailed)?;
             body_ranges.push(append_escaped_message_checked(
                 &mut text,
                 message.sequence,
                 message.kind,
-                &body,
+                body,
                 self.max_input_bytes,
             )?);
         }
@@ -423,20 +429,22 @@ where
         if !self.injection_scanner.scan_injection(&text).is_empty() {
             return Err(CompactionError::InjectionDetected);
         }
-        let (text, serialized_redacted_leak_count) =
-            self.redact_leaks(&text, Some(&body_ranges))?;
-        if text.len() > self.max_input_bytes {
-            return Err(CompactionError::InputTooLarge {
-                cap: self.max_input_bytes,
-                observed_bytes: text.len(),
-            });
-        }
-        if !self.injection_scanner.scan_injection(&text).is_empty() {
-            return Err(CompactionError::InjectionDetected);
+        let serialized_redaction = self.redact_leaks(&text, Some(&body_ranges))?;
+        if let Some(redacted) = serialized_redaction.content {
+            text = redacted;
+            if text.len() > self.max_input_bytes {
+                return Err(CompactionError::InputTooLarge {
+                    cap: self.max_input_bytes,
+                    observed_bytes: text.len(),
+                });
+            }
+            if !self.injection_scanner.scan_injection(&text).is_empty() {
+                return Err(CompactionError::InjectionDetected);
+            }
         }
         redacted_leak_count = redacted_leak_count
-            .checked_add(serialized_redacted_leak_count)
-            .ok_or(CompactionError::LeakDetected)?;
+            .checked_add(serialized_redaction.count)
+            .ok_or(CompactionError::LeakRedactionFailed)?;
         Ok(CompactionInput {
             text,
             redacted_leak_count,
@@ -478,23 +486,28 @@ where
         {
             return Err(CompactionError::InjectionDetected);
         }
-        let (output_text, redacted_leak_count) = self.redact_leaks(&response.output_text, None)?;
-        if !self
-            .injection_scanner
-            .scan_injection(&output_text)
-            .is_empty()
+        let redaction = self.redact_leaks(&response.output_text, None)?;
+        let output_text = redaction
+            .content
+            .as_deref()
+            .unwrap_or(&response.output_text);
+        if redaction.count > 0
+            && !self
+                .injection_scanner
+                .scan_injection(output_text)
+                .is_empty()
         {
             return Err(CompactionError::InjectionDetected);
         }
         let content = format!(
             "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
-            escape_xml(&output_text)
+            escape_xml(output_text)
         );
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, content.len());
         Ok(SanitizedSummary {
             content,
             compression_ratio_ppm,
-            redacted_leak_count,
+            redacted_leak_count: redaction.count,
         })
     }
 
@@ -502,14 +515,17 @@ where
         &self,
         content: &str,
         allowed_ranges: Option<&[Range<usize>]>,
-    ) -> Result<(String, u32), CompactionError> {
+    ) -> Result<LeakRedaction, CompactionError> {
         // Compaction is a retention boundary, so every declared action
         // (Block, Redact, or Warn) becomes deterministic value redaction.
         // Observability is the aggregate count returned to the loop; match
         // names, previews, ranges, and values never leave this method.
         let scan = self.leak_detector.scan_leaks(content);
         if scan.is_clean() {
-            return Ok((content.to_string(), 0));
+            return Ok(LeakRedaction {
+                content: None,
+                count: 0,
+            });
         }
         if let Some(allowed_ranges) = allowed_ranges
             && scan.matches.iter().any(|leak_match| {
@@ -519,18 +535,29 @@ where
                 })
             })
         {
-            return Err(CompactionError::LeakDetected);
+            return Err(CompactionError::LeakRedactionFailed);
         }
-        let redacted_leak_count =
-            u32::try_from(scan.matches.len()).map_err(|_| CompactionError::LeakDetected)?;
+        let redacted_leak_count = u32::try_from(scan.matches.len()).map_err(|error| {
+            tracing::error!(%error, "compaction leak match count exceeded telemetry bound");
+            CompactionError::LeakRedactionFailed
+        })?;
         let redacted = scan
             .redact_all_matches(content)
-            .map_err(|_| CompactionError::LeakDetected)?
-            .ok_or(CompactionError::LeakDetected)?;
+            .map_err(|error| {
+                tracing::error!(%error, "compaction leak scanner returned an invalid range");
+                CompactionError::LeakRedactionFailed
+            })?
+            .ok_or_else(|| {
+                tracing::error!("non-clean compaction leak scan produced no redacted content");
+                CompactionError::LeakRedactionFailed
+            })?;
         if !self.leak_detector.scan_leaks(&redacted).is_clean() {
-            return Err(CompactionError::LeakDetected);
+            return Err(CompactionError::LeakRedactionFailed);
         }
-        Ok((redacted, redacted_leak_count))
+        Ok(LeakRedaction {
+            content: Some(redacted),
+            count: redacted_leak_count,
+        })
     }
 
     async fn persist_summary(
@@ -833,7 +860,7 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
         CompactionError::InjectionDetected => LoopCompactionError::SecurityRejected {
             safe_summary: safe("injection detected"),
         },
-        CompactionError::LeakDetected => LoopCompactionError::SecurityRejected {
+        CompactionError::LeakRedactionFailed => LoopCompactionError::SecurityRejected {
             safe_summary: safe("leak detected"),
         },
         CompactionError::InferenceFailed { safe_summary } => {

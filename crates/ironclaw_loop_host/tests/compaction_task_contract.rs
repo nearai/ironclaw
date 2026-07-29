@@ -101,39 +101,41 @@ async fn compaction_port_uses_configured_prompt_id_for_inference_identity() {
 
 #[tokio::test]
 async fn compaction_port_redacts_leaked_inference_output_before_persistence() {
-    let fixture = CompactionFixture::new().await;
-    fixture.append_user("summarize me").await;
+    for action in [LeakAction::Redact, LeakAction::Warn, LeakAction::Block] {
+        let fixture = CompactionFixture::new_with_thread(&format!("output-{action}")).await;
+        fixture.append_user("summarize me").await;
 
-    let port = fixture.port(
-        "summary SECRET_TOKEN retained context",
-        Arc::new(CleanInjectionScanner),
-        Arc::new(ActionTokenLeakScanner::new(LeakAction::Block)),
-    );
+        let port = fixture.port(
+            "summary SECRET_TOKEN retained context",
+            Arc::new(CleanInjectionScanner),
+            Arc::new(ActionTokenLeakScanner::new(action)),
+        );
 
-    let outcome = port
-        .compact_loop_context(fixture.request(1))
-        .await
-        .expect("leak scanner should redact inference output");
-    let LoopCompactionOutcome::Compacted(response) = outcome else {
-        panic!("expected compacted outcome")
-    };
-    assert_eq!(response.redacted_leak_count, 1);
+        let outcome = port
+            .compact_loop_context(fixture.request(1))
+            .await
+            .expect("every leak action should redact inference output");
+        let LoopCompactionOutcome::Compacted(response) = outcome else {
+            panic!("expected compacted outcome")
+        };
+        assert_eq!(response.redacted_leak_count, 1);
 
-    let history = fixture
-        .threads
-        .list_thread_history(ThreadHistoryRequest {
-            scope: fixture.scope.clone(),
-            thread_id: fixture.thread_id.clone(),
-        })
-        .await
-        .unwrap();
-    let summary = history.summary_artifacts.first().expect("summary exists");
-    assert!(
-        summary
-            .content
-            .contains("summary [REDACTED] retained context")
-    );
-    assert!(!summary.content.contains("SECRET_TOKEN"));
+        let history = fixture
+            .threads
+            .list_thread_history(ThreadHistoryRequest {
+                scope: fixture.scope.clone(),
+                thread_id: fixture.thread_id.clone(),
+            })
+            .await
+            .unwrap();
+        let summary = history.summary_artifacts.first().expect("summary exists");
+        assert!(
+            summary
+                .content
+                .contains("summary [REDACTED] retained context")
+        );
+        assert!(!summary.content.contains("SECRET_TOKEN"));
+    }
 }
 
 #[tokio::test]
@@ -171,6 +173,117 @@ async fn compaction_port_redacts_registry_secret_output_before_persistence() {
 }
 
 #[tokio::test]
+async fn compaction_port_redacts_complete_private_keys_on_input_and_output() {
+    let fixture = CompactionFixture::new().await;
+    fixture
+        .append_user(concat!(
+            "input before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "INPUT_PRIVATE_KEY_MATERIAL\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "input after"
+        ))
+        .await;
+    let inference = Arc::new(CapturingInference::new(concat!(
+        "output before\n",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        "OUTPUT_PRIVATE_KEY_MATERIAL\n",
+        "-----END OPENSSH PRIVATE KEY-----\n",
+        "output after"
+    )));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("complete private-key blocks should be safely redacted");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+    assert_eq!(response.redacted_leak_count, 2);
+    let input = inference.last_input();
+    assert!(input.contains("input before\n[REDACTED]\ninput after"));
+    assert!(!input.contains("INPUT_PRIVATE_KEY_MATERIAL"));
+
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let summary = history.summary_artifacts.first().expect("summary exists");
+    assert!(
+        summary
+            .content
+            .contains("output before\n[REDACTED]\noutput after")
+    );
+    assert!(!summary.content.contains("OUTPUT_PRIVATE_KEY_MATERIAL"));
+}
+
+#[tokio::test]
+async fn compaction_port_does_not_truncate_private_key_redaction_at_mismatched_end_labels() {
+    let fixture = CompactionFixture::new().await;
+    fixture
+        .append_user(concat!(
+            "input before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "INPUT_PRIVATE_KEY_FRAGMENT\n",
+            "-----END PRIVATE KEY-----\n",
+            "INPUT_TRAILING_PRIVATE_KEY_FRAGMENT"
+        ))
+        .await;
+    let inference = Arc::new(CapturingInference::new(concat!(
+        "output before\n",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        "OUTPUT_PRIVATE_KEY_FRAGMENT\n",
+        "-----END EC PRIVATE KEY-----\n",
+        "OUTPUT_TRAILING_PRIVATE_KEY_FRAGMENT"
+    )));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("mismatched end labels must over-redact safely");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+
+    assert_eq!(response.redacted_leak_count, 2);
+    let input = inference.last_input();
+    assert!(input.contains("input before\n[REDACTED]"));
+    assert!(!input.contains("INPUT_TRAILING_PRIVATE_KEY_FRAGMENT"));
+
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let summary = history.summary_artifacts.first().expect("summary exists");
+    assert!(summary.content.contains("output before\n[REDACTED]"));
+    assert!(
+        !summary
+            .content
+            .contains("OUTPUT_TRAILING_PRIVATE_KEY_FRAGMENT")
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_redacts_all_leak_actions_before_inference() {
     for action in [LeakAction::Redact, LeakAction::Warn, LeakAction::Block] {
         let fixture = CompactionFixture::new_with_thread(&action.to_string()).await;
@@ -198,6 +311,98 @@ async fn compaction_port_redacts_all_leak_actions_before_inference() {
         assert!(input.contains("retain prefix [REDACTED] retain suffix"));
         assert!(!input.contains("SECRET_TOKEN"));
     }
+}
+
+#[tokio::test]
+async fn compaction_port_adds_input_and_output_redaction_counts() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("input SECRET_TOKEN retained").await;
+    let inference = Arc::new(CapturingInference::new("output SECRET_TOKEN retained"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(ActionTokenLeakScanner::new(LeakAction::Redact)),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("input and output leaks should both redact");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+    assert_eq!(response.redacted_leak_count, 2);
+    assert!(!inference.last_input().contains("SECRET_TOKEN"));
+
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .summary_artifacts
+            .iter()
+            .all(|summary| !summary.content.contains("SECRET_TOKEN"))
+    );
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_injection_introduced_by_input_redaction() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("input SECRET_TOKEN retained").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(RedactionMarkerInjectionScanner),
+        Arc::new(ActionTokenLeakScanner::new(LeakAction::Redact)),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("unsafe transformed input must fail before inference");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_injection_introduced_by_output_redaction() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("summarize me").await;
+    let port = fixture.port(
+        "output SECRET_TOKEN retained",
+        Arc::new(RedactionMarkerInjectionScanner),
+        Arc::new(ActionTokenLeakScanner::new(LeakAction::Redact)),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("unsafe transformed output must fail before persistence");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
 }
 
 #[tokio::test]
@@ -263,6 +468,54 @@ async fn compaction_port_rejects_serialized_cross_boundary_matches() {
         inference.last_input().is_empty(),
         "cross-boundary serialized content must not reach inference"
     );
+}
+
+#[tokio::test]
+async fn compaction_port_redacts_serialized_in_body_matches_without_crossing_boundaries() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("safe & safe").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(SerializedEntityLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("serialized in-body matches should redact safely");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+
+    assert_eq!(response.redacted_leak_count, 1);
+    let input = inference.last_input();
+    assert!(input.contains("<message sequence=\"1\" kind=\"user\">"));
+    assert!(input.contains("safe [REDACTED] safe"));
+    assert!(input.contains("</message>"));
+}
+
+#[tokio::test]
+async fn compaction_port_rejects_serialized_redaction_expansion_over_byte_cap() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user(&"&".repeat(50_000)).await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(ExpandingSerializedEntityLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("serialized redaction expansion must preserve the byte cap");
+
+    assert!(matches!(error, LoopCompactionError::InputTooLarge));
+    assert!(inference.last_input().is_empty());
 }
 
 #[tokio::test]
@@ -1268,6 +1521,23 @@ impl InjectionScanner for ChatMlInjectionScanner {
     }
 }
 
+struct RedactionMarkerInjectionScanner;
+
+impl InjectionScanner for RedactionMarkerInjectionScanner {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning> {
+        if content.contains("[REDACTED]") {
+            vec![InjectionWarning {
+                pattern: "redaction_marker".to_string(),
+                severity: Severity::High,
+                location: 0..content.len(),
+                description: "test transformed injection".to_string(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 struct CleanLeakScanner;
 
 impl LeakScanner for CleanLeakScanner {
@@ -1369,6 +1639,62 @@ impl LeakScanner for CrossBoundaryLeakScanner {
         }
         LeakScanResult {
             matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
+struct SerializedEntityLeakScanner;
+
+impl LeakScanner for SerializedEntityLeakScanner {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        if content.starts_with("<message")
+            && let Some(start) = content.find("&amp;")
+        {
+            return LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "serialized_entity".to_string(),
+                    severity: LeakSeverity::High,
+                    action: LeakAction::Warn,
+                    location: start..start + "&amp;".len(),
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: false,
+                redacted_content: None,
+            };
+        }
+        LeakScanResult {
+            matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
+struct ExpandingSerializedEntityLeakScanner;
+
+impl LeakScanner for ExpandingSerializedEntityLeakScanner {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        if !content.starts_with("<message") {
+            return LeakScanResult {
+                matches: Vec::new(),
+                should_block: false,
+                redacted_content: None,
+            };
+        }
+        let matches = content
+            .match_indices("&amp;")
+            .map(|(start, _)| LeakMatch {
+                pattern_name: "serialized_entity_component".to_string(),
+                severity: LeakSeverity::High,
+                action: LeakAction::Warn,
+                location: start + 1..start + 2,
+                masked_preview: "[masked]".to_string(),
+            })
+            .collect();
+        LeakScanResult {
+            matches,
             should_block: false,
             redacted_content: None,
         }

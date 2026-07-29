@@ -913,6 +913,12 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         Some(1)
     );
     assert_eq!(output.state.compaction_state.last_deferred, None);
+    assert!(
+        !host
+            .progress_event_names()
+            .contains(&"compaction_leak_detected"),
+        "zero redactions must not emit leak telemetry"
+    );
 }
 
 #[tokio::test]
@@ -1417,7 +1423,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
-            redacted_leak_count: 0,
+            redacted_leak_count: 1,
         }))
         .cancel_after_compaction_success();
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
@@ -1450,6 +1456,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
         vec![
             "prompt_bundle_built",
             "compaction_started",
+            "compaction_leak_detected",
             "checkpoint_written",
         ]
     );

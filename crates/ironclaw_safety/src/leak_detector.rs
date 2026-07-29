@@ -243,13 +243,17 @@ impl LeakDetector {
                     continue;
                 }
                 let location = mat.start()..mat.end();
+                let masked_preview = match pattern.name.as_str() {
+                    "pem_private_key" | "ssh_private_key" => "[PRIVATE_KEY]".to_string(),
+                    _ => mask_secret(matched_text),
+                };
 
                 let leak_match = LeakMatch {
                     pattern_name: pattern.name.clone(),
                     severity: pattern.severity,
                     action: pattern.action,
                     location: location.clone(),
-                    masked_preview: mask_secret(matched_text),
+                    masked_preview,
                 };
 
                 if pattern.action == LeakAction::Block {
@@ -611,14 +615,24 @@ fn default_patterns() -> Vec<LeakPattern> {
         // PEM private keys
         LeakPattern {
             name: "pem_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----").unwrap(), // safety: hardcoded literal
+            // Match the complete block so value-redaction consumers cannot
+            // remove only the BEGIN sentinel while retaining key material.
+            // A missing END sentinel consumes the bounded remainder of the
+            // scanned content, which deliberately over-redacts fail-safe.
+            regex: Regex::new(
+                r"(?s)(?:-----BEGIN\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|-----BEGIN\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$))",
+            )
+            .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // SSH private keys
         LeakPattern {
             name: "ssh_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:OPENSSH|EC|DSA)\s+PRIVATE\s+KEY-----").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(
+                r"(?s)(?:-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|-----BEGIN\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|-----BEGIN\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$))",
+            )
+            .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
@@ -750,8 +764,8 @@ fn default_patterns() -> Vec<LeakPattern> {
 #[cfg(test)]
 mod tests {
     use crate::leak_detector::{
-        LeakAction, LeakDetector, LeakMatch, LeakRedactionError, LeakScanResult, LeakSeverity,
-        MAX_BARE_JWT_CANDIDATE_LEN,
+        LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakRedactionError,
+        LeakScanResult, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN,
     };
 
     #[test]
@@ -813,6 +827,82 @@ mod tests {
                 .iter()
                 .any(|m| m.pattern_name == "pem_private_key")
         );
+    }
+
+    #[test]
+    fn private_key_redaction_removes_the_complete_bounded_block() {
+        let detector = LeakDetector::new();
+        let content = concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "TEST_PRIVATE_KEY_MATERIAL\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "after"
+        );
+
+        let scan = detector.scan(content);
+        let redacted = scan
+            .redact_all_matches(content)
+            .expect("valid detector ranges")
+            .expect("private key should be redacted");
+
+        assert_eq!(redacted, "before\n[REDACTED]\nafter");
+        assert!(!redacted.contains("TEST_PRIVATE_KEY_MATERIAL"));
+    }
+
+    #[test]
+    fn unterminated_private_key_redaction_consumes_the_bounded_remainder() {
+        let detector = LeakDetector::new();
+        let content = concat!(
+            "before\n",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            "TEST_PRIVATE_KEY_MATERIAL"
+        );
+
+        let scan = detector.scan(content);
+        let redacted = scan
+            .redact_all_matches(content)
+            .expect("valid detector ranges")
+            .expect("private key should be redacted");
+
+        assert_eq!(redacted, "before\n[REDACTED]");
+    }
+
+    #[test]
+    fn mismatched_private_key_end_label_does_not_truncate_redaction() {
+        let detector = LeakDetector::new();
+        let content = concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "FIRST_PRIVATE_KEY_FRAGMENT\n",
+            "-----END PRIVATE KEY-----\n",
+            "TRAILING_PRIVATE_KEY_FRAGMENT"
+        );
+
+        let scan = detector.scan(content);
+        let redacted = scan
+            .redact_all_matches(content)
+            .expect("valid detector ranges")
+            .expect("private key should be redacted");
+
+        assert_eq!(redacted, "before\n[REDACTED]");
+        assert!(!redacted.contains("TRAILING_PRIVATE_KEY_FRAGMENT"));
+    }
+
+    #[test]
+    fn unterminated_private_key_error_preview_is_constant() {
+        let detector = LeakDetector::new();
+        let private_material = "TEST_PRIVATE_KEY_SUFFIX";
+        let content = format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{private_material}");
+
+        let error = detector
+            .scan_and_clean(&content)
+            .expect_err("private keys should remain blocked outside retention boundaries");
+        let LeakDetectionError::SecretLeakBlocked { preview, .. } = &error;
+
+        assert_eq!(preview, "[PRIVATE_KEY]");
+        assert!(!preview.contains(private_material));
+        assert!(!error.to_string().contains("FFIX"));
     }
 
     #[test]
