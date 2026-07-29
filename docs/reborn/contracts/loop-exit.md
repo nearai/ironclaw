@@ -33,6 +33,15 @@ For rolling compatibility, `LoopFailed` still accepts and ignores the retired
 serializes it. Older readers treated that field as optional, so exits written
 without it remain readable during rollback; no store migration is required.
 
+`crates/ironclaw_turns/src/loop_exit/tests/mod.rs` test
+`loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it`
+owns this rolling-compatibility assertion, including both the historical string
+and `null` forms. Run:
+
+```bash
+cargo test -p ironclaw_turns --lib loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
+```
+
 ---
 
 ## 3. Exit variants

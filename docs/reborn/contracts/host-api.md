@@ -137,6 +137,25 @@ inline diagnostic. Both the host-api verdict and the loop's reconstructed
 omit it deserialize to the explicit unavailable-detail sentence and write the
 field on their next serialization.
 
+Owning regression coverage:
+
+- `crates/ironclaw_host_api/src/resolution.rs` test
+  `resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic`
+  pins the structurally required inline diagnostic and the legacy host-api
+  verdict fallback. Run:
+
+  ```bash
+  cargo test -p ironclaw_host_api --lib resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
+  ```
+
+- `crates/ironclaw_turns/src/run_profile/host/capability.rs` test
+  `run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback`
+  pins the reconstructed loop failure fallback and next-write upgrade. Run:
+
+  ```bash
+  cargo test -p ironclaw_turns --lib run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  ```
+
 The diagnostic value is bounded to 4096 bytes, rejects empty text, disallowed
 control characters, and known credential-token shapes, and revalidates on
 deserialize. It intentionally allows paths, URLs, payload delimiters, and

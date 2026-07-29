@@ -37,6 +37,13 @@ run_architecture() {
   # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
   # routes from re-entering the Reborn context.
   run_test ironclaw_architecture telegram_extension_gates
+  # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
+  # an inline model diagnostic, and legacy omissions upgrade explicitly.
+  run_lib_test ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
+  run_lib_test ironclaw_turns run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
+  # payloads remain readable but the retired field is never written again.
+  run_lib_test ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
@@ -72,6 +79,9 @@ run_runtimes() {
   run_test ironclaw_scripts script_runner_contract
   run_test ironclaw_mcp mcp_adapter_contract
   run_test ironclaw_mcp mcp_dispatch_integration
+  # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
+  # turn: the scrubbed, bounded MCP cause reaches the next model request.
+  run_test ironclaw_reborn_integration_tests reborn_integration_mcp
   run_test ironclaw_processes process_dispatch_integration
   run_test ironclaw_processes process_host_contract
   run_test ironclaw_processes process_services_contract
