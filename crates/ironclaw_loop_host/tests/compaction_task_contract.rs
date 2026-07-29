@@ -510,6 +510,58 @@ async fn compaction_port_rejects_serialized_cross_boundary_matches() {
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_private_keys_split_across_message_boundaries() {
+    let fixture = CompactionFixture::new().await;
+    fixture
+        .append_user(concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "FIRST_PRIVATE_KEY_FRAGMENT"
+        ))
+        .await;
+    fixture
+        .append_user(concat!(
+            "TRAILING_PRIVATE_KEY_FRAGMENT\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "after"
+        ))
+        .await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect_err("private keys spanning messages must fail closed");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(
+        inference.last_input().is_empty(),
+        "split private-key material must not reach inference"
+    );
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.summary_artifacts.is_empty(),
+        "split private-key material must not be persisted"
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_redacts_serialized_in_body_matches_without_crossing_boundaries() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("safe & safe").await;

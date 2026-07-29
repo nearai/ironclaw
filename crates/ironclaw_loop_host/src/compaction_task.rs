@@ -398,13 +398,21 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
+        for message in &range.messages {
+            if !self
+                .injection_scanner
+                .scan_injection(&message.body)
+                .is_empty()
+            {
+                return Err(CompactionError::InjectionDetected);
+            }
+        }
+        self.validate_unredacted_message_boundaries(range)?;
+
         let mut text = String::new();
         let mut redacted_leak_count = 0_u32;
         for message in &range.messages {
             let body = message.body.as_str();
-            if !self.injection_scanner.scan_injection(body).is_empty() {
-                return Err(CompactionError::InjectionDetected);
-            }
             let redaction = self.redact_leaks(body)?;
             let body = redaction.content.as_deref().unwrap_or(body);
             if redaction.count > 0 && !self.injection_scanner.scan_injection(body).is_empty() {
@@ -444,6 +452,46 @@ where
             text,
             redacted_leak_count,
         })
+    }
+
+    fn validate_unredacted_message_boundaries(
+        &self,
+        range: &ValidatedCompactionRange,
+    ) -> Result<(), CompactionError> {
+        let mut text = String::new();
+        let mut body_ranges = Vec::with_capacity(range.messages.len());
+        for message in &range.messages {
+            if !text.is_empty() {
+                push_checked(&mut text, "\n", self.max_input_bytes)?;
+            }
+            let escaped_body = escape_xml_checked(&message.body, self.max_input_bytes)?;
+            let body_start = text.len();
+            push_checked(&mut text, &escaped_body, self.max_input_bytes)?;
+            body_ranges.push(body_start..text.len());
+        }
+
+        if !self.injection_scanner.scan_injection(&text).is_empty() {
+            return Err(CompactionError::InjectionDetected);
+        }
+        let scan = self.leak_detector.scan_leaks(&text);
+        for leak_match in &scan.matches {
+            let location = &leak_match.location;
+            if location.start >= location.end
+                || location.end > text.len()
+                || !text.is_char_boundary(location.start)
+                || !text.is_char_boundary(location.end)
+            {
+                return Err(CompactionError::LeakRedactionFailed);
+            }
+            let candidate = body_ranges.partition_point(|body| body.end <= location.start);
+            let contained = body_ranges
+                .get(candidate)
+                .is_some_and(|body| body.start <= location.start && location.end <= body.end);
+            if !contained {
+                return Err(CompactionError::LeakRedactionFailed);
+            }
+        }
+        Ok(())
     }
 
     async fn run_inference(
