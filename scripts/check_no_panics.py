@@ -549,6 +549,7 @@ def run_cargo_metadata() -> dict:
             "--format-version",
             "1",
             "--all-features",
+            "--locked",
         ],
         cwd=REPO_ROOT,
         check=True,
@@ -662,6 +663,11 @@ def module_edges(
                         )
                     )
                     break
+            else:
+                raise RuntimeError(
+                    f"{scan.path}: could not resolve `mod {module.group(1)};`; "
+                    f"tried {[str(candidate) for candidate in candidates]}"
+                )
             pending_path = None
             pending_path_directory = None
             continue
@@ -770,9 +776,6 @@ def scan_violations(
             continue
         if scan.test_contexts[line_index]:
             continue
-        comment = scan.line_comments[line_index]
-        if comment is not None and SAFETY_RATIONALE_PATTERN.search(comment):
-            continue
         for match in PANIC_PATTERN.finditer(code):
             first_code_column = len(scan.lines[line_index]) - len(
                 scan.lines[line_index].lstrip()
@@ -783,6 +786,12 @@ def scan_violations(
                 first_code_column,
                 match.end(),
             )
+            span_end = line_index + invocation.count("\n")
+            if any(
+                comment is not None and SAFETY_RATIONALE_PATTERN.search(comment)
+                for comment in scan.line_comments[line_index : span_end + 1]
+            ):
+                continue
             fingerprint = violation_fingerprint(
                 path,
                 scan.item_contexts[line_index],
@@ -816,7 +825,7 @@ def load_reborn_baseline(
                 f"{path}:{line_no}: expected non-empty "
                 "path<TAB>fingerprint<TAB>reason"
             )
-        approved[(fields[0], fields[1])] += 1
+        approved[(fields[0], normalized_source_line(fields[1]))] += 1
     return approved
 
 
@@ -1177,6 +1186,20 @@ class CheckNoPanicsTests(unittest.TestCase):
             self.assertEqual(len(violations), 1)
             self.assertIn('panic!("caught")', violations[0][2])
 
+    def test_multiline_safety_rationale_on_closing_line_suppresses(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            source = pathlib.Path(directory) / "lib.rs"
+            source.write_text(
+                "fn invariant() {\n"
+                "    value.expect(\n"
+                '        "validated invariant",\n'
+                "    ); // safety: construction validates the invariant\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(collect_file_violations({source}), [])
+
     def test_nested_inline_module_resolves_out_of_line_children(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1199,6 +1222,28 @@ class CheckNoPanicsTests(unittest.TestCase):
             )
 
             self.assertIn((nested_root / "nested.rs").resolve(), production)
+
+    def test_unresolved_default_module_edge_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "lib.rs"
+            source.write_text("mod missing;\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, r"mod missing;"):
+                discover_reachable_rust_files([source])
+
+    def test_unresolved_nested_path_module_edge_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "lib.rs"
+            source.write_text(
+                "mod outer {\n"
+                '    #[path = "missing.rs"]\n'
+                "    mod missing;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, r"outer/missing.rs"):
+                discover_reachable_rust_files([source])
 
     def test_out_of_line_test_modules_are_excluded_transitively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1246,6 +1291,38 @@ class CheckNoPanicsTests(unittest.TestCase):
             self.assertIn((source_root / "tests_out.rs").resolve(), tests)
             self.assertIn((source_root / "nested_fixture.rs").resolve(), tests)
 
+    def test_production_reachability_reclassifies_transitive_children(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_root = pathlib.Path(directory)
+            (source_root / "lib.rs").write_text(
+                '#[path = "shared.rs"]\n'
+                "mod production_shared;\n"
+                "#[cfg(test)]\n"
+                '#[path = "shared.rs"]\n'
+                "mod test_shared;\n",
+                encoding="utf-8",
+            )
+            (source_root / "shared.rs").write_text(
+                "mod child;\n",
+                encoding="utf-8",
+            )
+            (source_root / "shared" / "child.rs").parent.mkdir()
+            (source_root / "shared" / "child.rs").write_text(
+                "pub fn reachable() {}\n",
+                encoding="utf-8",
+            )
+
+            production, tests = discover_reachable_rust_files(
+                [source_root / "lib.rs"]
+            )
+
+            shared = (source_root / "shared.rs").resolve()
+            child = (source_root / "shared" / "child.rs").resolve()
+            self.assertIn(shared, production)
+            self.assertIn(child, production)
+            self.assertNotIn(shared, tests)
+            self.assertNotIn(child, tests)
+
     def test_baseline_comparison_rejects_new_and_stale_entries(self) -> None:
         fingerprint = 'fn invariant :: unreachable!("static invariant")'
         approved = collections.Counter(
@@ -1277,6 +1354,31 @@ class CheckNoPanicsTests(unittest.TestCase):
         new, stale = compare_reborn_baseline(changed, approved)
         self.assertEqual(new, changed)
         self.assertEqual(stale, approved)
+
+    def test_baseline_loader_normalizes_and_counts_duplicate_fingerprints(self) -> None:
+        path = "crates/example/src/lib.rs"
+        normalized = 'fn invariant :: panic!("static invariant")'
+        record = (
+            f"{path}\t  fn   invariant ::   panic!(\"static invariant\")  "
+            "\treviewed invariant\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / "baseline.txt"
+            baseline.write_text(record + record, encoding="utf-8")
+
+            approved = load_reborn_baseline(baseline)
+
+        self.assertEqual(approved[(path, normalized)], 2)
+        violations = [
+            (path, 10, normalized),
+            (path, 20, normalized),
+        ]
+        new, stale = compare_reborn_baseline(violations, approved)
+        self.assertEqual(new, [])
+        self.assertEqual(stale, collections.Counter())
+
+        _new, stale = compare_reborn_baseline(violations[:1], approved)
+        self.assertEqual(stale[(path, normalized)], 1)
 
     def test_multiline_fingerprint_uses_complete_call_and_item_context(self) -> None:
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
