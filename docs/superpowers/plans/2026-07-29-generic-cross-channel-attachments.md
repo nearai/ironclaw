@@ -133,16 +133,16 @@ Validation and document extraction happen before the atomic write. A later valid
 
 ### Steps
 
-- [ ] Replace `later_item_failure_fails_the_batch_and_leaves_earlier_bytes_landed` with a red contract asserting the earlier file is also absent.
-- [ ] Add tests for same-name files, duplicate message delivery, empty filenames, path sanitization, maximum count, per-file limit, aggregate limit, and deterministic ordered refs.
-- [ ] Run `cargo test -p ironclaw_attachments inbound::tests` and confirm the atomicity test fails against sequential writes.
-- [ ] Change `land_inbound_attachments` to validate and prepare every `AtomicSubtreeEntry` in memory, then call one scoped atomic subtree operation.
-- [ ] Return `AttachmentRef`s only after the batch commit succeeds.
-- [ ] Add compensation in inbound product orchestration: if thread/message acceptance fails after landing, delete only the newly created message batch prefix and preserve unrelated batches.
-- [ ] Add a bounded stale-batch cleanup pass that deletes only old message directories which have no durable thread attachment reference; make cleanup best-effort and observable, never a prerequisite for message admission.
-- [ ] Change production `start_channel_host_assembly` wiring to give `ProjectScopedAttachmentLander` a read-write project workspace mount while keeping the reader and agent-visible read surfaces at their existing permissions.
-- [ ] Add a production-assembly regression test that lands through `start_channel_host_assembly`, not the test-only read-write shortcut.
-- [ ] Run:
+- [x] Replace `later_item_failure_fails_the_batch_and_leaves_earlier_bytes_landed` with a red contract asserting the earlier file is also absent.
+- [x] Add tests for same-name files, duplicate message delivery, empty filenames, path sanitization, maximum count, per-file limit, aggregate limit, and deterministic ordered refs.
+- [x] Run `cargo test -p ironclaw_attachments inbound::tests` and confirm the atomicity test fails against sequential writes.
+- [x] Change `land_inbound_attachments` to validate and prepare every `AtomicSubtreeEntry` in memory, then call one scoped atomic subtree operation.
+- [x] Return `AttachmentRef`s only after the batch commit succeeds.
+- [x] Add compensation in inbound product orchestration: if thread/message acceptance fails after landing, delete only the newly created message batch prefix and preserve unrelated batches.
+- [x] Add a bounded stale-batch cleanup pass that deletes only old message directories which have no durable thread attachment reference; make cleanup best-effort and observable, never a prerequisite for message admission.
+- [x] Change production `start_channel_host_assembly` wiring to give `ProjectScopedAttachmentLander` a read-write project workspace mount while keeping the reader and agent-visible read surfaces at their existing permissions.
+- [x] Add a production-assembly regression test that lands through `start_channel_host_assembly`, not the test-only read-write shortcut.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_attachments
@@ -150,8 +150,8 @@ cargo test -p ironclaw_product inbound_turn --all-features
 cargo test -p ironclaw_reborn_composition attachment --all-features
 ```
 
-- [ ] Run targeted clippy for the three changed crates.
-- [ ] Commit:
+- [x] Run targeted clippy for the three changed crates.
+- [x] Commit:
 
 ```bash
 git add crates/ironclaw_attachments crates/ironclaw_product crates/ironclaw_reborn_composition

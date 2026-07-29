@@ -172,7 +172,9 @@ pub(super) fn operation_allowed(
 ) -> bool {
     match operation {
         FilesystemOperation::ReadFile => permissions.read,
-        FilesystemOperation::WriteFile | FilesystemOperation::AppendFile => permissions.write,
+        FilesystemOperation::WriteFile
+        | FilesystemOperation::AppendFile
+        | FilesystemOperation::CreateSubtreeAtomic => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,

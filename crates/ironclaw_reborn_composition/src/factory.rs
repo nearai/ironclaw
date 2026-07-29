@@ -1206,6 +1206,21 @@ pub(crate) struct ChannelHostAssemblyWiring {
 }
 
 impl RebornRuntimeStores {
+    /// Build the project-scoped workspace view used by host-owned attachment
+    /// landing. The long-lived `workspace_filesystem` handle is intentionally
+    /// read-only; inbound bytes need a separately composed, workspace-only
+    /// mount with write and rollback-delete authority. Raw workspace and host
+    /// aliases are deliberately excluded.
+    fn read_write_workspace_filesystem(
+        &self,
+    ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
+        let mounts = workspace_mount_view(MountPermissions::read_write_list_delete(), &[]).ok()?;
+        Some(Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::clone(&self.extension_filesystem),
+            mounts,
+        )))
+    }
+
     /// Start the generic channel host assembly (extension-runtime P6 S2):
     /// the per-extension inbound-channel reconcile loop over deployment
     /// bindings and the generic host's active compatibility snapshot. `None`
@@ -1263,7 +1278,7 @@ impl RebornRuntimeStores {
             }
         });
         let inbound_attachments = Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
-            workspace_filesystem,
+            self.read_write_workspace_filesystem()?,
         ));
 
         let identity_lookup = Some(Arc::clone(&self.channel_identity_store)

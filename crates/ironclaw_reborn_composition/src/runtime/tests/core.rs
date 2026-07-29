@@ -5182,6 +5182,64 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+#[tokio::test]
+async fn production_channel_host_lands_attachment_with_read_write_mount() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "channel attachment mount ok".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-channel-attachment-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-channel-attachment-tenant".to_string(),
+        agent_id: "runtime-channel-attachment-agent".to_string(),
+        source_binding_id: "runtime-channel-attachment-source".to_string(),
+        reply_target_binding_id: "runtime-channel-attachment-reply".to_string(),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let assembly = runtime
+        ._channel_host_assembly
+        .as_ref()
+        .expect("local-dev runtime composes the production channel host");
+    let lander = assembly.inbound_attachment_lander_for_test();
+    let thread_scope = ThreadScope {
+        tenant_id: TenantId::new("runtime-channel-attachment-tenant").unwrap(),
+        agent_id: AgentId::new("runtime-channel-attachment-agent").unwrap(),
+        project_id: None,
+        owner_user_id: Some(UserId::new("runtime-channel-attachment-owner").unwrap()),
+        mission_id: None,
+    };
+
+    let refs = lander
+        .land(
+            &thread_scope,
+            "msg-channel-attachment-mount",
+            vec![ironclaw_host_api::InboundAttachment {
+                id: "att-0".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: Some("channel-mount-check.png".to_string()),
+                bytes: b"channel-attachment-mount-bytes".to_vec(),
+            }],
+        )
+        .await
+        .expect("production channel-host attachment lander has write authority");
+
+    assert_eq!(refs.len(), 1);
+    lander
+        .rollback(&thread_scope, &refs)
+        .await
+        .expect("production channel-host attachment lander has batch rollback authority");
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
 async fn query_webui_extension_setup(
     api: &dyn ironclaw_host_api::ProductSurface,
     caller: ProductSurfaceCaller,

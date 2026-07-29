@@ -9,25 +9,31 @@
 //! provider-backed and handled by a later pipeline stage.
 
 use ironclaw_common::{AttachmentKind, AttachmentRef, canonical_extension, kind_for_mime};
-use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{InboundAttachment, ResourceScope};
+use ironclaw_filesystem::{
+    Entry, FilesystemError, RootFilesystem, ScopedAtomicSubtreeEntry, ScopedFilesystem,
+};
+use ironclaw_host_api::{InboundAttachment, ResourceScope, ScopedPath};
+use sha2::{Digest, Sha256};
 
-use crate::landing::{AttachmentLanding, AttachmentLandingError, land_attachment};
+use crate::budgets::DEFAULT_ATTACHMENT_BUDGETS;
+use crate::landing::{
+    AttachmentLanding, AttachmentLandingError, attachment_batch_scoped_path, attachment_scoped_path,
+};
 
 /// Canonical extension to synthesize a filename with when the MIME type is not
 /// in the attachment format registry.
 const UNKNOWN_EXTENSION: &str = "bin";
+const BATCH_MANIFEST_FILENAME: &str = ".ironclaw-attachment-batch-v1";
 
 /// Land each inbound attachment's bytes under the project mount and return the
 /// transcript references, with `storage_key` set to the landed [`ScopedPath`]
 /// and `size_bytes` set to the landed byte count.
 ///
-/// Writes go through `filesystem`, so a read-only project mount fails closed
-/// (see [`land_attachment`]). Each attachment is bounded by `max_bytes` and an
-/// over-limit one fails the batch with [`AttachmentLandingError::TooLarge`]. On
-/// the first failure the whole batch returns the error; partial writes that may
-/// already have landed are left in place (the filesystem authority makes them
-/// addressable, and a retry re-lands at the same deterministic paths).
+/// Writes go through `filesystem`, so a read-only project mount fails closed.
+/// Each attachment is bounded by `max_bytes` and an over-limit one fails the
+/// batch with [`AttachmentLandingError::TooLarge`]. Validation and document
+/// extraction finish before one atomic subtree creation publishes the complete
+/// message batch; any failure leaves the message prefix absent.
 ///
 /// [`ScopedPath`]: ironclaw_host_api::ScopedPath
 pub async fn land_inbound_attachments<F>(
@@ -42,7 +48,37 @@ pub async fn land_inbound_attachments<F>(
 where
     F: RootFilesystem,
 {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
+        return Err(AttachmentLandingError::TooMany {
+            count: attachments.len(),
+            max: DEFAULT_ATTACHMENT_BUDGETS.max_count,
+        });
+    }
+    let max_bytes = max_bytes.min(DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes);
+    let mut total_bytes = 0usize;
+    for attachment in &attachments {
+        if attachment.bytes.len() > max_bytes {
+            return Err(AttachmentLandingError::TooLarge {
+                size: attachment.bytes.len(),
+                max: max_bytes,
+            });
+        }
+        total_bytes = total_bytes
+            .checked_add(attachment.bytes.len())
+            .unwrap_or(DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes.saturating_add(1));
+        if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
+            return Err(AttachmentLandingError::BatchTooLarge {
+                size: total_bytes,
+                max: DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes,
+            });
+        }
+    }
+    let batch_path = attachment_batch_scoped_path(project_alias, date, message_id)?;
     let mut refs = Vec::with_capacity(attachments.len());
+    let mut entries = Vec::with_capacity(attachments.len().saturating_add(1));
     for (index, attachment) in attachments.into_iter().enumerate() {
         let InboundAttachment {
             id,
@@ -50,16 +86,6 @@ where
             filename,
             bytes,
         } = attachment;
-        // Reject over-limit uploads before the (potentially expensive) document
-        // extraction below. `land_attachment` enforces the same bound as the
-        // canonical gate, but checking here avoids parsing bytes that are about
-        // to be thrown away.
-        if bytes.len() > max_bytes {
-            return Err(AttachmentLandingError::TooLarge {
-                size: bytes.len(),
-                max: max_bytes,
-            });
-        }
         let size_bytes = bytes.len() as u64;
         // Derive kind and fallback extension from the MIME type so a ref's
         // `kind` is always consistent with its `mime_type`.
@@ -81,16 +107,11 @@ where
             filename: filename.as_deref(),
             fallback_extension,
         };
-        let stored = land_attachment(
-            filesystem,
-            scope,
-            project_alias,
-            date,
-            &landing,
-            bytes,
-            max_bytes,
-        )
-        .await?;
+        let stored = attachment_scoped_path(project_alias, date, &landing)?;
+        entries.push(ScopedAtomicSubtreeEntry {
+            path: stored.clone(),
+            entry: Entry::bytes(bytes),
+        });
         refs.push(AttachmentRef {
             id,
             kind,
@@ -101,7 +122,95 @@ where
             extracted_text,
         });
     }
-    Ok(refs)
+    entries.push(ScopedAtomicSubtreeEntry {
+        path: ScopedPath::new(format!(
+            "{}/{}",
+            batch_path.as_str(),
+            BATCH_MANIFEST_FILENAME
+        ))?,
+        entry: Entry::bytes(batch_manifest_digest(&refs)),
+    });
+    match filesystem
+        .create_subtree_atomic(scope, &batch_path, entries.clone())
+        .await
+    {
+        Ok(_) => Ok(refs),
+        Err(conflict @ FilesystemError::VersionMismatch { .. }) => {
+            if existing_batch_matches(filesystem, scope, &batch_path, &entries).await? {
+                Ok(refs)
+            } else {
+                Err(AttachmentLandingError::Write(conflict))
+            }
+        }
+        Err(error) => Err(AttachmentLandingError::Write(error)),
+    }
+}
+
+fn batch_manifest_digest(refs: &[AttachmentRef]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(b"ironclaw.attachment-batch.v1");
+    digest.update((refs.len() as u64).to_be_bytes());
+    for attachment in refs {
+        digest_field(&mut digest, attachment.id.as_bytes());
+        digest.update([match attachment.kind {
+            AttachmentKind::Document => 0,
+            AttachmentKind::Image => 1,
+            AttachmentKind::Audio => 2,
+        }]);
+        digest_field(&mut digest, attachment.mime_type.as_bytes());
+        digest_optional_field(&mut digest, attachment.filename.as_deref());
+        match attachment.size_bytes {
+            Some(size) => {
+                digest.update([1]);
+                digest.update(size.to_be_bytes());
+            }
+            None => digest.update([0]),
+        }
+        digest_optional_field(&mut digest, attachment.storage_key.as_deref());
+        digest_optional_field(&mut digest, attachment.extracted_text.as_deref());
+    }
+    digest.finalize().to_vec()
+}
+
+fn digest_optional_field(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            digest_field(digest, value.as_bytes());
+        }
+        None => digest.update([0]),
+    }
+}
+
+fn digest_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+async fn existing_batch_matches<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    batch_path: &ironclaw_host_api::ScopedPath,
+    expected: &[ScopedAtomicSubtreeEntry],
+) -> Result<bool, FilesystemError>
+where
+    F: RootFilesystem,
+{
+    let children = filesystem
+        .list_dir_bounded(scope, batch_path, expected.len().saturating_add(1))
+        .await?;
+    if children.len() != expected.len() {
+        return Ok(false);
+    }
+    for item in expected {
+        let Some(actual) = filesystem.get(scope, &item.path).await? else {
+            return Ok(false);
+        };
+        if actual.entry != item.entry {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Maximum characters of extracted document *content* retained on a reference
@@ -139,7 +248,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::DEFAULT_MAX_ATTACHMENT_BYTES;
+    use crate::{DEFAULT_ATTACHMENT_BUDGETS, DEFAULT_MAX_ATTACHMENT_BYTES};
     use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
@@ -219,7 +328,7 @@ mod tests {
         assert_eq!(refs[0].size_bytes, Some(doc_bytes.len() as u64));
         assert_eq!(
             refs[0].storage_key.as_deref(),
-            Some("/workspace/attachments/2026-06-09/msg1-1-report.pdf")
+            Some("/workspace/attachments/2026-06-09/msg1/1-report.pdf")
         );
         assert!(refs[0].extracted_text.is_none());
 
@@ -227,7 +336,7 @@ mod tests {
         assert_eq!(refs[1].kind, AttachmentKind::Image);
         assert_eq!(
             refs[1].storage_key.as_deref(),
-            Some("/workspace/attachments/2026-06-09/msg1-2-diagram.png")
+            Some("/workspace/attachments/2026-06-09/msg1/2-diagram.png")
         );
 
         // The bytes are addressable at each ref's storage_key through the same
@@ -317,32 +426,28 @@ mod tests {
             refs[0].storage_key.as_deref(),
             // `png` is derived from `image/png`; `1` is the 1-based attachment
             // index; the synthesized name is `attachment.<ext>`.
-            Some("/workspace/attachments/2026-06-09/msg1-1-attachment.png")
+            Some("/workspace/attachments/2026-06-09/msg1/1-attachment.png")
         );
         assert!(refs[0].filename.is_none());
     }
 
     #[tokio::test]
-    async fn later_item_failure_fails_the_batch_and_leaves_earlier_bytes_landed() {
-        // Documents the batch boundary the rustdoc promises: the first failure
-        // returns Err, and bytes already landed for earlier items are left in
-        // place (dangling — no ref is returned for them).
+    async fn conflicting_message_batch_retry_preserves_the_committed_batch() {
         let backend = Arc::new(InMemoryBackend::new());
         let writer = project_mount(Arc::clone(&backend), MountPermissions::read_write());
         let scope = test_scope();
 
-        // Force att-1's write to fail: seed a child under its computed path so
-        // the backend rejects writing a file where a directory now exists.
-        // att-1 is the 2nd attachment, so its 1-based index segment is `2`.
-        let att1_path = "/workspace/attachments/2026-06-09/msg1-2-b.txt";
-        writer
-            .write_bytes(
-                &scope,
-                &ScopedPath::new(format!("{att1_path}/sentinel")).unwrap(),
-                b"x".to_vec(),
-            )
-            .await
-            .expect("seed a child so att-1's path is a directory");
+        let committed = land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![inbound("att-0", "text/plain", "a.txt", b"committed")],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("initial batch lands");
 
         let err = land_inbound_attachments(
             &writer,
@@ -350,28 +455,70 @@ mod tests {
             DEFAULT_PROJECT_MOUNT_ALIAS,
             "2026-06-09",
             "msg1",
-            vec![
-                inbound("att-0", "text/plain", "a.txt", b"ok"),
-                inbound("att-1", "text/plain", "b.txt", b"boom"),
-            ],
+            vec![inbound(
+                "att-metadata-conflict",
+                "text/plain",
+                "a.txt",
+                b"committed",
+            )],
             DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
-        .expect_err("a later landing failure fails the whole batch");
+        .expect_err("a conflicting retry must fail closed");
         assert!(matches!(err, AttachmentLandingError::Write(_)));
 
-        // att-0 landed before att-1 failed: its bytes remain addressable even
-        // though the batch returned no refs.
         let reader = project_mount(backend, MountPermissions::read_only());
-        let landed = reader
-            .get(
-                &scope,
-                &ScopedPath::new("/workspace/attachments/2026-06-09/msg1-1-a.txt").unwrap(),
-            )
+        let committed_path =
+            ScopedPath::new(committed[0].storage_key.clone().expect("storage key")).unwrap();
+        let stored = reader
+            .get(&scope, &committed_path)
             .await
             .expect("read succeeds")
-            .expect("att-0 bytes are still present");
-        assert_eq!(landed.entry.body, b"ok");
+            .expect("the committed attachment remains");
+        assert_eq!(stored.entry.body, b"committed");
+    }
+
+    #[tokio::test]
+    async fn identical_message_batch_retry_returns_the_existing_ordered_refs() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(Arc::clone(&backend), MountPermissions::read_write());
+        let scope = test_scope();
+        let attachments = vec![
+            inbound("att-0", "text/plain", "a.txt", b"first"),
+            inbound("att-1", "text/plain", "b.txt", b"second"),
+        ];
+
+        let first = land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            attachments.clone(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("initial batch lands");
+        let replay = land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            attachments,
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("an identical retry reuses the committed batch");
+
+        assert_eq!(replay, first);
+        assert_eq!(
+            replay
+                .iter()
+                .map(|attachment| attachment.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["att-0", "att-1"]
+        );
     }
 
     #[tokio::test]
@@ -411,6 +558,89 @@ mod tests {
                 .is_none(),
             "oversized attachment must not have been written"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_more_than_the_shared_attachment_count_limit() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(backend, MountPermissions::read_write());
+        let attachments = (0..=DEFAULT_ATTACHMENT_BUDGETS.max_count)
+            .map(|index| inbound(&format!("att-{index}"), "text/plain", "a.txt", b"x"))
+            .collect();
+
+        let error = land_inbound_attachments(
+            &writer,
+            &test_scope(),
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            attachments,
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect_err("the shared count limit must reject the complete batch");
+
+        assert!(matches!(
+            error,
+            AttachmentLandingError::TooMany { count: 11, max: 10 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn caller_cannot_broaden_the_shared_per_file_limit() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(backend, MountPermissions::read_write());
+        let bytes = vec![b'x'; DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1];
+
+        let error = land_inbound_attachments(
+            &writer,
+            &test_scope(),
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![inbound("att-0", "text/plain", "large.txt", &bytes)],
+            usize::MAX,
+        )
+        .await
+        .expect_err("a caller may narrow but never broaden the shared limit");
+
+        assert!(matches!(
+            error,
+            AttachmentLandingError::TooLarge { size, max }
+                if size == DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1
+                    && max == DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_batch_over_the_shared_total_byte_limit() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(backend, MountPermissions::read_write());
+        let half_plus_one = DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes / 2 + 1;
+        let first = vec![b'a'; half_plus_one];
+        let second = vec![b'b'; half_plus_one];
+
+        let error = land_inbound_attachments(
+            &writer,
+            &test_scope(),
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![
+                inbound("att-0", "application/octet-stream", "a.bin", &first),
+                inbound("att-1", "application/octet-stream", "b.bin", &second),
+            ],
+            DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes,
+        )
+        .await
+        .expect_err("the shared total byte limit must reject the complete batch");
+
+        assert!(matches!(
+            error,
+            AttachmentLandingError::BatchTooLarge { size, max }
+                if size == half_plus_one * 2
+                    && max == DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes
+        ));
     }
 
     #[tokio::test]

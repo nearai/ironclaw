@@ -14158,6 +14158,22 @@ impl InboundAttachmentLander for RecordingLander {
         ));
         Ok(refs)
     }
+
+    async fn rollback(
+        &self,
+        _thread_scope: &ThreadScope,
+        _attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError> {
+        Ok(())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _thread_scope: &ThreadScope,
+        _referenced_storage_keys: &[String],
+    ) -> Result<ironclaw_product::AttachmentCleanupReport, ProductSurfaceError> {
+        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    }
 }
 
 #[tokio::test]

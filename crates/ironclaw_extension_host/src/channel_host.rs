@@ -1089,6 +1089,15 @@ impl GenericChannelHostAssembly {
             _ => None,
         }
     }
+
+    /// The exact inbound attachment lander captured by production assembly.
+    ///
+    /// This seam lets composition tests verify the authority of the mounted
+    /// filesystem without reconstructing the lander from test-only parts.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inbound_attachment_lander_for_test(&self) -> Arc<dyn InboundAttachmentLander> {
+        Arc::clone(&self.deps.inbound_attachments)
+    }
 }
 
 impl Drop for GenericChannelHostAssembly {

@@ -3,10 +3,17 @@
 use super::*;
 
 use crate::{
-    AuthRequirement, ExternalEventId, ParsedProductInbound, ProductInboundEnvelope,
-    ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
+    AttachmentCleanupReport, AuthRequirement, ExternalEventId, ParsedProductInbound,
+    ProductInboundEnvelope, ProductInboundPayload, ProjectScopedAttachmentLander,
+    ProtocolAuthEvidence, TrustedInboundContext,
 };
-use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemError, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+};
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_threads::{
+    AttachmentKind, AttachmentRef, FilesystemSessionThreadService, InMemorySessionThreadService,
+};
 
 use crate::binding::ResolveBindingRequest;
 use ironclaw_host_api::ProductSurfaceError;
@@ -40,6 +47,7 @@ impl ConversationBindingService for LandingBindingStub {
 #[derive(Default)]
 struct CapturingLander {
     landed: Mutex<Vec<InboundAttachment>>,
+    cleanup_calls: Mutex<Vec<Vec<String>>>,
 }
 
 #[async_trait]
@@ -67,6 +75,26 @@ impl InboundAttachmentLander for CapturingLander {
             .collect();
         self.landed.lock().unwrap().extend(attachments);
         Ok(refs)
+    }
+
+    async fn rollback(
+        &self,
+        _thread_scope: &ThreadScope,
+        _attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError> {
+        Ok(())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _thread_scope: &ThreadScope,
+        referenced_storage_keys: &[String],
+    ) -> Result<AttachmentCleanupReport, ProductSurfaceError> {
+        self.cleanup_calls
+            .lock()
+            .unwrap()
+            .push(referenced_storage_keys.to_vec());
+        Ok(AttachmentCleanupReport::default())
     }
 }
 
@@ -954,6 +982,96 @@ async fn native_attachment_path_lands_inline_bytes_before_acceptance() {
     assert_eq!(landed.len(), 1, "the inline image is landed exactly once");
     assert_eq!(landed[0].mime_type, "image/png");
     assert_eq!(landed[0].bytes, bytes);
+    drop(landed);
+    let cleanup_calls = lander.cleanup_calls.lock().unwrap();
+    assert_eq!(cleanup_calls.len(), 1);
+    assert!(
+        cleanup_calls[0]
+            .iter()
+            .any(|key| key.contains("evt:image-1"))
+    );
+}
+
+#[tokio::test]
+async fn native_attachment_path_rolls_back_landed_batch_when_message_acceptance_fails() {
+    let thread_backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/messages/")
+                .backend("injected message acceptance failure"),
+        ),
+    );
+    let thread_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/threads").unwrap(),
+        VirtualPath::new("/tenants/test/users/test/threads").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let thread_service = Arc::new(FilesystemSessionThreadService::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(thread_backend, thread_mounts),
+    )));
+
+    let attachment_backend = Arc::new(InMemoryBackend::new());
+    let attachment_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let attachment_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        attachment_backend,
+        attachment_mounts,
+    ));
+    let service = DefaultInboundTurnService::new(
+        LandingBindingStub,
+        thread_service,
+        CapturingTurnCoordinator::default(),
+    )
+    .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(
+        &attachment_filesystem,
+    ))));
+
+    let envelope = user_message_envelope_with_refs("evt:rollback", Vec::new());
+    let resource_scope = ThreadScope {
+        tenant_id: tenant_id(),
+        agent_id: AgentId::new("agent:alpha").unwrap(),
+        project_id: None,
+        owner_user_id: Some(user_id()),
+        mission_id: None,
+    }
+    .to_resource_scope();
+    let date_before = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let result = service
+        .accept_user_message_with_before_policy_and_attachments(
+            &envelope,
+            &NoopBeforeInboundPolicy,
+            vec![InboundAttachment {
+                id: "rollback-image".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: Some("rollback.png".to_string()),
+                bytes: vec![1, 2, 3, 4],
+            }],
+        )
+        .await;
+    let date_after = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    assert!(result.is_err(), "message acceptance must fail in this test");
+    for date in [date_before, date_after] {
+        let batch = ironclaw_attachments::attachment_batch_scoped_path(
+            "/workspace",
+            &date,
+            envelope.external_event_id().as_str(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                attachment_filesystem.stat(&resource_scope, &batch).await,
+                Err(FilesystemError::NotFound { .. })
+            ),
+            "a failed message acceptance must remove the landed attachment batch at {}",
+            batch.as_str()
+        );
+    }
 }
 
 /// Without a lander wired, a user message carrying inline bytes must fail

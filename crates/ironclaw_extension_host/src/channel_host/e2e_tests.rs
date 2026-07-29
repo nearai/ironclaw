@@ -127,6 +127,23 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
     ) -> Result<Vec<ironclaw_threads::AttachmentRef>, ironclaw_host_api::ProductSurfaceError> {
         Ok(Vec::new())
     }
+
+    async fn rollback(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _attachments: &[ironclaw_threads::AttachmentRef],
+    ) -> Result<(), ironclaw_host_api::ProductSurfaceError> {
+        Ok(())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _referenced_storage_keys: &[String],
+    ) -> Result<ironclaw_product::AttachmentCleanupReport, ironclaw_host_api::ProductSurfaceError>
+    {
+        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    }
 }
 
 const TENANT: &str = "tenant:slack";

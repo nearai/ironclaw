@@ -6,8 +6,8 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     ChannelAdapter, ChannelAttachmentRef, ChannelError, ProductAdapterId, ProductInboundAck,
@@ -20,9 +20,9 @@ use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_host_api::UserId;
 use ironclaw_host_api::{InboundAttachment, RestrictedEgress};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadService, ThreadMessageId,
-    ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
+    ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
@@ -50,6 +50,9 @@ use crate::reborn_services::InboundAttachmentLander;
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(test, feature = "test-support"))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
+const ATTACHMENT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
+const ATTACHMENT_CLEANUP_MAX_THREADS: usize = 50;
+const ATTACHMENT_CLEANUP_MAX_MESSAGES: usize = 10_000;
 
 /// Run a before-inbound policy with the workflow-owned wall-clock budget.
 ///
@@ -249,6 +252,82 @@ where
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
         self
+    }
+
+    async fn reconcile_stale_attachment_batches(&self, thread_scope: &ThreadScope) {
+        let Some(lander) = self.inbound_attachments.as_ref() else {
+            return;
+        };
+        let reconciliation = async {
+            let page = self
+                .thread_service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: thread_scope.clone(),
+                    limit: Some((ATTACHMENT_CLEANUP_MAX_THREADS + 1) as u32),
+                    cursor: None,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            if page.next_cursor.is_some() || page.threads.len() > ATTACHMENT_CLEANUP_MAX_THREADS {
+                return Ok(None);
+            }
+
+            let mut storage_keys = BTreeSet::new();
+            let mut message_count = 0usize;
+            for thread in page.threads {
+                let history = self
+                    .thread_service
+                    .list_thread_history(ThreadHistoryRequest {
+                        scope: thread_scope.clone(),
+                        thread_id: thread.thread_id,
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                message_count = message_count.saturating_add(history.messages.len());
+                if message_count > ATTACHMENT_CLEANUP_MAX_MESSAGES {
+                    return Ok(None);
+                }
+                storage_keys.extend(
+                    history
+                        .messages
+                        .into_iter()
+                        .flat_map(|message| message.attachments)
+                        .filter_map(|attachment| attachment.storage_key),
+                );
+            }
+            let storage_keys = storage_keys.into_iter().collect::<Vec<_>>();
+            lander
+                .cleanup_stale(thread_scope, &storage_keys)
+                .await
+                .map(Some)
+                .map_err(|error| error.to_string())
+        };
+
+        match tokio::time::timeout(ATTACHMENT_CLEANUP_TIMEOUT, reconciliation).await {
+            Ok(Ok(Some(report))) if report.deleted_batches > 0 => {
+                tracing::debug!(
+                    scanned_batches = report.scanned_batches,
+                    deleted_batches = report.deleted_batches,
+                    "reconciled stale inbound attachment batches"
+                );
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => {
+                tracing::debug!(
+                    "skipped stale inbound attachment cleanup because the durable reference scan \
+                     exceeded its safety bound"
+                );
+            }
+            Ok(Err(reason)) => {
+                tracing::warn!(
+                    reason = %reason,
+                    "best-effort stale inbound attachment cleanup failed"
+                );
+            }
+            Err(_) => {
+                tracing::warn!("best-effort stale inbound attachment cleanup timed out");
+            }
+        }
     }
 }
 
@@ -617,8 +696,8 @@ where
         // are landed into project storage through the same authority
         // the agent's file tools resolve through, then carried on the message as
         // refs — never as raw bytes through the bytes-free product envelope.
-        let content = if attachments.is_empty() {
-            MessageContent::text(payload.text.clone())
+        let (content, landed_refs) = if attachments.is_empty() {
+            (MessageContent::text(payload.text.clone()), None)
         } else {
             let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
                 ProductSurfaceFailure::TurnSubmissionRejected {
@@ -635,11 +714,14 @@ where
                 .map_err(|e| ProductSurfaceFailure::Transient {
                     reason: format!("failed to land inbound attachments: {e}"),
                 })?;
-            MessageContent::with_attachments(payload.text.clone(), refs)
+            (
+                MessageContent::with_attachments(payload.text.clone(), refs.clone()),
+                Some(refs),
+            )
         };
 
         let reply_target_binding_id = prepared.source_binding_id.clone();
-        let accepted = self
+        let accepted = match self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
                 scope: prepared.thread_scope.clone(),
@@ -651,25 +733,56 @@ where
                 content,
             })
             .await
-            .map_err(|e| ProductSurfaceFailure::Transient {
-                reason: format!("failed to accept inbound message: {e}"),
-            })?;
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let acceptance_reason = format!("failed to accept inbound message: {error}");
+                if let Some(refs) = landed_refs {
+                    let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
+                        ProductSurfaceFailure::Transient {
+                            reason: format!("{acceptance_reason}; attachment rollback unavailable"),
+                        }
+                    })?;
+                    if let Err(rollback_error) =
+                        lander.rollback(&prepared.thread_scope, &refs).await
+                    {
+                        return Err(ProductSurfaceFailure::Transient {
+                            reason: format!(
+                                "{acceptance_reason}; failed to roll back inbound attachments: \
+                                 {rollback_error}"
+                            ),
+                        });
+                    }
+                }
+                return Err(ProductSurfaceFailure::Transient {
+                    reason: acceptance_reason,
+                });
+            }
+        };
 
-        ProductInboundTurnHandoff::NeedsSubmission(Box::new(AcceptedProductInboundTurn {
-            binding: prepared.binding,
-            thread_scope: prepared.thread_scope,
-            message_id: accepted.message_id,
-            source_binding_id: prepared.source_binding_id,
-            reply_target_binding_id,
-            idempotency_key_raw: prepared.submit_idempotency_key,
-            received_at: envelope.received_at(),
-            adapter_id: prepared.adapter_id,
-            source_channel: prepared.source_channel,
-            surface_type: prepared.surface_type,
-            requested_model: payload.requested_model.clone(),
-        }))
-        .submit_or_replay(&self.thread_service, &self.turn_coordinator)
-        .await
+        let cleanup_scope = prepared.thread_scope.clone();
+        let cleanup_needed = landed_refs.is_some();
+        let outcome =
+            ProductInboundTurnHandoff::NeedsSubmission(Box::new(AcceptedProductInboundTurn {
+                binding: prepared.binding,
+                thread_scope: prepared.thread_scope,
+                message_id: accepted.message_id,
+                source_binding_id: prepared.source_binding_id,
+                reply_target_binding_id,
+                idempotency_key_raw: prepared.submit_idempotency_key,
+                received_at: envelope.received_at(),
+                adapter_id: prepared.adapter_id,
+                source_channel: prepared.source_channel,
+                surface_type: prepared.surface_type,
+                requested_model: payload.requested_model.clone(),
+            }))
+            .submit_or_replay(&self.thread_service, &self.turn_coordinator)
+            .await?;
+        if cleanup_needed {
+            self.reconcile_stale_attachment_batches(&cleanup_scope)
+                .await;
+        }
+        Ok(outcome)
     }
 }
 

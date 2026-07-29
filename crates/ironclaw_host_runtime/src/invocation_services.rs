@@ -442,6 +442,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::WriteFile
         | FilesystemOperation::AppendFile
         | FilesystemOperation::CreateDirAll
+        | FilesystemOperation::CreateSubtreeAtomic
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
         | FilesystemOperation::Append

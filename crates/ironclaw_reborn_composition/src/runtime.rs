@@ -705,7 +705,6 @@ pub struct RebornRuntime {
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
-    pub(crate) workspace_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1955,10 +1954,14 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
         let extension_filesystem = &self.extension_filesystem;
-        let workspace_mounts = &self.workspace_mounts;
+        let attachment_mounts = crate::local_dev_mounts::workspace_mount_view(
+            ironclaw_host_api::MountPermissions::read_write_list_delete(),
+            &[],
+        )
+        .ok()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(extension_filesystem),
-            workspace_mounts.clone(),
+            attachment_mounts,
         )))
     }
 
@@ -4739,7 +4742,6 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
-        workspace_mounts: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]

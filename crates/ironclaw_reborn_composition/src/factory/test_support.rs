@@ -371,28 +371,6 @@ impl RebornRuntimeStores {
         Arc::clone(&self.secret_store)
     }
 
-    /// Read-write project-scoped workspace filesystem, built over
-    /// `extension_filesystem` + `workspace_mounts`.
-    /// `None` when no local runtime is composed.
-    ///
-    /// This deliberately does NOT reuse `workspace_filesystem`:
-    /// that handle is intentionally read-only (it backs setup-marker reads —
-    /// see `local_dev_setup_marker_workspace_filesystem_is_read_only`), so
-    /// writing through it fails closed with `PermissionDenied`.
-    ///
-    /// Single owner of this recipe — both `RebornRuntime::webui_workspace_filesystem`
-    /// (production attachment landing) and `local_dev_attachment_test_support_for_test`
-    /// (C-ATTACH test seam) call this rather than each rebuilding the view, so the
-    /// two can never drift apart.
-    pub(crate) fn read_write_workspace_filesystem(
-        &self,
-    ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&self.extension_filesystem),
-            self.workspace_mounts.clone(),
-        )))
-    }
-
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_approval_test_parts(&self) -> Option<RebornApprovalTestParts> {
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =

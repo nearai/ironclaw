@@ -8,12 +8,12 @@
 //! makes a landed attachment readable by `file_read`/`list_dir` at the recorded
 //! `storage_key` in this and later turns.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
-use crate::{InboundAttachmentLander, InboundAttachmentReader};
+use crate::{AttachmentCleanupReport, InboundAttachmentLander, InboundAttachmentReader};
 use async_trait::async_trait;
 use ironclaw_attachments::{DEFAULT_MAX_ATTACHMENT_BYTES, land_inbound_attachments};
-use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     InboundAttachment, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ResourceScope, ScopedPath,
@@ -22,6 +22,11 @@ use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
 use ironclaw_attachments::WORKSPACE_ALIAS;
+
+const STALE_RECONCILIATION_DAYS: i64 = 1;
+const STALE_CLEANUP_MAX_DATE_DIRS: usize = 32;
+const STALE_CLEANUP_MAX_BATCHES_PER_DATE: usize = 64;
+const STALE_CLEANUP_MAX_DELETES: usize = 64;
 
 /// Lands inbound attachments through a project-scoped workspace filesystem.
 pub struct ProjectScopedAttachmentLander<F: RootFilesystem> {
@@ -177,6 +182,159 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
             ))
         })
     }
+
+    async fn rollback(
+        &self,
+        thread_scope: &ThreadScope,
+        attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError> {
+        let Some(first_storage_key) = attachments
+            .first()
+            .and_then(|attachment| attachment.storage_key.as_deref())
+        else {
+            return Ok(());
+        };
+        let batch_path = attachment_batch_parent(first_storage_key)?;
+        for attachment in attachments.iter().skip(1) {
+            let storage_key = attachment.storage_key.as_deref().ok_or_else(|| {
+                ProductSurfaceError::internal_from(
+                    "landed attachment rollback reference has no storage key",
+                )
+            })?;
+            if attachment_batch_parent(storage_key)? != batch_path {
+                return Err(ProductSurfaceError::internal_from(
+                    "landed attachment rollback references span multiple batches",
+                ));
+            }
+        }
+
+        let scope = thread_scope.to_resource_scope();
+        match self.filesystem.delete(&scope, &batch_path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(ProductSurfaceError::internal_from(format!(
+                "roll back inbound attachment batch at {}: {error}",
+                batch_path.as_str()
+            ))),
+        }
+    }
+
+    async fn cleanup_stale(
+        &self,
+        thread_scope: &ThreadScope,
+        referenced_storage_keys: &[String],
+    ) -> Result<AttachmentCleanupReport, ProductSurfaceError> {
+        let mut referenced_batches = HashSet::new();
+        for storage_key in referenced_storage_keys {
+            let relative = match storage_key.strip_prefix("/workspace/attachments/") {
+                Some(relative) => relative,
+                None => continue,
+            };
+            // Legacy flat keys are `<date>/<file>` and cannot name a message
+            // directory. New keys are exactly `<date>/<message>/<file>`.
+            if relative.split('/').count() != 3 {
+                continue;
+            }
+            referenced_batches.insert(attachment_batch_parent(storage_key)?.as_str().to_string());
+        }
+
+        let scope = thread_scope.to_resource_scope();
+        let root = ScopedPath::new("/workspace/attachments")
+            .map_err(ProductSurfaceError::internal_from)?;
+        let date_dirs = match self
+            .filesystem
+            .list_dir_bounded(&scope, &root, STALE_CLEANUP_MAX_DATE_DIRS)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => {
+                return Ok(AttachmentCleanupReport::default());
+            }
+            Err(error) => {
+                return Err(ProductSurfaceError::internal_from(format!(
+                    "list inbound attachment dates for stale cleanup: {error}"
+                )));
+            }
+        };
+        let cutoff =
+            chrono::Utc::now().date_naive() - chrono::Duration::days(STALE_RECONCILIATION_DAYS);
+        let mut report = AttachmentCleanupReport::default();
+
+        for date_entry in date_dirs {
+            if date_entry.file_type != FileType::Directory {
+                continue;
+            }
+            let Ok(date) = chrono::NaiveDate::parse_from_str(&date_entry.name, "%Y-%m-%d") else {
+                continue;
+            };
+            if date >= cutoff {
+                continue;
+            }
+            let date_path = ScopedPath::new(format!("/workspace/attachments/{}", date_entry.name))
+                .map_err(ProductSurfaceError::internal_from)?;
+            let batches = match self
+                .filesystem
+                .list_dir_bounded(&scope, &date_path, STALE_CLEANUP_MAX_BATCHES_PER_DATE)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => {
+                    return Err(ProductSurfaceError::internal_from(format!(
+                        "list inbound attachment batches for stale cleanup: {error}"
+                    )));
+                }
+            };
+            for batch in batches {
+                if batch.file_type != FileType::Directory
+                    || report.deleted_batches >= STALE_CLEANUP_MAX_DELETES
+                {
+                    continue;
+                }
+                report.scanned_batches += 1;
+                let batch_path = ScopedPath::new(format!(
+                    "/workspace/attachments/{}/{}",
+                    date_entry.name, batch.name
+                ))
+                .map_err(ProductSurfaceError::internal_from)?;
+                if referenced_batches.contains(batch_path.as_str()) {
+                    continue;
+                }
+                match self.filesystem.delete(&scope, &batch_path).await {
+                    Ok(()) => report.deleted_batches += 1,
+                    Err(FilesystemError::NotFound { .. }) => {}
+                    Err(error) => {
+                        return Err(ProductSurfaceError::internal_from(format!(
+                            "delete stale inbound attachment batch at {}: {error}",
+                            batch_path.as_str()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
+fn attachment_batch_parent(storage_key: &str) -> Result<ScopedPath, ProductSurfaceError> {
+    let (parent, filename) = storage_key.rsplit_once('/').ok_or_else(|| {
+        ProductSurfaceError::internal_from("landed attachment storage key has no batch parent")
+    })?;
+    let relative = parent
+        .strip_prefix("/workspace/attachments/")
+        .ok_or_else(|| {
+            ProductSurfaceError::internal_from(
+                "landed attachment rollback path is outside the attachment root",
+            )
+        })?;
+    if filename.is_empty()
+        || relative.split('/').count() != 2
+        || relative.split('/').any(str::is_empty)
+    {
+        return Err(ProductSurfaceError::internal_from(
+            "landed attachment rollback path has an invalid batch shape",
+        ));
+    }
+    ScopedPath::new(parent.to_string()).map_err(ProductSurfaceError::internal_from)
 }
 
 #[cfg(test)]
@@ -331,5 +489,77 @@ mod tests {
             LoopAttachmentReadError::Backend(reason) => assert!(reason.contains("exceeds")),
             other => panic!("expected a backend refusal, got {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_deletes_only_old_unreferenced_message_batches() {
+        let fs = workspace_fs(MountPermissions::read_write_list_delete());
+        let scope = thread_scope();
+        let resource_scope = scope.to_resource_scope();
+        let old_date = (chrono::Utc::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let orphan = land_inbound_attachments(
+            fs.as_ref(),
+            &resource_scope,
+            WORKSPACE_ALIAS,
+            &old_date,
+            "orphan-message",
+            vec![InboundAttachment {
+                id: "orphan".to_string(),
+                mime_type: "text/plain".to_string(),
+                filename: Some("orphan.txt".to_string()),
+                bytes: b"orphan".to_vec(),
+            }],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("seed orphan batch");
+        let protected = land_inbound_attachments(
+            fs.as_ref(),
+            &resource_scope,
+            WORKSPACE_ALIAS,
+            &old_date,
+            "referenced-message",
+            vec![InboundAttachment {
+                id: "protected".to_string(),
+                mime_type: "text/plain".to_string(),
+                filename: Some("protected.txt".to_string()),
+                bytes: b"protected".to_vec(),
+            }],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("seed referenced batch");
+        let protected_keys = protected
+            .iter()
+            .filter_map(|attachment| attachment.storage_key.clone())
+            .collect::<Vec<_>>();
+        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
+
+        let report = lander
+            .cleanup_stale(&scope, &protected_keys)
+            .await
+            .expect("stale cleanup succeeds");
+
+        assert_eq!(report.deleted_batches, 1);
+        let orphan_key = orphan[0].storage_key.as_deref().expect("orphan key");
+        assert!(matches!(
+            fs.stat(
+                &resource_scope,
+                &ScopedPath::new(orphan_key.to_string()).unwrap()
+            )
+            .await,
+            Err(FilesystemError::NotFound { .. })
+        ));
+        let protected_key = protected[0].storage_key.as_deref().expect("protected key");
+        assert!(
+            fs.stat(
+                &resource_scope,
+                &ScopedPath::new(protected_key.to_string()).unwrap()
+            )
+            .await
+            .is_ok()
+        );
     }
 }
