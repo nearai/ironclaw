@@ -196,6 +196,12 @@ impl LoopSafeSummary {
         Self("model gateway failed".to_string())
     }
 
+    /// Fixed fallback for a host-rejected checkpoint whose producer did not
+    /// supply a valid bounded cause.
+    pub fn checkpoint_rejected() -> Self {
+        Self("checkpoint validation rejected the proposed state".to_string())
+    }
+
     /// Sanitized summary for a primary model call that exceeded its timeout.
     /// Infallible because the literal is known to satisfy
     /// [`validate_loop_safe_summary`].

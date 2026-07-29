@@ -93,6 +93,11 @@ run_architecture() {
   # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
   # keep nested dispatcher failures attached to capability activity, not runs.
   run_lib_test ironclaw_reborn_composition projection::tests::nested_dispatch_stream
+  # Pins docs/reborn/contracts/loop-exit.md and turn-runner.md: a rejected
+  # pre-model checkpoint terminalizes through the durable host-authored channel
+  # without model/capability work or a retryable partial success.
+  run_test_exact ironclaw_runner loop_driver_host \
+    turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work
 }
 
 run_runtimes() {

@@ -13,6 +13,12 @@ pub const MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY: &str = "model_spend_budget_exha
 /// This must not be presented as a provider balance or configured-budget outcome.
 pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
 
+/// A deterministic checkpoint validation rejection.
+///
+/// The rejected state is never used to run a model or capability. The
+/// independent turn lifecycle journal records the terminal explanation.
+pub const CHECKPOINT_REJECTED_CATEGORY: &str = "checkpoint_rejected";
+
 /// Model-stage failures that are PERMANENT for an identical retry.
 ///
 /// These four kinds previously returned no category and fell through to

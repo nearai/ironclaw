@@ -27,6 +27,10 @@ use ironclaw_turns::{
 };
 
 use crate::model_failure_mapping::model_stage_failure_category;
+use crate::{
+    failure_categories::CHECKPOINT_REJECTED_CATEGORY,
+    failure_summary::checkpoint_rejection_host_explanation,
+};
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
@@ -356,8 +360,22 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
         AgentLoopExecutorError::CheckpointFailed { stage } => {
             tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
             AgentLoopDriverError::Failed {
-                reason_kind: "checkpoint_rejected".to_string(),
+                reason_kind: CHECKPOINT_REJECTED_CATEGORY.to_string(),
                 detail: None,
+            }
+        }
+        AgentLoopExecutorError::CheckpointRejected {
+            stage,
+            safe_summary,
+        } => {
+            tracing::warn!(
+                stage = ?stage,
+                safe_summary = %safe_summary,
+                "planned driver checkpoint was rejected"
+            );
+            AgentLoopDriverError::Failed {
+                reason_kind: CHECKPOINT_REJECTED_CATEGORY.to_string(),
+                detail: Some(checkpoint_rejection_host_explanation(stage, &safe_summary)),
             }
         }
         AgentLoopExecutorError::RecoverySequenceExhausted => {
@@ -534,6 +552,31 @@ mod tests {
                 reason_kind: "interrupted_unexpectedly".to_string(),
                 detail: None,
             }
+        );
+    }
+
+    #[test]
+    fn executor_checkpoint_rejection_maps_to_host_authored_terminal_explanation() {
+        let mapped = map_executor_error(AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::BeforeModel,
+            safe_summary: LoopSafeSummary::new(
+                "checkpoint state write conflicted with current turn state",
+            )
+            .expect("safe checkpoint cause"),
+        });
+
+        let AgentLoopDriverError::Failed {
+            reason_kind,
+            detail: Some(detail),
+        } = mapped
+        else {
+            panic!("checkpoint rejection should be a detailed terminal failure");
+        };
+        assert_eq!(reason_kind, CHECKPOINT_REJECTED_CATEGORY);
+        assert!(
+            detail.contains("pre-model checkpoint")
+                && detail.contains("No model or capability ran after the rejection")
+                && detail.contains("Start a new run")
         );
     }
 

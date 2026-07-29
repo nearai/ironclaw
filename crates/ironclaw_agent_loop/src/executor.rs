@@ -117,6 +117,11 @@ pub enum AgentLoopExecutorError {
     },
     #[error("planner returned a contract violation: {detail}")]
     PlannerContract { detail: &'static str },
+    #[error("host rejected checkpoint at {stage:?}: {safe_summary}")]
+    CheckpointRejected {
+        stage: CheckpointKind,
+        safe_summary: LoopSafeSummary,
+    },
     #[error("checkpoint write failed at {stage:?}")]
     CheckpointFailed { stage: CheckpointKind },
     #[error("durable recovery event sequence exhausted")]

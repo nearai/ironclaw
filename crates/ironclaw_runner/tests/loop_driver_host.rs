@@ -2670,6 +2670,226 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 }
 
 #[tokio::test]
+async fn turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work() {
+    let fixture = HostFixture::new_unsubmitted(
+        "thread-full-reborn-checkpoint-rejected",
+        "hello rejected checkpoint",
+    )
+    .await;
+    let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
+    let turn_store = Arc::new(TurnStateRowStore::new(scoped.clone()));
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-checkpoint-rejected",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let checkpoint_state_store = Arc::new(CountingCheckpointStateStore::new(
+        fixture.checkpoint_state_store.clone(),
+    ));
+    let loop_checkpoint_store = Arc::new(RejectingLoopCheckpointStore::new(turn_store.clone()));
+    let factory = RebornLoopDriverHostFactory::new(
+        fixture.thread_service.clone(),
+        fixture.thread_scope.clone(),
+        fixture.gateway.clone(),
+        checkpoint_state_store.clone(),
+        turn_store.clone(),
+        loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::local_development_noop(),
+    )
+    .with_driver_requirements(driver_requirements_for(
+        &descriptor,
+        planned_requirements_without_capabilities(),
+    ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config(),
+    )
+    .start();
+
+    let failed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Failed,
+        "full reborn run should terminalize a rejected pre-model checkpoint",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    let failure = failed.failure.as_ref().expect("terminal failure");
+    assert_eq!(failure.category(), "checkpoint_rejected");
+    let detail = failure.detail().expect("host-authored explanation");
+    assert!(
+        detail.contains("checkpoint state write conflicted with current turn state"),
+        "explanation should carry the bounded host cause: {detail}"
+    );
+    assert!(
+        detail.contains("No model or capability ran after the rejection")
+            && detail.contains("Start a new run")
+            && detail.contains("checkpoint storage and run-profile compatibility"),
+        "explanation should state the safety outcome and concrete remediation: {detail}"
+    );
+    assert!(
+        !detail.contains("sk-checkpoint-rejection-secret")
+            && !detail.contains("/host/checkpoints/state.json"),
+        "raw store diagnostics must not enter the durable explanation: {detail}"
+    );
+    assert_eq!(
+        checkpoint_state_store.put_attempts(),
+        1,
+        "the private payload stage should complete exactly once before metadata rejection"
+    );
+    assert_eq!(
+        loop_checkpoint_store.put_attempts(),
+        1,
+        "a deterministic checkpoint rejection must not be retried blindly"
+    );
+    assert!(
+        fixture.gateway.requests().is_empty(),
+        "the rejected pre-model state must never reach the model provider"
+    );
+    let milestone_names = fixture.milestone_names();
+    assert!(
+        milestone_names.iter().all(|name| {
+            !matches!(
+                *name,
+                "checkpoint_created"
+                    | "model_started"
+                    | "model_text_delta"
+                    | "model_completed"
+                    | "capability_started"
+                    | "capability_completed"
+                    | "assistant_reply_finalized"
+            )
+        }),
+        "no checkpoint success, model, capability, or assistant progress may follow rejection: {milestone_names:?}"
+    );
+    assert_no_assistant_message(&fixture).await;
+    assert_eq!(failed.checkpoint_id, None);
+    assert!(
+        turn_store
+            .persistence_snapshot()
+            .await
+            .expect("turn-state snapshot")
+            .loop_checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.run_id != run_id),
+        "the staged private payload must not create authoritative checkpoint metadata"
+    );
+    assert_eq!(
+        ironclaw_runner::retry_disposition::retry_disposition(failure.category(), false),
+        ironclaw_runner::retry_disposition::RetryDisposition::NoRetry
+    );
+
+    let events = turn_store.events().await.expect("turn events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.run_id == run_id && event.kind == ironclaw_turns::TurnEventKind::Failed
+            })
+            .count(),
+        1,
+        "checkpoint rejection must terminalize exactly once"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.run_id == run_id && event.kind == ironclaw_turns::TurnEventKind::Completed
+            })
+            .count(),
+        0,
+        "checkpoint rejection must not emit partial success"
+    );
+    let failed_event = events
+        .iter()
+        .find(|event| event.run_id == run_id && event.kind == ironclaw_turns::TurnEventKind::Failed)
+        .expect("failed event");
+    assert_eq!(
+        failed_event.sanitized_reason.as_deref(),
+        Some("checkpoint_rejected")
+    );
+    assert_eq!(failed_event.detail.as_deref(), Some(detail));
+    assert_eq!(failed_event.retryable, Some(false));
+    assert!(matches!(
+        turn_store
+            .retry_turn(ironclaw_turns::RetryTurnRequest {
+                scope: fixture.context.scope.clone(),
+                actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
+                run_id,
+                source_binding_ref: SourceBindingRef::new(
+                    "source-web-checkpoint-rejected-retry"
+                )
+                .unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new(
+                    "reply-web-checkpoint-rejected-retry"
+                )
+                .unwrap(),
+                idempotency_key: IdempotencyKey::new(
+                    "idem-full-reborn-checkpoint-rejected-retry"
+                )
+                .unwrap(),
+            })
+            .await,
+        Err(TurnError::RunNotRetryable {
+            run_id: rejected_run_id
+        }) if rejected_run_id == run_id
+    ));
+
+    turn_store.drain().await.expect("drain terminal transition");
+    drop(turn_store);
+    let reopened = TurnStateRowStore::new(scoped);
+    let reopened_state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: fixture.context.scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("reopened terminal state");
+    assert_eq!(reopened_state.status, TurnStatus::Failed);
+    assert_eq!(reopened_state.failure.as_ref(), failed.failure.as_ref());
+    assert_eq!(
+        reopened
+            .events()
+            .await
+            .expect("reopened turn events")
+            .iter()
+            .filter(|event| {
+                event.run_id == run_id && event.kind == ironclaw_turns::TurnEventKind::Failed
+            })
+            .count(),
+        1,
+        "the durable terminal explanation must survive reopen without duplication"
+    );
+}
+
+#[tokio::test]
 async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoint_state_outage() {
     let fixture = HostFixture::new_unsubmitted(
         "thread-full-reborn-checkpoint-transient",
@@ -9698,6 +9918,82 @@ impl CheckpointStateStorePort for DiskFullCheckpointStateStore {
         Err(TurnError::Unavailable {
             reason: "checkpoint state disk full".to_string(),
         })
+    }
+}
+
+struct RejectingLoopCheckpointStore {
+    inner: Arc<TurnStateRowStore<InMemoryBackend>>,
+    put_attempts: AtomicUsize,
+}
+
+struct CountingCheckpointStateStore {
+    inner: Arc<dyn CheckpointStateStorePort>,
+    put_attempts: AtomicUsize,
+}
+
+impl CountingCheckpointStateStore {
+    fn new(inner: Arc<dyn CheckpointStateStorePort>) -> Self {
+        Self {
+            inner,
+            put_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn put_attempts(&self) -> usize {
+        self.put_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CheckpointStateStorePort for CountingCheckpointStateStore {
+    async fn put_checkpoint_state(
+        &self,
+        request: PutCheckpointStateRequest,
+    ) -> Result<ironclaw_turns::CheckpointStateRecord, TurnError> {
+        self.put_attempts.fetch_add(1, Ordering::SeqCst);
+        self.inner.put_checkpoint_state(request).await
+    }
+
+    async fn get_checkpoint_state(
+        &self,
+        request: GetCheckpointStateRequest,
+    ) -> Result<Option<ironclaw_turns::CheckpointStateRecord>, TurnError> {
+        self.inner.get_checkpoint_state(request).await
+    }
+}
+
+impl RejectingLoopCheckpointStore {
+    fn new(inner: Arc<TurnStateRowStore<InMemoryBackend>>) -> Self {
+        Self {
+            inner,
+            put_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn put_attempts(&self) -> usize {
+        self.put_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LoopCheckpointStore for RejectingLoopCheckpointStore {
+    async fn put_loop_checkpoint(
+        &self,
+        _request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        self.put_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(TurnError::Conflict {
+            reason:
+                "stale state at /host/checkpoints/state.json with sk-checkpoint-rejection-secret"
+                    .to_string(),
+        })
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        self.inner.get_loop_checkpoint(request).await
     }
 }
 
