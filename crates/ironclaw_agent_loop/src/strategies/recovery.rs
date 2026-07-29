@@ -1574,7 +1574,6 @@ mod tests {
                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                     ModelInvalidOutputDetailReason::OutsideCapabilitySurface.safe_summary(),
                 ),
-                diagnostic_ref: None,
             };
 
             let outcome = strategy
