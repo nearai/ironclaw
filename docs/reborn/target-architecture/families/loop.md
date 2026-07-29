@@ -4,6 +4,14 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/loop/
+├── ironclaw_agent_loop    the canonical loop: executor & sealed strategies
+├── ironclaw_loop_host     host-port adapters over kernel services
+├── ironclaw_runner        drivers & the agent-turn executor
+└── ironclaw_hooks         trust-tiered hook middleware
+```
+
 ## Role
 
 `crates/loop/` hosts replaceable agent behavior and the adapters that connect it to the kernel. `ironclaw_agent_loop` is the sealed strategy-and-executor framework: it decides what a turn does next. `ironclaw_loop_host` implements every host-port contract that framework calls, over kernel services. `ironclaw_runner` is the agent-turn executor, the driver registry, and the loop-host factory, registered as the executor the process supervisor invokes for turn-shaped work. `ironclaw_hooks` is the trust-tiered hook framework wrapping every port call with policy and audit. Together, the four let an agent's behavior be replaced or extended without any of the replacement code ever touching a privileged handle directly.

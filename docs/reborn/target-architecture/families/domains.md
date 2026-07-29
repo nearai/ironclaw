@@ -5,6 +5,25 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/domains/
+├── ironclaw_threads          canonical transcript service
+├── ironclaw_conversations    external↔canonical binding & idempotency
+├── ironclaw_triggers         scheduled triggers & trusted-fire minting
+├── ironclaw_memory           provider-neutral memory contract
+├── ironclaw_memory_native    native filesystem memory provider
+├── ironclaw_memory_mem0      mem0 memory provider (composition-selected)
+├── ironclaw_skills           skill parsing, selection & learning
+├── ironclaw_auth             product auth & the recipe engine
+├── ironclaw_attachments      attachment landing & its ports
+├── ironclaw_extractors       pure bytes→text extraction
+├── ironclaw_projects         project entity & membership ACL
+├── ironclaw_identity         external identity → stable UserId
+├── ironclaw_llm              provider contract, providers & decorators
+├── ironclaw_traces           Trace Commons client & redaction
+└── ironclaw_outbound         outbound authority: sealed grants, at-most-once
+```
+
 ## Role
 
 `crates/domains/` owns IronClaw Reborn's typed business records: sessions and threads, scheduled triggers, memory documents, skills, credentials, attachments, projects, identity, model providers, trace submissions, and outbound delivery state. Each crate in the family owns exactly one record grammar and the invariants that keep it valid — uniqueness, idempotency, scope isolation, compare-and-swap ordering — and exposes a typed service contract over `ScopedFilesystem` that the kernel and product layers wire against.

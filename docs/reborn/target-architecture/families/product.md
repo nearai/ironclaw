@@ -4,6 +4,15 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/product/
+├── ironclaw_product         ProductSurface impl, workflow & delivery
+├── ironclaw_operator        deployment-operator control plane
+├── ironclaw_openai_compat   OpenAI-compatible ingress adapter
+├── ironclaw_webui           web host: routes, auth, gateway, SPA
+└── ironclaw_host_ingress    Axum route-mount carriers
+```
+
 ## Role
 
 `product/` is the supported first-party experience: the single place that turns validated channel and HTTP traffic into admitted, idempotent, durably bound turns, and turns kernel and domain state back into redacted, product-safe views and deliveries. `ironclaw_product` implements the product surface end to end — binding resolution, command admission, delivery semantics, and the click-approval and click-auth interaction services that stand between a human and a blocked run. Around it sit four supporting crates, each a distinct responsibility rather than a smaller copy of the center: `ironclaw_operator` is the deployment-operator control plane — LLM provider administration, service lifecycle, log capture — a different kind of "operator" than an installed extension's own management surface; `ironclaw_openai_compat` and `ironclaw_webui` are two protocol skins over the same conversational core, one for OpenAI-shaped API clients and one for the browser single-page application and its host-owned authentication; and `ironclaw_host_ingress` is the thin carrier vocabulary that lets the family hand a composed router to whoever assembles a deployment without pulling a web framework into neutral vocabulary.

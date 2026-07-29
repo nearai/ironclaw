@@ -4,6 +4,15 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/substrate/
+├── ironclaw_filesystem        storage fabric: mounts, containment, CAS
+├── ironclaw_secrets           secret custody & one-shot leases
+├── ironclaw_network           egress policy & hardened transport
+├── ironclaw_safety            scanning & redaction primitives
+└── ironclaw_observability     latency-trace macros
+```
+
 ## Role
 
 Substrate holds the durable, reusable mechanisms the kernel mediates: storage fabric, secret storage, network policy and transport, safety scanning, and cross-cutting tracing. A crate belongs here exactly when it is a backend-generic mechanism with a real containment story and a fail-closed local invariant; it does not belong here if it makes an authority decision, which is kernel's job, or if it owns domain record grammar, which is domains' job. Five crates satisfy that test, and each is isolated from the others by a genuine dependency cone — a database driver stack, an operating-system keychain integration, an HTTP client and DNS resolver, or a pattern-matching engine — never by categorization for its own sake.

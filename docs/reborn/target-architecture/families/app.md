@@ -4,6 +4,16 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/app/
+├── ironclaw_composition     the assembly root: selection & wiring
+├── ironclaw_cli             the binary `ironclaw` & its binding tables
+├── ironclaw_config          boot contract & config.toml schema
+└── ironclaw_architecture    mechanical enforcement tests
+
+tools/                       stress harness & excluded helpers
+```
+
 ## Role
 
 `app/` is the assembly root, the shipped artifact, the boot-configuration leaf, and the enforcement suite — four crates whose only shared trait is that nothing else in the workspace may depend on any of them. `ironclaw_composition` wires every owning crate from every other family into a running deployment; `ironclaw_cli` produces the binary named `ironclaw`, the thing an operator actually runs, and the only place a concrete extension package is named; `ironclaw_config` is the boot-time configuration schema the rest of this family reads; `ironclaw_architecture` is the enforcement suite that fails the build whenever a crate's dependency graph or public surface drifts from the declared model.

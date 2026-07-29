@@ -4,6 +4,15 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/lanes/
+├── wit/                       component-model interface definitions
+├── ironclaw_wasm              WASM component lane
+├── ironclaw_wasm_limiter      shared wasmtime resource limiter
+├── ironclaw_mcp               MCP lane over host-mediated HTTP
+└── ironclaw_sandbox           sandboxed process lane
+```
+
 ## Role
 
 `crates/lanes/` is how an already-authorized invocation runs. Every lane receives work only after it has crossed the kernel membrane carrying a sealed `Authorized` witness already bound to exactly one `RuntimeLane` — a closed, fixed set of variants (`FirstParty`, `Wasm`, `Mcp`, `Process`) selected once by runtime-policy planning and never re-derived inside the lane itself. A lane's job is narrow by design: load or connect to the already-selected execution mechanism, run the request under mediated services — scoped-down mounts, one-shot staged secrets, policy-scoped egress — and hand back a normalized outcome or a bounded, host-visible failure class. A lane never decides whether work is allowed; that decision is made and sealed before the lane ever sees the request.

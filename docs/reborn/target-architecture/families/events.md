@@ -4,6 +4,14 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/events/
+├── ironclaw_events               evidence vocabulary & log traits
+├── ironclaw_event_store          durable backends & fail-closed profiles
+├── ironclaw_event_projections    replay-derived read models
+└── ironclaw_event_streams        admission-checked stream delivery
+```
+
 ## Role
 
 `crates/events/` is the system's record of what happened, kept structurally distinct from what a screen shows right now. It is a one-way pipeline, four stages deep: a producer emits a redacted event or audit envelope; `ironclaw_events`' traits accept it; `ironclaw_event_store` selects a durable backend and appends the entry under a monotonic cursor; `ironclaw_event_projections` folds the log into scoped, metadata-only read models on demand; `ironclaw_event_streams` authorizes and admits a live or replay subscription over those projections, consulting the outbound-delivery domain only to read push candidates. Nothing in this family runs backward: a projection cannot mutate the log it was folded from, and a stream cannot invent state that did not arrive by replaying one.

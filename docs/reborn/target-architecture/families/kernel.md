@@ -11,6 +11,19 @@ by a loop, an extension, or a product surface.
 constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md),
 [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/kernel/
+├── ironclaw_trust             trust ceilings (sealed)
+├── ironclaw_authorization     default-deny grants & capability leases
+├── ironclaw_approvals         exact-invocation consent
+├── ironclaw_resources         reservation & quota accounting
+├── ironclaw_runtime_policy    pure policy resolution & lane planning
+├── ironclaw_capabilities      the CapabilityHost membrane
+├── ironclaw_processes         lifecycle authority: journal & supervisor
+├── ironclaw_turns             turn admission & exit validation
+└── ironclaw_host_runtime      mediated services & the lane executor
+```
+
 ## Role
 
 The kernel is a security perimeter, not a crate. It is defined by what it mediates, not by how

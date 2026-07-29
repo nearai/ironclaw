@@ -4,6 +4,16 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/contracts/
+├── ironclaw_host_api              authority vocabulary & sealed witnesses
+├── ironclaw_common                cross-domain primitives
+├── ironclaw_prompt_envelope       untrusted-snippet envelope
+├── ironclaw_loop_contracts        the loop-tier port set
+├── ironclaw_extension_contracts   extension surfaces, recipes & inbound evidence
+└── ironclaw_product_contracts     ProductSurface, wire DTOs & product ports
+```
+
 ## Role
 
 Contracts is the vocabulary tier: the one family every other family depends on, and which depends on nothing itself. A type earns a home here by passing a four-part test — it names a concept that crosses an authority, host, or product boundary; it is neutral with respect to vendor, runtime, storage, and deployment; it is needed by two or more consumers that must not import one another; and it carries no execution, persistence, policy engine, or workflow. Four kinds of vocabulary live here: the identity and authority primitives shared by the whole workspace (`ironclaw_host_api`, `ironclaw_common`); the untrusted-content fence every prompt-construction path wraps snippets with (`ironclaw_prompt_envelope`); and three purpose-built membranes, one per adjacent family whose authority crosses a boundary, for the loop tier, the extension surface, and the product surface (`ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`). Nothing in this family runs, stores, or decides; it only names.

@@ -4,6 +4,18 @@
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
+```text
+crates/extensions/
+├── ironclaw_extensions           manifests, registry, installation records
+├── ironclaw_extension_host       generic host: verify, bind, deliver
+├── ironclaw_extension_manager    product-side extension management
+└── packages/                     one self-contained directory per package
+    ├── first_party/              inventory, native executors & assets
+    │   └── assets/<ext>/         manifest, prompts, schemas, wasm
+    ├── slack/                    Slack channel package (protocol only)
+    └── telegram/                 Telegram channel package (protocol only)
+```
+
 ## Role
 
 `crates/extensions/` holds every concern that follows from "an extension is an installable package," short of the vocabulary that concern is expressed in. An extension is the only installable product object; its surfaces are tool, channel, and auth; a vendor identity is a credential-authority namespace, never a product identity; at most one channel surface exists per extension. Four host pipelines — dispatch, inbound routing, outbound delivery, and auth — are implemented exactly once, generically, and this family owns the generic implementations of routing and hosting plus the product-facing orchestration around all four. Adding a new vendor, in this design, is a package-directory addition: a manifest, an implementation of the relevant adapter contract, and one binding entry at the binary — nothing elsewhere in the family changes.
