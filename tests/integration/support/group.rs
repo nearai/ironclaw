@@ -442,7 +442,9 @@ impl RebornIntegrationGroup {
             safety_context: None,
             turn_event_sink: None,
             trace_capture: false,
-            tool_disclosure: None,
+            // General integration groups stay hermetic across production
+            // default changes. Disclosure-specific tests opt into Bridged.
+            tool_disclosure: Some(ToolDisclosureMode::Off),
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -712,9 +714,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// group's one planned runtime, fan-out-composed with the in-memory sink
     /// when both are opted in.
     trace_capture: bool,
-    /// Enabler (b): `Some(ToolDisclosureMode::Bridged)` once
-    /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
-    /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
+    /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
+    /// `Bridged` only by `.with_tool_disclosure_bridged()`. Existing assembly
+    /// plumbing retains the `Option` fallback, but general constructors do not
+    /// leave it ambient.
     tool_disclosure: Option<ToolDisclosureMode>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +

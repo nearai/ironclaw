@@ -109,16 +109,15 @@ impl ToolDisclosureMode {
             Ok(value) => Self::from_raw(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::from_raw(None),
             // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
-            // unreadable (a misconfiguration). Surface it, then fall back to the
-            // unset default.
-            Err(error @ std::env::VarError::NotUnicode(_)) => {
-                tracing::debug!(
+            // unreadable (a misconfiguration). Surface it and fail closed even
+            // if the normal unset default changes in the future.
+            Err(std::env::VarError::NotUnicode(_)) => {
+                tracing::warn!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_TOOL_DISCLOSURE_ENV,
-                    error = %error,
-                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; using default"
+                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; falling back to Off"
                 );
-                Self::from_raw(None)
+                Self::Off
             }
         }
     }
@@ -132,9 +131,9 @@ impl ToolDisclosureMode {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
             Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
             Some(value) if !value.is_empty() => {
-                tracing::debug!(
+                tracing::warn!(
                     target: "ironclaw::reborn::runtime",
-                    value,
+                    env = REBORN_TOOL_DISCLOSURE_ENV,
                     "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
                 );
                 Self::Off
@@ -970,6 +969,7 @@ mod tests {
     #[test]
     fn tool_disclosure_mode_defaults_off_with_bridged_opt_in() {
         use super::ToolDisclosureMode;
+        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Off);
         // Default off: unset / empty / unrecognized resolve to Off so the
         // request path stays byte-identical. Only explicit `bridged` opts in.
         // `is_bridged()` is what gates whether the gateway attaches the decorator.

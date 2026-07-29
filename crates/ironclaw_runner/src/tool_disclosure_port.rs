@@ -484,13 +484,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             }
         }
         // Callable = the full reachable catalog (captured above) UNION the tools
-        // actually advertised this turn UNION every bridge capability. Only
-        // `tool_search` is advertised now, but the `tool_describe` / `tool_call`
-        // synthetic capabilities are still used internally — describe-first routes
-        // a schema response through `tool_describe`'s capability id. Keeping ALL
-        // bridge capabilities callable authorizes that internal routing at the
-        // executor visibility gate even though they are no longer advertised;
-        // without it a describe-first response is rejected as "not visible".
+        // actually advertised this turn UNION every bridge capability. Deferred
+        // surfaces advertise all three bridges, and describe-first routing can
+        // also synthesize a response through `tool_describe`'s capability id.
+        // Keeping every bridge callable authorizes both paths at the executor
+        // visibility gate.
         let mut callable: BTreeSet<CapabilityId> = callable_capability_ids.into_iter().collect();
         callable.extend(
             surface
@@ -1574,19 +1572,14 @@ mod tests {
             "visible surface must preserve inner descriptor metadata"
         );
         let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == TOOL_SEARCH_NAME),
-            "tool_search stays advertised as the discovery entry point"
-        );
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == TOOL_CALL_NAME),
-            "tool_call is no longer advertised (discovery is capability_info + direct call); \
-             it still resolves internally for the forgiving path"
-        );
+        for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+            assert!(
+                advertised
+                    .iter()
+                    .any(|definition| definition.name.as_str() == bridge),
+                "deferred surfaces advertise the complete discovery protocol: missing {bridge}"
+            );
+        }
         assert!(
             !advertised
                 .iter()

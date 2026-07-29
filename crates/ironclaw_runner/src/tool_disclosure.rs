@@ -477,19 +477,18 @@ fn bridge_tool_definitions_with_tokens() -> impl Iterator<Item = BridgeDefinitio
 fn advertised_bridge_tool_definitions(
     catalog: &CapabilityCatalog,
 ) -> Vec<(ProviderToolDefinition, u32)> {
-    // Only `tool_search` is advertised to the model. Discovery is
-    // `tool_search` (find names) → `capability_info` (load schema + promote) →
-    // direct call, so `tool_describe` and `tool_call` are no longer surfaced:
-    // `capability_info` already returns schemas, and a promoted tool is called
-    // directly rather than through a proxy. Their synthetic capabilities are
-    // retained internally (see `bridge_tool_definitions`) only so describe-first
-    // can still hand back a schema when the model calls a deferred tool blind.
+    // Deferred surfaces advertise the complete protocol promised by the system
+    // prompt. `tool_search` carries the catalog index; the other bridge
+    // definitions are stable and can reuse their cached token estimates.
     bridge_tool_definitions_with_tokens()
-        .filter(|(definition, _)| definition.name.as_str() == TOOL_SEARCH_NAME)
-        .map(|(definition, _)| {
+        .map(|(definition, est_schema_tokens)| {
             let mut advertised = definition.clone();
-            advertised.description = catalog_index_tool_search_description(catalog);
-            let est_schema_tokens = estimate_definition_tokens(&advertised);
+            let est_schema_tokens = if advertised.name.as_str() == TOOL_SEARCH_NAME {
+                advertised.description = catalog_index_tool_search_description(catalog);
+                estimate_definition_tokens(&advertised)
+            } else {
+                est_schema_tokens
+            };
             (advertised, est_schema_tokens)
         })
         .collect()
@@ -1316,6 +1315,47 @@ mod tests {
     }
 
     #[test]
+    fn production_core_policy_fits_disclosure_caps() {
+        let caps = DisclosureCaps::default();
+        assert_eq!(
+            (caps.max_tools, caps.max_tokens),
+            (32, 12_000),
+            "the production disclosure budget changed; review the core policy and rollout gate"
+        );
+        assert!(
+            CORE_TOOL_NAMES.len() <= caps.max_tools,
+            "production core declares {} tools, exceeding the {}-tool disclosure budget",
+            CORE_TOOL_NAMES.len(),
+            caps.max_tools
+        );
+
+        // Exercise one deliberately broad schema per declared production core
+        // slot. This is a cheap deterministic CI tripwire; live trace estimates
+        // remain part of the rollout gate.
+        let definitions: Vec<_> = CORE_TOOL_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !is_bridge_name(name))
+            .map(|(index, name)| {
+                fixture_tool(
+                    *name,
+                    format!("Current production core schema budget fixture for {name}."),
+                    large_nested_schema(index),
+                )
+            })
+            .chain(bridge_tool_definitions())
+            .collect();
+        let estimated_tokens = definitions.iter().fold(0_u32, |total, definition| {
+            total.saturating_add(estimate_definition_tokens(definition))
+        });
+        assert!(
+            estimated_tokens <= caps.max_tokens,
+            "production core estimates {estimated_tokens} schema tokens, exceeding the {}-token disclosure budget",
+            caps.max_tokens
+        );
+    }
+
+    #[test]
     fn promoted_set_is_append_only_and_unique() {
         let mut promoted = PromotedSet::default();
         promoted.push("workspace_search");
@@ -1406,6 +1446,8 @@ mod tests {
                 "memory_search",
                 "read_file",
                 "tool_search",
+                "tool_describe",
+                "tool_call",
                 "zzz_promoted",
                 "aaa_promoted"
             ]
@@ -1451,8 +1493,8 @@ mod tests {
         assert!(by_count.definitions.len() <= base_count + 1);
         assert!(by_count_names.contains(&"read_file"));
         assert!(by_count_names.contains(&TOOL_SEARCH_NAME));
-        assert!(!by_count_names.contains(&TOOL_DESCRIBE_NAME));
-        assert!(!by_count_names.contains(&TOOL_CALL_NAME));
+        assert!(by_count_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(by_count_names.contains(&TOOL_CALL_NAME));
         assert!(by_count_names.contains(&"promoted_00"));
         assert!(!by_count_names.contains(&"promoted_01"));
 
@@ -1497,8 +1539,8 @@ mod tests {
         assert!(by_tokens.advertised_tokens <= token_threshold);
         assert!(by_token_names.contains(&"read_file"));
         assert!(by_token_names.contains(&TOOL_SEARCH_NAME));
-        assert!(!by_token_names.contains(&TOOL_DESCRIBE_NAME));
-        assert!(!by_token_names.contains(&TOOL_CALL_NAME));
+        assert!(by_token_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(by_token_names.contains(&TOOL_CALL_NAME));
         assert!(by_token_names.contains(&"promoted_00"));
         assert!(!by_token_names.contains(&"promoted_01"));
     }
@@ -1537,15 +1579,16 @@ mod tests {
             tool_search.description,
             catalog_index_tool_search_description(&catalog)
         );
-        // tool_describe / tool_call are no longer advertised — only tool_search.
-        assert!(
-            !active.definitions.iter().any(|definition| {
-                matches!(
-                    definition.name.as_str(),
-                    TOOL_DESCRIBE_NAME | TOOL_CALL_NAME
-                )
-            }),
-            "only tool_search is advertised; describe/call bridges are internal-only"
+        let bridge_names: Vec<_> = active
+            .definitions
+            .iter()
+            .filter(|definition| is_bridge_name(definition.name.as_str()))
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert_eq!(
+            bridge_names,
+            vec![TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME],
+            "deferred surfaces must advertise the complete discovery protocol"
         );
 
         let actual_tokens = active.definitions.iter().fold(0_u32, |total, definition| {

@@ -150,11 +150,9 @@ pub struct RebornIntegrationHarnessBuilder {
     model_mode: ThreadModelMode,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
-    /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
-    /// planned runtime, bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`
+    /// Tool disclosure mode for the underlying group's ONE planned runtime.
+    /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
-    /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
-    /// today's behavior byte-for-byte.
     tool_disclosure: Option<ToolDisclosureMode>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
@@ -378,9 +376,8 @@ impl RebornIntegrationHarnessBuilder {
     /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
     /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
     /// tool list with the bridge meta tools in the `tools` argument shipped
-    /// to the model. Only `tool_search` is ever ADVERTISED to the model;
-    /// `tool_describe`/`tool_call` are retained internally for describe-first
-    /// routing and never appear on the model-visible tool surface (see
+    /// to the model. Deferred surfaces advertise the complete
+    /// `tool_search`/`tool_describe`/`tool_call` protocol (see
     /// `tool_disclosure.rs`'s `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`).
     /// Deferral is ALSO threshold-gated (`select_active_set`,
     /// `DisclosureCaps::default().max_tools = 32`): backends under the cap
@@ -756,7 +753,9 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
-            tool_disclosure: None,
+            // General integration tests stay hermetic across production default
+            // changes. Disclosure-specific tests opt into Bridged explicitly.
+            tool_disclosure: Some(ToolDisclosureMode::Off),
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -2296,9 +2295,8 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
             // No integration test should inherit the ambient tool-disclosure
-            // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
-            // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
-            // never ambient (see `tool_disclosure.rs`'s negative control).
+            // knob. Builders pin Off and disclosure tests opt into Bridged;
+            // scrubbing is defense in depth for the retained env fallback.
             std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });

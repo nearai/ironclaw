@@ -431,10 +431,8 @@ impl RebornIntegrationHarness {
     /// `TraceLlm::captured_tool_definitions`) contains a definition named
     /// `name`, across every request this thread has sent so far (C-TOOLDISCLOSURE).
     /// This is the channel `ToolDisclosureMode::Bridged` rewrites: bridged runs
-    /// replace the flat per-capability tool list with the bridge meta tools.
-    /// Only `tool_search` is ever ADVERTISED to the model; `tool_describe`/
-    /// `tool_call` are retained internally for describe-first routing and
-    /// never appear in the captured tool definitions.
+    /// replace a wide flat per-capability tool list with the complete discovery
+    /// bridge set.
     pub async fn assert_model_tools_contains(&self, name: &str) -> HarnessResult<()> {
         let definitions = self.scripted_llm.captured_tool_definitions();
         if definitions
