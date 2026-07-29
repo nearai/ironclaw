@@ -26,6 +26,8 @@ use ironclaw_webui::{
 use secrecy::SecretString;
 
 const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+const TEST_GOOGLE_AUTH_ENDPOINT_ENV: &str = "IRONCLAW_REBORN_TEST_WEBUI_GOOGLE_AUTH_ENDPOINT";
+const TEST_GOOGLE_TOKEN_ENDPOINT_ENV: &str = "IRONCLAW_REBORN_TEST_WEBUI_GOOGLE_TOKEN_ENDPOINT";
 
 /// Resolved SSO startup config: the providers to mount plus the public
 /// base URL their callback URLs are built from. Constructed by
@@ -195,6 +197,7 @@ pub(crate) fn is_cleartext_http_scheme(base_url: &str) -> bool {
 /// different registered redirect URIs.)
 fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     let mut providers: Vec<Arc<dyn OAuthProvider>> = Vec::new();
+    let google_test_endpoints = google_test_endpoints_from_env()?;
     // Optional operator override for the provider HTTP timeout, applied to
     // every configured provider. Useful on a slow / cross-border path to
     // the provider (e.g. `github.com`) where the default times out.
@@ -234,14 +237,22 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
         // authorization succeeds almost always means the secret does not
         // match this client id.
         log_provider_config("google", &client_id, client_secret.len());
-        let provider = GoogleProvider::new(GoogleOAuthConfig {
-            client_id,
-            client_secret: SecretString::from(client_secret),
-            allowed_hd,
-            http_timeout,
-        })
+        let provider = build_google_provider(
+            GoogleOAuthConfig {
+                client_id,
+                client_secret: SecretString::from(client_secret),
+                allowed_hd,
+                http_timeout,
+            },
+            google_test_endpoints,
+        )
         .context("failed to build Google OAuth provider")?;
         providers.push(Arc::new(provider));
+    } else if google_test_endpoints.is_some() {
+        anyhow::bail!(
+            "{TEST_GOOGLE_AUTH_ENDPOINT_ENV} and {TEST_GOOGLE_TOKEN_ENDPOINT_ENV} require \
+             IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID"
+        );
     }
 
     if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID") {
@@ -263,6 +274,92 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     }
 
     Ok(providers)
+}
+
+/// Resolve the paired, loopback-only Google endpoint override used by the
+/// standalone-binary E2E harness.
+///
+/// This is deliberately stricter than an ordinary provider URL setting:
+/// either both endpoints are absent (the production default), or both must be
+/// present in an `e2e-test-support` debug build and point at literal loopback
+/// IP addresses over HTTP. A partial or production activation fails startup
+/// rather than falling through to a real provider mid-test.
+fn google_test_endpoints_from_env() -> anyhow::Result<Option<(String, String)>> {
+    let auth_endpoint = non_empty_env(TEST_GOOGLE_AUTH_ENDPOINT_ENV);
+    let token_endpoint = non_empty_env(TEST_GOOGLE_TOKEN_ENDPOINT_ENV);
+
+    let (auth_endpoint, token_endpoint) = match (auth_endpoint, token_endpoint) {
+        (None, None) => return Ok(None),
+        (Some(auth_endpoint), Some(token_endpoint)) => (auth_endpoint, token_endpoint),
+        _ => {
+            anyhow::bail!(
+                "{TEST_GOOGLE_AUTH_ENDPOINT_ENV} and {TEST_GOOGLE_TOKEN_ENDPOINT_ENV} \
+                 must be set together"
+            )
+        }
+    };
+
+    if !cfg!(feature = "e2e-test-support") {
+        anyhow::bail!(
+            "{TEST_GOOGLE_AUTH_ENDPOINT_ENV} is test-only and requires the \
+             `e2e-test-support` feature"
+        );
+    }
+    if !cfg!(debug_assertions) {
+        anyhow::bail!(
+            "{TEST_GOOGLE_AUTH_ENDPOINT_ENV} is test-only and unavailable in release builds"
+        );
+    }
+
+    validate_test_google_endpoint(TEST_GOOGLE_AUTH_ENDPOINT_ENV, &auth_endpoint)?;
+    validate_test_google_endpoint(TEST_GOOGLE_TOKEN_ENDPOINT_ENV, &token_endpoint)?;
+
+    tracing::warn!(
+        auth_endpoint = %auth_endpoint,
+        token_endpoint = %token_endpoint,
+        "test-only WebUI Google OAuth endpoints are ACTIVE"
+    );
+    Ok(Some((auth_endpoint, token_endpoint)))
+}
+
+fn validate_test_google_endpoint(name: &str, raw: &str) -> anyhow::Result<()> {
+    let endpoint =
+        reqwest::Url::parse(raw).with_context(|| format!("{name} must be a valid URL"))?;
+    if endpoint.scheme() != "http" {
+        anyhow::bail!("{name} must use http:// for the local E2E provider");
+    }
+    if !endpoint.username().is_empty() || endpoint.password().is_some() {
+        anyhow::bail!("{name} must not contain URL credentials");
+    }
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| anyhow!("{name} must include a loopback IP host"))?;
+    let ip = host
+        .parse::<std::net::IpAddr>()
+        .with_context(|| format!("{name} host must be a loopback IP literal"))?;
+    if !ip.is_loopback() {
+        anyhow::bail!("{name} host must be a loopback IP literal");
+    }
+    Ok(())
+}
+
+fn build_google_provider(
+    config: GoogleOAuthConfig,
+    test_endpoints: Option<(String, String)>,
+) -> Result<GoogleProvider, ironclaw_webui::ProviderInitError> {
+    let Some((auth_endpoint, token_endpoint)) = test_endpoints else {
+        return GoogleProvider::new(config);
+    };
+
+    #[cfg(feature = "e2e-test-support")]
+    {
+        GoogleProvider::with_endpoints(config, auth_endpoint, token_endpoint)
+    }
+    #[cfg(not(feature = "e2e-test-support"))]
+    {
+        let _ = (config, auth_endpoint, token_endpoint);
+        unreachable!("test endpoints are rejected before provider construction")
+    }
 }
 
 /// Log a redacted view of a configured OAuth provider at startup. The
@@ -430,6 +527,101 @@ mod tests {
         assert!(require_admission_allowlist(&["example.com".to_string()]).is_ok());
     }
 
+    #[test]
+    fn test_google_endpoint_overrides_must_be_paired() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        clear_sso_env();
+        // SAFETY: the shared process-env lock serializes this mutation.
+        unsafe {
+            std::env::set_var(
+                TEST_GOOGLE_AUTH_ENDPOINT_ENV,
+                "http://127.0.0.1:1234/authorize",
+            )
+        };
+
+        let error = google_test_endpoints_from_env()
+            .expect_err("a partial endpoint override must fail closed");
+        assert!(
+            error.to_string().contains("must be set together"),
+            "unexpected error: {error}"
+        );
+        clear_sso_env();
+    }
+
+    #[test]
+    fn test_google_endpoints_require_loopback_ip_literals() {
+        let cases = [
+            ("https://127.0.0.1:1234/authorize", "must use http://"),
+            ("http://localhost:1234/authorize", "loopback IP literal"),
+            ("http://192.0.2.1:1234/authorize", "loopback IP literal"),
+            ("http://user@127.0.0.1:1234/authorize", "URL credentials"),
+        ];
+        for (raw, expected) in cases {
+            let error = validate_test_google_endpoint(TEST_GOOGLE_AUTH_ENDPOINT_ENV, raw)
+                .expect_err("unsafe test endpoint must be rejected");
+            assert!(
+                error.to_string().contains(expected),
+                "{raw}: expected `{expected}` in `{error}`"
+            );
+        }
+        validate_test_google_endpoint(
+            TEST_GOOGLE_AUTH_ENDPOINT_ENV,
+            "http://127.0.0.1:1234/authorize",
+        )
+        .expect("loopback HTTP endpoint");
+    }
+
+    #[cfg(not(feature = "e2e-test-support"))]
+    #[test]
+    fn test_google_endpoints_require_explicit_cargo_feature() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        clear_sso_env();
+        // SAFETY: the shared process-env lock serializes these mutations.
+        unsafe {
+            std::env::set_var(
+                TEST_GOOGLE_AUTH_ENDPOINT_ENV,
+                "http://127.0.0.1:1234/authorize",
+            );
+            std::env::set_var(
+                TEST_GOOGLE_TOKEN_ENDPOINT_ENV,
+                "http://127.0.0.1:1234/token",
+            );
+        }
+
+        let error =
+            google_test_endpoints_from_env().expect_err("default builds must reject the test seam");
+        assert!(
+            error.to_string().contains("e2e-test-support"),
+            "unexpected error: {error}"
+        );
+        clear_sso_env();
+    }
+
+    #[cfg(feature = "e2e-test-support")]
+    #[test]
+    fn test_google_endpoints_resolve_in_feature_enabled_debug_build() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        clear_sso_env();
+        // SAFETY: the shared process-env lock serializes these mutations.
+        unsafe {
+            std::env::set_var(
+                TEST_GOOGLE_AUTH_ENDPOINT_ENV,
+                "http://127.0.0.1:1234/authorize",
+            );
+            std::env::set_var(
+                TEST_GOOGLE_TOKEN_ENDPOINT_ENV,
+                "http://127.0.0.1:1234/token",
+            );
+        }
+
+        let endpoints = google_test_endpoints_from_env()
+            .expect("feature-enabled debug build accepts loopback endpoints")
+            .expect("paired endpoints");
+        assert_eq!(endpoints.0, "http://127.0.0.1:1234/authorize");
+        assert_eq!(endpoints.1, "http://127.0.0.1:1234/token");
+        clear_sso_env();
+    }
+
     const SSO_ENV_VARS: &[&str] = &[
         "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
         "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
@@ -438,6 +630,8 @@ mod tests {
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
         WEBUI_BASE_URL_ENV,
         "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
+        TEST_GOOGLE_AUTH_ENDPOINT_ENV,
+        TEST_GOOGLE_TOKEN_ENDPOINT_ENV,
     ];
 
     fn clear_sso_env() {

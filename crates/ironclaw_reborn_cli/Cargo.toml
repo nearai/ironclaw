@@ -32,6 +32,12 @@ eula = false
 memory-mem0 = [
     "ironclaw_reborn_composition/memory-mem0",
 ]
+# Compile the local-provider endpoint constructor used by the Python E2E
+# harness. Activation still requires a debug build plus paired loopback-only
+# endpoint env vars; release builds fail closed if the vars are present.
+e2e-test-support = [
+    "ironclaw_webui/test-support",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1" }
