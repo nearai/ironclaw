@@ -131,7 +131,18 @@ const paths = {
   retry: (<><path d="M3.5 12a8.5 8.5 0 1 1 2.6 6.1" /><path d="M3.2 18.5v-5h5" /></>),
 };
 
-export function Icon({ name, className = "", strokeWidth = 1.7 }) {
+export type IconName = keyof typeof paths;
+
+/** Every registered icon name — used by the Storybook gallery. */
+export const ICON_NAMES = Object.keys(paths) as IconName[];
+
+type IconProps = {
+  name: IconName;
+  className?: string;
+  strokeWidth?: number | string;
+};
+
+export function Icon({ name, className = "", strokeWidth = 1.7 }: IconProps) {
   return (
     <svg
       aria-hidden="true"

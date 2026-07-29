@@ -10,6 +10,8 @@ test("theme remounts from the live selection instead of the bootstrap snapshot",
   const container = document.createElement("div");
   document.body.append(container);
   const originalInitialTheme = window.__IRONCLAW_INITIAL_THEME__;
+  const originalDataTheme = document.documentElement.dataset.theme;
+  const originalStoredTheme = window.localStorage.getItem("ironclaw:v2-theme");
 
   function ThemeHarness() {
     const { theme, setTheme } = useInterfaceTheme();
@@ -43,8 +45,16 @@ test("theme remounts from the live selection instead of the bootstrap snapshot",
     } else {
       window.__IRONCLAW_INITIAL_THEME__ = originalInitialTheme;
     }
-    delete document.documentElement.dataset.theme;
-    window.localStorage.removeItem("ironclaw:v2-theme");
+    if (originalDataTheme === undefined) {
+      delete document.documentElement.dataset.theme;
+    } else {
+      document.documentElement.dataset.theme = originalDataTheme;
+    }
+    if (originalStoredTheme === null) {
+      window.localStorage.removeItem("ironclaw:v2-theme");
+    } else {
+      window.localStorage.setItem("ironclaw:v2-theme", originalStoredTheme);
+    }
     container.remove();
   }
 });

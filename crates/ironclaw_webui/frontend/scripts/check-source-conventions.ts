@@ -165,13 +165,16 @@ export function formatViolation(violation: ConventionViolation): string {
 
 function runCli(): void {
   const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-  const sourceRoots = [
-    resolve(scriptDirectory, "../src"),
-    resolve(scriptDirectory, "../packages/ui/src"),
-    resolve(scriptDirectory, "../packages/ui/stories"),
-    resolve(scriptDirectory, "../packages/ui/.storybook"),
-  ];
-  const violations = sourceRoots.flatMap((sourceRoot) => checkSourceTree(sourceRoot));
+  // Frontend-relative root prefixes are kept in the reported paths so
+  // violations in e.g. packages/ui/src/components and src/components stay
+  // unambiguous.
+  const sourceRoots = ["src", "packages/ui/src", "packages/ui/stories", "packages/ui/.storybook"];
+  const violations = sourceRoots.flatMap((sourceRoot) =>
+    checkSourceTree(resolve(scriptDirectory, "..", sourceRoot)).map((violation) => ({
+      ...violation,
+      file: `${sourceRoot}/${violation.file}`,
+    }))
+  );
   if (violations.length === 0) return;
 
   for (const violation of violations) {

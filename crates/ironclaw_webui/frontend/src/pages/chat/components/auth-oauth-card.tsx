@@ -143,8 +143,10 @@ export function AuthOauthCard({ gate, onCancel }) {
   const awaiting = opened && !closedNotice;
 
   return (
+    // The icon set has no "link" glyph; this card has always rendered the
+    // spark fallback, so name it explicitly.
     <AuthGateShell
-      icon="link"
+      icon="spark"
       headline={gate?.headline || t("authGate.oauthTitle")}
       provider={gate?.provider ? providerLabel : ""}
       accountLabel={gate?.accountLabel || ""}
@@ -168,7 +170,7 @@ export function AuthOauthCard({ gate, onCancel }) {
             openAuth();
           }}
         >
-          {!awaiting && <Icon name="link" className="h-4 w-4" />}
+          {!awaiting && <Icon name="spark" className="h-4 w-4" />}
           {awaiting ? t("authGate.authorizing", { provider: providerLabel }) : openLabel}
         </Button>
         <Button

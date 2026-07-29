@@ -1,7 +1,7 @@
-import { Icon } from "@ironclaw/ui";
+import { Icon, type IconName } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 
-const ADMIN_TABS = [
+const ADMIN_TABS: { id: string; labelKey: string; icon: IconName }[] = [
   { id: "dashboard", labelKey: "admin.tab.dashboard", icon: "pulse" },
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
   { id: "usage", labelKey: "admin.tab.usage", icon: "spark" },

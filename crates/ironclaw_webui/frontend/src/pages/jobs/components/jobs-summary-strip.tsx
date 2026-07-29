@@ -1,6 +1,6 @@
-import { Panel, StatCard } from "@ironclaw/ui";
+import { Panel, StatCard, type BadgeTone } from "@ironclaw/ui";
 
-const SUMMARY_CARDS = [
+const SUMMARY_CARDS: { key: string; label: string; tone: BadgeTone; detail: string }[] = [
   { key: "total", label: "Total jobs", tone: "muted", detail: "All tracked work across agent and sandbox execution." },
   { key: "pending", label: "Pending", tone: "warning", detail: "Queued work waiting for a worker or container slot." },
   { key: "in_progress", label: "In progress", tone: "signal", detail: "Actively running jobs and live bridges." },

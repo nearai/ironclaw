@@ -5,7 +5,7 @@ import hotToast, {
   type Toast,
   type ToastType,
 } from "react-hot-toast";
-import { Icon } from "@ironclaw/ui";
+import { Icon, type IconName } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 
 const INFO_TONE = "border-[var(--v2-panel-border)] text-[var(--v2-text)]";
@@ -18,7 +18,7 @@ const TONE: Record<ToastType, string> = {
   error:
     "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] text-[var(--v2-danger-text)]",
 };
-const ICON: Record<ToastType, string> = {
+const ICON: Record<ToastType, IconName> = {
   blank: "bolt",
   custom: "bolt",
   loading: "bolt",

@@ -1,17 +1,8 @@
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { Icon } from "../src/primitives/icon";
+import { Icon, ICON_NAMES } from "../src/primitives/icon";
 import { Spinner } from "../src/primitives/spinner";
 import { Skeleton } from "../src/primitives/skeleton";
-
-const ICON_NAMES = [
-  "attach", "bolt", "bell", "bookOpen", "calendar", "check", "chat", "close",
-  "clock", "download", "edit", "file", "flag", "pin", "pause", "play",
-  "folder", "layers", "list", "logs", "lock", "logout", "moon", "plug",
-  "plus", "pulse", "send", "search", "settings", "spark", "sun", "shield",
-  "tool", "terminal", "trash", "upload", "chevron", "more", "copy",
-  "arrowDown", "retry",
-];
 
 const meta: Meta = { title: "Primitives/Overview" };
 export default meta;

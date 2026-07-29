@@ -11,12 +11,13 @@
  *   active    boolean — accent-tinted active/selected state
  *   as        "button" (default) | "a" | Link-like component
  *   className extra classes (e.g. "relative", custom colors for "plain")
- *   ...rest   forwarded (onClick, aria-*, data-*, title, ref, …)
+ *   ...rest   forwarded; typed against the rendered element, so only the
+ *             attributes valid for `as` are accepted (href on "a", …)
  *
  * `iconButtonClasses` is exported for call sites that must build the class
  * string themselves (e.g. react-router <NavLink className={fn}> callbacks).
  */
-import type { ElementType, ReactNode } from "react";
+import type { ComponentProps, ElementType, ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
 const BASE = "grid h-8 w-8 shrink-0 place-items-center rounded-[8px]";
@@ -43,29 +44,33 @@ export function iconButtonClasses({
   return cn(BASE, VARIANTS[variant] ?? VARIANTS.ghost, active && ACTIVE, className);
 }
 
-type IconButtonProps = IconButtonStyleOptions & {
+type IconButtonOwnProps<E extends ElementType> = IconButtonStyleOptions & {
+  as?: E;
   children?: ReactNode;
-  as?: ElementType;
-  type?: string;
-  [key: string]: unknown;
 };
 
-export function IconButton({
+export type IconButtonProps<E extends ElementType = "button"> = IconButtonOwnProps<E> &
+  Omit<ComponentProps<E>, keyof IconButtonOwnProps<E>>;
+
+export function IconButton<E extends ElementType = "button">({
   children,
   className = "",
   variant = "ghost",
   active = false,
-  as: Tag = "button",
-  type,
+  as,
   ...rest
-}: IconButtonProps) {
-  const Element: any = Tag;
-  const resolvedType = Tag === "button" ? type ?? "button" : type;
+}: IconButtonProps<E>) {
+  const Element = (as ?? "button") as ElementType<Record<string, unknown>>;
+  // Native buttons default to type="submit"; keep icon buttons inert unless
+  // the caller opts in.
+  const defaultedProps =
+    Element === "button" && (rest as { type?: string }).type === undefined
+      ? { ...rest, type: "button" }
+      : rest;
   return (
     <Element
-      type={resolvedType}
       className={iconButtonClasses({ variant, active, className })}
-      {...rest}
+      {...defaultedProps}
     >
       {children}
     </Element>

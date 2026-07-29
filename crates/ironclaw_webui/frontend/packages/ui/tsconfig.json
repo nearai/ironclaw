@@ -2,15 +2,24 @@
   "compilerOptions": {
     "isolatedModules": true,
     "jsx": "react-jsx",
-    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2022"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
-    "noImplicitAny": false,
     "skipLibCheck": true,
-    "strict": false,
+    "strict": true,
     "target": "ES2022",
-    "types": ["react"]
+    "types": [
+      "react"
+    ]
   },
-  "include": ["src", "stories", ".storybook"]
+  "include": [
+    "src",
+    "stories",
+    ".storybook"
+  ]
 }

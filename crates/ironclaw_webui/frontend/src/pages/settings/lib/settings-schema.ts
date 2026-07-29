@@ -1,4 +1,8 @@
-export const SETTINGS_TABS = [
+import type { IconName } from "@ironclaw/ui";
+
+type SettingsTab = { id: string; labelKey: string; icon: IconName };
+
+export const SETTINGS_TABS: SettingsTab[] = [
   { id: "inference", labelKey: "settings.inference", icon: "spark" },
   { id: "appearance", labelKey: "settings.appearance", icon: "sun" },
   { id: "agent", labelKey: "settings.agent", icon: "bolt" },
@@ -8,7 +12,9 @@ export const SETTINGS_TABS = [
   { id: "skills", labelKey: "settings.skills", icon: "file" },
   { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
   { id: "users", labelKey: "settings.users", icon: "lock" },
-  { id: "language", labelKey: "settings.language", icon: "globe" },
+  // The icon set has no "globe" glyph; this tab has always rendered the
+  // spark fallback, so name it explicitly.
+  { id: "language", labelKey: "settings.language", icon: "spark" },
 ];
 
 // Inference settings use dedicated LLM endpoints. Keep this schema empty until

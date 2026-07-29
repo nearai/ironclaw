@@ -1,4 +1,4 @@
-import { Icon } from "@ironclaw/ui";
+import { Icon, type IconName } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
 
@@ -16,7 +16,7 @@ export function EmptyState({
   onCancel,
 }) {
   const t = useT();
-  const suggestions = [
+  const suggestions: { icon: IconName; title: string; detail: string }[] = [
     {
       icon: "tool",
       title: t("chat.suggestion1"),

@@ -17,7 +17,7 @@
  *   <ModalBody>    — scrollable content area
  *   <ModalFooter>  — action button row with top divider
  */
-import React from "react";
+import React, { type ReactNode } from "react";
 import { useUiText } from "../theme/ui-text";
 import { cn } from "../primitives/cn";
 import { Icon } from "../primitives/icon";
@@ -34,6 +34,17 @@ const SIZES = {
 
 /* ─── Modal ───────────────────────────────────────────────────────── */
 
+type ModalProps = {
+  open: boolean;
+  onClose?: () => void;
+  title?: ReactNode;
+  size?: keyof typeof SIZES;
+  className?: string;
+  /** Close-button aria-label; defaults to the UiTextProvider string. */
+  closeLabel?: string;
+  children?: ReactNode;
+};
+
 export function Modal({
   open,
   onClose,
@@ -42,7 +53,7 @@ export function Modal({
   className = "",
   closeLabel,
   children,
-}) {
+}: ModalProps) {
   /* Lock body scroll when open */
   React.useEffect(() => {
     if (!open) return;
@@ -56,7 +67,7 @@ export function Modal({
   /* Close on Escape */
   React.useEffect(() => {
     if (!open) return;
-    const handler = (e) => {
+    const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose?.();
     };
     window.addEventListener("keydown", handler);
@@ -101,7 +112,14 @@ export function Modal({
 
 /* ─── ModalHeader ─────────────────────────────────────────────────── */
 
-export function ModalHeader({ children, onClose, className = "", closeLabel }) {
+type ModalHeaderProps = {
+  children?: ReactNode;
+  onClose?: () => void;
+  className?: string;
+  closeLabel?: string;
+};
+
+export function ModalHeader({ children, onClose, className = "", closeLabel }: ModalHeaderProps) {
   const uiText = useUiText();
   const effectiveCloseLabel = closeLabel || uiText.close;
   return (
@@ -138,7 +156,12 @@ export function ModalHeader({ children, onClose, className = "", closeLabel }) {
 
 /* ─── ModalBody ───────────────────────────────────────────────────── */
 
-export function ModalBody({ children, className = "" }) {
+type ModalSectionProps = {
+  children?: ReactNode;
+  className?: string;
+};
+
+export function ModalBody({ children, className = "" }: ModalSectionProps) {
   return (
     <div className={cn("flex-1 overflow-y-auto px-5 py-4 md:px-7 md:py-5", className)}>
       {children}
@@ -148,7 +171,7 @@ export function ModalBody({ children, className = "" }) {
 
 /* ─── ModalFooter ─────────────────────────────────────────────────── */
 
-export function ModalFooter({ children, className = "" }) {
+export function ModalFooter({ children, className = "" }: ModalSectionProps) {
   return (
     <div
       className={cn(

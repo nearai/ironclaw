@@ -1,17 +1,27 @@
 /**
  * FlowList
  *
- * Numbered list of { title, description } items.
+ * Numbered list of { title, description } items. Items may carry an `id`
+ * for stable React reconciliation; without one the list position is used,
+ * so duplicate titles are safe.
  */
-export function FlowList({ items }) {
+import type { CSSProperties, ReactNode } from "react";
+
+export type FlowListItem = {
+  id?: string;
+  title: ReactNode;
+  description?: ReactNode;
+};
+
+export function FlowList({ items }: { items: FlowListItem[] }) {
   return (
     <div className="grid gap-3">
       {items.map(
         (item, index) => (
           <div
-            key={item.title}
+            key={item.id ?? index}
             className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-4 border-t border-[var(--v2-panel-border)] py-4"
-            style={{ "--index": index } as any}
+            style={{ "--index": index } as CSSProperties}
           >
             <div className="font-mono text-xs text-[var(--v2-accent-text)]">
               {String(index + 1).padStart(2, "0")}

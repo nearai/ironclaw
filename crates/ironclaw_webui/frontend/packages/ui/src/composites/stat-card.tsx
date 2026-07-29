@@ -18,8 +18,20 @@
  *     concatenates (no tailwind-merge), so this REPLACES the size classes
  *     rather than appending to them.
  */
+import type { ReactNode } from "react";
 import { cn } from "../primitives/cn";
-import { Badge } from "../components/badge";
+import { Badge, type BadgeTone } from "../components/badge";
+
+type StatCardProps = {
+  label: ReactNode;
+  value: ReactNode;
+  tone?: BadgeTone;
+  badgeLabel?: ReactNode;
+  detail?: ReactNode;
+  showDivider?: boolean;
+  className?: string;
+  valueClassName?: string;
+};
 
 export function StatCard({
   label,
@@ -30,7 +42,7 @@ export function StatCard({
   showDivider = true,
   className = "",
   valueClassName = "text-[1.75rem] md:text-[2rem]",
-}) {
+}: StatCardProps) {
   return (
     <div
       className={cn(

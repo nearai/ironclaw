@@ -9,9 +9,17 @@
  *   children    optional CTA (usually a Button)
  *   boxed       boolean (wrap in Card)
  */
+import type { ReactNode } from "react";
 import { Card } from "../components/card";
 
-export function EmptyPanel({ title, description, children = null, boxed = true }) {
+type EmptyPanelProps = {
+  title?: ReactNode;
+  description?: ReactNode;
+  children?: ReactNode;
+  boxed?: boolean;
+};
+
+export function EmptyPanel({ title, description, children = null, boxed = true }: EmptyPanelProps) {
   const body = (
     <div className="max-w-xl">
       <h2

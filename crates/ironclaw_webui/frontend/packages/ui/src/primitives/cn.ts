@@ -8,8 +8,16 @@
  *   cn("base", isActive && "active", ["also", "works"])
  *   cn("base", condition ? "a" : "b", { "font-bold": isBold }, className)
  */
-export function cn(...inputs) {
-  const result = [];
+export type ClassValue =
+  | string
+  | false
+  | null
+  | undefined
+  | ClassValue[]
+  | Record<string, unknown>;
+
+export function cn(...inputs: ClassValue[]): string {
+  const result: string[] = [];
   for (const input of inputs) {
     if (!input) continue;
     if (typeof input === "string") {

@@ -11,7 +11,11 @@
  *   onDismiss    optional — renders a text dismiss button
  *   dismissLabel label for the dismiss button (pass a translated string)
  *   className    layout additions (margins, …)
- *   ...rest      forwarded to the root div (role="alert", data-testid, …)
+ *   ...rest      forwarded to the root div (data-testid, …)
+ *
+ * The root div defaults to a live-region role — "alert" for danger,
+ * "status" otherwise — so dynamically mounted callouts are announced by
+ * assistive tech. Pass an explicit `role` to override.
  */
 import type { ReactNode } from "react";
 import { cn } from "../primitives/cn";
@@ -47,6 +51,7 @@ export function Callout({
 }: CalloutProps) {
   return (
     <div
+      role={tone === "danger" ? "alert" : "status"}
       className={cn(
         "flex items-center gap-3 rounded-xl border px-4 py-3 text-sm",
         TONES[tone] ?? TONES.info,

@@ -11,6 +11,7 @@
  *   size     "sm" (default) | "md"
  *   className string
  */
+import type { ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
 /* ── Tone maps ────────────────────────────────────────────────────────── */
@@ -41,7 +42,18 @@ const sizeClasses = {
   md: "h-7 gap-2 rounded-full px-2.5 text-[0.6875rem] tracking-[0.12em]",
 };
 
-export function Badge({ tone = "muted", label, dot = true, size = "md", className = "" }) {
+export type BadgeTone = keyof typeof toneClasses;
+export type BadgeSize = keyof typeof sizeClasses;
+
+type BadgeProps = {
+  tone?: BadgeTone;
+  label: ReactNode;
+  dot?: boolean;
+  size?: BadgeSize;
+  className?: string;
+};
+
+export function Badge({ tone = "muted", label, dot = true, size = "md", className = "" }: BadgeProps) {
   const isLive = tone === "success" || tone === "positive" || tone === "signal";
   return (
     <span

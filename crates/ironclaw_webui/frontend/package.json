@@ -13,7 +13,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && pnpm check:bundle",
     "check:bundle": "node --experimental-strip-types scripts/check-bundle-budgets.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p packages/ui --noEmit",
     "lint": "pnpm lint:conventions && pnpm typecheck",
     "lint:conventions": "node --experimental-strip-types scripts/check-source-conventions.ts",
     "test": "vitest run",

@@ -13,6 +13,7 @@
  *   Label       — <label> with consistent typography
  *   FormField   — Label + Input/children + optional error/hint
  */
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
 /* ─── Shared base ─────────────────────────────────────────────────── */
@@ -33,14 +34,21 @@ const INPUT_SIZES = {
   lg: "h-[54px] rounded-[18px] px-4 text-ui-lg",
 };
 
+export type InputSize = keyof typeof INPUT_SIZES;
+
 /* ─── Input ───────────────────────────────────────────────────────── */
+
+type InputProps = {
+  size?: InputSize;
+  error?: boolean;
+} & Omit<ComponentPropsWithoutRef<"input">, "size">;
 
 export function Input({
   className = "",
   size = "md",
   error = false,
   ...rest
-}) {
+}: InputProps) {
   return (
     <input
       className={cn(
@@ -56,12 +64,16 @@ export function Input({
 
 /* ─── Textarea ────────────────────────────────────────────────────── */
 
+type TextareaProps = {
+  error?: boolean;
+} & ComponentPropsWithoutRef<"textarea">;
+
 export function Textarea({
   className = "",
   error = false,
   rows = 4,
   ...rest
-}) {
+}: TextareaProps) {
   return (
     <textarea
       rows={rows}
@@ -79,13 +91,18 @@ export function Textarea({
 
 /* ─── Select ──────────────────────────────────────────────────────── */
 
+type SelectProps = {
+  size?: InputSize;
+  error?: boolean;
+} & Omit<ComponentPropsWithoutRef<"select">, "size">;
+
 export function Select({
   children,
   className = "",
   size = "md",
   error = false,
   ...rest
-}) {
+}: SelectProps) {
   return (
     <div className="relative w-full">
       <select
@@ -116,7 +133,11 @@ export function Select({
 
 /* ─── Label ───────────────────────────────────────────────────────── */
 
-export function Label({ children, className = "", required = false, ...rest }) {
+type LabelProps = {
+  required?: boolean;
+} & ComponentPropsWithoutRef<"label">;
+
+export function Label({ children, className = "", required = false, ...rest }: LabelProps) {
   return (
     <label
       className={cn(
@@ -140,6 +161,16 @@ export function Label({ children, className = "", required = false, ...rest }) {
  *     <${Input} ...${register("firstName")} />
  *   <//>
  */
+type FormFieldProps = {
+  label?: ReactNode;
+  children?: ReactNode;
+  error?: ReactNode;
+  hint?: ReactNode;
+  required?: boolean;
+  className?: string;
+  htmlFor?: string;
+};
+
 export function FormField({
   label,
   children,
@@ -148,7 +179,7 @@ export function FormField({
   required = false,
   className = "",
   htmlFor = "",
-}) {
+}: FormFieldProps) {
   return (
     <div className={cn("flex flex-col gap-2", className)}>
       {label &&

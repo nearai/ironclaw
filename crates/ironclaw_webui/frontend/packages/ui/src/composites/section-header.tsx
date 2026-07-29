@@ -3,6 +3,7 @@
  *
  * Page-level headings shared by list/detail views.
  */
+import type { ReactNode } from "react";
 import { cn } from "../primitives/cn";
 import { Card } from "../components/card";
 
@@ -10,7 +11,7 @@ import { Card } from "../components/card";
  * SectionHeader — top heading card (hidden on mobile, visible md+):
  *   h1 text-[1.9rem] md:text-[2.2rem] font-medium tracking-[-0.04em]
  */
-export function SectionHeader({ title, subtitle }) {
+export function SectionHeader({ title, subtitle }: { title?: ReactNode; subtitle?: ReactNode }) {
   return (
     <Card padding="lg" className="hidden md:block">
       <h1
@@ -29,7 +30,7 @@ export function SectionHeader({ title, subtitle }) {
 /**
  * SubLabel — section divider label: text-[1.35rem] font-medium text/82
  */
-export function SubLabel({ children, className = "" }) {
+export function SubLabel({ children, className = "" }: { children?: ReactNode; className?: string }) {
   return (
     <div
       className={cn(

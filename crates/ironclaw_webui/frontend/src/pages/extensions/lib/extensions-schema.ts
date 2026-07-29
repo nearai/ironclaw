@@ -1,6 +1,8 @@
+import type { IconName } from "@ironclaw/ui";
+
 // Tabs are product-taxonomy views over surfaces. Runtime (wasm/mcp/...) is
 // an implementation badge on cards, never a grouping axis.
-export const EXTENSIONS_TABS = [
+export const EXTENSIONS_TABS: { id: string; labelKey: string; icon: IconName }[] = [
   { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
   { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
