@@ -3,7 +3,10 @@
 //! admin-boundary role (admin-users directory).
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProductSurfaceError, RebornUserIdentityLookup, TenantId, UserId};
+use ironclaw_host_api::{
+    ProductSurfaceError, RebornUserIdentityLookup, TenantId, UserId,
+    installation_scoped_provider_user_id,
+};
 use ironclaw_product::{
     AdminUserError, AdminUserRole, AdminUserService, AdminUserStatus, CommandActorRoleResolver,
     ProductCommandContext,
@@ -56,7 +59,13 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
     ) -> Result<Option<AdminUserRole>, ProductSurfaceError> {
         let user_id = match &self.identity_lookup {
             Some(lookup) => match lookup
-                .resolve_user_identity(&self.provider, context.external_actor_ref.id())
+                .resolve_user_identity(
+                    &self.provider,
+                    &installation_scoped_provider_user_id(
+                        &context.installation_id,
+                        context.external_actor_ref.id(),
+                    ),
+                )
                 .await
             {
                 Ok(Some(user_id)) => user_id,
@@ -97,6 +106,14 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    /// The installation id `sample_context` bakes into every context it
+    /// builds. Binding keys must be scoped to this SAME value
+    /// (`installation_scoped_provider_user_id`) — a shared helper rather than
+    /// a second hardcoded literal keeps the two from drifting apart.
+    fn test_installation_id() -> AdapterInstallationId {
+        AdapterInstallationId::new("install_alpha").expect("valid installation")
+    }
+
     fn tenant(value: &str) -> TenantId {
         TenantId::new(value).expect("valid tenant")
     }
@@ -107,8 +124,7 @@ mod tests {
 
     fn sample_context(actor_id: &str) -> ProductCommandContext {
         let adapter_id = ProductAdapterId::new("test_adapter").expect("valid adapter");
-        let installation_id =
-            AdapterInstallationId::new("install_alpha").expect("valid installation");
+        let installation_id = test_installation_id();
         let evidence = ProtocolAuthEvidence::test_verified(
             AuthRequirement::SharedSecretHeader {
                 header_name: "X-Secret".into(),
@@ -147,9 +163,35 @@ mod tests {
             .expect("context")
     }
 
+    /// Bindings are keyed by the SCOPED provider-user id
+    /// (`installation_scoped_provider_user_id`), matching every real
+    /// producer (`channel_identity_binding.rs`, `channel_pairing.rs`) and the
+    /// production `ProviderIdentityActorResolver` reader — never a raw actor
+    /// id. `calls()` additionally records every `(provider,
+    /// provider_user_id)` pair the resolver actually looked up, so a test can
+    /// pin the exact key format `actor_role` sends rather than trust that
+    /// seeding and lookup happen to agree.
     struct FakeLookup {
         bindings: std::collections::HashMap<String, UserId>,
         fail: bool,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl FakeLookup {
+        fn new(bindings: std::collections::HashMap<String, UserId>, fail: bool) -> Self {
+            Self {
+                bindings,
+                fail,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
     }
 
     #[async_trait]
@@ -159,6 +201,10 @@ mod tests {
             provider: &str,
             provider_user_id: &str,
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((provider.to_string(), provider_user_id.to_string()));
             if self.fail {
                 return Err(RebornUserIdentityLookupError::Backend(
                     "fake lookup unavailable".to_string(),
@@ -300,10 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn unbound_actor_resolves_to_no_role() {
-        let lookup = Arc::new(FakeLookup {
-            bindings: std::collections::HashMap::new(),
-            fail: false,
-        });
+        let lookup = Arc::new(FakeLookup::new(std::collections::HashMap::new(), false));
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(std::collections::HashMap::new()),
             fail: false,
@@ -328,11 +371,16 @@ mod tests {
     async fn suspended_admin_account_resolves_to_no_role() {
         let bound_user = user("user-1");
         let mut bindings = std::collections::HashMap::new();
-        bindings.insert("suspended-actor".to_string(), bound_user.clone());
-        let lookup = Arc::new(FakeLookup {
-            bindings,
-            fail: false,
-        });
+        // Keyed by the SCOPED provider-user id, matching the real write path
+        // (`channel_identity_binding.rs`, `channel_pairing.rs`) and the fixed
+        // `actor_role` read path — never the raw actor id (regression guard
+        // for the unscoped-lookup bug: an unscoped key would make this
+        // binding unreachable in production and this test pass vacuously).
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "suspended-actor"),
+            bound_user.clone(),
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
         let mut roles = std::collections::HashMap::new();
         roles.insert(
             bound_user.as_str().to_string(),
@@ -362,11 +410,12 @@ mod tests {
     async fn active_admin_account_resolves_its_role() {
         let bound_user = user("user-2");
         let mut bindings = std::collections::HashMap::new();
-        bindings.insert("admin-actor".to_string(), bound_user.clone());
-        let lookup = Arc::new(FakeLookup {
-            bindings,
-            fail: false,
-        });
+        // Same scoped-key regression guard as above.
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "admin-actor"),
+            bound_user.clone(),
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
         let mut roles = std::collections::HashMap::new();
         roles.insert(
             bound_user.as_str().to_string(),
@@ -378,7 +427,7 @@ mod tests {
         });
         let resolver = ChannelActorRoleResolver::new(
             "test-provider".to_string(),
-            Some(lookup),
+            Some(lookup.clone()),
             admin_users,
             tenant("tenant-a"),
             user("operator-a"),
@@ -390,6 +439,18 @@ mod tests {
             .expect("resolves");
 
         assert_eq!(role, Some(AdminUserRole::Admin));
+        // Pin the exact key format `actor_role` sends the identity lookup:
+        // the literal is independent of `installation_scoped_provider_user_id`
+        // so this fails if the resolver ever regresses back to an unscoped
+        // (or differently-scoped) actor id, even if some future change
+        // altered the helper itself.
+        assert_eq!(
+            lookup.calls(),
+            vec![(
+                "test-provider".to_string(),
+                "install_alpha:admin-actor".to_string()
+            )]
+        );
     }
 
     #[tokio::test]
@@ -422,10 +483,7 @@ mod tests {
 
     #[tokio::test]
     async fn identity_lookup_failure_is_a_retryable_error() {
-        let lookup = Arc::new(FakeLookup {
-            bindings: std::collections::HashMap::new(),
-            fail: true,
-        });
+        let lookup = Arc::new(FakeLookup::new(std::collections::HashMap::new(), true));
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(std::collections::HashMap::new()),
             fail: false,
@@ -450,11 +508,13 @@ mod tests {
     async fn admin_users_unavailable_is_a_retryable_error() {
         let bound_user = user("user-3");
         let mut bindings = std::collections::HashMap::new();
-        bindings.insert("actor".to_string(), bound_user);
-        let lookup = Arc::new(FakeLookup {
-            bindings,
-            fail: false,
-        });
+        // Scoped key: this test only exercises the AdminUserService failure
+        // path if the identity lookup ABOVE it actually hits.
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "actor"),
+            bound_user,
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
         let admin_users = Arc::new(FakeAdminUsers {
             roles: Mutex::new(std::collections::HashMap::new()),
             fail: true,
