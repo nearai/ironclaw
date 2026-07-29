@@ -29,12 +29,17 @@ raw hex values, a generator will invent new ones. If accessibility is
 "remember to add aria attributes," a generator will forget. Atomicity
 closes the leaks:
 
-1. **A closed vocabulary.** Every component in the sidebar is a complete,
-   self-contained unit: `Button`, `Badge`, `Card`, `NavItem`, `ListRow`,
-   `ChatMessage`, `Callout`, and the rest. Their typed props are the entire
-   API surface. A generated screen is a tree of these components and
-   nothing else, so there is nothing to hallucinate. Wrong output fails
-   typecheck instead of shipping.
+1. **A closed vocabulary — by convention, enforced in layers.** Every
+   component in the sidebar is a complete, self-contained unit: `Button`,
+   `Badge`, `Card`, `NavItem`, `ListRow`, `ChatMessage`, `Callout`, and
+   the rest. Their typed props are the intended API surface: a generated
+   screen is a tree of these components and nothing else. Precision about
+   what enforces this: wrong prop values fail typecheck; raw colors fail
+   the CI token ratchet; but `className` escape hatches remain on most
+   components (for layout composition), so a determined generator *can*
+   express raw styling — that's caught by the mechanical lint pass
+   described in point 6, not by the compiler. The vocabulary is closed as
+   a target and a review contract, not as a type-level guarantee.
 
 2. **Decisions are already made.** Color, spacing, radius, type, and motion
    live in the `--v2-*` tokens (see Tokens). Components consume tokens, not

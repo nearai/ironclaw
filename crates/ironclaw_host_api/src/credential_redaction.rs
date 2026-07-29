@@ -60,11 +60,13 @@ fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
     for (start, _) in haystack.match_indices(marker) {
         let end = start + marker.len();
         let before_ok = !starts_alnum
-            || start == 0
-            || !haystack[..start].ends_with(|c: char| c.is_ascii_alphanumeric());
+            || haystack
+                .get(..start)
+                .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
         let after_ok = !ends_alnum
-            || end >= haystack.len()
-            || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
+            || haystack
+                .get(end..)
+                .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
         if before_ok && after_ok {
             return true;
         }
@@ -80,6 +82,87 @@ pub(crate) fn contains_secret_like_token(lower: &str) -> bool {
             !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
         })
         .any(has_secret_like_prefix)
+}
+
+/// True when diagnostic text contains a credential assignment with a value or
+/// URL userinfo. Credential vocabulary by itself remains valid diagnostic
+/// context (`password field is required`).
+pub(crate) fn contains_unredacted_credential_value(lower: &str) -> bool {
+    const LABELS: &[&str] = &[
+        "access token",
+        "access-token",
+        "access_token",
+        "api key",
+        "api-key",
+        "api_key",
+        "authorization",
+        "client secret",
+        "client-secret",
+        "client_secret",
+        "cookie",
+        "credential",
+        "password",
+        "passwd",
+        "private key",
+        "private-key",
+        "private_key",
+        "refresh token",
+        "refresh-token",
+        "refresh_token",
+        "secret",
+        "token",
+    ];
+
+    LABELS.iter().any(|label| {
+        lower.match_indices(label).any(|(start, _)| {
+            let end = start + label.len();
+            let before_ok = lower
+                .get(..start)
+                .is_none_or(|prefix| !prefix.ends_with(is_identifier_character));
+            let after_ok = lower
+                .get(end..)
+                .is_none_or(|suffix| !suffix.starts_with(is_identifier_character));
+            if !before_ok || !after_ok {
+                return false;
+            }
+            let suffix = lower[end..]
+                .trim_start()
+                .trim_start_matches(['"', '\'', '`'])
+                .trim_start();
+            let Some(value) = suffix
+                .strip_prefix('=')
+                .or_else(|| suffix.strip_prefix(':'))
+            else {
+                return false;
+            };
+            let value = value
+                .trim_start()
+                .trim_start_matches(['"', '\'', '`'])
+                .trim_start();
+            !value.is_empty() && !value.starts_with("[redacted]")
+        })
+    }) || contains_url_userinfo(lower)
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn contains_url_userinfo(value: &str) -> bool {
+    let mut remainder = value;
+    while let Some(scheme_end) = remainder.find("://") {
+        let authority_start = scheme_end + 3;
+        let authority_end = remainder[authority_start..]
+            .find(|character: char| {
+                matches!(character, '/' | '?' | '#') || character.is_whitespace()
+            })
+            .map_or(remainder.len(), |index| authority_start + index);
+        if remainder[authority_start..authority_end].contains('@') {
+            return true;
+        }
+        remainder = &remainder[authority_end..];
+    }
+    false
 }
 
 /// True when a credential-shaped prefix starts this token or any interior
@@ -101,7 +184,7 @@ fn has_secret_like_prefix(token: &str) -> bool {
 }
 
 fn is_secret_like_token(token: &str) -> bool {
-    [
+    const SECRET_PREFIXES: [&str; 25] = [
         "sk-",
         "sk-ant-",
         // Stripe's underscore forms. The hyphenated `sk-` above does not
@@ -124,11 +207,11 @@ fn is_secret_like_token(token: &str) -> bool {
         "gcp-",
         "ya29.",
         "aiza",
-        // Google OAuth client secrets and Slack bot/user/app tokens. Added
-        // with `HostRemediation` (the host-authored remediation channel):
-        // remediation text NAMES `google.client_secret` and Slack app
-        // credentials, so the VALUE shapes for exactly those credentials must
-        // be detectable. Strengthening this shared detector also tightens
+        // OAuth client secrets and workspace bot/user/app tokens. Added with
+        // `HostRemediation` (the host-authored remediation channel):
+        // remediation text names the corresponding configuration keys, so the
+        // VALUE shapes for those credentials must be detectable. Strengthening
+        // this shared detector also tightens
         // `SafeSummary`/`ModelResultPreview`, which is the correct direction —
         // the single definition never forks.
         "gocspx-",
@@ -138,9 +221,17 @@ fn is_secret_like_token(token: &str) -> bool {
         "xoxr-",
         "xoxs-",
         "xoxe-",
-    ]
-    .iter()
-    .any(|prefix| token.starts_with(prefix))
+    ];
+
+    // A bare prefix is documentation, not credential material. Extension
+    // catalog descriptions legitimately name token families such as `xoxp-`;
+    // treating the prefix alone as a leaked value drops the entire structured
+    // tool result before the model can see it. Any non-empty suffix still fails
+    // closed, including short sentinel values used by tests.
+    (!SECRET_PREFIXES.contains(&token)
+        && SECRET_PREFIXES
+            .iter()
+            .any(|prefix| token.starts_with(prefix)))
         || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
 }
 
@@ -167,6 +258,32 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_credential_guard_distinguishes_vocabulary_from_values() {
+        for safe in [
+            "password field is required",
+            "token bucket exhausted",
+            "secret sharing failed",
+            "credential setup is unavailable",
+            r#"{"password":"[REDACTED]"}"#,
+        ] {
+            assert!(
+                !contains_unredacted_credential_value(&safe.to_ascii_lowercase()),
+                "safe vocabulary was treated as a value: {safe}"
+            );
+        }
+        for unsafe_text in [
+            "password=hunter2",
+            r#"{"api_key":"opaque"}"#,
+            "https://user:pass@example.com/path",
+        ] {
+            assert!(
+                contains_unredacted_credential_value(&unsafe_text.to_ascii_lowercase()),
+                "credential value was not detected: {unsafe_text}"
+            );
+        }
+    }
+
+    #[test]
     fn secret_like_tokens_are_detected_even_behind_a_leading_word() {
         assert!(contains_secret_like_token("token sk-ant-abc123"));
         assert!(contains_secret_like_token("ghp_0123456789abcdef"));
@@ -178,6 +295,10 @@ mod tests {
         assert!(contains_secret_like_token("secret gocspx-abc123def456"));
         assert!(contains_secret_like_token("xoxb-1234-5678-abcdefghij"));
         assert!(contains_secret_like_token("xoxp-1234-5678-abcdefghij"));
+        assert!(
+            !contains_secret_like_token("supports xoxp- tokens"),
+            "a documented token-family prefix without a value is not a credential"
+        );
         // Stripe's underscore forms — the hyphenated `sk-` prefix never
         // matched these, so they used to pass the guard untouched.
         assert!(contains_secret_like_token("sk_live_0123456789abcdef"));

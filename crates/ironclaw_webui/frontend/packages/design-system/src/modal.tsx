@@ -114,7 +114,7 @@ export function Modal({
                   "relative z-10 w-full",
                   "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
                   "shadow-[var(--v2-shadow-modal)]",
-                  "rounded-[1.5rem]",
+                  "rounded-[var(--v2-radius-2xl)]",
                   "flex flex-col max-h-[90dvh] overflow-hidden",
                   "focus:outline-none",
                   SIZES[size] ?? SIZES.md,

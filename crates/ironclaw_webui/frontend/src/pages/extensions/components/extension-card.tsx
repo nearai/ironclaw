@@ -4,12 +4,21 @@ import { Badge } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import {
-  KIND_LABELS,
+  RUNTIME_LABELS,
   STATE_TONES,
   STATE_LABELS,
-  isChannelExtensionKind,
+  hasAuthSurface,
+  hasChannelSurface,
+  primaryAuthAccount,
+  authAccountNeedsReconnect,
+  authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
+import type {
+  ConfigureFocusHandler,
+  FocusTarget,
+  InstallFocusHandler,
+} from "../lib/focus-target";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
    behind a count disclosure; secondary actions (Configure / Setup / Remove)
@@ -36,11 +45,28 @@ function translatedKnownLabel(t, prefix, value, knownLabels) {
   return knownLabels[value] ? t(`${prefix}.${value}`) : value;
 }
 
-/* Lightweight overflow menu. Real <button>s; closes on outside click. */
+/**
+ * @typedef {{
+ *   id: string;
+ *   label: string;
+ *   icon?: string;
+ *   danger?: boolean;
+ *   run: (returnFocusTo: FocusTarget) => void;
+ * }} FocusAction
+ */
+
+/**
+ * Lightweight overflow menu. Real <button>s; closes on outside click.
+ *
+ * @param {{ actions: FocusAction[]; isBusy: boolean }} props
+ */
 function OverflowMenu({ actions, isBusy }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
+  const triggerRef = React.useRef(
+    /** @type {HTMLButtonElement | null} */ (null),
+  );
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -54,10 +80,12 @@ function OverflowMenu({ actions, isBusy }) {
   return (
     <div ref={ref} className="relative shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         aria-label={t("extensions.moreActions")}
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
+        data-extension-return-focus="true"
         disabled={isBusy}
         onClick={() => setOpen((v) => !v)}
         className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
@@ -77,9 +105,9 @@ function OverflowMenu({ actions, isBusy }) {
                 type="button"
                 role="menuitem"
                 disabled={isBusy}
-                onClick={() => {
+                onClick={(event) => {
                   setOpen(false);
-                  action.run();
+                  action.run(triggerRef.current || event.currentTarget);
                 }}
                 className={[
                   "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] disabled:cursor-not-allowed disabled:opacity-50",
@@ -108,18 +136,26 @@ function ChipGrid({ items }) {
   );
 }
 
-export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }) {
+/**
+ * @param {{
+ *   ext: any;
+ *   onConfigure: ConfigureFocusHandler<any>;
+ *   onRemove: (extension: any) => void;
+ *   isBusy: boolean;
+ * }} props
+ */
+export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const t = useT();
   const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
   const label = translatedKnownLabel(t, "extensions.state", state, STATE_LABELS);
-  const kindLabel = translatedKnownLabel(t, "extensions.kind", ext.kind, KIND_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.runtime", ext.runtime, RUNTIME_LABELS);
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
   const tools = ext.tools || [];
   const [capsOpen, setCapsOpen] = React.useState(false);
 
-  const setupState = state === "setup_required" || state === "auth_required";
+  const setupState = state === "setup_needed";
   const onboardingHint =
     (setupState
       ? ext.onboarding?.credential_instructions || ext.onboarding?.credential_next_step
@@ -127,27 +163,36 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     null;
 
   const configurePayload = {
+    ...ext,
     packageRef: ext.package_ref,
     displayName,
-    kind: ext.kind,
-    active: ext.active,
-    authenticated: ext.authenticated,
-    needs_setup: ext.needs_setup,
-    activationStatus: ext.activation_status,
-    onboardingState: ext.onboarding_state,
   };
 
+  // The caller's primary vendor account (§6.3 state + typed last_error). An
+  // expired account, or a disconnected account carrying a typed last_error
+  // (revoked grant, missing credential, failed/expired prior attempt), needs
+  // re-authentication rather than a first-time Connect — so the affordance
+  // and the notice key off it.
+  const channelAccount = hasChannelSurface(ext) ? primaryAuthAccount(ext) : null;
+  const needsReconnect = hasChannelSurface(ext) && authAccountNeedsReconnect(ext);
+  const hasConnectedChannelAccount = channelAccount?.state === "connected";
+
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
-  // an operator credential form (Configure/Reconfigure). Pick the label by kind.
-  const configureLabel = isChannelExtensionKind(ext.kind)
-    ? ext.authenticated
-      ? t("extensions.reconnect")
-      : t("extensions.connect")
-    : ext.authenticated
+  // an operator credential form (Configure/Reconfigure). Pick the label by kind,
+  // and by whether a connected account has expired.
+  const configureLabel = hasChannelSurface(ext)
+    ? needsReconnect
+      ? t("extensions.reconnectExpired")
+      : hasConnectedChannelAccount
+        ? t("extensions.reconnect")
+        : t("extensions.connect")
+    : state === "active"
       ? t("extensions.reconfigure")
       : t("extensions.configure");
 
+  /** @type {FocusAction[]} */
   const primaryActions = [];
+  /** @type {FocusAction[]} */
   const overflowActions = [];
   const primaryAction = primaryExtensionAction(ext);
 
@@ -155,50 +200,20 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     primaryActions.push({
       id: "configure",
       label: configureLabel,
-      run: () => onConfigure(configurePayload),
-    });
-  } else if (primaryAction === "activate") {
-    primaryActions.push({
-      id: "activate",
-      label: t("extensions.activate"),
-      run: () => onActivate(configurePayload),
-    });
-  }
-  if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
-    overflowActions.push({
-      id: "configure",
-      label: configureLabel,
-      icon: "settings",
-      run: () => onConfigure(configurePayload),
-    });
-  }
-  const hasOverflowConfigureAction = overflowActions.some(
-    (action) => action.id === "configure"
-  );
-  if (
-    canManage &&
-    primaryAction !== "configure" &&
-    isChannelExtensionKind(ext.kind) &&
-    (state === "setup_required" || state === "failed")
-  ) {
-    overflowActions.push({
-      id: "setup",
-      label: t("extensions.setup"),
-      icon: "settings",
-      run: () => onConfigure(configurePayload),
+      run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
     });
   }
   if (
     canManage &&
-    isChannelExtensionKind(ext.kind) &&
-    !hasOverflowConfigureAction &&
-    (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
+    state === "active" &&
+    (hasAuthSurface(ext) || hasChannelSurface(ext)) &&
+    primaryAction !== "configure"
   ) {
     overflowActions.push({
       id: "reconfigure",
       label: configureLabel,
       icon: "settings",
-      run: () => onConfigure(configurePayload),
+      run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
     });
   }
   if (canManage) {
@@ -238,12 +253,23 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       {ext.description && (<p className={DESC}>{ext.description}</p>)}
 
+      {/* Internal startup failures remain attached to the public
+          `setup_needed` state as redacted remediation context. */}
       {ext.activation_error &&
       (
         <div
           className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-xs text-[var(--v2-danger-text)]"
         >
           {ext.activation_error}
+        </div>
+      )}
+
+      {needsReconnect &&
+      (
+        <div
+          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
+        >
+          {t(authAccountReasonLabelKey(channelAccount))}
         </div>
       )}
 
@@ -275,7 +301,13 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
         <span className="flex-1"></span>
         {primary &&
         (
-          <Button variant="secondary" size="sm" onClick={primary.run} disabled={isBusy}>
+          <Button
+            variant="secondary"
+            size="sm"
+            data-extension-primary-action="true"
+            onClick={(event) => primary.run(event.currentTarget)}
+            disabled={isBusy}
+          >
             {primary.label}
           </Button>
         )}
@@ -286,14 +318,19 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   );
 }
 
+/**
+ * @param {{
+ *   entry: any;
+ *   onInstall?: InstallFocusHandler | null;
+ *   isBusy: boolean;
+ *   statusLabel?: string;
+ * }} props
+ */
 export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = undefined }) {
   const t = useT();
-  const kindLabel = translatedKnownLabel(t, "extensions.kind", entry.kind, KIND_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
-  const configureAfterInstall = Boolean(
-    entry.needs_setup || entry.has_auth || isChannelExtensionKind(entry.kind)
-  );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
 
@@ -302,6 +339,8 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
       className={CARD}
       data-testid="extension-card"
       data-extension-id={packageId(entry)}
+      data-extension-return-focus={statusLabel ? "true" : undefined}
+      tabIndex={statusLabel ? -1 : undefined}
     >
       <div className="flex items-start gap-2">
         <Badge
@@ -345,13 +384,11 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           <Button
             variant="outline"
             size="sm"
-            onClick={() =>
+            onClick={(event) =>
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-                kind: entry.kind,
-                configureAfterInstall,
-              })}
+              }, event.currentTarget)}
             disabled={isBusy}
           >
             <Icon name="plus" className="mr-1.5 h-3.5 w-3.5" />

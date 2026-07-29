@@ -11,8 +11,8 @@ description: 使用 Rust 构建一个天气 WASM 工具
 
 完整参考实现：
 
-<Card title="weather-tool source" icon="github" href="https://github.com/matiasbenary/ironclaw/tree/tools/weather/tools-src/weather">
-  查看完整代码：lib.rs、Cargo.toml 与 capabilities.json。
+<Card title="first-party extension examples" icon="github" href="https://github.com/nearai/ironclaw/tree/main/crates/ironclaw_first_party_extensions/assets">
+  查看当前打包扩展示例：manifest、schemas、prompts 与 WASM 产物。
 </Card>
 
 ---
@@ -207,10 +207,14 @@ cargo build --release --target wasm32-wasip2
 
 ## 8. 安装并测试
 
+在 [Web 界面](/using/webui)的 **Extensions** 中导入打包好的扩展归档，然后按 id 安装：
+
 ```bash
-ironclaw tool install ./target/wasm32-wasip2/release/weather_tool.wasm
-ironclaw tool list
+ironclaw extension search weather-tool
+ironclaw extension install weather-tool
 ```
+
+`extension install` 只接受扩展 id，不接受 `.wasm` 文件路径。
 
 然后在聊天中测试：
 

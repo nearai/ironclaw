@@ -47,26 +47,12 @@ impl SkillActivationTestSource {
 /// Tests only.
 #[cfg(feature = "test-support")]
 pub fn build_skill_context_source_for_test(
-    services: &crate::RebornServices,
-    tenant_id: &ironclaw_host_api::TenantId,
-    regex_skill_activation_enabled: bool,
+    runtime: &crate::RebornRuntime,
+    _tenant_id: &ironclaw_host_api::TenantId,
+    _regex_skill_activation_enabled: bool,
 ) -> Option<SkillActivationTestSource> {
-    let local_runtime = services.local_runtime.as_ref()?;
-    // `None` means "no local runtime composed" (a legitimate backend shape,
-    // handled by the `?` above). A build *error* is a genuine misconfiguration
-    // of the local-dev skill filesystem, so surface it loudly rather than
-    // masking it as an un-wired skill source (which would fail a skill test at
-    // a confusing, far-removed assertion instead of here). Test-only code, so a
-    // panic is the right failure mode.
-    let (source, activation_source) =
-        crate::runtime::local_dev_filesystem_skill_context_source_for_test(
-            local_runtime,
-            tenant_id,
-            regex_skill_activation_enabled,
-        )
-        .unwrap_or_else(|error| panic!("build local-dev skill context source for test: {error}"));
     Some(SkillActivationTestSource {
-        source,
-        activation_source,
+        source: runtime.skill_context_source.clone()?,
+        activation_source: runtime.skill_activation_source.clone()?,
     })
 }

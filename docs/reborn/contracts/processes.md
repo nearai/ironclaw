@@ -153,7 +153,7 @@ In-memory/dev result stores may keep small JSON output inline. Filesystem-backed
 
 `ProcessCancellationRegistry` is optional wiring shared by `BackgroundProcessManager` and `ProcessHost`. The manager registers a token under tenant/user/process scope before starting executor work. `ProcessHost::kill` removes and signals the matching token only after the scoped store kill succeeds. Cross-tenant or cross-user kill attempts therefore cannot cancel another tenant/user's running executor even if they know a process UUID. Executor cancellation is cooperative: runtime adapters must observe `ProcessExecutionRequest.cancellation` and stop themselves.
 
-`FilesystemProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
+`ProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
 
 `ResourceManagedProcessStore` wraps any `ProcessStore` and owns process reservation cleanup:
 

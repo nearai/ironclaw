@@ -22,10 +22,24 @@ pub fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-static RUNTIME_ENV_OVERRIDES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeEnvOverride {
+    Value(String),
+    Mask,
+}
 
-fn runtime_overrides() -> &'static Mutex<HashMap<String, String>> {
+static RUNTIME_ENV_OVERRIDES: OnceLock<Mutex<HashMap<String, RuntimeEnvOverride>>> =
+    OnceLock::new();
+
+fn runtime_overrides() -> &'static Mutex<HashMap<String, RuntimeEnvOverride>> {
     RUNTIME_ENV_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Exact saved runtime-overlay state for one env var.
+#[derive(Clone, Debug)]
+pub struct RuntimeEnvSnapshot {
+    key: String,
+    value: Option<RuntimeEnvOverride>,
 }
 
 /// Optional secondary env lookup registered by the main crate at startup.
@@ -52,7 +66,22 @@ pub fn set_runtime_env(key: &str, value: &str) {
     runtime_overrides()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(key.to_string(), value.to_string());
+        .insert(
+            key.to_string(),
+            RuntimeEnvOverride::Value(value.to_string()),
+        );
+}
+
+/// Mask an env var for callers of [`env_or_override`].
+///
+/// This is primarily useful for tests that need hermetic "env var absent"
+/// behavior even when a developer shell exports the variable. Call
+/// [`remove_runtime_env`] to clear the mask.
+pub fn mask_runtime_env(key: &str) {
+    runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string(), RuntimeEnvOverride::Mask);
 }
 
 /// Remove a runtime env override.
@@ -63,24 +92,62 @@ pub fn remove_runtime_env(key: &str) {
         .remove(key);
 }
 
-/// Read an env var, checking real env first, then runtime overrides, then any
-/// secondary fallback registered by the embedding application.
+/// Capture the current runtime overlay or mask for one env var.
+///
+/// This does not capture the real process environment. It is intended for
+/// tests that temporarily set or mask a runtime env override and then need to
+/// restore the exact prior overlay state.
+pub fn snapshot_runtime_env(key: &str) -> RuntimeEnvSnapshot {
+    let value = runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned();
+    RuntimeEnvSnapshot {
+        key: key.to_string(),
+        value,
+    }
+}
+
+/// Restore an exact runtime overlay or mask captured by [`snapshot_runtime_env`].
+pub fn restore_runtime_env(snapshot: RuntimeEnvSnapshot) {
+    let mut overrides = runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match snapshot.value {
+        Some(value) => {
+            overrides.insert(snapshot.key, value);
+        }
+        None => {
+            overrides.remove(&snapshot.key);
+        }
+    }
+}
+
+/// Read an env var, honoring a runtime mask first, then checking real env,
+/// runtime overrides, and any secondary fallback registered by the embedding
+/// application.
 ///
 /// Empty values are treated as unset at every layer.
 pub fn env_or_override(key: &str) -> Option<String> {
+    let runtime_value = {
+        let overrides = runtime_overrides()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match overrides.get(key) {
+            Some(RuntimeEnvOverride::Mask) => return None,
+            Some(RuntimeEnvOverride::Value(value)) if !value.is_empty() => Some(value.clone()),
+            _ => None,
+        }
+    };
+
     if let Ok(val) = std::env::var(key)
         && !val.is_empty()
     {
         return Some(val);
     }
 
-    if let Some(val) = runtime_overrides()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(key)
-        .filter(|v| !v.is_empty())
-        .cloned()
-    {
+    if let Some(val) = runtime_value {
         return Some(val);
     }
 
@@ -120,5 +187,29 @@ mod tests {
         set_runtime_env("IRONCLAW_TEST_REMOVE", "1");
         remove_runtime_env("IRONCLAW_TEST_REMOVE");
         assert_eq!(env_or_override("IRONCLAW_TEST_REMOVE"), None);
+    }
+
+    #[test]
+    fn runtime_mask_hides_real_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_RUNTIME_MASK";
+        let original = std::env::var_os(key);
+        remove_runtime_env(key);
+        unsafe {
+            std::env::set_var(key, "real-env-value");
+        }
+
+        assert_eq!(env_or_override(key), Some("real-env-value".to_string()));
+
+        mask_runtime_env(key);
+        assert_eq!(env_or_override(key), None);
+
+        remove_runtime_env(key);
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 }

@@ -19,7 +19,7 @@ pub enum RebornReadinessState {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFacadeReadiness {
+pub struct RebornServiceReadiness {
     pub host_runtime: bool,
     pub turn_coordinator: bool,
     pub product_auth: bool,
@@ -277,51 +277,18 @@ pub(crate) fn readiness_contract_for_profile(
 }
 
 impl RebornReadinessDiagnostic {
-    pub fn disabled() -> Self {
-        Self {
-            profile: RebornCompositionProfile::Disabled,
-            component: RebornReadinessDiagnosticComponent::CompositionProfile,
-            reason: RebornReadinessDiagnosticReason::Disabled,
-            status: RebornReadinessDiagnosticStatus::Blocking,
-            blocks_production: true,
-        }
-    }
-
-    pub fn local_dev() -> Self {
-        Self::dev_only_profile(RebornCompositionProfile::LocalDev)
-    }
-
-    pub fn local_dev_yolo() -> Self {
-        Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
-    }
-
-    pub fn hosted_single_tenant_volume() -> Self {
-        Self {
-            profile: RebornCompositionProfile::HostedSingleTenantVolume,
-            component: RebornReadinessDiagnosticComponent::CompositionProfile,
-            reason: RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview,
-            status: RebornReadinessDiagnosticStatus::Warning,
-            blocks_production: true,
-        }
-    }
-
-    pub fn hosted_single_tenant() -> Self {
-        Self {
-            profile: RebornCompositionProfile::HostedSingleTenant,
-            component: RebornReadinessDiagnosticComponent::CompositionProfile,
-            reason: RebornReadinessDiagnosticReason::Unverified,
-            status: RebornReadinessDiagnosticStatus::Info,
-            blocks_production: false,
-        }
-    }
-
-    fn dev_only_profile(profile: RebornCompositionProfile) -> Self {
+    pub(crate) fn composition_profile(
+        profile: RebornCompositionProfile,
+        reason: RebornReadinessDiagnosticReason,
+        status: RebornReadinessDiagnosticStatus,
+        blocks_production: bool,
+    ) -> Self {
         Self {
             profile,
             component: RebornReadinessDiagnosticComponent::CompositionProfile,
-            reason: RebornReadinessDiagnosticReason::DevOnlyProfile,
-            status: RebornReadinessDiagnosticStatus::Blocking,
-            blocks_production: true,
+            reason,
+            status,
+            blocks_production,
         }
     }
 
@@ -330,7 +297,7 @@ impl RebornReadinessDiagnostic {
         component: RebornReadinessDiagnosticComponent,
         reason: RebornReadinessDiagnosticReason,
     ) -> Option<Self> {
-        if !profile.requires_production_shape() {
+        if !profile.is_active() {
             return None;
         }
         Some(Self {
@@ -346,7 +313,7 @@ impl RebornReadinessDiagnostic {
         profile: RebornCompositionProfile,
         report: &ProductionWiringReport,
     ) -> Vec<Self> {
-        if !profile.requires_production_shape() {
+        if !profile.is_active() {
             return Vec::new();
         }
 
@@ -373,8 +340,8 @@ impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
             ProductionWiringComponent::TrustPolicy => Self::TrustPolicy,
             ProductionWiringComponent::Filesystem => Self::Filesystem,
             ProductionWiringComponent::ResourceGovernor => Self::ResourceGovernor,
-            ProductionWiringComponent::ProcessStore => Self::ProcessStore,
-            ProductionWiringComponent::ProcessResultStore => Self::ProcessResultStore,
+            ProductionWiringComponent::ProcessStorePort => Self::ProcessStore,
+            ProductionWiringComponent::ProcessResultStorePort => Self::ProcessResultStore,
             ProductionWiringComponent::RunState => Self::RunState,
             ProductionWiringComponent::ApprovalRequests => Self::ApprovalRequests,
             ProductionWiringComponent::CapabilityLeases => Self::CapabilityLeases,
@@ -383,7 +350,7 @@ impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
             }
             ProductionWiringComponent::EventSink => Self::EventSink,
             ProductionWiringComponent::AuditSink => Self::AuditSink,
-            ProductionWiringComponent::SecretStore => Self::SecretStore,
+            ProductionWiringComponent::SecretStorePort => Self::SecretStore,
             ProductionWiringComponent::CredentialAccountStore => Self::CredentialAccountStore,
             ProductionWiringComponent::CredentialSessionStore => Self::CredentialSessionStore,
             ProductionWiringComponent::RuntimeHttpEgress => Self::RuntimeHttpEgress,
@@ -415,7 +382,7 @@ impl From<ProductionWiringIssueKind> for RebornReadinessDiagnosticReason {
 pub struct RebornReadiness {
     pub profile: RebornCompositionProfile,
     pub state: RebornReadinessState,
-    pub facades: RebornFacadeReadiness,
+    pub services: RebornServiceReadiness,
     #[serde(default)]
     pub workers: RebornWorkerReadiness,
     #[serde(default)]
@@ -434,10 +401,12 @@ impl RebornReadiness {
     /// This is intentionally not `const`: the rich snapshot includes the
     /// diagnostics vector that downstream readiness surfaces consume.
     pub fn disabled() -> Self {
+        let config = crate::deployment::DeploymentConfig::disabled();
+        let contract = config.readiness();
         Self {
-            profile: RebornCompositionProfile::Disabled,
-            state: RebornReadinessState::Disabled,
-            facades: RebornFacadeReadiness {
+            profile: config.profile(),
+            state: contract.state,
+            services: RebornServiceReadiness {
                 host_runtime: false,
                 turn_coordinator: false,
                 product_auth: false,
@@ -446,7 +415,7 @@ impl RebornReadiness {
                 turn_runner: false,
                 trigger_poller: false,
             },
-            diagnostics: vec![RebornReadinessDiagnostic::disabled()],
+            diagnostics: contract.diagnostics.clone(),
         }
     }
 }
@@ -459,7 +428,10 @@ mod tests {
     fn readiness_default_matches_disabled_snapshot() {
         let readiness = RebornReadiness::default();
 
-        assert_eq!(readiness.profile, RebornCompositionProfile::Disabled);
+        assert_eq!(
+            readiness.profile,
+            crate::deployment::DeploymentConfig::disabled().profile()
+        );
         assert_eq!(readiness.state, RebornReadinessState::Disabled);
         assert_eq!(readiness.diagnostics.len(), 1);
         assert_eq!(
@@ -479,7 +451,7 @@ mod tests {
             r#"{
                 "profile": "local-dev",
                 "state": "dev-only",
-                "facades": {
+                "services": {
                     "host_runtime": true,
                     "turn_coordinator": true,
                     "product_auth": false
@@ -488,7 +460,10 @@ mod tests {
         )
         .expect("readiness deserializes");
 
-        assert_eq!(readiness.profile, RebornCompositionProfile::LocalDev);
+        assert_eq!(
+            readiness.profile,
+            crate::deployment::DeploymentConfig::local_dev().profile()
+        );
         assert_eq!(readiness.state, RebornReadinessState::DevOnly);
         assert_eq!(readiness.workers, RebornWorkerReadiness::default());
         assert!(readiness.diagnostics.is_empty());

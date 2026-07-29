@@ -1,7 +1,6 @@
 // @ts-nocheck
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@ironclaw/design-system";
-import { Icon } from "@ironclaw/design-system";
+import { useQueryClient } from "@tanstack/react-query";
+import { Button, Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -11,65 +10,47 @@ import {
 } from "../hooks/useExtensions";
 import {
   extensionIsActive,
-  extensionLifecycleState,
-  setupReadyForActivation,
 } from "../lib/extension-actions";
-import { isChannelExtensionKind } from "../lib/extensions-schema";
-import { redeemPairingCode } from "../lib/pairing-api";
-import { activateExtension } from "../lib/extensions-api";
-import { notifyChannelConnected } from "../../../lib/channel-connection-events";
-import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
+import {
+  channelConnection,
+  hasChannelSurface,
+  isWebGeneratedCodeConnection,
+} from "../lib/extensions-schema";
+import { resolveFocusTarget } from "../lib/focus-target";
+import type { FocusTarget } from "../lib/focus-target";
+import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
-// Model B: the visible Slack extension is the user-tools package (id `slack`),
-// not the bot channel (which is hidden operator infrastructure).
-const SLACK_TOOLS_EXTENSION_ID = "slack";
-// Telegram pairs via WebGeneratedCode: IronClaw mints the code (deep link +
-// QR + typed fallback), so Configure hosts the pairing panel — never the
-// proof-code paste box and never the "no configuration required" fallback.
-const TELEGRAM_EXTENSION_ID = "telegram";
-
-export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
+/**
+ * @param {{
+ *   extension: any;
+ *   onClose: () => void;
+ *   onSaved?: (result?: unknown) => void;
+ *   returnFocusTo?: FocusTarget | null;
+ * }} props
+ */
+export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
-  const { secrets = [], fields = [], onboarding, isLoading, error } =
+  const { secrets = [], onboarding, isLoading, error } =
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
-  const [fieldValues, setFieldValues] = React.useState({});
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"
       ? extension.packageRef
       : extension?.packageRef?.id || "";
-  const channelId = extension?.channel || packageId;
-  const lifecycleState = extensionLifecycleState(extension);
-  // Slack tools use OAuth rather than the proof-code pairing flow below.
-  const isSlackToolsExtension =
-    channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
   const handleOauthConfigured = React.useCallback(async () => {
-    // Extension-scoped OAuth completion is atomic on the backend: the callback
-    // is not marked complete until lifecycle activation has published tools.
-    // A second client-side activation races that committed state and used to
-    // surface a misleading Conflict after an otherwise successful popup.
-    // invalidateQueries refetches active queries and resolves when they
-    // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
+    onClose();
+    // The server-owned OAuth continuation performs lifecycle activation and
+    // connection fan-out transactionally. The browser only refreshes the
+    // authoritative caller-scoped projection after callback completion.
     await Promise.all(
       [["extensions"], ["extension-registry"], ["extension-setup", packageId]].map(
         (queryKey) => queryClient.invalidateQueries({ queryKey }),
       ),
     );
-    // Broadcast channel-connected (same event pairing redemption sends) so an
-    // open chat card for this channel clears and its parked request resumes —
-    // connecting from the Extensions page must not strand the chat surface.
-    if ((isChannelExtensionKind(extension?.kind) || isSlackToolsExtension) && channelId) {
-      try {
-        await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
-      } catch {
-        console.error("channel connection broadcast after OAuth failed.");
-      }
-    }
     if (onSaved) onSaved();
-    onClose();
-  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
+  }, [onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -87,8 +68,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       const trimmed = (val || "").trim();
       if (trimmed) secretPayload[key] = trimmed;
     }
-    submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
-  }, [values, fieldValues, submitMutation]);
+    submitMutation.mutate({ secrets: secretPayload });
+  }, [values, submitMutation]);
   const [popupBlockedError, setPopupBlockedError] = React.useState("");
   const handleOauth = React.useCallback(
     (secret) => {
@@ -99,123 +80,55 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       // popup — surface it and stop before burning the OAuth flow start,
       // mirroring the in-chat startOnboardingOAuth guard.
       if (!popup) {
-        setPopupBlockedError("Authorization popup was blocked.");
+        setPopupBlockedError(t("authGate.popupBlocked"));
         return;
       }
       setPopupBlockedError("");
       oauthMutation.mutate({ secret, popup });
     },
-    [oauthMutation]
+    [oauthMutation, t]
   );
 
-  // Some channel extensions may still use proof-code setup: redeem a code,
-  // then best-effort activate so the channel goes live.
-  const oauthSecrets = secrets.filter(
-    (secret) => (secret.setup?.kind || "manual_token") === "oauth"
-  );
   const manualSecrets = secrets.filter(
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
-  const isPairingChannel =
-    !isSlackToolsExtension &&
-    isChannelExtensionKind(extension?.kind) &&
-    (lifecycleState === "pairing" || lifecycleState === "pairing_required");
-  const channelPairingInstructions = t("pairing.instructions");
-  const channelPairingPlaceholder = t("pairing.placeholder");
-  const channelPairingError = t("pairing.error");
-  const [pairingCode, setPairingCode] = React.useState("");
-  const pairingMutation = useMutation({
-    mutationFn: async (code) => {
-      const result = await redeemPairingCode(channelId, code);
-      try {
-        await activateExtension({ id: packageId || channelId });
-      } catch {
-        console.error("channel activation after pairing failed.");
-      }
-      return result;
-    },
-    onSuccess: () => {
-      for (const queryKey of [
-        ["extensions"],
-        ["connectable-channels"],
-        ["pairing", channelId],
-      ]) {
-        queryClient.invalidateQueries({ queryKey });
-      }
-      if (onSaved) onSaved();
-      onClose();
-    },
-  });
-  const submitPairing = React.useCallback(() => {
-    const code = pairingCode.trim();
-    if (!code || pairingMutation.isPending) return;
-    pairingMutation.mutate(code);
-  }, [pairingCode, pairingMutation]);
+  // The manifest declares whether the user-facing setup is a host-issued
+  // code/deep-link/QR flow. Do not probe a provider route to infer strategy.
+  const connection = channelConnection(extension);
+  const isWebCodeChannel =
+    hasChannelSurface(extension) &&
+    isWebGeneratedCodeConnection(connection);
 
-  const canSave = manualSecrets.length > 0 || fields.length > 0;
+  const canSave = manualSecrets.length > 0;
   const isActive = extensionIsActive(extension);
-  const canActivate =
-    !isChannelExtensionKind(extension?.kind) &&
-    setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
-  const isTelegramChannelExtension =
-    isChannelExtensionKind(extension?.kind) &&
-    channelId.toLowerCase() === TELEGRAM_EXTENSION_ID;
-
-  if (isTelegramChannelExtension) {
+  if (isWebCodeChannel) {
     // The panel is self-contained (mints/rotates codes, polls status,
-    // broadcasts channel-connected on pairing), so the modal only hosts it —
-    // dual-surface parity with the Channels tab (design spec §4.2/§5).
+    // broadcasts channel-connected on pairing), so the modal only hosts it.
     return (
       <ModalShell
         onClose={onClose}
+        returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <TelegramPairingPanel compact />
-      </ModalShell>
-    );
-  }
-
-  if (isPairingChannel) {
-    return (
-      <ModalShell
-        onClose={onClose}
-        title={t("extensions.configureName").replace("{name}", extensionName)}
-      >
-        <p className="mb-4 text-sm leading-6 text-[var(--v2-text-muted)]">
-          {channelPairingInstructions}
-        </p>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            type="text"
-            value={pairingCode}
-            onChange={(event) => setPairingCode(event.currentTarget.value)}
-            onKeyDown={(event) => event.key === "Enter" && submitPairing()}
-            placeholder={channelPairingPlaceholder}
-            aria-label={channelPairingPlaceholder}
-            className="h-9 min-w-0 flex-1 rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
-          />
-          <Button
-            variant="primary"
-            onClick={submitPairing}
-            loading={pairingMutation.isPending}
-            disabled={!pairingCode.trim()}
-          >
-            {pairingMutation.isPending ? t("common.saving") : t("pairing.connect")}
-          </Button>
-        </div>
-        {pairingMutation.isError &&
-        (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">
-          {channelPairingError}
-        </p>)}
+        <PairingWebCodePanel
+          extensionId={packageId}
+          displayName={extensionName}
+          instructions={connection?.instructions || ""}
+          compact
+        />
       </ModalShell>
     );
   }
 
   if (isLoading) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <div className="space-y-3">
           {[1, 2].map(
             (i) =>
@@ -231,7 +144,11 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 
   if (error) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <p className="text-sm text-[var(--v2-danger-text)]">
           {t("extensions.loadFailed")} {error.message}
         </p>
@@ -239,9 +156,13 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     );
   }
 
-  if (secrets.length === 0 && fields.length === 0) {
+  if (secrets.length === 0) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <p className="text-sm text-[var(--v2-text-muted)]">
           {t("extensions.noConfigRequired")}
         </p>
@@ -250,7 +171,11 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   }
 
   return (
-    <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+    <ModalShell
+      onClose={onClose}
+      returnFocusTo={returnFocusTo}
+      title={t("extensions.configureName").replace("{name}", extensionName)}
+    >
       {onboarding?.credential_instructions &&
       (
         <p className="mb-4 text-sm leading-6 text-[var(--v2-text-muted)]">
@@ -286,14 +211,14 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                 )}
                 {secret.provided &&
                 (
-                  <span className="font-mono text-[10px] text-[var(--v2-positive-text)]"
+                  <span className="font-mono text-[10px] text-mint"
                     >{t("common.configured") || "configured"}</span
                   >
                 )}
               </label>
               {(secret.setup?.kind || "manual_token") === "oauth"
                 ? (
-                    <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2">
+                    <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 py-2">
                       <span className="text-xs text-[var(--v2-text-muted)]">
                         {secret.provided
                           ? t("extensions.authConfigured")
@@ -328,7 +253,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                   }));
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+                className="h-10 w-full rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]/45"
               />
               {secret.auto_generate &&
               !secret.provided &&
@@ -339,37 +264,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
               )}
               </>
                   )}
-            </div>
-          )
-        )}
-        {fields.map(
-          (field) => (
-            <div key={field.name}>
-              <label
-                className="mb-1.5 flex items-center gap-2 text-sm text-[var(--v2-text)]"
-              >
-                {field.prompt || field.name}
-                {field.optional &&
-                (
-                  <span className="font-mono text-[10px] text-[var(--v2-text-faint)]"
-                    >{t("common.optional") || "optional"}</span
-                  >
-                )}
-              </label>
-              <input
-                type="text"
-                placeholder={field.placeholder || ""}
-                value={fieldValues[field.name] || ""}
-                onChange={(e) => {
-                  const value = e.currentTarget.value;
-                  setFieldValues((prev) => ({
-                    ...prev,
-                    [field.name]: value,
-                  }));
-                }}
-                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
-              />
             </div>
           )
         )}
@@ -384,7 +278,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       {isActive &&
       (
         <div
-          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] px-3 py-2 text-xs text-[var(--v2-positive-text)]"
+          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
         >
           {t("extensions.activeConfigured")}
         </div>
@@ -392,7 +286,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       {submitMutation.error &&
       (
         <div
-          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_25%,transparent)] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {submitMutation.error.message}
         </div>
@@ -400,7 +294,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       {oauthMutation.error &&
       (
         <div
-          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_25%,transparent)] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {oauthMutation.error.message}
         </div>
@@ -409,7 +303,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       oauthMutation.authError &&
       (
         <div
-          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_25%,transparent)] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {oauthMutation.authError}
         </div>
@@ -419,7 +313,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       popupBlockedError &&
       (
         <div
-          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_25%,transparent)] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {popupBlockedError}
         </div>
@@ -427,19 +321,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-        {canActivate &&
-        (
-        <Button
-          variant="primary"
-          onClick={() => onActivate?.(extension)}
-        >
-          {t("extensions.activate")}
-        </Button>
-        )}
         {canSave &&
         (
         <Button
-          variant={canActivate ? "secondary" : "primary"}
+          variant="primary"
           onClick={handleSubmit}
           loading={submitMutation.isPending}
         >
@@ -461,16 +346,100 @@ function httpsUrl(value) {
   }
 }
 
-function ModalShell({ onClose, title, children }) {
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[contenteditable='true']",
+  "[tabindex]:not([tabindex^='-'])",
+].join(",");
+
+function isVisible(element) {
+  if (typeof element.checkVisibility === "function") {
+    return element.checkVisibility({
+      checkOpacity: true,
+      checkVisibilityCSS: true,
+    });
+  }
+
+  const style = window.getComputedStyle(element);
+  return (
+    element.getClientRects().length > 0 &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    style.opacity !== "0"
+  );
+}
+
+function focusableElements(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+    (element) =>
+      element.tabIndex >= 0 &&
+      !element.hidden &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      isVisible(element),
+  );
+}
+
+/**
+ * @param {{
+ *   onClose: () => void;
+ *   returnFocusTo?: FocusTarget | null;
+ *   title: string;
+ *   children: React.ReactNode;
+ * }} props
+ */
+function ModalShell({ onClose, returnFocusTo, title, children }) {
   const t = useT();
   const titleId = React.useId();
+  const dialogRef = React.useRef(null);
   React.useEffect(() => {
+    const returnTarget = returnFocusTo || document.activeElement;
+    const dialog = dialogRef.current;
+    const initialFocus = focusableElements(dialog)[0] || dialog;
+    initialFocus?.focus({ preventScroll: true });
+
     const handleKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const focusable = focusableElements(dialog);
+      if (focusable.length === 0) {
+        e.preventDefault();
+        dialog?.focus({ preventScroll: true });
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement;
+      const focusIsOutside = !dialog?.contains(activeElement);
+      if (e.shiftKey && (activeElement === first || focusIsOutside)) {
+        e.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!e.shiftKey && (activeElement === last || focusIsOutside)) {
+        e.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     };
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      const previouslyFocused = resolveFocusTarget(returnTarget);
+      if (
+        previouslyFocused?.isConnected &&
+        typeof previouslyFocused.focus === "function"
+      ) {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+    };
+  }, [onClose, returnFocusTo]);
 
   return (
     <div
@@ -480,9 +449,11 @@ function ModalShell({ onClose, title, children }) {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
         onClick={(e) => e.stopPropagation()}
       >
@@ -491,7 +462,7 @@ function ModalShell({ onClose, title, children }) {
           <button
             onClick={onClose}
             aria-label={t("common.close")}
-            className="grid h-8 w-8 place-items-center rounded-md text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+            className="grid h-8 w-8 place-items-center rounded-md text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]"
           >
             <Icon name="close" className="h-4 w-4" />
           </button>

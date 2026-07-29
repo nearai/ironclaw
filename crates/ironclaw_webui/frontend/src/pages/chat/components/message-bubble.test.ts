@@ -12,8 +12,16 @@ import {
 vi.mock("./markdown-renderer", async () => {
   const { createElement } = await import("react");
   return {
-    MarkdownRenderer: ({ content, className }) =>
-      createElement("div", { className, "data-testid": "markdown" }, content),
+    MarkdownRenderer: ({ content, className, streaming }) =>
+      createElement(
+        "div",
+        {
+          className,
+          "data-testid": "markdown",
+          "data-streaming": String(Boolean(streaming)),
+        },
+        content,
+      ),
   };
 });
 
@@ -102,6 +110,88 @@ test("assistant bubbles expose final reply state for live QA", () => {
     /data-final-reply=\{finalReplyState\}/,
     "live QA should be able to distinguish streaming text from the final answer",
   );
+});
+
+test("assistant bubbles keep streaming projections off the full markdown path", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const render = (isFinalReply: boolean, activeRunId: string | null) =>
+    renderToStaticMarkup(
+      React.createElement(MessageBubble, {
+        message: {
+          id: "assistant-stream",
+          role: CHAT_MESSAGE_ROLES.ASSISTANT,
+          content: '<img src=x onerror="alert(1)">',
+          turnRunId: "run-1",
+          isFinalReply,
+        },
+        activeRunId,
+      }),
+    );
+
+  assert.match(render(false, "run-1"), /data-streaming="true"/);
+  assert.match(render(true, "run-1"), /data-streaming="false"/);
+  assert.match(
+    render(false, null),
+    /data-streaming="false"/,
+    "historical assistant drafts must render through the completed Markdown path",
+  );
+});
+
+test("thinking bubbles defer Markdown only for the active run", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const render = (activeRunId: string | null) =>
+    renderToStaticMarkup(
+      React.createElement(MessageBubble, {
+        message: {
+          id: "thinking-run-1",
+          role: CHAT_MESSAGE_ROLES.THINKING,
+          content: "Working on **this**.",
+          turnRunId: "run-1",
+        },
+        activeRunId,
+      }),
+    );
+
+  assert.match(render("run-1"), /data-streaming="true"/);
+  assert.match(render(null), /data-streaming="false"/);
+});
+
+test("active reasoning in an activity run defers Markdown", async () => {
+  const { ActivityRun } = await import("./activity-run");
+  const render = (activeRunId: string | null) =>
+    renderToStaticMarkup(
+      React.createElement(ActivityRun, {
+        activeRunId,
+        activity: [
+          {
+            id: "thinking-run-1",
+            role: CHAT_MESSAGE_ROLES.THINKING,
+            content: "Working on **this**.",
+            turnRunId: "run-1",
+          },
+        ],
+      }),
+    );
+
+  assert.match(render("run-1"), /data-streaming="true"/);
+  assert.match(render(null), /data-streaming="false"/);
+});
+
+test("untagged reasoning in an activity run renders Markdown", async () => {
+  const { ActivityRun } = await import("./activity-run");
+  const markup = renderToStaticMarkup(
+    React.createElement(ActivityRun, {
+      activity: [
+        {
+          id: "thinking-history",
+          role: CHAT_MESSAGE_ROLES.THINKING,
+          content: "Completed **reasoning**.",
+        },
+      ],
+    }),
+  );
+
+  assert.match(markup, /data-streaming="false"/);
 });
 
 test("only final assistant replies expose the run artifact download", async () => {

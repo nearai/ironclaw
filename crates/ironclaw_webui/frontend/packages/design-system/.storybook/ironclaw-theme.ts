@@ -14,8 +14,11 @@ const FONT_MONO =
 export const ironclawTheme = create({
   base: "light",
 
-  // Storybook renders brandTitle as HTML inside the sidebar heading link:
-  // helmet logo on the left, two-line wordmark matching the logo height.
+  // brandImage must be explicitly null: that is what switches Storybook's
+  // sidebar Brand component into its HTML mode, where brandTitle is
+  // rendered as markup (helmet logo on the left, two-line wordmark)
+  // instead of being used as an image alt text.
+  brandImage: null,
   brandTitle: `
     <div style="display:flex;align-items:center;gap:10px;">
       <img src="./ironclaw-logo.jpg" alt="IronClaw" width="34" height="34"

@@ -221,7 +221,6 @@ jobs:
         run: |
           cargo build --release \
             --package ironclaw \
-            --features postgres \
             --bin ironclaw
           cargo build --release --package ironclaw_stress
 

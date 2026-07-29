@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import tomllib
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -42,6 +43,11 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
     "AUTH_LIVE_SLACK_USER_TOKEN",
     "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
 ]
+SLACK_EXTENSION_INSTALLATION_ID = "slack"
+SLACK_EXTENSION_MANIFEST = (
+    Path(__file__).resolve().parents[2]
+    / "crates/ironclaw_first_party_extensions/assets/slack/manifest.toml"
+)
 # Optional SECOND human identity (a dedicated canary user, distinct from the
 # connected personal account AND from the bot). Arms that strictly need a
 # second HUMAN actor must assert this env and fail loudly when it is absent —
@@ -76,6 +82,24 @@ LEGACY_SLACK_SETUP_KEYS = {
     "signing_secret_env",
     "bot_token_env",
 }
+
+
+def _slack_auth_provider() -> str:
+    """Return the credential vendor declared by the unified Slack manifest."""
+    try:
+        with SLACK_EXTENSION_MANIFEST.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise LiveQaError(
+            f"could not read unified Slack manifest auth surface: {exc}"
+        ) from exc
+    auth = manifest.get("auth")
+    providers = sorted(auth) if isinstance(auth, dict) else []
+    if len(providers) != 1 or not isinstance(providers[0], str):
+        raise LiveQaError(
+            "unified Slack manifest must declare exactly one auth provider"
+        )
+    return providers[0]
 
 
 def _toml_string(value: str) -> str:
@@ -397,13 +421,16 @@ def _has_persisted_slack_personal_dm_target(reborn_home: Path, user_id: str) -> 
 
 
 def _persisted_slack_personal_dm_payload(reborn_home: Path, user_id: str) -> dict[str, object] | None:
+    # The generic channel DM-target store (one record per `(extension, user)`
+    # under `/tenants/{tenant}/shared/channel-dm-targets/{extension}/{user}.json`)
+    # replaced the Slack-specific `slack-personal-binding/dm-targets` layout.
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     with closing(sqlite3.connect(db_path)) as db:
         rows = db.execute(
             "SELECT contents FROM root_filesystem_entries "
-            "WHERE path LIKE '%/slack-personal-binding/dm-targets/%' "
+            "WHERE path LIKE '%/shared/channel-dm-targets/%' "
             "ORDER BY path"
         ).fetchall()
     for row in rows:
@@ -411,7 +438,11 @@ def _persisted_slack_personal_dm_payload(reborn_home: Path, user_id: str) -> dic
             payload = json.loads(row[0])
         except (TypeError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict) and payload.get("user_id") == user_id:
+        if (
+            isinstance(payload, dict)
+            and payload.get("extension_id") == "slack"
+            and payload.get("user_id") == user_id
+        ):
             return payload
     return None
 
@@ -420,8 +451,13 @@ def _persisted_slack_personal_dm_channel_id(reborn_home: Path, user_id: str) -> 
     payload = _persisted_slack_personal_dm_payload(reborn_home, user_id)
     if payload is None:
         return None
-    channel_id = str(payload.get("dm_channel_id") or "").strip()
-    return channel_id or None
+    target = payload.get("target")
+    conversation_id = (
+        str(target.get("conversation_id") or "").strip()
+        if isinstance(target, dict)
+        else ""
+    )
+    return conversation_id or None
 
 
 def _hash_scoped_part(hasher: "hashlib._Hash", value: str) -> None:
@@ -530,16 +566,41 @@ def _slack_setup_payload(
     reborn_home: Path,
     config_text: str,
     extra_env: dict[str, str],
+    *,
+    bot_user_id: str | None = None,
+    shared_subject_user_id: str | None = None,
 ) -> tuple[dict[str, object] | None, dict[str, object]]:
     preflight = _slack_setup_preflight(reborn_home, config_text, extra_env)
+    setup = _slack_setup_from_reborn_home(reborn_home) or {}
     bot_token = _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
     signing_secret = _env_value(SLACK_SIGNING_SECRET_ENV, extra_env)
+    oauth_client_id = str(preflight.get("oauth_client_id") or "").strip()
+    oauth_client_secret = _env_value(SLACK_OAUTH_CLIENT_SECRET_ENV, extra_env)
+    resolved_bot_user_id = str(bot_user_id or "").strip() or _slack_setup_field(
+        setup,
+        config_text,
+        "bot_user_id",
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_USER_ID",
+    )
+    resolved_shared_subject_user_id = (
+        str(shared_subject_user_id or "").strip()
+        or _slack_setup_field(
+            setup,
+            config_text,
+            "shared_subject_user_id",
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_SHARED_SUBJECT_USER_ID",
+        )
+    )
     required = {
         "installation_id": preflight.get("installation_id"),
         "team_id": preflight.get("team_id"),
         "api_app_id": preflight.get("api_app_id"),
         "bot_token": bot_token,
         "signing_secret": signing_secret,
+        "bot_user_id": resolved_bot_user_id,
+        "shared_subject_user_id": resolved_shared_subject_user_id,
+        "oauth_client_id": oauth_client_id,
+        "oauth_client_secret": oauth_client_secret,
     }
     missing = [key for key, value in required.items() if not str(value or "").strip()]
     if missing:
@@ -550,33 +611,34 @@ def _slack_setup_payload(
         "api_app_id": str(required["api_app_id"]),
         "bot_token": bot_token,
         "signing_secret": signing_secret,
+        "bot_user_id": str(required["bot_user_id"]),
+        "shared_subject_user_id": str(required["shared_subject_user_id"]),
+        "allowed_channels": "[]",
+        "subject_routes": "{}",
+        "oauth_client_id": str(required["oauth_client_id"]),
+        "oauth_client_secret": required["oauth_client_secret"],
     }
-    oauth_client_id = str(preflight.get("oauth_client_id") or "").strip()
-    oauth_client_secret = _env_value(SLACK_OAUTH_CLIENT_SECRET_ENV, extra_env)
-    if oauth_client_id:
-        payload["oauth_client_id"] = oauth_client_id
-    if oauth_client_secret:
-        payload["oauth_client_secret"] = oauth_client_secret
     return payload, {**preflight, "ready_for_api": True, "missing": []}
 
 
 def _seed_slack_personal_identity_binding(
     db_path: Path,
     *,
-    installation_id: str,
     user_id: str,
     slack_user_id: str,
     now: str,
 ) -> dict[str, object]:
-    provider = "slack"
-    provider_user_id = f"{installation_id}:{slack_user_id}"
+    provider = _slack_auth_provider()
+    provider_user_id = f"{SLACK_EXTENSION_INSTALLATION_ID}:{slack_user_id}"
+    # The generic channel identity store replaced the Slack-specific
+    # `slack-personal-binding` root; record shape is unchanged.
     identity_path = (
-        "/tenants/reborn-cli/shared/slack-personal-binding/identities/"
+        "/tenants/reborn-cli/shared/channel-identities/identities/"
         f"{_slack_host_state_path_segment(provider)}/"
         f"{_slack_host_state_path_segment(provider_user_id)}.json"
     )
     index_path = (
-        "/tenants/reborn-cli/shared/slack-personal-binding/identities-by-user/"
+        "/tenants/reborn-cli/shared/channel-identities/identities-by-user/"
         f"{_slack_host_state_path_segment(provider)}/"
         f"{_slack_host_state_path_segment(user_id)}/"
         f"{_slack_host_state_path_segment(provider_user_id)}.json"
@@ -707,29 +769,31 @@ def _seed_slack_personal_dm_target(
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     _root_filesystem_create_table(db_path)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    # Generic channel DM-target record: one per `(extension, user)`, carrying
+    # the proven external actor id plus the direct conversation's external ref
+    # (`space_id` = Slack team, `conversation_id` = DM channel).
     path = (
-        "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
-        f"{_slack_host_state_path_segment(installation_id)}/"
-        f"{_slack_host_state_path_segment(team_id)}/"
+        "/tenants/reborn-cli/shared/channel-dm-targets/"
+        f"{_slack_host_state_path_segment('slack')}/"
         f"{_slack_host_state_path_segment(auth_user_id)}.json"
     )
     _put_root_filesystem_json(
         db_path,
         path,
         {
-            "tenant_id": "reborn-cli",
-            "installation_id": installation_id,
-            "team_id": team_id,
+            "extension_id": "slack",
             "user_id": auth_user_id,
-            "slack_user_id": slack_user_id,
-            "dm_channel_id": dm_channel_id,
+            "external_actor_id": slack_user_id,
+            "target": {
+                "space_id": team_id,
+                "conversation_id": dm_channel_id,
+            },
             "created_at": now,
             "updated_at": now,
         },
     )
     identity_binding = _seed_slack_personal_identity_binding(
         db_path,
-        installation_id=installation_id,
         user_id=auth_user_id,
         slack_user_id=slack_user_id,
         now=now,
@@ -946,6 +1010,7 @@ def _slack_personal_auth_preflight(
     if master_key_path.exists():
         master_key = master_key_path.read_text(encoding="utf-8").strip()
 
+    auth_provider = _slack_auth_provider()
     accounts: list[dict[str, object]] = []
     for path, raw in rows:
         if not str(path).startswith(account_path_prefix):
@@ -954,7 +1019,12 @@ def _slack_personal_auth_preflight(
             account = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             continue
-        if account.get("provider") != "slack_personal" or account.get("status") != "configured":
+        # Provider id comes from the manifest's credential-authority vendor
+        # namespace (`slack_personal` is retired taxonomy).
+        if (
+            account.get("provider") != auth_provider
+            or account.get("status") != "configured"
+        ):
             continue
         scope = account.get("scope")
         resource = scope.get("resource") if isinstance(scope, dict) else None
@@ -1046,6 +1116,7 @@ def _seed_generated_slack_product_auth_if_configured(
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
     selected = _slack_env_field(SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES, extra_env)
+    auth_provider = _slack_auth_provider()
     preflight: dict[str, object] = {
         "checked": True,
         "seeded": False,
@@ -1168,8 +1239,8 @@ def _seed_generated_slack_product_auth_if_configured(
         account_path,
         {
             "id": account_id,
-            "provider": "slack_personal",
-            "label": "slack_personal",
+            "provider": auth_provider,
+            "label": auth_provider,
             "status": "configured",
             "ownership": "user_reusable",
             "owner_extension": None,
@@ -1193,7 +1264,6 @@ def _seed_generated_slack_product_auth_if_configured(
     )
     identity_binding = _seed_slack_personal_identity_binding(
         db_path,
-        installation_id=installation[1],
         user_id=user_id,
         slack_user_id=slack_user_id,
         now=now_s,

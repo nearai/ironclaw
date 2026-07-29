@@ -77,7 +77,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | IronClaw innovation; host resolves owner scope vs sender identity |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
-| Telegram | ✅ | ✅ | - | WASM channel(MTProto), polling-first setup, DM pairing, caption, /start, bot_username, DM topics, web/UI ownership claim flow, owner-scoped persistence |
+| Telegram | ✅ | ✅ | - | WASM channel(MTProto), polling-first setup, DM pairing, caption, manifest-declared `/start`, bot_username, DM topics, web/UI ownership claim flow, owner-scoped persistence |
 | Discord | ✅ | 🚧 | P2 | Gateway `MESSAGE_CREATE` intake restored via websocket queue + WASM poll; Gateway DMs now respect pairing; thread parent binding inheritance and reply/thread parity still incomplete |
 | Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
@@ -86,7 +86,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
 | WeCom | ✅ | 🚧 | P2 | Standalone WASM channel focused on WeCom intelligent bot WebSocket inbound/outbound, pairing, group sessions, inbound media hydration, and direct Bot media upload/send; self-built app callback + Agent API deferred |
 | LINE | ✅ | ❌ | P3 | |
-| WeChat (iLink bot) | ✅ | 🚧 | P2 | Extension-first channel (`channels-src/wechat`), single-account DM flow with QR login, typing, image send/receive, inbound file/voice/video handling, outbound image/video/file media, and SILK-to-WAV voice fallback; multi-account remains deferred |
+| WeChat (iLink bot) | ✅ | 🚧 | P2 | Packaged extension-first channel, single-account DM flow with QR login, typing, image send/receive, inbound file/voice/video handling, outbound image/video/file media, and SILK-to-WAV voice fallback; multi-account remains deferred |
 | WebChat | ✅ | ✅ | - | Web gateway chat |
 | Matrix | ✅ | ❌ | P3 | E2EE support |
 | Mattermost | ✅ | ❌ | P3 | Emoji reactions, interactive buttons, model picker |
@@ -674,7 +674,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger; runtime state split into `jobs-state.json`; `sessionTarget: "current"`/`session:<id>` bindings |
-| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; scoped pause/resume/rename/delete state transitions are available through first-party capabilities and WebUI v2 controls; first-class one-shot triggers (`TriggerSchedule::Once`, `schedule.kind = once`) are implemented (completion is derived from the schedule; the old year-pinned-cron + `completion_policy` workaround was removed); remaining follow-ups: legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
+| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; scoped pause/resume/rename/delete state transitions are available through first-party capabilities and WebUI v2 controls; first-class one-shot triggers (`TriggerSchedule::Once`, `schedule.kind = once`) are implemented (completion is derived from the schedule; the old year-pinned-cron + `completion_policy` workaround was removed); run-scoped source-inherited and explicit external result targets are durably sealed and revalidated before delivery, including paired Telegram DMs enumerated through the generic channel target registry; remaining follow-ups: legacy pre-fix rows without a stored thread_id remain unopenable, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
 | Per-job model fallback override | ✅ | ❌ | P2 | `payload.fallbacks` overrides agent-level fallbacks |
 | Cron stagger controls | ✅ | ❌ | P3 | Default stagger for scheduled jobs |
 | Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
@@ -747,7 +747,7 @@ CLAUDE.md for the full mapping + gap catalog.
 | SSRF IPv6 transition bypass block | ✅ | ❌ | Block IPv4-mapped IPv6 bypasses |
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
-| Docker sandbox | ✅ | ✅ | Orchestrator/worker containers; opt-in `sandbox.docker.gpus` passthrough; Reborn process sandbox MVP adds typed `SandboxProcessPlan`, backend-neutral `ProcessSandboxBackend`, hardened Docker command construction, fail-closed unenforced network hosts, explicit timeout/cancel cleanup, loop-to-host `SandboxProcessPlan` validation/spawn dispatch, and a host-runtime approval/lease spawn path for `system.process_sandbox.run`; production MITM broker/product wiring still partial |
+| Docker sandbox | ✅ | ❌ | Orchestrator/worker containers; opt-in `sandbox.docker.gpus` passthrough; Reborn defines a typed `SandboxProcessPlan` contract (`ironclaw_process_sandbox`) with plan validation only — no production execution backend is wired for it yet |
 | Podman support | ✅ | ❌ | `--container` accepts both Docker + Podman |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); Reborn process sandbox rejects sensitive raw env values in plans and uses placeholders for brokered credentials, but production secure-capture and MITM transport wiring remain partial |
@@ -835,7 +835,7 @@ CLAUDE.md for the full mapping + gap catalog.
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw serve` with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
+- 🚧 Slack channel (real implementation): Slack mounts as a generic extension channel surface (the bespoke host-beta serve lane — `serve_slack` / `with_slack_channel_routes` — was removed) with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and one unified host-bundled `slack` extension manifest (provider `slack`) declaring both the Slack channel surface and the user-scoped tool surfaces; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

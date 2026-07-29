@@ -65,9 +65,9 @@ progress/projection payloads and non-text modality defaults remain deferred.
   is closed. `RebornLocalRuntimeServices` now owns a single outbound store
   exposing preferences, state, gate-routes, and triggered-delivery handles;
   `slack_host_beta` consumes those handles rather than constructing a private
-  `FilesystemOutboundStateStore`. The `/outbound` grant was removed from
+  `OutboundStateStore`. The `/outbound` grant was removed from
   `slack_host_state_mount_view`, and a `clippy::disallowed-methods` lint bans
-  `FilesystemOutboundStateStore::new` outside the factory.
+  `OutboundStateStore::new` outside the factory.
 - The staged Slack provider is not yet wired into the WebUI/API bundle and
   should not become user-selectable until the scoped authority model below is
   implemented.
@@ -362,7 +362,7 @@ Not defaultable in the first E2E:
 
 - `docs/reborn/contracts/communication-delivery-resolution.md`
   - preference fields, rule order, and trigger delivery boundary.
-- `docs/reborn/contracts/product-adapters.md`
+- `docs/reborn/how-to-port-channel-to-reborn.md`
   - adapter outbound rendering boundary and Slack-like external channel
     capability model.
 - `crates/ironclaw_outbound/src/communication_preferences.rs`
@@ -371,11 +371,11 @@ Not defaultable in the first E2E:
     contract described below.
 - `crates/ironclaw_outbound/src/resolution_engine.rs`
   - triggered notification preference lookup and fail-closed behavior.
-- `crates/ironclaw_product_workflow/src/outbound_delivery.rs`
+- `crates/ironclaw_product/src/outbound_delivery.rs`
   - `prepare_and_render_product_outbound` validation-before-render path.
 - `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
   - Slack final-reply observer and observed reply-target authority.
-- `crates/ironclaw_reborn_composition/src/product_auth_serve/oauth.rs`
+- `crates/ironclaw_webui/src/product_auth/oauth.rs`
   - Slack OAuth callback binds identity only today.
 - `crates/ironclaw_webui_v2/src/handlers.rs`
   - WebUI handlers must delegate through `RebornServicesApi`.

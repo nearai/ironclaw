@@ -10,11 +10,11 @@
 //! 1. `EnvBearerAuthenticator` (the standalone CLI / single-operator
 //!    deployment) accept/reject on a protected v2 route.
 //! 2. Missing / malformed `Authorization` headers collapse to `401`
-//!    without ever reaching the facade.
+//!    without ever reaching the service.
 //! 3. `Bearer` prefix parsing is case-insensitive — parity with v1's
 //!    `auth.rs` extractor (documented as a KEEP in
 //!    `docs/reborn/security-parity/01-auth.md`).
-//! 4. A session revoked directly through `SessionStore::revoke` stops
+//! 4. A session revoked directly through `SignedTokenSessionStore::revoke` stops
 //!    authenticating, isolated from the OAuth round-trip.
 //! 5. An expired session is rejected at the route layer (the
 //!    `session.rs` unit test only covers `authenticate()` in isolation).
@@ -30,15 +30,15 @@
 #![cfg(feature = "test-support")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
-    EnvBearerAuthenticator, InMemorySessionStore, OidcAuthenticator, OidcAuthenticatorConfig,
-    SessionAuthenticator, SessionStore,
+    EnvBearerAuthenticator, OidcAuthenticator, OidcAuthenticatorConfig, SessionAuthenticator,
+    SignedTokenSessionStore, signed_session_store,
 };
 use ironclaw_webui::{WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use secrecy::{ExposeSecret, SecretString};
@@ -66,15 +66,10 @@ const ENV_USER: &str = "operator-user";
 /// Compose `webui_v2_app` with the supplied authenticator and no public
 /// route mount (these tests never exercise the OAuth login surface —
 /// they inject bearers / sessions directly). Returns the router plus the
-/// facade stub so callers can assert whether a request reached the
+/// service stub so callers can assert whether a request reached the
 /// handler.
 fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -82,7 +77,7 @@ fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<Stu
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -97,8 +92,19 @@ fn env_bearer_app() -> (axum::Router, Arc<StubServices>) {
     compose(authenticator)
 }
 
-fn session_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
-    let store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+fn signed_store_for(tenant_id: &TenantId) -> Arc<SignedTokenSessionStore> {
+    signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        tenant_id,
+    )
+}
+
+fn session_app() -> (
+    axum::Router,
+    Arc<StubServices>,
+    Arc<SignedTokenSessionStore>,
+) {
+    let store = signed_store_for(&TenantId::new(TENANT).expect("tenant"));
     let authenticator = Arc::new(SessionAuthenticator::new(store.clone()));
     let (app, services) = compose(authenticator);
     (app, services, store)
@@ -138,7 +144,7 @@ async fn env_bearer_valid_token_authenticates_protected_route() {
         "valid env bearer must authenticate on the v2 surface",
     );
     let callers = services.create_thread_callers.lock().expect("lock");
-    assert_eq!(callers.len(), 1, "facade reached exactly once");
+    assert_eq!(callers.len(), 1, "service reached exactly once");
     assert_eq!(
         callers[0].tenant_id.as_str(),
         TENANT,
@@ -165,7 +171,7 @@ async fn env_bearer_wrong_token_rejected() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "facade must not be reached when the bearer is wrong",
+        "service must not be reached when the bearer is wrong",
     );
 }
 
@@ -281,8 +287,11 @@ async fn revoked_session_bearer_rejected() {
     );
     assert_eq!(callers_len(&services), 1);
 
-    store.revoke(&bearer).await.expect("revoke");
-    assert_eq!(store.len(), 0, "revoke must drop the session");
+    store.revoke(&bearer).await;
+    assert!(
+        store.lookup(&bearer).await.expect("lookup").is_none(),
+        "revoke must denylist the session",
+    );
 
     let after_revoke = app
         .oneshot(create_thread_request(Some(&format!("Bearer {bearer}"))))
@@ -296,13 +305,13 @@ async fn revoked_session_bearer_rejected() {
     assert_eq!(
         callers_len(&services),
         1,
-        "facade must not be reached after revoke",
+        "service must not be reached after revoke",
     );
 }
 
 #[tokio::test]
 async fn expired_session_bearer_rejected_on_route() {
-    // The `session.rs` unit test checks expiry inside `authenticate()`;
+    // The signed-session unit tests check expiry inside `lookup()`;
     // this drives the full route to confirm an expired session yields a
     // 401 at the gateway, not just inside the authenticator.
     let (app, services, store) = session_app();
@@ -310,15 +319,15 @@ async fn expired_session_bearer_rejected_on_route() {
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
-            // Already expired: `SessionRecord::is_expired` is `now >=
-            // expires_at`, so a negative lifetime is unambiguously past.
-            ChronoDuration::seconds(-1),
+            ChronoDuration::seconds(1),
             false,
         )
         .await
         .expect("create_session")
         .expose_secret()
         .to_string();
+
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
 
     let response = app
         .oneshot(create_thread_request(Some(&format!("Bearer {bearer}"))))
@@ -345,13 +354,13 @@ fn callers_len(services: &Arc<StubServices>) -> usize {
 #[tokio::test]
 async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment() {
     // v2 isolates tenants two ways: each deployment owns a separate
-    // `SessionStore`, and `caller.tenant_id` is always stamped from host
+    // signed session store, and `caller.tenant_id` is always stamped from host
     // config — never from the bearer. A session minted against tenant-a's
     // store must therefore fail on a tenant-b deployment backed by its own
     // (different) store: the lookup misses and the bearer is rejected. If
     // the tenant binding were ever loosened to trust a shared store, this
     // would catch it.
-    let tenant_a_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let tenant_a_store = signed_store_for(&TenantId::new(TENANT).expect("tenant"));
     let bearer = tenant_a_store
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
@@ -365,14 +374,9 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
         .to_string();
 
     // A distinct deployment: tenant-b, its own empty store.
-    let tenant_b_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let tenant_b_store = signed_store_for(&TenantId::new("tenant-b").expect("tenant"));
     let authenticator = Arc::new(SessionAuthenticator::new(tenant_b_store.clone()));
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new("tenant-b").expect("tenant"),
         authenticator,
@@ -380,7 +384,7 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
 
     let response = app
         .oneshot(with_peer(
@@ -405,12 +409,15 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
             .lock()
             .expect("lock")
             .is_empty(),
-        "a cross-deployment bearer must never reach the facade",
+        "a cross-deployment bearer must never reach the service",
     );
-    assert_eq!(
-        tenant_a_store.len(),
-        1,
-        "the tenant-a session stays intact in its own store",
+    assert!(
+        tenant_a_store
+            .lookup(&bearer)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the tenant-a session stays valid in its own store",
     );
 }
 
@@ -477,7 +484,7 @@ async fn query_token_honored_on_sse_events_route() {
     // session credential and stamped as that user — not merely yield a
     // 200. A mis-wire that left the route auth-gated but stamped a
     // default/empty caller would still 200. The SSE body is a lazy
-    // stream, so the facade's `stream_events` only runs once the body is
+    // stream, so the service's `stream_events` only runs once the body is
     // polled — drive frames briefly so it runs at least once (the
     // drain-poll loop may call it several times; assert on identity, not
     // count).
@@ -491,7 +498,7 @@ async fn query_token_honored_on_sse_events_route() {
     let callers = services.stream_events_callers.lock().expect("lock");
     assert!(
         !callers.is_empty(),
-        "the authenticated SSE request must reach the facade",
+        "the authenticated SSE request must reach the service",
     );
     assert_eq!(
         callers[0].user_id.as_str(),
@@ -529,7 +536,7 @@ async fn query_token_wrong_token_rejected_on_sse_route() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "a rejected `?token=` must never reach the facade",
+        "a rejected `?token=` must never reach the service",
     );
 }
 
@@ -539,20 +546,22 @@ async fn expired_query_token_rejected_on_sse_route() {
     // not just the `Authorization: Bearer` path. If the shim were ever
     // widened or the expiry check skipped on the query path, an expired
     // session could keep streaming over `?token=` while bearer-header
-    // tests still pass. Mint a session that is already expired and
+    // tests still pass. Mint a short-lived session, wait until it expires, and
     // present it through the query string.
     let (app, services, store) = session_app();
     let expired_bearer = store
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
-            ChronoDuration::seconds(-1),
+            ChronoDuration::seconds(1),
             false,
         )
         .await
         .expect("create_session")
         .expose_secret()
         .to_string();
+
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
 
     let response = app
         .oneshot(sse_events_request(Some(&expired_bearer)))
@@ -569,7 +578,7 @@ async fn expired_query_token_rejected_on_sse_route() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "an expired `?token=` must never reach the facade",
+        "an expired `?token=` must never reach the service",
     );
 }
 
@@ -606,7 +615,7 @@ async fn query_token_rejected_on_mutation_route() {
         StatusCode::UNAUTHORIZED,
         "`?token=` must not authenticate a mutation route",
     );
-    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    assert_eq!(callers_len(&services), 0, "service must not be reached");
 }
 
 /// `GET /api/webchat/v2/threads/{id}/ws` (the WebSocket upgrade route)
@@ -702,7 +711,7 @@ async fn cookie_session_not_honored_on_protected_route() {
         StatusCode::UNAUTHORIZED,
         "an `ironclaw_session` cookie must not authenticate a v2 route (cookie transport dropped)",
     );
-    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    assert_eq!(callers_len(&services), 0, "service must not be reached");
 }
 
 // ─── operator-config mounting boundary ────────────────────────────────
@@ -711,7 +720,7 @@ async fn cookie_session_not_honored_on_protected_route() {
 /// exists at all depends on the authenticator's
 /// `allows_operator_webui_config()`; sending no credential lets us read
 /// the verdict as 401 (mounted, behind bearer auth) vs 404 (not
-/// mounted) without invoking the facade.
+/// mounted) without invoking the service.
 fn llm_providers_unauthenticated() -> Request<Body> {
     with_peer(
         Request::builder()
@@ -894,7 +903,7 @@ async fn oidc_signed_token_authenticates_protected_route_and_bad_claims_rejected
     assert_eq!(
         callers_len(&services),
         1,
-        "only the valid token may reach the facade",
+        "only the valid token may reach the service",
     );
     server.abort();
 }
@@ -906,7 +915,7 @@ async fn oidc_hs256_token_rejected_on_route() {
     // matching the JWKS key. A verifier that doesn't pin the algorithm
     // would verify the MAC with the public key and forge a valid caller.
     // The RS/ES-only allowlist must reject it at the gateway, and the
-    // facade must never be reached. (row 5 — locks the highest-value
+    // service must never be reached. (row 5 — locks the highest-value
     // OIDC control, which RS256-only tests cannot exercise.)
     let (_pem, public) = generate_oidc_key();
     let (jwks_url, server) = spawn_jwks_server(oidc_jwk(&public, OIDC_KID)).await;
@@ -941,7 +950,7 @@ async fn oidc_hs256_token_rejected_on_route() {
     assert_eq!(
         callers_len(&services),
         0,
-        "the forged token must never reach the facade",
+        "the forged token must never reach the service",
     );
     server.abort();
 }
@@ -951,7 +960,7 @@ async fn oidc_not_yet_valid_nbf_token_rejected_on_route() {
     // row 5 lists `nbf` as a validated claim. A correctly-signed token
     // with valid iss/aud/exp but a not-before in the future must collapse
     // to 401 at the gateway (not just inside `authenticate()`), and the
-    // facade must not be reached.
+    // service must not be reached.
     let (pem, public) = generate_oidc_key();
     let (jwks_url, server) = spawn_jwks_server(oidc_jwk(&public, OIDC_KID)).await;
     let (app, services) = oidc_app(jwks_url);
@@ -983,7 +992,7 @@ async fn oidc_not_yet_valid_nbf_token_rejected_on_route() {
         StatusCode::UNAUTHORIZED,
         "a token whose nbf is in the future must be rejected at the route layer",
     );
-    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    assert_eq!(callers_len(&services), 0, "service must not be reached");
     server.abort();
 }
 

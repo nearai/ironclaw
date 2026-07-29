@@ -4,7 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatCard, StatusPill } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { SelectMenu } from "@ironclaw/design-system";
-import { ConfirmDialog } from "@ironclaw/design-system";
+import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import { UserSecretsPanel } from "./user-secrets-panel";
@@ -18,6 +18,7 @@ import {
   formatUserRole,
   formatUserStatus,
   buildRoleOptions,
+  adminUserActionErrorMessage,
 } from "../lib/admin-presenters";
 
 function DetailRow({ label, children }) {
@@ -30,10 +31,39 @@ function DetailRow({ label, children }) {
 }
 
 export function UserDetail({ userId, onBack }) {
-  const t = useT();
   const userQuery = useAdminUserDetail(userId);
   const usageQuery = useUsage("month", userId);
-  const { suspendUser, activateUser, updateUser, deleteUser } = useAdminUsers();
+  const adminState = useAdminUsers();
+  return (
+    <UserDetailView
+      key={userId}
+      onBack={onBack}
+      userQuery={userQuery}
+      usageQuery={usageQuery}
+      adminState={adminState}
+    />
+  );
+}
+
+export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
+  const t = useT();
+  const {
+    suspendUser,
+    activateUser,
+    updateUser,
+    deleteUser,
+    isSuspending,
+    suspendError,
+    isActivating,
+    activateError,
+    isUpdating,
+    updateError,
+    resetUpdate,
+    isDeleting,
+    deleteError,
+    resetDelete,
+    resetActionErrors,
+  } = adminState;
 
   const [role, setRole] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
@@ -41,6 +71,8 @@ export function UserDetail({ userId, onBack }) {
 
   const user = userQuery.data;
   const usageEntries = usageQuery.data?.usage || [];
+  const isActionPending = isSuspending || isActivating || isUpdating || isDeleting;
+  const statusError = suspendError || activateError;
 
   React.useEffect(() => {
     if (user && role === null) setRole(user.role);
@@ -68,14 +100,58 @@ export function UserDetail({ userId, onBack }) {
   if (!user) return null;
 
   const handleSaveRole = async () => {
-    if (role && role !== user.role) {
-      await updateUser(user.id, { role });
+    if (role && role !== user.role && !isActionPending) {
+      resetActionErrors?.();
+      try {
+        await updateUser(user.id, { role });
+      } catch (_) {
+        // The mutation exposes its sanitized error below.
+      }
     }
   };
 
+  const handleStatusChange = async () => {
+    if (isActionPending) return;
+    resetActionErrors?.();
+    try {
+      if (user.status === "active") {
+        await suspendUser(user.id);
+      } else {
+        await activateUser(user.id);
+      }
+    } catch (_) {
+      // The mutation exposes its sanitized error below.
+    }
+  };
+
+  const beginDelete = () => {
+    if (isActionPending) return;
+    resetDelete?.();
+    setConfirmDelete(true);
+  };
+
+  const closeDelete = () => {
+    if (isDeleting) return;
+    setConfirmDelete(false);
+    resetDelete?.();
+  };
+
   const handleDelete = async () => {
-    await deleteUser(user.id);
-    onBack();
+    if (isActionPending) return;
+    resetActionErrors?.();
+    try {
+      await deleteUser(user.id);
+      setConfirmDelete(false);
+      onBack();
+    } catch (_) {
+      // Keep the confirmation open so the administrator can retry.
+    }
+  };
+
+  const handleRoleChange = (nextRole) => {
+    if (isActionPending) return;
+    resetUpdate?.();
+    setRole(nextRole);
   };
 
   return (
@@ -99,19 +175,27 @@ export function UserDetail({ userId, onBack }) {
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {user.status === "active"
-              ? (<Button variant="secondary" size="sm" className="min-w-24" onClick={() => suspendUser(user.id)}>{t("admin.users.suspend")}</Button>)
-              : (<Button variant="secondary" size="sm" className="min-w-24" onClick={() => activateUser(user.id)}>{t("admin.users.activate")}</Button>)}
+              ? (<Button variant="secondary" size="sm" className="min-w-24" loading={isSuspending} disabled={isActionPending} data-testid="admin-user-detail-status" onClick={handleStatusChange}>{isSuspending ? t("common.loading") : t("admin.users.suspend")}</Button>)
+              : (<Button variant="secondary" size="sm" className="min-w-24" loading={isActivating} disabled={isActionPending} data-testid="admin-user-detail-status" onClick={handleStatusChange}>{isActivating ? t("common.loading") : t("admin.users.activate")}</Button>)}
             <Button
               variant="danger"
               size="sm"
               className="min-w-24"
-              onClick={() => setConfirmDelete(true)}
+              disabled={isActionPending}
+              data-testid="admin-user-detail-delete"
+              onClick={beginDelete}
             >
               {t("admin.users.delete")}
             </Button>
           </div>
         </div>
       </Panel>
+
+      {statusError && (
+        <p className="text-sm text-red-200" role="alert" data-testid="admin-user-detail-status-error">
+          {adminUserActionErrorMessage(statusError, t)}
+        </p>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Panel className="p-5 sm:p-6">
@@ -145,16 +229,22 @@ export function UserDetail({ userId, onBack }) {
             <SelectMenu
               value={role || user.role}
               options={roleOptions}
-              onChange={setRole}
+              onChange={handleRoleChange}
+              disabled={isActionPending}
               ariaLabel={t("admin.user.currentRole")}
               className="!min-w-0 w-36"
               buttonClassName="h-9 rounded-md border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-sans text-sm text-[var(--v2-text-strong)]"
             />
           </div>
-          <Button onClick={handleSaveRole} disabled={!role || role === user.role}>
-            {t("admin.user.saveRole")}
+          <Button data-testid="admin-user-detail-save-role" onClick={handleSaveRole} loading={isUpdating} disabled={isActionPending || !role || role === user.role}>
+            {isUpdating ? t("common.saving") : t("admin.user.saveRole")}
           </Button>
         </div>
+        {updateError && (
+          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-detail-role-error">
+            {adminUserActionErrorMessage(updateError, t)}
+          </p>
+        )}
       </Panel>
 
       <UserSecretsPanel key={user.id} userId={user.id} />
@@ -194,15 +284,50 @@ export function UserDetail({ userId, onBack }) {
       </Panel>
 
       {confirmDelete && (
-        <ConfirmDialog
+        <Modal
           open
+          size="sm"
+          data-testid="admin-user-delete-dialog"
           title={t("admin.users.deleteUserTitle")}
-          description={t("admin.users.deleteUserDesc", { name: user.display_name })}
-          confirmLabel={t("admin.users.delete")}
-          cancelLabel={t("admin.users.cancel")}
-          onConfirm={handleDelete}
-          onCancel={() => setConfirmDelete(false)}
-        />
+          closeLabel={t("admin.users.cancel")}
+          onClose={closeDelete}
+        >
+          <ModalBody>
+            <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+              {t("admin.users.deleteUserDesc", { name: user.display_name })}
+            </p>
+            {deleteError && (
+              <p
+                className="mt-4 text-sm text-[var(--v2-danger-text)]"
+                role="alert"
+                data-testid="admin-user-delete-error"
+              >
+                {adminUserActionErrorMessage(deleteError, t)}
+              </p>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button
+              data-testid="admin-user-delete-cancel"
+              variant="ghost"
+              size="sm"
+              disabled={isDeleting}
+              onClick={closeDelete}
+            >
+              {t("admin.users.cancel")}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={isDeleting}
+              disabled={isDeleting}
+              data-testid="admin-user-delete-confirm"
+              onClick={handleDelete}
+            >
+              {isDeleting ? t("common.loading") : t("admin.users.delete")}
+            </Button>
+          </ModalFooter>
+        </Modal>
       )}
     </div>
   );

@@ -8,10 +8,10 @@
 //! run multiple independent filesystem governors over the same quota domain.
 //! Multi-replica deployments need one elected authority for each quota domain
 //! or a different distributed admission primitive. Durable recovery loads the compacted
-//! [`ResourceGovernorSnapshot`] written through [`FilesystemResourceGovernorStore`]
+//! [`ResourceGovernorSnapshot`] written through [`ResourceGovernorStore`]
 //! and replays `/resources/deltas/log` from the snapshot cursor.
 //!
-//! [`FilesystemResourceGovernorStore`] remains the CAS snapshot mechanism for
+//! [`ResourceGovernorStore`] remains the CAS snapshot mechanism for
 //! compaction only. Hot reserve/reconcile/release paths update per-account
 //! shards in memory, enqueue one delta, and ack the caller after the group
 //! commit flusher durably appends that delta.
@@ -22,17 +22,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{ResourceReservationId, ResourceScope};
+use ironclaw_host_api::{ResourceReservation, ResourceReservationId, ResourceScope};
 use tracing::warn;
 
 use crate::cas_snapshot::{AsyncStorageWorkerPoolCell, new_worker_pool_cell, run_on_worker_pool};
 use crate::{
-    AccountSnapshot, BudgetEvent, BudgetEventSink, Clock, FilesystemResourceGovernorStore,
-    NoOpBudgetEventSink, ReservationOutcome, ResourceAccount, ResourceError, ResourceGovernor,
-    ResourceGovernorStore, ResourceLimits, ResourceReceipt, ResourceTally, SystemClock,
+    AccountSnapshot, BudgetEvent, BudgetEventSink, Clock, NoOpBudgetEventSink, ReservationOutcome,
+    ResourceAccount, ResourceError, ResourceGovernor, ResourceGovernorStore,
+    ResourceGovernorStorePort, ResourceLimits, ResourceReceipt, ResourceTally, SystemClock,
     account_snapshot_in_state, advance_period_if_rolled_over, emit_reserve_events,
     most_specific_account, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
-    set_limit_in_state,
+    set_limit_in_state, validate_reservation_in_state,
 };
 use crate::{ResourceEstimate, ResourceUsage};
 
@@ -64,7 +64,7 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    snapshot_store: FilesystemResourceGovernorStore<F>,
+    snapshot_store: ResourceGovernorStore<F>,
     authority: Mutex<AuthorityLifecycle>,
     delta_journal: ResourceDeltaJournal<F>,
     workers: AsyncStorageWorkerPoolCell,
@@ -83,7 +83,7 @@ where
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            snapshot_store: FilesystemResourceGovernorStore::new(Arc::clone(&filesystem)),
+            snapshot_store: ResourceGovernorStore::new(Arc::clone(&filesystem)),
             delta_journal: ResourceDeltaJournal::new(Arc::clone(&filesystem)),
             filesystem,
             authority: Mutex::new(AuthorityLifecycle::Vacant),
@@ -574,6 +574,28 @@ where
         Ok(receipt)
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        let authority = self.authority()?;
+        authority.check_available()?;
+        let accounts = {
+            let reservations = authority.lock_reservations()?;
+            let Some(record) = reservations.get(&reservation.id) else {
+                return Err(ResourceError::UnknownReservation { id: reservation.id });
+            };
+            record.accounts.clone()
+        };
+        let _commit = authority.lock_commit_for_accounts(&accounts)?;
+        let reservations = authority.lock_reservations()?;
+        let Some(record) = reservations.get(&reservation.id).cloned() else {
+            return Err(ResourceError::UnknownReservation { id: reservation.id });
+        };
+        let mut locked = authority.lock_accounts(&accounts)?;
+        let mut reservation_subset = HashMap::new();
+        reservation_subset.insert(reservation.id, record);
+        let mut state = locked.state_for_accounts(&accounts, reservation_subset);
+        validate_reservation_in_state(&mut state, reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -697,7 +719,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
-    use crate::{BudgetPeriod, FakeClock, ResourceGovernorStore, ResourceLimits};
+    use crate::{BudgetPeriod, FakeClock, ResourceGovernorStorePort, ResourceLimits};
 
     fn scoped_resources_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let backend = Arc::new(InMemoryBackend::new());
@@ -938,7 +960,7 @@ mod tests {
             )
             .unwrap();
 
-        let store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped));
+        let store = ResourceGovernorStore::new(Arc::clone(&scoped));
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let snapshot = store.inspect(|snapshot| Ok(snapshot.clone())).unwrap();
@@ -1005,7 +1027,7 @@ mod tests {
         let rolled = governor.account_snapshot(&account).unwrap().unwrap();
         assert_eq!(rolled.ledger.spent.usd, dec!(0));
 
-        let store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped));
+        let store = ResourceGovernorStore::new(Arc::clone(&scoped));
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let snapshot = store.inspect(|snapshot| Ok(snapshot.clone())).unwrap();

@@ -101,8 +101,8 @@ Current implementations:
 ```text
 InMemoryRunStateStore
 InMemoryApprovalRequestStore
-FilesystemRunStateStore
-FilesystemApprovalRequestStore
+RunStateStore
+ApprovalRequestStore
 ```
 
 ---

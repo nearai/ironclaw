@@ -322,7 +322,8 @@ impl SandboxCredentialBinding {
                 }
             }
             RuntimeCredentialTarget::QueryParam { .. }
-            | RuntimeCredentialTarget::PathPlaceholder { .. } => {
+            | RuntimeCredentialTarget::PathPlaceholder { .. }
+            | RuntimeCredentialTarget::BodyJsonPointer { .. } => {
                 return Err(ProcessSandboxPlanError::UnsupportedCredentialTarget);
             }
         }
@@ -333,9 +334,10 @@ impl SandboxCredentialBinding {
         match &self.target {
             RuntimeCredentialTarget::Header { name, .. } => name.to_ascii_lowercase(),
             RuntimeCredentialTarget::QueryParam { name } => name.to_ascii_lowercase(),
-            RuntimeCredentialTarget::PathPlaceholder { .. } => unreachable!(
-                "PathPlaceholder targets are rejected during sandbox credential validation"
-            ),
+            RuntimeCredentialTarget::PathPlaceholder { .. }
+            | RuntimeCredentialTarget::BodyJsonPointer { .. } => {
+                unreachable!("non-header targets are rejected during sandbox credential validation")
+            }
         }
     }
 }

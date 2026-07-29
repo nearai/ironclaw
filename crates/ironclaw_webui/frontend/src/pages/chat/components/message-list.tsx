@@ -126,6 +126,7 @@ export function MessageList({
   onLoadMore,
   onRetryMessage,
   threadId,
+  activeRunId,
   logsPath,
   pending = false,
   children,
@@ -386,12 +387,19 @@ export function MessageList({
         )}
         {grouped.map((item) =>
           item.type === "activity-run"
-            ? (<ActivityRun key={item.id} activity={item.activity} />)
+            ? (
+                <ActivityRun
+                  key={item.id}
+                  activity={item.activity}
+                  activeRunId={activeRunId}
+                />
+              )
             : (<MessageBubble
                 key={item.id}
                 message={item.message}
                 onRetry={onRetryMessage}
                 threadId={threadId}
+                activeRunId={activeRunId}
               />)
         )}
         {children}

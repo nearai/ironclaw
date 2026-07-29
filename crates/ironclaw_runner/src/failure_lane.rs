@@ -84,6 +84,11 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "lease_expired",
     // LoopFailureKind (ironclaw_turns)
     "model_error",
+    // Permanent model-stage failures (see `failure_categories.rs`): named
+    // separately so they are not auto-retried as generic host outages.
+    "model_stage_request_invalid",
+    "model_stage_policy_denied",
+    "model_stage_scope_mismatch",
     "context_build_failed",
     "capability_protocol_error",
     "iteration_limit",
@@ -103,6 +108,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "model_unavailable",
     "model_internal",
     "model_invalid_output",
+    "model_stale_request",
     // Capability recovery categories
     "capability_transient",
     "capability_permanent",

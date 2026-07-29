@@ -16,11 +16,11 @@ use ironclaw_auth::{
     OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
     ProviderScope,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
-use ironclaw_reborn_composition::{
+use ironclaw_auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use secrecy::SecretString;
 use tokio::sync::Semaphore;
 
@@ -48,6 +48,12 @@ impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
             .lock()
             .expect("continuation event lock poisoned")
             .push(event);
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -217,6 +223,12 @@ impl RebornAuthContinuationDispatcher for BlockingContinuationDispatcher {
             .forget();
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -279,6 +291,12 @@ impl RebornAuthContinuationDispatcher for FailingContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Err(self.error.clone())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
     }
 }
 
@@ -793,7 +811,7 @@ async fn oauth_callback_handler_routes_exchange_failures_through_provider_bounda
     assert!(!error.retryable);
     assert!(dispatcher.events().is_empty());
     let serialized = serde_json::to_string(&error).unwrap();
-    let parsed: ironclaw_reborn_composition::RebornOAuthCallbackError =
+    let parsed: ironclaw_auth::RebornOAuthCallbackError =
         serde_json::from_str(&serialized).unwrap();
     assert_eq!(parsed, error);
     assert!(!serialized.contains("raw-auth-code"));

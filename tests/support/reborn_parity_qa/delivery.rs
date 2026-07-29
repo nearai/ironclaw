@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_product_adapters::{DeliveryStatus, OutboundDeliverySink};
+use ironclaw_product::{DeliveryStatus, OutboundDeliverySink};
 
 #[derive(Debug, Clone, Default)]
 pub struct RecordingOutboundDeliverySink {

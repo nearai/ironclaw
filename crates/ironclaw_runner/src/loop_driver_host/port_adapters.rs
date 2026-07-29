@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest,
+    CheckpointStateStorePort, GetCheckpointStateRequest, GetLoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, TurnCheckpointId, TurnRunId,
     run_profile::{
@@ -77,7 +77,7 @@ impl LoopInputPort for NoExtraLoopInputPort {
 #[derive(Clone)]
 pub(super) struct HostManagedLoopCheckpointPort {
     run_context: LoopRunContext,
-    checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     staged_checkpoint_refs: Arc<Mutex<HashMap<LoopCheckpointStateRef, LoopCheckpointKind>>>,
@@ -86,7 +86,7 @@ pub(super) struct HostManagedLoopCheckpointPort {
 impl HostManagedLoopCheckpointPort {
     pub(super) fn new(
         run_context: LoopRunContext,
-        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {

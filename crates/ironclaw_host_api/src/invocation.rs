@@ -1,7 +1,7 @@
 //! Slice-C kernel capability vocabulary — the one invocation payload.
 //!
 //! This module lands the first types of the capability-path DTO collapse
-//! described in `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
+//! described in `docs/reborn/contracts/capability-access.md`
 //! (§3 "one payload, authority as a fold"; §3.1 "the three real states, named";
 //! §5.2.1 "origin is part of the `Invocation`"). Per the migration plan (§9), the
 //! kernel vocabulary lands in `ironclaw_host_api` *first*, ahead of any wiring —
@@ -10,11 +10,14 @@
 //!
 //! ## What [`Invocation`] replaces
 //!
-//! Today a single capability call is re-wrapped through ~5 near-identical request
-//! shapes across the crate graph (§1.1): `CapabilityInvocation` (`ironclaw_turns`),
-//! `RuntimeCapabilityRequest` (`ironclaw_host_runtime`), `CapabilityInvocationRequest`
-//! (`ironclaw_capabilities`), [`crate::CapabilityDispatchRequest`] (this crate), and
-//! `RuntimeAdapterRequest` (`ironclaw_dispatcher`). The field-level diff shows only
+//! The retired path re-wrapped a single capability call through ~5
+//! near-identical request shapes across the crate graph (§1.1):
+//! `CapabilityInvocation` (`ironclaw_turns`), `RuntimeCapabilityRequest`
+//! (`ironclaw_host_runtime`), `CapabilityInvocationRequest`
+//! (`ironclaw_capabilities`) and `RuntimeAdapterRequest` (`ironclaw_dispatcher`).
+//! The live names are `LoopRequest`, runtime tuple parts, direct
+//! `CapabilityHost` parameters, and the private runtime-lane request.
+//! The field-level diff shows only
 //! **three** genuinely distinct states; the rest is duplication forced by the
 //! dependency DAG plus dead transitional fields. `Invocation` is the middle state —
 //! *the host-side payload, resolved at the membrane* — and lives here, the bottom
@@ -27,8 +30,16 @@
 //! exist and are still wired. The doc's plan is explicit that the type count rises
 //! before it falls (~14 → ~18 → ~11) while the new vocabulary and the old shapes
 //! coexist; the mirror-DTO ratchet's frozen allowlist is what will make the old
-//! shapes "may only disappear". Nothing in this module is wired into the dispatch
-//! path yet — that is a later slice.
+//! shapes "may only disappear".
+//!
+//! These vocabulary types are now consumed on the live path (the wiring slice has
+//! landed): [`InvocationOrigin`] is sealed at the membrane and read by the
+//! capability authorization fold ([`crate::ExecutionContext::resolved_origin`],
+//! the `origin`→gate matrix) and by the first-party trigger-mutation policy that
+//! denies `ScheduledLoopRun`, and [`Invocation`]/[`Actor`] back the
+//! `ironclaw_capabilities` `authorize()` path. The retired shapes still coexist,
+//! but the earlier "nothing in this module is wired into the dispatch path yet"
+//! note no longer holds.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,6 +71,10 @@ pub enum InvocationOrigin {
     /// Model-initiated, trust-attenuated: a tool call from inside an agent loop
     /// turn-run. Gated by default (§5.2.1).
     LoopRun(RunId),
+    /// Model-initiated call from a host-trusted scheduled routine/trigger run.
+    /// It shares loop-run gate semantics with [`Self::LoopRun`] while keeping
+    /// the scheduled lineage typed for stricter capability policy.
+    ScheduledLoopRun(RunId),
     /// A direct, authenticated user action from a product surface (settings
     /// mutation, admin action). The user's gesture is consent evidence bound to
     /// this `(capability, input)` pair, honored per the descriptor's matrix.
@@ -75,6 +90,7 @@ impl InvocationOrigin {
     pub fn kind(&self) -> &'static str {
         match self {
             InvocationOrigin::LoopRun(_) => "loop_run",
+            InvocationOrigin::ScheduledLoopRun(_) => "scheduled_loop_run",
             InvocationOrigin::Product(_) => "product",
             InvocationOrigin::Automation(_) => "automation",
         }
@@ -134,9 +150,8 @@ impl Actor {
 /// [`crate::Authorized`] witness, never on the request. `Invocation` is the
 /// pre-auth input; [`crate::Authorized`] is the post-auth witness.
 ///
-/// Like [`crate::CapabilityDispatchRequest`], this is an in-process payload
-/// (`input` is arbitrary JSON, not `Eq`), so it derives `PartialEq` but not `Eq`
-/// and is not itself a wire type.
+/// This is an in-process payload (`input` is arbitrary JSON, not `Eq`), so it
+/// derives `PartialEq` but not `Eq` and is not itself a wire type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Invocation {
     /// Idempotency identity of this invocation (§11.3). Stable across retries.
@@ -187,6 +202,16 @@ mod tests {
         let back: InvocationOrigin = serde_json::from_value(json).unwrap();
         assert_eq!(back, origin);
 
+        let scheduled_run = RunId::new();
+        let scheduled = InvocationOrigin::ScheduledLoopRun(scheduled_run);
+        let json = serde_json::to_value(&scheduled).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "scheduled_loop_run": scheduled_run.to_string() })
+        );
+        let back: InvocationOrigin = serde_json::from_value(json).unwrap();
+        assert_eq!(back, scheduled);
+
         let product = InvocationOrigin::Product(ProductKind::new("settings").unwrap());
         assert_eq!(
             serde_json::to_value(&product).unwrap(),
@@ -206,6 +231,10 @@ mod tests {
         // accounting views (§5.3.3) key on it.
         for (origin, tag) in [
             (InvocationOrigin::LoopRun(RunId::new()), "loop_run"),
+            (
+                InvocationOrigin::ScheduledLoopRun(RunId::new()),
+                "scheduled_loop_run",
+            ),
             (
                 InvocationOrigin::Product(ProductKind::new("chat").unwrap()),
                 "product",

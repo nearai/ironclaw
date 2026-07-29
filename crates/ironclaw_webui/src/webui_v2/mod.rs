@@ -1,16 +1,16 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is compiled into
+//! [`ironclaw_host_api::ProductSurface`] service. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
 //!
-//! - Handlers consume only [`RebornServicesApi`] for chat, run/gate,
+//! - Handlers consume only [`ProductSurface`] for chat, run/gate,
 //!   extension, and automation reads. They never reach into the dispatcher,
 //!   `HostRuntime`, run-state, DB stores, or any runtime lane.
 //! - Auth and CORS are **not** enforced here. Host composition runs the
-//!   bearer-token middleware that builds a [`WebUiAuthenticatedCaller`] and
+//!   bearer-token middleware that builds a [`ProductSurfaceCaller`] and
 //!   injects it as an `Extension` before traffic reaches these handlers.
 //! - The [`IngressRouteDescriptor`] set returned by [`webui_v2_routes`] is
 //!   the canonical contract the host composes against: mount path, method,
@@ -21,11 +21,11 @@
 //! ## Streaming
 //!
 //! `stream_events` is exposed as SSE. The current
-//! [`RebornServicesApi::stream_events`] is drain-only, so the handler
+//! [`ProductSurface::stream_events`] is drain-only, so the handler
 //! drains once, renders each product envelope into a
 //! [`WebChatV2EventFrame`] SSE message with the projection cursor as the
 //! SSE id, then polls at a low cadence for newly-arrived events. When the
-//! facade gains a real subscription API the handler can migrate without
+//! service gains a real subscription API the handler can migrate without
 //! changing the descriptor or browser-visible event schema.
 //!
 //! Beyond the route descriptor's per-caller request rate limit, the
@@ -34,9 +34,9 @@
 //! maximum lifetime so leaked guards or stuck pollers cannot wedge a
 //! caller's slot indefinitely.
 //!
-//! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
+//! [`ProductSurface`]: ironclaw_host_api::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
-//! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
+//! [`ProductSurfaceCaller`]: ironclaw_host_api::ProductSurfaceCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
 mod descriptors;
@@ -49,16 +49,13 @@ mod sse_capacity;
 // drives now ship from one crate.
 pub mod static_assets;
 
-#[allow(deprecated)]
-pub use descriptors::is_webui_v2_llm_config_route_id;
 pub use descriptors::{
-    WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
-    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
-    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,
-    WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS, WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
-    WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
-    WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS, WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
-    WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
+    WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER, WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
+    WEBUI_V2_ROUTE_ADMIN_GET_USER, WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
+    WEBUI_V2_ROUTE_ADMIN_LIST_USERS, WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
+    WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE, WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS,
+    WEBUI_V2_ROUTE_ADMIN_UPDATE_USER, WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_PROJECT,
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_DELETE_AUTOMATION,
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_PROJECT,
@@ -68,14 +65,15 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_GET_RUN_ARTIFACT, WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL,
     WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
     WEBUI_V2_ROUTE_INSTALL_SKILL, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
-    WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_FS_MOUNTS, WEBUI_V2_ROUTE_LIST_LLM_MODELS,
+    WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
+    WEBUI_V2_ROUTE_LIST_FS_MOUNTS, WEBUI_V2_ROUTE_LIST_LLM_MODELS,
     WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS, WEBUI_V2_ROUTE_LIST_PROJECT_FILES,
     WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS, WEBUI_V2_ROUTE_LIST_PROJECTS,
     WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS, WEBUI_V2_ROUTE_LIST_SKILLS, WEBUI_V2_ROUTE_LIST_THREADS,
     WEBUI_V2_ROUTE_LOGS, WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS,
     WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_GET_SETUP,
-    WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG, WEBUI_V2_ROUTE_OPERATOR_LOGS,
+    WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG, WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION,
+    WEBUI_V2_ROUTE_OPERATOR_LOGS, WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION,
     WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP, WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE,
     WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_STATUS,
     WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
@@ -98,21 +96,21 @@ pub use descriptors::{
 };
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 pub use handlers::{
-    activate_extension, browse_fs_dir, cancel_run, complete_nearai_wallet_login, create_thread,
-    delete_automation, delete_llm_provider, delete_thread, get_attachment, get_extension_setup,
-    get_llm_config, get_operator_config_key, get_operator_diagnostics, get_operator_setup,
-    get_operator_status, get_outbound_preferences, get_run_artifact, get_session,
-    get_skill_content, get_timeline, install_extension, install_skill, list_automations,
-    list_connectable_channels, list_extension_registry, list_extensions, list_fs_mounts,
-    list_llm_models, list_operator_config, list_outbound_delivery_targets, list_settings_tools,
-    list_skills, list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
-    remove_extension, remove_skill, rename_automation, resolve_gate, resume_automation, retry_run,
-    run_operator_service_lifecycle, run_operator_setup, search_skills, send_message,
-    set_active_llm, set_auto_activate_learned, set_operator_config_key, set_outbound_preferences,
-    set_settings_tool_permission, set_settings_tools_auto_approve, set_skill_auto_activate,
-    setup_extension, start_codex_login, start_nearai_login, stat_fs_path, stream_events,
-    stream_events_ws, test_llm_connection, trace_account_traces, trace_credits, update_skill,
-    upsert_llm_provider,
+    browse_fs_dir, cancel_run, complete_nearai_wallet_login, create_thread, delete_automation,
+    delete_llm_provider, delete_thread, get_attachment, get_extension_setup, get_llm_config,
+    get_operator_config_key, get_operator_diagnostics, get_operator_setup, get_operator_status,
+    get_outbound_preferences, get_run_artifact, get_session, get_skill_content, get_timeline,
+    install_extension, install_skill, list_automations, list_extension_admin_configuration,
+    list_extension_registry, list_extensions, list_fs_mounts, list_llm_models,
+    list_operator_config, list_outbound_delivery_targets, list_settings_tools, list_skills,
+    list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
+    remove_extension, remove_skill, rename_automation, replace_extension_admin_configuration,
+    resolve_gate, resume_automation, retry_run, run_operator_service_lifecycle, run_operator_setup,
+    search_skills, send_message, set_active_llm, set_auto_activate_learned,
+    set_operator_config_key, set_outbound_preferences, set_settings_tool_permission,
+    set_settings_tools_auto_approve, set_skill_auto_activate, setup_extension, start_codex_login,
+    start_nearai_login, stat_fs_path, stream_events, stream_events_ws, test_llm_connection,
+    trace_account_traces, trace_credits, update_skill, upsert_llm_provider,
 };
 pub use router::{
     WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State, webui_v2_router,

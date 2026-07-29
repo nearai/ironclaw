@@ -20,15 +20,15 @@ across it:
 
 | Composed piece | Was | Now lives in |
 |---|---|---|
-| **WebChat v2 route surface + SPA** | crate `ironclaw_webui_v2` | `src/webui_v2/` (public module) + `frontend/` |
-| **Gateway assembly + middleware** | `ironclaw_reborn_composition::webui::webui_serve` + middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
+| **WebChat v2 route surface + SPA** | folded from the former `ironclaw_webui_v2` crate | `src/webui_v2/` (public module) + `frontend/` |
+| **Gateway assembly + middleware** | host-supplied `ProductSurface` + WebUI middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
 | **Serve loop + host auth** | crate `ironclaw_reborn_webui_ingress` (this crate's original scope) | `src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs` |
 
 ### 1. WebChat v2 route surface + SPA (`src/webui_v2/`)
 
 The native WebChat v2 HTTP routes on top of
-`ironclaw_product_workflow::RebornServicesApi`. Handlers are thin: they read the
-`WebUiAuthenticatedCaller` + `WebUiV2Capabilities` injected as axum extensions,
+`ironclaw_host_api::ProductSurface`. Handlers are thin: they read the
+`ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
 dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
 
 - `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` — build
@@ -39,7 +39,7 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
   stack; the table is locked by `tests/webui_v2_descriptors_contract.rs`.
 - ~60 routes across sessions, threads/timeline, message send, SSE + WebSocket
   event streams, logs, automations, connectable channels, extensions
-  (install/import/activate/setup lifecycle), LLM config, tool-approval settings,
+  (install/import/setup/remove lifecycle), LLM config, tool-approval settings,
   operator setup/config/diagnostics, admin user management, and trace credits.
   The full table lives in `CLAUDE.md`.
 - **Streaming:** `stream_events` (SSE) and `stream_events_ws` (WebSocket) share
@@ -52,7 +52,7 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
 
 ### 2. Gateway assembly + middleware (`src/webui_serve.rs`, `src/webui_*.rs`)
 
-`webui_v2_app(bundle, config)` takes composition's `RebornWebuiBundle` plus a
+`webui_v2_app(product_surface, config)` takes a host-supplied `ProductSurface` plus a
 host-owned `WebuiServeConfig` and returns a `WebuiV2App` — the fully composed
 `axum::Router` with the canonical middleware stack layered in a fixed order:
 
@@ -64,7 +64,8 @@ Each middleware is its own module: `webui_ws_origin`, `webui_body_limit`,
 `webui_operator_auth`, `webui_rate_limit`, `webui_route_match`. This is where
 the descriptor-driven policy (from `webui_v2_routes()`) is turned into real
 tower layers, where product-auth and OAuth `PublicRouteMount`s are merged
-outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
+outside bearer auth, and where the OpenAI-compat host-beta route mounts
+attach under their feature flag.
 
 ### 3. Serve loop + host authentication (`src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`)
 
@@ -72,11 +73,10 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
   (single operator token for the standalone binary / local dev),
-  `SessionAuthenticator` (bearer → `SessionStore` lookup, non-operator),
+  `SessionAuthenticator` (bearer → `SignedTokenSessionStore` lookup),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
-- **Sessions:** the `SessionStore` trait (durable impl is the host's;
-  `InMemorySessionStore` behind `test-support` for dev/tests) plus the
-  signed-token login surface (`build_signed_session_login`).
+- **Sessions:** `SignedTokenSessionStore` plus the signed-token login surface
+  (`build_signed_session_login`).
 - **OAuth login surface:** `webui_v2_auth_router` mounts `/auth/*` and mints
   sessions from Google / GitHub logins. Providers plug in through the
   `OAuthProvider` trait. Full security model (PKCE, CSRF state, canonical host,
@@ -84,13 +84,14 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
 
 ## Layering & boundaries
 
-- Reaches the rest of Reborn **only** through composition's facade
-  (`RebornWebuiBundle`, product-auth mount builders, the
-  `PublicRouteMount`/`ProtectedRouteMount` vocabulary) and
-  `ironclaw_product_workflow::RebornServicesApi`.
-- **No** direct dependency on `ironclaw_product_adapters` or any lower substrate
-  crate; **no** v1 `src/` import; **no** v1 secrets / settings / DB. Host auth
-  stays host-owned here (Path A of `docs/reborn/how-to-port-channel-to-reborn.md`).
+- Reaches the rest of Reborn **only** through
+  `ironclaw_host_api::ProductSurface` and the neutral
+  `PublicRouteMount`/`ProtectedRouteMount` vocabulary supplied by the host.
+- Direct `ironclaw_product` access is limited to wire DTOs and ProductSurface
+  descriptors; handlers reach behavior through `ironclaw_host_api::ProductSurface`.
+  There is no v1 `src/` import, v1 secrets/settings/DB, or lower-substrate
+  access. Host auth stays host-owned here (Path A of
+  `docs/reborn/how-to-port-channel-to-reborn.md`).
 - These edges are enforced by `crates/ironclaw_architecture` — see
   `tests/reborn_dependency_boundaries.rs`.
 
@@ -99,11 +100,11 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
 | Feature | Effect |
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
-| `test-support` | Compile in `InMemorySessionStore` + `EmailUserDirectory` for local dev / tests. |
+| `test-support` | Compile in `EmailUserDirectory` for local dev / tests. |
 
-The Slack personal-OAuth setup + channel-route admin surface and the
-`OpenAiCompatActorScope` stamping for protected OpenAI-compatible mounts are
-unconditional parts of `webui_v2_app`; both forward to composition.
+The generic extension administration surface and the `OpenAiCompatActorScope`
+stamping for protected OpenAI-compatible mounts are unconditional parts of
+`webui_v2_app`; both forward to composition.
 
 ## Build & test
 
@@ -112,7 +113,7 @@ unconditional parts of `webui_v2_app`; both forward to composition.
 cargo test  -p ironclaw_webui
 cargo clippy -p ironclaw_webui --all-targets -- -D warnings
 
-# Everything, incl. the dev-only session store
+# Everything, incl. the OpenAI-compat host-beta surface
 cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
 

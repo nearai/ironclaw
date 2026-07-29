@@ -1,6 +1,6 @@
 //! Input DTO for the assembled Reborn runtime (`build_reborn_runtime`).
 //!
-//! `RebornRuntimeInput` extends `RebornBuildInput` (which is substrate-only)
+//! `RebornRuntimeInput` extends `RebornHostBindings` (which is substrate-only)
 //! with the additional knobs needed to assemble a runnable agent:
 //!
 //! - **LLM configuration** (optional).
@@ -36,7 +36,7 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -198,82 +198,7 @@ impl TriggerFireAccessPolicy {
     }
 }
 
-#[derive(Clone)]
-pub struct ResolvedRebornLlm {
-    provider_id: String,
-    model: String,
-    pub(crate) config: ironclaw_llm::LlmConfig,
-    /// Optional decorator applied over the gateway's *swappable* provider at
-    /// cold boot — e.g. a benchmark harness layering token/reasoning
-    /// instrumentation. `config` stays the construction source (single source of
-    /// truth for `provider_id`/`model` and budget cost-table derivation); the
-    /// factory only *wraps* the swappable, so it survives the boot-time reload
-    /// that swaps a real provider into the placeholder. When `None` the gateway
-    /// drives the swappable directly. Threaded through
-    /// `build_production_model_gateway` → `build_placeholder_llm_gateway` →
-    /// `wrap_swappable_gateway`.
-    pub(crate) provider_factory: Option<RebornProviderFactory>,
-}
-
-/// Decorator over the config-built LLM provider. See
-/// [`ResolvedRebornLlm::with_provider_factory`].
-pub type RebornProviderFactory = Arc<
-    dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
->;
-
-// `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
-impl std::fmt::Debug for ResolvedRebornLlm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedRebornLlm")
-            .field("provider_id", &self.provider_id)
-            .field("model", &self.model)
-            .field("provider_factory", &self.provider_factory.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-impl ResolvedRebornLlm {
-    pub fn provider_id(&self) -> &str {
-        &self.provider_id
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    /// Base URL of the backend `serve` actually boots with, when the
-    /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
-    pub fn base_url(&self) -> Option<String> {
-        self.config.active_base_url()
-    }
-
-    pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
-        Self {
-            provider_id: config.active_provider_id(),
-            model: config.active_model_name(),
-            config,
-            provider_factory: None,
-        }
-    }
-
-    /// Wrap the config-built provider with `factory` before the gateway drives
-    /// it — e.g. to layer token/reasoning/cost instrumentation over the real
-    /// provider.
-    ///
-    /// This is the instrumentation seam. The composition still constructs the
-    /// provider from `config` and hands the
-    /// factory the *swappable* wrapper over it, so `config` remains the single
-    /// source of truth and the raw `ironclaw_llm::LlmProvider` substrate handle
-    /// is never accepted wholesale through the facade — the caller only supplies
-    /// a decorator over a provider the composition built.
-    /// `build_placeholder_llm_gateway` applies the factory at cold boot and never
-    /// re-exposes the provider; because it wraps the swappable, the decorator
-    /// stays in the call path across the boot-time (and later) reloads.
-    pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
-        self.provider_factory = Some(factory);
-        self
-    }
-}
+pub use ironclaw_operator::{RebornProviderFactory, ResolvedRebornLlm};
 
 /// Configuration for the turn-runner worker spawned by the runtime.
 #[derive(Debug, Clone)]
@@ -351,73 +276,16 @@ impl Default for PollSettings {
     }
 }
 
-/// Configuration for the background Google OAuth credential keepalive worker.
-///
-/// The worker handles background keepalive refreshes (B2/B3): it periodically
-/// refreshes Google OAuth accounts that are idle (by `updated_at`) to prevent
-/// the 7-day refresh-token death window from expiring during periods of
-/// inactivity.
+/// Scheduling knobs for the engine-owned credential keepalive sweep
+/// ([`ironclaw_auth::keepalive`]). The idle threshold is deliberately NOT a
+/// deployment setting: vendors declare their idle lifetime in their auth
+/// recipe (`refresh.keepalive_idle_seconds`) and the engine sweeps every
+/// declaring vendor's accounts.
 ///
 /// The inline access-token expiry gate is controlled by the fixed
 /// `DEFAULT_ACCESS_REFRESH_MARGIN` constant in
 /// `product_auth_runtime_credentials.rs`; it is not configurable here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialRefreshSettings {
-    /// Whether the worker is enabled. Defaults to `false`; use
-    /// `CredentialRefreshSettings::enabled()` to turn on.
-    pub enabled: bool,
-    /// How often the worker wakes and sweeps for idle accounts.
-    ///
-    /// Default: 6 hours.
-    pub interval: Duration,
-    /// How old (by `updated_at`) an account must be before it is considered
-    /// idle and eligible for a proactive refresh.
-    ///
-    /// Default: 2 days — well under the 7-day refresh-token idle-death window,
-    /// with headroom for downtime or deployment gaps.
-    pub idle_threshold: Duration,
-    /// Maximum random jitter applied once at worker startup before the first
-    /// tick. Spreading startup jitter across the multi-process deployment
-    /// prevents a thundering herd at first boot. The advisory-lock wrapper
-    /// (A4) serializes concurrent refreshes, but jitter reduces unnecessary
-    /// contention. Default: `Duration::ZERO`.
-    pub startup_jitter_max: Duration,
-    /// Maximum random jitter appended to each inter-tick sleep.
-    /// Default: `Duration::ZERO`.
-    pub tick_jitter_max: Duration,
-    /// Maximum number of candidate accounts processed per tick. Bounds the
-    /// work done in a single sweep to avoid a large initial backfill
-    /// overloading the token endpoint.
-    ///
-    /// Default: 5.
-    pub max_per_tick: usize,
-}
-
-impl Default for CredentialRefreshSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            interval: Duration::from_secs(6 * 3600),
-            idle_threshold: Duration::from_secs(2 * 24 * 3600),
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-            max_per_tick: 5,
-        }
-    }
-}
-
-impl CredentialRefreshSettings {
-    /// Return a settings value with the worker enabled and all other fields at
-    /// their defaults.
-    pub fn enabled() -> Self {
-        Self {
-            enabled: true,
-            // 5-minute spread prevents fleet-wide sweep storms on simultaneous startup.
-            startup_jitter_max: Duration::from_secs(300),
-            ..Self::default()
-        }
-    }
-}
+pub use ironclaw_auth::KeepaliveSweepSettings;
 
 /// Configuration for the composition-owned scheduled-trigger poller.
 ///
@@ -482,15 +350,15 @@ impl TriggerPollerSettings {
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
 pub struct RebornRuntimeInput {
-    pub services: Option<RebornBuildInput>,
+    pub services: Option<RebornHostBindings>,
     pub llm: Option<ResolvedRebornLlm>,
-    /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
+    /// Operator boot config. When present, the product surface composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
-    pub credential_refresh: CredentialRefreshSettings,
+    pub credential_refresh: KeepaliveSweepSettings,
     /// Explicit fire-time access checker override. Primarily a test/advanced
     /// seam; production callers set [`trigger_fire_access`](Self::trigger_fire_access)
     /// and let the build construct the checker. When set, it takes precedence
@@ -558,7 +426,7 @@ impl RebornRuntimeInput {
     /// provided — there is no in-memory-only fallback at this layer because
     /// the substrate decisions (local-dev root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
-    pub fn from_services(services: RebornBuildInput) -> Self {
+    pub fn from_build_input(services: RebornHostBindings) -> Self {
         Self {
             services: Some(services),
             llm: None,
@@ -566,7 +434,7 @@ impl RebornRuntimeInput {
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
-            credential_refresh: CredentialRefreshSettings::default(),
+            credential_refresh: KeepaliveSweepSettings::default(),
             trigger_fire_access_checker: None,
             trigger_fire_access: TriggerFireAccessPolicy::default(),
             poll: PollSettings::default(),
@@ -586,6 +454,28 @@ impl RebornRuntimeInput {
             #[cfg(any(test, feature = "test-support"))]
             model_availability_retry_attempts_override: None,
         }
+    }
+
+    /// The declarative deployment config (Phase A) — the authoritative "what
+    /// deployment is this" input, read separately from the code-carrying
+    /// `services` bindings. It is sourced from the bindings the caller supplied
+    /// to [`from_build_input`](Self::from_build_input) (that is where the
+    /// profile preset and all declarative DATA are seeded), so existing callers
+    /// keep working while the runtime layer can treat config as a first-class,
+    /// bindings-independent value. Returns `None` only before services are set.
+    pub fn config(&self) -> Option<&crate::deployment::DeploymentConfig> {
+        self.services.as_ref().map(RebornHostBindings::deployment)
+    }
+
+    /// Override the deployment config carried by the bindings. Lets a caller
+    /// install an accurately-resolved config (e.g. one built with the operator's
+    /// yolo host-access disclosure) after constructing the input, without
+    /// reaching into the bindings directly.
+    pub fn with_config(mut self, config: crate::deployment::DeploymentConfig) -> Self {
+        if let Some(services) = self.services.take() {
+            self.services = Some(services.with_deployment_config(config));
+        }
+        self
     }
 
     /// Supply pre-resolved budget defaults. The caller is responsible
@@ -676,7 +566,7 @@ impl RebornRuntimeInput {
         self
     }
 
-    /// Supply the operator boot config so the WebUI facade can compose the
+    /// Supply the operator boot config so the product surface can compose the
     /// LLM-config settings service.
     pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
         self.boot = Some(boot);
@@ -700,7 +590,7 @@ impl RebornRuntimeInput {
 
     pub fn with_credential_refresh_settings(
         mut self,
-        credential_refresh: CredentialRefreshSettings,
+        credential_refresh: KeepaliveSweepSettings,
     ) -> Self {
         self.credential_refresh = credential_refresh;
         self
@@ -747,26 +637,6 @@ impl RebornRuntimeInput {
         self.services = self
             .services
             .map(|services| services.with_owner_id(owner_id));
-        self
-    }
-
-    /// Forward the build-time Slack host-beta wiring signal onto the
-    /// substrate build input. No-op when the services input is absent,
-    /// mirroring `with_owner_id` above.
-    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
-        self.services = self
-            .services
-            .map(|services| services.with_slack_host_beta_enabled(enabled));
-        self
-    }
-
-    /// Forward the build-time Slack personal-OAuth redirect-URI signal onto
-    /// the substrate build input. No-op when the services input is absent,
-    /// mirroring `with_slack_host_beta_enabled` above.
-    pub fn with_slack_personal_oauth_redirect_uri_configured(mut self, configured: bool) -> Self {
-        self.services = self
-            .services
-            .map(|services| services.with_slack_personal_oauth_redirect_uri_configured(configured));
         self
     }
 

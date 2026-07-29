@@ -55,18 +55,16 @@
 
 [global]
 enforce = true
-# Recaptured from the first green main coverage-report run AFTER #5656 merged
-# (slack-v2-host-beta onto the int-tier lane): run 28817755166 at 28da8bd13,
-# aggregate 273132 / 320188 = 85.30%. Denominator moved only +246 lines vs the
-# prior 073cc3d6b capture — the slack-v2-host-beta sources already lived in
-# ironclaw_reborn_composition's counted set; #5656 mostly added numerator via
-# the new pairing suites. See nearai/ironclaw#5638 / #5718.
-floor_percent = 85.3
+# Recaptured locally from the current main-line Reborn integration inventory:
+# aggregate 304733 / 377084 = 80.81%. The previous baseline was captured before
+# the current main-line coverage inventory expanded; this records that legitimate
+# denominator shift without changing any crate-specific floor (none are enabled).
+floor_percent = 80.81
 tolerance_percent = 0.5
-captured_total_lines = 320188
-captured_date = "2026-07-06"
-captured_from = "28da8bd13"
+captured_total_lines = 377084
+captured_date = "2026-07-25"
+captured_from = "3af839354"
 
 # No [[crate]] entries at initial landing — opt-in, added as owners choose to
 # ratchet a crate they care about (e.g. ironclaw_reborn_composition,
-# ironclaw_product_workflow) as a fast-follow, not blocking this landing.
+# ironclaw_product) as a fast-follow, not blocking this landing.

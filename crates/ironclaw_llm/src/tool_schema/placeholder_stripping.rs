@@ -19,7 +19,7 @@ impl PlaceholderStrippingMode {
 ///
 /// `shape_tool_schema(StrictOpenAi, ..)` forces every property to be `required`
 /// and makes the originally-optional ones nullable, because OpenAI strict
-/// function-calling has no notion of an absent property. Models therefore fill
+/// function-calling has no concept of an absent property. Models therefore fill
 /// the optionals they aren't using with a placeholder: `null` for most, `""`
 /// for some (e.g. gpt-5.2-codex). Validating those against the tool's original
 /// schema would reject them, so this removes them before loop-side validation.

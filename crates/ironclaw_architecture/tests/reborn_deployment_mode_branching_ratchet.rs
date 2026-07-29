@@ -1,5 +1,5 @@
 //! Anti-slippage ratchet for the deployment-mode *branching* axis (§4.4 / §10
-//! of `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! of `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! Its two siblings own deployment mode as a **type name**
 //! (`reborn_localdev_typename_ratchet`, `reborn_deployment_mode_typename_ratchet`).
@@ -62,10 +62,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
          profile name becomes deployment data (§4.4). This entry stays.",
     ),
     (
-        "readiness.rs",
-        "Readiness diagnostics carry a profile as an operator-facing **label** \
-         on the wire (`RebornReadinessDiagnostic::profile`), not a branch. \
-         Retires only if that wire field is reshaped.",
+        "memory_binding.rs",
+        "Maps the composition profile to a typed `MemoryDeploymentProfile` for \
+         the fail-closed memory profile-binding certification policy (#3537): \
+         production rejects unverified third-party bindings absent an admin \
+         override; local-dev permits them. The branch produces a typed \
+         memory-deployment axis, not a raw label. Retires into `DeploymentConfig` \
+         when it grows a memory-binding axis (#5264).",
     ),
 ];
 

@@ -33,11 +33,14 @@ function StatefulSelect(props: {
   disabled?: boolean;
   placeholder?: string;
   align?: "left" | "right";
+  /** Start without a selection so the `placeholder` control is visible. */
+  initialValue?: string;
 }) {
-  const [value, setValue] = useState("all");
+  const { initialValue = "all", ...rest } = props;
+  const [value, setValue] = useState(initialValue);
   return (
     <SelectMenu
-      {...props}
+      {...rest}
       value={value}
       onChange={setValue}
       options={[
@@ -58,4 +61,11 @@ export const Default: Story = {
 export const WithPrefix: Story = {
   args: { prefix: "Status" },
   render: (args) => <StatefulSelect {...(args as Record<string, unknown>)} />,
+};
+
+export const Placeholder: Story = {
+  args: { placeholder: "Filter by status…" },
+  render: (args) => (
+    <StatefulSelect initialValue="" {...(args as Record<string, unknown>)} />
+  ),
 };

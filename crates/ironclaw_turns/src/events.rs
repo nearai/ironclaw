@@ -339,6 +339,21 @@ pub trait TurnEventProjectionSource: Send + Sync {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError>;
+
+    /// Read the authoritative lifecycle log in global cursor order for a
+    /// host-owned durable projection consumer.
+    ///
+    /// Implementations must use an indexed, bounded read and fail explicitly
+    /// rather than fall back to an unbounded directory scan. The consumer owns
+    /// its durable cursor and advances it only after derived state commits. A
+    /// retention gap is surfaced through [`TurnEventPage::rebase_required`]
+    /// and must never be silently skipped.
+    #[doc(hidden)]
+    async fn read_turn_event_log_after(
+        &self,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError>;
 }
 
 pub struct TurnEventProjectionService<S>
@@ -539,8 +554,8 @@ pub(crate) fn project_turn_events(
 mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, ExtensionId, ProjectId, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId,
+        AgentId, ExtensionId, ProjectId, RuntimeCredentialAuthRequirement, TenantId, ThreadId,
+        UserId, VendorId,
     };
 
     use crate::{
@@ -578,7 +593,7 @@ mod tests {
                 gate_kind: TurnBlockedGateKind::Approval,
                 activity_id: None,
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
-                    provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
+                    provider: VendorId::new("github").expect("provider"),
                     setup: Default::default(),
                     requester_extension: ExtensionId::new("github").expect("extension"),
                     provider_scopes: vec!["repo".to_string()],
@@ -625,6 +640,32 @@ mod tests {
                 limit,
                 EventCursor::default(),
             ))
+        }
+
+        async fn read_turn_event_log_after(
+            &self,
+            after: Option<EventCursor>,
+            limit: usize,
+        ) -> Result<TurnEventPage, TurnError> {
+            let after = after.unwrap_or_default();
+            let mut entries = self
+                .events
+                .iter()
+                .filter(|event| event.cursor > after)
+                .cloned()
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|event| event.cursor);
+            let truncated = entries.len() > limit;
+            if truncated {
+                entries.truncate(limit);
+            }
+            let next_cursor = entries.last().map_or(after, |event| event.cursor);
+            Ok(TurnEventPage {
+                entries,
+                next_cursor,
+                truncated,
+                rebase_required: None,
+            })
         }
     }
 
@@ -825,7 +866,7 @@ mod tests {
     async fn projection_service_preserves_source_read_error_cause() {
         use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 
-        // The projection source is the real `FilesystemTurnStateRowStore` (which
+        // The projection source is the real `TurnStateRowStore` (which
         // implements `TurnEventProjectionSource`) over a `FaultInjecting` backend
         // armed to fail its first durable read. `read_turn_events_after` now runs
         // the store's genuine durable-row read and its
@@ -836,7 +877,7 @@ mod tests {
         let backend = std::sync::Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
             Fault::on(FilesystemOperation::ReadFile).backend("injected turn-state read failure"),
         ));
-        let source = std::sync::Arc::new(crate::FilesystemTurnStateRowStore::new(
+        let source = std::sync::Arc::new(crate::TurnStateRowStore::new(
             crate::test_support::scoped_turns_filesystem(backend),
         ));
         let service = TurnEventProjectionService::new(source);

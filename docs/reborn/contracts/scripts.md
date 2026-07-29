@@ -171,7 +171,7 @@ This contract does not add:
 - network access
 - MCP protocol handling
 - long-running process lifecycle
-- product workflows
+- product-surface orchestration
 
 Those are separate slices.
 

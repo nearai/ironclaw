@@ -849,7 +849,9 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 
@@ -903,6 +905,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     };
     ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

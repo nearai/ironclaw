@@ -2438,3 +2438,4 @@ fn optional_env_var(name: &str) -> Result<Option<String>, String> {
 fn display_err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
+// arch-exempt: large_file, stress harness orchestration remains centralized, plan #6175

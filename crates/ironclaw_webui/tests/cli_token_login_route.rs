@@ -19,7 +19,7 @@ use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_webui::{
-    CliTokenLoginConfig, EnvBearerAuthenticator, SessionAuthenticator, SessionStore,
+    CliTokenLoginConfig, EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore,
     build_cli_token_login, signed_session_store,
 };
 use secrecy::SecretString;
@@ -33,7 +33,7 @@ fn tenant() -> TenantId {
     TenantId::new("tenant-a").expect("tenant")
 }
 
-fn build_router() -> (axum::Router, Arc<dyn SessionStore>) {
+fn build_router() -> (axum::Router, Arc<SignedTokenSessionStore>) {
     let session_store = signed_session_store(
         &SecretString::from("operator-secret".to_string()),
         &tenant(),
@@ -183,7 +183,7 @@ async fn missing_token_is_rejected() {
 // `serve.rs`'s `WebuiServeConfig`), fed the SAME `session_store` the login
 // mount mints through.
 // - deliberately NOT the full `webui_v2_app` composition
-//   `session_round_trip.rs` uses — that facade is scoped to the OAuth
+//   `session_round_trip.rs` uses — that service is scoped to the OAuth
 //   round-trip; duplicating it here is unneeded machinery.
 // - `SessionAuthenticator` IS the seam that decides "does this bearer
 //   authenticate" in production, so a route behind it suffices.
@@ -214,7 +214,7 @@ async fn require_session_bearer(
     next.run(request).await
 }
 
-fn build_protected_router(session_store: Arc<dyn SessionStore>) -> axum::Router {
+fn build_protected_router(session_store: Arc<SignedTokenSessionStore>) -> axum::Router {
     let authenticator = Arc::new(SessionAuthenticator::new(session_store));
     axum::Router::new()
         .route(

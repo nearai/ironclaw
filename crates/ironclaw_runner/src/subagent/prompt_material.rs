@@ -14,13 +14,13 @@ use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, Lo
 use crate::subagent::{
     directions::direction_prompt,
     flavors::{SubagentFlavorId, lookup_flavor, parse_flavor_id},
-    goal_store::{SubagentGoalStore, SubagentGoalStoreError},
+    goal_store::{SubagentGoalStoreError, SubagentGoalStorePort},
 };
 
 #[cfg(test)]
 pub struct RebornSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     goal_store: Arc<G>,
     flavor_id: SubagentFlavorId,
@@ -29,7 +29,7 @@ where
 #[cfg(test)]
 impl<G> RebornSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     pub fn new(goal_store: Arc<G>, flavor_id: SubagentFlavorId) -> Self {
         Self {
@@ -48,7 +48,7 @@ where
 /// longer holds a gate/edge dependency at all.
 pub struct GateBackedSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     goal_store: Arc<G>,
     thread_service: Arc<dyn SessionThreadService>,
@@ -56,7 +56,7 @@ where
 
 impl<G> GateBackedSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     pub fn new(goal_store: Arc<G>, thread_service: Arc<dyn SessionThreadService>) -> Self {
         Self {
@@ -69,7 +69,7 @@ where
 #[async_trait]
 impl<G> SubagentPromptMaterialSource for GateBackedSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + Send + Sync + ?Sized,
+    G: SubagentGoalStorePort + Send + Sync + ?Sized,
 {
     async fn material_for_run(
         &self,
@@ -104,7 +104,7 @@ where
 #[async_trait]
 impl<G> SubagentPromptMaterialSource for RebornSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + Send + Sync + ?Sized,
+    G: SubagentGoalStorePort + Send + Sync + ?Sized,
 {
     async fn material_for_run(
         &self,
@@ -121,7 +121,7 @@ async fn goal_for_run<G>(
     run_context: &LoopRunContext,
 ) -> Result<SubagentPromptGoal, AgentLoopHostError>
 where
-    G: SubagentGoalStore + Send + Sync + ?Sized,
+    G: SubagentGoalStorePort + Send + Sync + ?Sized,
 {
     match goal_store
         .get_goal(&run_context.scope, run_context.run_id)
@@ -300,14 +300,14 @@ mod tests {
 
     use crate::subagent::{
         flavors::SubagentFlavorId,
-        goal_store::{InMemoryBoundedSubagentGoalStore, SubagentGoal},
+        goal_store::{SubagentGoal, in_memory_backed_subagent_goal_store},
     };
 
     use super::*;
 
     #[tokio::test]
     async fn material_source_fails_loud_on_goal_miss() {
-        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::General);
         let context = ironclaw_agent_loop::test_support::test_run_context("missing-goal");
 
@@ -318,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_combines_static_direction_goal_and_allowlist() {
-        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let context = ironclaw_agent_loop::test_support::test_run_context("goal");
         store
             .put_goal(
@@ -353,7 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_uses_thread_metadata_for_flavor() {
-        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("thread-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-thread-flavor").unwrap());
@@ -378,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_errors_when_no_flavor_is_recorded() {
-        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("missing-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-missing-flavor").unwrap());
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_errors_when_flavor_is_unknown() {
-        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let store = Arc::new(in_memory_backed_subagent_goal_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("unknown-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-unknown-flavor").unwrap());

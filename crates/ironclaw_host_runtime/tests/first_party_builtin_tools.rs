@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -16,9 +16,9 @@ use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -30,20 +30,23 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
-    builtin_first_party_package_for_process_backend,
+    builtin_first_party_package_for_process_backend, native_memory_first_party_package,
+    register_native_memory_tools,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -54,7 +57,7 @@ use ironclaw_network::{
     NetworkResolver, NetworkTransportRequest, NetworkUsage, PolicyNetworkHttpEgress,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
@@ -87,6 +90,8 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SHELL_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
@@ -156,26 +161,36 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
-    let memory_write = package
+    // Memory tools now live in the always-on `ironclaw.memory` package,
+    // not the generic builtin package; assert their effects there.
+    let native_package = native_memory_first_party_package().unwrap();
+    let memory_write = native_package
         .capabilities
         .iter()
         .find(|descriptor| descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
         .expect("memory write manifest");
     assert_eq!(
         memory_write.effects,
-        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem
+        ]
     );
     for capability_id in [
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,
         MEMORY_TREE_CAPABILITY_ID,
     ] {
-        let descriptor = package
+        let descriptor = native_package
             .capabilities
             .iter()
             .find(|descriptor| descriptor.id.as_str() == capability_id)
             .expect("memory read-like manifest");
-        assert_eq!(descriptor.effects, vec![EffectKind::ReadFilesystem]);
+        assert_eq!(
+            descriptor.effects,
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+        );
     }
 
     let handlers =
@@ -183,6 +198,168 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+/// §5.3 S3 (behavior-neutral): every builtin tool-package descriptor carries a
+/// declared `origin_gate_matrix`. `LoopRun` mirrors today's effect gate exactly
+/// (Ungated iff the id is in the reviewed `UNGATED_LOOP_RUN_CAPABILITIES`
+/// allowlist, else GatedUnlessGranted); `Product`/`Automation` are deny-by-
+/// default until a reviewed ingress slice declares a producer. This is the
+/// load-bearing "allowlist <=> loop_run == Ungated" invariant, checked over the
+/// production descriptors the tool package actually emits.
+#[tokio::test]
+async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matrix() {
+    let package = builtin_first_party_package().unwrap();
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_ne!(
+            matrix.loop_run,
+            OriginGatePolicy::ConsentSufficient,
+            "{}: ConsentSufficient is Product-only; not valid on loop_run",
+            descriptor.id
+        );
+        assert_ne!(
+            matrix.automation,
+            OriginGatePolicy::ConsentSufficient,
+            "{}: ConsentSufficient is Product-only; not valid on automation",
+            descriptor.id
+        );
+        let expected_product =
+            if product_surface_builtin_capabilities().contains(&descriptor.id.as_str()) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
+        assert_eq!(
+            matrix.product, expected_product,
+            "{} product origin policy mismatch",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{} automation must be deny-by-default",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(
+            matrix.loop_run, expected_loop_run,
+            "{} loop_run must match its allowlist membership",
+            descriptor.id
+        );
+    }
+
+    // Concrete spot checks so a reader sees the intended posture, independent of
+    // the allowlist derivation: read-only/dispatch-only caps are Ungated, any
+    // write/network/process cap is GatedUnlessGranted.
+    let loop_run = |id: &str| {
+        package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == id)
+            .and_then(|descriptor| descriptor.origin_gate_matrix.as_ref())
+            .map(|matrix| matrix.loop_run)
+            .unwrap_or_else(|| panic!("{id} descriptor with matrix"))
+    };
+    for ungated in [
+        ECHO_CAPABILITY_ID,
+        JSON_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+    ] {
+        assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
+    }
+    for gated in [
+        WRITE_FILE_CAPABILITY_ID,
+        HTTP_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+    ] {
+        assert_eq!(
+            loop_run(gated),
+            OriginGatePolicy::GatedUnlessGranted,
+            "{gated}"
+        );
+    }
+}
+
+/// §5.3 S3 for the always-on `ironclaw.memory` package: every memory tool
+/// descriptor carries a declared `origin_gate_matrix` preserving the gating the
+/// tools had as `builtin.memory_*` members of the builtin package (read-like
+/// tools Ungated for `LoopRun` via the reviewed allowlist, `memory_write`
+/// GatedUnlessGranted, `Product`/`Automation` deny-by-default). A missing
+/// matrix is not "no gate" — the S4 authorize fold fails closed to Forbidden
+/// for every origin-stamped invocation, denying all model memory dispatch.
+#[tokio::test]
+async fn native_memory_package_declares_behavior_neutral_origin_gate_matrix() {
+    let package = native_memory_first_party_package().unwrap();
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_eq!(
+            matrix.product,
+            OriginGatePolicy::Forbidden,
+            "{} product must be deny-by-default",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{} automation must be deny-by-default",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(
+            matrix.loop_run, expected_loop_run,
+            "{} loop_run must match its allowlist membership",
+            descriptor.id
+        );
+    }
+
+    let loop_run = |id: &str| {
+        package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == id)
+            .and_then(|descriptor| descriptor.origin_gate_matrix.as_ref())
+            .map(|matrix| matrix.loop_run)
+            .unwrap_or_else(|| panic!("{id} descriptor with matrix"))
+    };
+    for ungated in [
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ] {
+        assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
+    }
+    assert_eq!(
+        loop_run(MEMORY_WRITE_CAPABILITY_ID),
+        OriginGatePolicy::GatedUnlessGranted,
+        "{MEMORY_WRITE_CAPABILITY_ID}"
+    );
+}
+
+fn product_surface_builtin_capabilities() -> &'static [&'static str] {
+    &[
+        SKILL_INSTALL_CAPABILITY_ID,
+        "builtin.skill_update",
+        "builtin.skill_auto_activate_set",
+        SKILL_REMOVE_CAPABILITY_ID,
+    ]
 }
 
 #[tokio::test]
@@ -328,7 +505,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
     let runtime = runtime();
     let request = VisibleCapabilityRequest::new(
-        execution_context(all_builtin_capability_ids()),
+        execution_context(all_always_on_first_party_capability_ids()),
         SurfaceKind::new("agent_loop").unwrap(),
     )
     .with_policy(CapabilitySurfacePolicy::allow_all())
@@ -589,6 +766,79 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
 }
 
+/// Regression: a trigger-fired loop carries typed scheduled lineage all the
+/// way to the first-party capability boundary. Every model-visible mutation
+/// verb is denied there, while the same caller's ordinary interactive create
+/// and read-only list remain available.
+#[tokio::test]
+async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let mut context = execution_context([
+        TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID,
+    ]);
+
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "interactive control",
+            "prompt": "remain scheduled",
+            "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("ordinary interactive caller can create a trigger");
+    let trigger_id = created["trigger"]["trigger_id"]
+        .as_str()
+        .expect("created trigger id")
+        .to_string();
+
+    let run_id = ironclaw_host_api::RunId::new();
+    context.run_id = Some(run_id);
+    context.origin = Some(ironclaw_host_api::InvocationOrigin::ScheduledLoopRun(
+        run_id,
+    ));
+    for (capability_id, input) in [
+        (
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "forbidden child",
+                "prompt": "replicate",
+                "schedule": { "kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC" }
+            }),
+        ),
+        (
+            TRIGGER_PAUSE_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+        (
+            TRIGGER_RESUME_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+        (
+            TRIGGER_REMOVE_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+    ] {
+        let error = invoke_with_context(&runtime, capability_id, input, context.clone())
+            .await
+            .expect_err("scheduled loop mutation must be denied");
+        assert_eq!(error, FailureKind::PolicyDenied, "{capability_id}");
+    }
+
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .expect("scheduled loop retains read-only trigger_list");
+    assert_eq!(listed["triggers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["triggers"][0]["state"], json!("scheduled"));
+}
+
 /// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
 /// shape-validated, host-validated through the create hook, persisted on the
 /// record, and echoed in the model-facing output — so one automation's
@@ -640,6 +890,48 @@ async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_valid
     );
 }
 
+/// When the model omits `delivery_target_id`, the host hook still receives the
+/// trusted loop run id and may seal a source-derived target into the record.
+/// This is the authority path used for an automation created from an external
+/// conversation; prompt text never supplies the target.
+#[tokio::test]
+async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_context() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let inherited = "external:source-conversation";
+    let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+    let run_id = ironclaw_host_api::RunId::new();
+    context.run_id = Some(run_id);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Source-routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["trigger"]["delivery_target_id"], json!(inherited));
+    assert_eq!(hook.seen_run_ids(), vec![Some(run_id)]);
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        records[0]
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some(inherited)
+    );
+}
+
 /// Fail closed: without host wiring that can resolve outbound delivery
 /// targets (the default no-op hook), a supplied `delivery_target_id` must be
 /// rejected as invalid input instead of being persisted unvalidated.
@@ -663,7 +955,7 @@ async fn builtin_trigger_create_rejects_delivery_target_without_host_validation(
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -698,7 +990,7 @@ async fn builtin_trigger_create_rejects_delivery_target_the_host_rejects() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -807,7 +1099,7 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -838,7 +1130,7 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
     )
     .await;
 
-    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(failure.kind, FailureKind::Backend);
     assert_eq!(
         failure.safe_summary().as_deref(),
         Some("trigger create rollback failed after hook error")
@@ -873,7 +1165,7 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -942,7 +1234,7 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -971,7 +1263,7 @@ async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -1017,11 +1309,7 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
             context.clone(),
         )
         .await;
-        assert_eq!(
-            failure.kind,
-            RuntimeFailureKind::InvalidInput,
-            "{case_name}"
-        );
+        assert_eq!(failure.kind, FailureKind::InputEncode, "{case_name}");
         assert_failure_input_issue_expected(
             &failure,
             issue_path,
@@ -1075,11 +1363,7 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
             context.clone(),
         )
         .await;
-        assert_eq!(
-            failure.kind,
-            RuntimeFailureKind::InvalidInput,
-            "{case_name}"
-        );
+        assert_eq!(failure.kind, FailureKind::InputEncode, "{case_name}");
         assert_failure_input_issue_expected(
             &failure,
             issue_path,
@@ -1118,7 +1402,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Resource);
+    assert_eq!(error, FailureKind::Resource);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -1147,7 +1431,7 @@ async fn builtin_trigger_create_rejects_invalid_schedule_kind_before_persistence
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -1176,7 +1460,7 @@ async fn builtin_trigger_create_rejects_missing_schedule_before_persistence() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -1313,11 +1597,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
         )
         .await;
 
-        assert_eq!(
-            failure.kind,
-            RuntimeFailureKind::InvalidInput,
-            "{case_name}"
-        );
+        assert_eq!(failure.kind, FailureKind::InputEncode, "{case_name}");
         for (path, code) in expected_issues {
             assert_failure_has_input_issue(&failure, path, code, case_name);
         }
@@ -1415,7 +1695,7 @@ async fn builtin_trigger_create_rejects_invalid_once_schedule_before_persistence
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -2272,7 +2552,7 @@ async fn builtin_trigger_remove_rejects_invalid_trigger_id() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -2290,7 +2570,7 @@ async fn builtin_trigger_list_rejects_non_integer_limit() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -2315,7 +2595,7 @@ async fn builtin_trigger_list_rejects_non_integer_run_limit() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -2341,7 +2621,7 @@ async fn builtin_trigger_remove_rejects_malformed_input() {
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
     }
 }
 
@@ -2366,7 +2646,7 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
     )
     .await
     .unwrap_err();
-    assert_eq!(create_error, RuntimeFailureKind::Backend);
+    assert_eq!(create_error, FailureKind::Backend);
 
     let list_error = invoke_with_context(
         &runtime,
@@ -2376,7 +2656,7 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
     )
     .await
     .unwrap_err();
-    assert_eq!(list_error, RuntimeFailureKind::Backend);
+    assert_eq!(list_error, FailureKind::Backend);
 
     let remove_error = invoke_with_context(
         &runtime,
@@ -2386,7 +2666,7 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
     )
     .await
     .unwrap_err();
-    assert_eq!(remove_error, RuntimeFailureKind::Backend);
+    assert_eq!(remove_error, FailureKind::Backend);
 }
 
 #[tokio::test]
@@ -2412,13 +2692,13 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
         .await
         .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
 }
 
 #[tokio::test]
 async fn builtin_rejects_oversized_inputs_before_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -2430,13 +2710,13 @@ async fn builtin_rejects_oversized_inputs_before_dispatch() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected resource failure, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Resource);
+    assert_eq!(failure.kind, FailureKind::Resource);
 }
 
 #[tokio::test]
 async fn builtin_rejects_oversized_outputs_before_return() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -2448,14 +2728,19 @@ async fn builtin_rejects_oversized_outputs_before_return() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected output-too-large failure, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+    assert_eq!(failure.kind, FailureKind::OutputTooLarge);
 }
 
 #[tokio::test]
 async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
-        all_builtin_capability_ids(),
+        [
+            MEMORY_WRITE_CAPABILITY_ID,
+            MEMORY_READ_CAPABILITY_ID,
+            MEMORY_TREE_CAPABILITY_ID,
+            MEMORY_SEARCH_CAPABILITY_ID,
+        ],
         memory_mounts(MountPermissions::read_write_list_delete()),
     );
 
@@ -2669,7 +2954,7 @@ async fn memory_write_patches_existing_document_and_rejects_missing_old_string()
     )
     .await
     .unwrap_err();
-    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -2719,7 +3004,7 @@ async fn memory_write_daily_log_rejects_invalid_timezone() {
     )
     .await
     .unwrap_err();
-    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -2742,7 +3027,7 @@ async fn memory_write_rejects_local_filesystem_paths() {
         )
         .await
         .unwrap_err();
-        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure, FailureKind::InputEncode);
     }
 }
 
@@ -2766,7 +3051,7 @@ async fn memory_write_rejects_traversal_paths() {
         )
         .await
         .unwrap_err();
-        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure, FailureKind::InputEncode);
     }
 }
 
@@ -2788,7 +3073,7 @@ async fn memory_write_rejects_non_string_target() {
         )
         .await
         .unwrap_err();
-        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure, FailureKind::InputEncode);
     }
 }
 
@@ -2833,7 +3118,7 @@ async fn memory_read_returns_input_error_for_missing_document() {
     )
     .await
     .unwrap_err();
-    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -2852,7 +3137,7 @@ async fn memory_write_requires_memory_mount_authority() {
     )
     .await
     .unwrap_err();
-    assert_eq!(failure, RuntimeFailureKind::Authorization);
+    assert_eq!(failure, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]
@@ -2897,7 +3182,7 @@ async fn memory_write_rejects_empty_new_string_replacement() {
     )
     .await
     .unwrap_err();
-    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure, FailureKind::InputEncode);
 
     // The document must NOT be mutated — the matched text must still be present.
     let read = invoke_with_context(
@@ -2951,7 +3236,7 @@ async fn memory_read_rejects_versioned_read_options() {
     .unwrap_err();
     assert_eq!(
         version_failure,
-        RuntimeFailureKind::InvalidInput,
+        FailureKind::InputEncode,
         "memory_read must reject a `version` option"
     );
 
@@ -2965,7 +3250,7 @@ async fn memory_read_rejects_versioned_read_options() {
     .unwrap_err();
     assert_eq!(
         list_versions_failure,
-        RuntimeFailureKind::InvalidInput,
+        FailureKind::InputEncode,
         "memory_read must reject a `list_versions` option"
     );
 }
@@ -3060,7 +3345,7 @@ async fn memory_write_rejects_protected_prompt_write_through_runtime() {
     .unwrap_err();
     assert_eq!(
         failure,
-        RuntimeFailureKind::OperationFailed,
+        FailureKind::OperationFailed,
         "high-risk protected-prompt write must be rejected"
     );
 
@@ -3076,13 +3361,13 @@ async fn memory_write_rejects_protected_prompt_write_through_runtime() {
     .unwrap_err();
     assert_eq!(
         read_failure,
-        RuntimeFailureKind::InvalidInput,
+        FailureKind::InputEncode,
         "rejected protected-prompt write must not persist the document"
     );
 }
 
 #[tokio::test]
-async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+async fn memory_profile_set_rejects_missing_memory_mount_authority() {
     // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
     // profile_merge_write. This test verifies that the guard fires when the invocation
     // context carries only a /workspace mount (no /memory write grant), mirroring
@@ -3098,12 +3383,12 @@ async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
     )
     .await
     .unwrap_err();
-    // ensure_memory_mount returns FilesystemDenied, which maps to RuntimeFailureKind::Authorization.
-    assert_eq!(failure, RuntimeFailureKind::Authorization);
+    // ensure_memory_mount returns FilesystemDenied, carried 1:1 into FailureKind::FilesystemDenied.
+    assert_eq!(failure, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]
-async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+async fn memory_profile_set_rejects_memory_mount_without_delete_permission() {
     // ensure_memory_mount(write=true) requires read + list + write + delete.
     // A /memory grant with read+list+write but NO delete must be rejected with
     // Authorization, locking the current contract.
@@ -3120,8 +3405,8 @@ async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
     )
     .await
     .unwrap_err();
-    // ensure_memory_mount rejects write without delete (FilesystemDenied → Authorization).
-    assert_eq!(failure, RuntimeFailureKind::Authorization);
+    // ensure_memory_mount rejects write without delete (FilesystemDenied, carried 1:1).
+    assert_eq!(failure, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]
@@ -3188,7 +3473,7 @@ async fn builtin_time_now_rejects_invalid_utc_offset() {
     .await
     .unwrap_err();
 
-    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -3275,7 +3560,7 @@ async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
 #[tokio::test]
 async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
             capability_id(SHELL_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3409,6 +3694,51 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
+async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+    let local_process = Arc::new(RecordingProcessPort::default());
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let runtime = runtime_with_local_and_sandbox_process_ports(
+        Arc::clone(&local_process),
+        Arc::clone(&sandbox_process),
+        tenant_sandbox_process_policy(),
+    );
+    let user_a = UserId::new("user-a").unwrap();
+    let user_b = UserId::new("user-b").unwrap();
+    let tenant = TenantId::new("tenant-shared").unwrap();
+    let mut context = execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy());
+    context.run_id = Some(RunId::new());
+    let agent_id = context.agent_id.clone();
+    let project_id = context.project_id.clone();
+    set_context_scope(
+        &mut context,
+        tenant.clone(),
+        user_b.clone(),
+        agent_id,
+        project_id,
+    );
+    let expected_scope = context.resource_scope.clone();
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /workspace/user-a-secret.txt"}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["sandboxed"], json!(true));
+    assert!(local_process.requests.lock().unwrap().is_empty());
+    let requests = sandbox_transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].scope, expected_scope);
+    assert_eq!(requests[0].scope.tenant_id, tenant);
+    assert_eq!(requests[0].scope.user_id, user_b);
+    assert_ne!(requests[0].scope.user_id, user_a);
+}
+
+#[tokio::test]
 async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     let process_port = Arc::new(RecordingProcessPort::default());
     let runtime =
@@ -3423,7 +3753,7 @@ async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, FailureKind::FilesystemDenied);
     assert!(
         process_port.requests.lock().unwrap().is_empty(),
         "hosted shell must fail at invocation-service resolution before the handler can run"
@@ -3439,7 +3769,7 @@ async fn builtin_shell_reuses_v1_shell_validation() {
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
-        assert_eq!(err, RuntimeFailureKind::PolicyDenied);
+        assert_eq!(err, FailureKind::PolicyDenied);
     }
 }
 
@@ -3454,7 +3784,7 @@ async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
-        assert_eq!(err, RuntimeFailureKind::InvalidInput);
+        assert_eq!(err, FailureKind::InputEncode);
     }
 }
 
@@ -3472,7 +3802,7 @@ async fn builtin_shell_invalid_input_failure_carries_the_reason_through_the_runt
     )
     .await;
 
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure.kind, FailureKind::InputEncode);
     let summary = failure
         .safe_summary()
         .expect("shell invalid-input failure must carry a reason");
@@ -3488,7 +3818,7 @@ async fn builtin_shell_rejects_timeout_above_manifest_ceiling() {
         .await
         .unwrap_err();
 
-    assert_eq!(err, RuntimeFailureKind::Resource);
+    assert_eq!(err, FailureKind::Resource);
 }
 
 #[tokio::test]
@@ -3496,7 +3826,7 @@ async fn builtin_shell_maps_timeout_and_spawn_failures() {
     let timeout = invoke_shell(json!({"command": "sleep 2", "timeout": 1}))
         .await
         .unwrap_err();
-    assert_eq!(timeout, RuntimeFailureKind::Resource);
+    assert_eq!(timeout, FailureKind::Resource);
 
     let spawn = invoke_shell(json!({
             "command": "echo missing",
@@ -3504,7 +3834,7 @@ async fn builtin_shell_maps_timeout_and_spawn_failures() {
     }))
     .await
     .unwrap_err();
-    assert_eq!(spawn, RuntimeFailureKind::Backend);
+    assert_eq!(spawn, FailureKind::Executor);
 }
 
 #[tokio::test]
@@ -3628,7 +3958,7 @@ async fn builtin_shell_rejects_scoped_mount_workdir_until_process_backend_handle
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Client);
 }
 
 #[tokio::test]
@@ -3792,7 +4122,7 @@ async fn builtin_time_rejects_naive_without_timezone_and_ambiguous_local_time() 
     )
     .await
     .unwrap_err();
-    assert_eq!(missing_timezone, RuntimeFailureKind::InvalidInput);
+    assert_eq!(missing_timezone, FailureKind::InputEncode);
 
     let ambiguous = invoke(
         TIME_CAPABILITY_ID,
@@ -3804,7 +4134,7 @@ async fn builtin_time_rejects_naive_without_timezone_and_ambiguous_local_time() 
     )
     .await
     .unwrap_err();
-    assert_eq!(ambiguous, RuntimeFailureKind::InvalidInput);
+    assert_eq!(ambiguous, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -3854,13 +4184,13 @@ async fn builtin_json_stringify_rejects_invalid_json_strings() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
 }
 
 #[tokio::test]
 async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3875,7 +4205,7 @@ async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() 
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected sanitized failure, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure.kind, FailureKind::InputEncode);
     let debug = format!("{failure:?}");
     assert!(!debug.contains("RAW_SECRET"));
     assert!(!debug.contains("sk-provider-secret"));
@@ -3947,7 +4277,7 @@ async fn builtin_http_requires_tool_call_http_egress_for_inline_output() {
     .await
     .unwrap_err();
 
-    assert_eq!(failure, RuntimeFailureKind::Network);
+    assert_eq!(failure, FailureKind::Network);
     assert!(egress.requests().is_empty());
 }
 
@@ -4172,7 +4502,7 @@ async fn builtin_http_save_rejects_response_body_limit_above_save_ceiling_before
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(egress.requests().is_empty());
 }
 
@@ -4652,7 +4982,7 @@ async fn builtin_http_rejects_save_to_on_network_only_capability_before_egress()
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(egress.requests().is_empty());
 }
 
@@ -4682,7 +5012,7 @@ async fn builtin_http_save_rejects_missing_save_to_before_egress() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(egress.requests().is_empty());
 }
 
@@ -4703,7 +5033,7 @@ async fn builtin_http_save_rejects_save_to_without_mount_authority_before_egress
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(egress.requests().is_empty());
 }
 
@@ -4734,7 +5064,7 @@ async fn builtin_http_save_rejects_save_to_without_write_mount_before_egress() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(egress.requests().is_empty());
 }
 
@@ -4766,7 +5096,7 @@ async fn builtin_http_save_rejects_invalid_or_unresolved_save_to_before_egress()
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -4906,7 +5236,7 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(temp.path().read_dir().unwrap().next().is_none());
     }
 }
@@ -5398,7 +5728,7 @@ async fn builtin_skill_install_url_path_rejects_github_tree_directory_fanout() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::OutputTooLarge);
+    assert_eq!(error, FailureKind::OutputTooLarge);
     assert_eq!(egress.requests().len(), 24);
 }
 
@@ -5422,37 +5752,37 @@ async fn builtin_skill_install_url_path_rejects_invalid_zip_bundles() {
     let cases = [
         (
             skill_bundle_zip(&[("bundle/references/guide.md", b"# Guide\n")]),
-            RuntimeFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
         ),
         (
             skill_bundle_zip(&[
                 ("bundle/one/SKILL.md", b"---\nname: one\n---\nOne\n"),
                 ("bundle/two/SKILL.md", b"---\nname: two\n---\nTwo\n"),
             ]),
-            RuntimeFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             skill_bundle_zip(&[("../escape/SKILL.md", b"---\nname: escape\n---\nEscape\n")]),
-            RuntimeFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             skill_bundle_zip_owned([("bundle/SKILL.md".to_string(), vec![0xff, 0xfe, 0xfd])]),
-            RuntimeFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
         ),
         (
             skill_bundle_zip_owned([("bundle/oversized.bin".to_string(), oversized_entry)]),
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
         (
             skill_bundle_zip_owned(too_many_entries),
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
         (
             skill_bundle_zip_with_dirs(
                 &too_many_directories,
                 std::iter::empty::<(String, Vec<u8>)>(),
             ),
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
         (
             skill_bundle_zip_owned(
@@ -5462,7 +5792,7 @@ async fn builtin_skill_install_url_path_rejects_invalid_zip_bundles() {
                 ))
                 .chain(oversized_total),
             ),
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
     ];
 
@@ -5514,7 +5844,7 @@ async fn builtin_skill_install_url_path_rejects_truncated_zip_bytes() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::OperationFailed);
+    assert_eq!(error, FailureKind::OperationFailed);
     assert_eq!(egress.requests().len(), 1);
     assert!(temp.path().read_dir().unwrap().next().is_none());
 }
@@ -5564,7 +5894,7 @@ async fn builtin_skill_install_url_path_rejects_invalid_github_api_responses() {
         .await
         .unwrap_err();
 
-        assert_eq!(actual, RuntimeFailureKind::OperationFailed);
+        assert_eq!(actual, FailureKind::OperationFailed);
         assert!(temp.path().read_dir().unwrap().next().is_none());
     }
 }
@@ -5611,7 +5941,7 @@ async fn builtin_skill_install_url_path_rejects_github_tree_file_response() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(temp.path().read_dir().unwrap().next().is_none());
 }
 
@@ -5649,7 +5979,7 @@ async fn builtin_skill_install_url_path_rejects_github_blob_download_url_host_mi
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert_eq!(egress.requests().len(), 2);
 }
 
@@ -5679,7 +6009,7 @@ async fn builtin_skill_install_url_path_rejects_malformed_github_paths_before_fe
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -5713,7 +6043,7 @@ async fn builtin_skill_install_url_path_rejects_ambiguous_content_and_url_before
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -5740,7 +6070,7 @@ async fn builtin_skill_install_url_path_rejects_non_https_url_before_fetch() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(egress.requests().is_empty());
 }
 
@@ -5767,7 +6097,7 @@ async fn builtin_skill_install_url_path_rejects_empty_input_before_fetch() {
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -5795,7 +6125,7 @@ async fn builtin_skill_install_url_path_rejects_whitespace_url_before_fetch() {
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -5826,7 +6156,7 @@ async fn builtin_skill_install_url_path_rejects_credentials_in_url_before_fetch(
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -5857,7 +6187,7 @@ async fn builtin_skill_install_url_path_rejects_disallowed_hosts_before_fetch() 
         .await
         .unwrap_err();
 
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
         assert!(egress.requests().is_empty());
     }
 }
@@ -5881,7 +6211,7 @@ async fn builtin_skill_install_url_path_fails_closed_when_runtime_egress_is_miss
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(error, FailureKind::NetworkDenied);
 }
 
 #[tokio::test]
@@ -5908,7 +6238,7 @@ async fn builtin_skill_install_url_path_rejects_non_success_url_response() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::OperationFailed);
+    assert_eq!(error, FailureKind::OperationFailed);
     assert_eq!(egress.requests().len(), 1);
 
     let listed = invoke_with_context(&runtime, SKILL_LIST_CAPABILITY_ID, json!({}), context)
@@ -5937,7 +6267,7 @@ async fn builtin_skill_install_url_path_rejects_invalid_utf8_url_response() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::OperationFailed);
+    assert_eq!(error, FailureKind::OperationFailed);
     assert_eq!(egress.requests().len(), 1);
 }
 
@@ -5950,7 +6280,7 @@ async fn builtin_skill_install_url_path_maps_runtime_egress_errors_by_reason() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -5958,7 +6288,7 @@ async fn builtin_skill_install_url_path_maps_runtime_egress_errors_by_reason() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::PolicyDenied,
+            FailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -5966,7 +6296,7 @@ async fn builtin_skill_install_url_path_maps_runtime_egress_errors_by_reason() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Network,
+            FailureKind::NetworkDenied,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -5974,7 +6304,7 @@ async fn builtin_skill_install_url_path_maps_runtime_egress_errors_by_reason() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -5982,7 +6312,7 @@ async fn builtin_skill_install_url_path_maps_runtime_egress_errors_by_reason() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
     ];
 
@@ -6019,16 +6349,11 @@ async fn builtin_skill_install_url_path_accounts_wall_clock_time() {
     });
     let runtime = runtime_with_filesystem_and_http_egress(filesystem, egress);
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            execution_context_with_mounts_and_network(
+        .invoke_capability((execution_context_with_mounts_and_network(
                 [SKILL_INSTALL_CAPABILITY_ID],
                 mounts,
                 http_test_policy(),
-            ),
-            capability_id(SKILL_INSTALL_CAPABILITY_ID),
-            ResourceEstimate::default(),
-            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})
-        ))
+            ), capability_id(SKILL_INSTALL_CAPABILITY_ID), ResourceEstimate::default(), json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})))
         .await
         .unwrap();
 
@@ -6068,7 +6393,7 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
             capability_id(HTTP_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -6080,7 +6405,7 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected runtime-policy failure, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.kind, FailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
     // Message is now the sanitized `DenyReason::PolicyDenied` form the kernel
     // produces (see #6386): it conveys a policy denial and must not leak the
@@ -6151,7 +6476,7 @@ async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(error, FailureKind::NetworkDenied);
 }
 
 #[tokio::test]
@@ -6186,7 +6511,7 @@ async fn builtin_http_rejects_ambiguous_body_zero_timeout_and_zero_response_limi
         let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
             .await
             .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
     }
 }
 
@@ -6210,7 +6535,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
         let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
             .await
             .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
     }
 
     assert!(egress.requests().is_empty());
@@ -6329,7 +6654,7 @@ async fn builtin_http_rejects_invalid_header_names_and_oversized_header_sets() {
         let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
             .await
             .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(error, FailureKind::InputEncode);
     }
 }
 
@@ -6341,7 +6666,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
             RuntimeHttpEgressError::Credential {
                 reason: "credential missing".to_string(),
             },
-            RuntimeFailureKind::Backend,
+            FailureKind::Client,
         ),
         (
             RuntimeHttpEgressError::Request {
@@ -6349,7 +6674,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -6357,7 +6682,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::PolicyDenied,
+            FailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -6365,7 +6690,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -6373,7 +6698,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -6381,7 +6706,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
         ),
     ];
 
@@ -6420,7 +6745,7 @@ async fn builtin_http_offline_runtime_egress_returns_network_failure_without_pan
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(error, FailureKind::Network);
     assert_eq!(egress.requests().len(), 1);
 }
 
@@ -6436,7 +6761,7 @@ async fn builtin_http_maps_panicking_runtime_egress_to_backend_failure() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
 }
 
 #[tokio::test]
@@ -6466,7 +6791,7 @@ async fn builtin_http_rejects_sensitive_headers_through_host_validator() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(error, FailureKind::InputEncode);
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -6494,7 +6819,7 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
+    assert_eq!(error, FailureKind::PolicyDenied);
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -6575,7 +6900,7 @@ async fn builtin_http_blocks_redirect_to_private_location() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
+    assert_eq!(error, FailureKind::PolicyDenied);
     // Only the initial request was attempted; the redirect's link-local target
     // was rejected at re-authorization, never contacted.
     let recorded = requests.lock().unwrap();
@@ -6643,7 +6968,7 @@ async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]
@@ -7063,7 +7388,7 @@ async fn builtin_coding_blocks_sensitive_scoped_paths_like_v1() {
         let error = invoke_with_context(&runtime, capability, input, context.clone())
             .await
             .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
     }
 
     let listed = invoke_with_context(
@@ -7114,7 +7439,7 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization, "{path}");
+        assert_eq!(error, FailureKind::FilesystemDenied, "{path}");
     }
 
     for (capability, input) in [
@@ -7130,7 +7455,7 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
         let error = invoke_with_context(&runtime, capability, input, context.clone())
             .await
             .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
     }
 
     #[cfg(unix)]
@@ -7144,7 +7469,7 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
         assert!(
             !temp.path().join(".ssh/config").exists(),
             "write must not create files under sensitive canonical parents"
@@ -7158,7 +7483,7 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
         assert!(
             !temp.path().join(".ssh/generated").exists(),
             "write must not create intermediate directories under sensitive canonical parents"
@@ -7172,7 +7497,7 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
 
         let listed = invoke_with_context(
             &runtime,
@@ -7226,7 +7551,7 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, FailureKind::FilesystemDenied);
 
     let raw_safe_path = format!("{raw_host_home}/safe.txt");
     let read = invoke_with_context(
@@ -7254,7 +7579,6 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -7293,7 +7617,7 @@ async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
         let error = invoke_with_context(&runtime, capability, input, context.clone())
             .await
             .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
     }
 }
 
@@ -7406,7 +7730,7 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
         )
         .await
         .unwrap_err();
-        assert_eq!(write_error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(write_error, FailureKind::InputEncode);
         assert_eq!(
             std::fs::read_to_string(temp.path().join(host_path)).unwrap(),
             "keep\n"
@@ -7429,7 +7753,7 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
         )
         .await
         .unwrap_err();
-        assert_eq!(patch_error, RuntimeFailureKind::InvalidInput);
+        assert_eq!(patch_error, FailureKind::InputEncode);
         assert_eq!(
             std::fs::read_to_string(temp.path().join(host_path)).unwrap(),
             "keep\n"
@@ -7680,7 +8004,7 @@ async fn builtin_coding_grep_requires_read_permission_but_glob_only_requires_lis
     )
     .await
     .unwrap_err();
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]
@@ -7710,7 +8034,7 @@ async fn builtin_coding_grep_denies_directory_without_list_grant() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]
@@ -7750,7 +8074,7 @@ async fn builtin_coding_list_and_glob_require_list_permission() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert_eq!(error, FailureKind::FilesystemDenied);
     }
 }
 
@@ -7797,7 +8121,7 @@ async fn builtin_coding_read_rejects_files_larger_than_v1_limit_before_loading_c
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Resource);
+    assert_eq!(error, FailureKind::Resource);
 }
 
 #[tokio::test]
@@ -7816,7 +8140,7 @@ async fn builtin_coding_read_rejects_non_file_paths() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Resource);
+    assert_eq!(error, FailureKind::Resource);
 }
 
 #[tokio::test]
@@ -7845,7 +8169,7 @@ async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
     )
     .await
     .unwrap_err();
-    assert_eq!(duplicate, RuntimeFailureKind::OperationFailed);
+    assert_eq!(duplicate, FailureKind::OperationFailed);
 
     let replaced = invoke_with_context(
         &runtime,
@@ -7875,7 +8199,7 @@ async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
     )
     .await
     .unwrap_err();
-    assert_eq!(no_op, RuntimeFailureKind::InvalidInput);
+    assert_eq!(no_op, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -7896,7 +8220,7 @@ async fn builtin_apply_patch_requires_prior_read_of_existing_file() {
         context.clone(),
     )
     .await;
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     assert_eq!(
         failure.message.as_deref(),
         Some(
@@ -8003,7 +8327,7 @@ async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
         context,
     )
     .await;
-    assert_eq!(missing.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(missing.kind, FailureKind::OperationFailed);
     assert_eq!(
         missing.message.as_deref(),
         Some("apply_patch failed for path workspace code.rs: old_string matched 0 times")
@@ -8026,14 +8350,14 @@ async fn builtin_coding_write_is_denied_by_read_only_mount() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, FailureKind::FilesystemDenied);
     assert!(!temp.path().join("blocked.txt").exists());
 }
 
 #[tokio::test]
 async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(std::iter::empty::<&str>()),
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8045,15 +8369,15 @@ async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected authorization failure, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.kind, FailureKind::Authorization);
 }
 
-async fn invoke(capability: &str, input: Value) -> Result<Value, RuntimeFailureKind> {
+async fn invoke(capability: &str, input: Value) -> Result<Value, FailureKind> {
     let runtime = runtime();
     invoke_with_context(&runtime, capability, input, execution_context([capability])).await
 }
 
-async fn invoke_shell(input: Value) -> Result<Value, RuntimeFailureKind> {
+async fn invoke_shell(input: Value) -> Result<Value, FailureKind> {
     let runtime = runtime();
     invoke_with_context(
         &runtime,
@@ -8069,9 +8393,9 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     capability: &str,
     input: Value,
     context: ExecutionContext,
-) -> Result<Value, RuntimeFailureKind> {
+) -> Result<Value, FailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -8093,7 +8417,7 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> RuntimeCapabilityFailure {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -8247,9 +8571,14 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(trigger_repository).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        // Local-testing analog of the composition registration: builtin
+        // handlers + the bound (native) memory provider's registry-routed
+        // tools.
+        let mut handlers = builtin_first_party_handlers(trigger_repository).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(policy)
@@ -8309,6 +8638,43 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
 struct DeliveryTargetValidatingTriggerCreateHook {
     accepted: String,
     validated: std::sync::Mutex<Vec<String>>,
+}
+
+struct SourceResolvingTriggerCreateHook {
+    target: String,
+    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::RunId>>>,
+}
+
+impl SourceResolvingTriggerCreateHook {
+    fn new(target: &str) -> Self {
+        Self {
+            target: target.to_string(),
+            seen_run_ids: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::RunId>> {
+        self.seen_run_ids.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
+    async fn resolve_implicit_delivery_target(
+        &self,
+        _scope: &ironclaw_host_api::ResourceScope,
+        run_id: Option<ironclaw_host_api::RunId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        self.seen_run_ids.lock().unwrap().push(run_id);
+        Ok(Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new(self.target.clone())
+                .expect("fixture target id"),
+        ))
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
 }
 
 impl DeliveryTargetValidatingTriggerCreateHook {
@@ -8919,9 +9285,12 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        let mut handlers =
+            builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(audit_sink)
     .with_runtime_policy(local_dev_policy())
@@ -9126,7 +9495,7 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
@@ -9140,6 +9509,12 @@ fn registry() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(builtin_first_party_package().unwrap())
+        .unwrap();
+    // Native memory rides the always-on lane alongside builtin; register its
+    // package so the `ironclaw.memory.*` capabilities are declared for
+    // dispatch + surface in these host-runtime tests (mirrors composition).
+    registry
+        .insert(native_memory_first_party_package().unwrap())
         .unwrap();
     registry
 }
@@ -9167,11 +9542,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-        PROFILE_SET_CAPABILITY_ID,
-        MEMORY_SEARCH_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID,
-        MEMORY_READ_CAPABILITY_ID,
-        MEMORY_TREE_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -9180,6 +9551,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         APPLY_PATCH_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
@@ -9187,6 +9560,17 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_RESUME_CAPABILITY_ID,
     ]
+}
+
+fn all_always_on_first_party_capability_ids() -> Vec<&'static str> {
+    let mut ids = all_builtin_capability_ids();
+    ids.extend([
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ]);
+    ids
 }
 
 fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesystem, MountView) {
@@ -9632,7 +10016,7 @@ where
             .map(|grant| dispatch_grant(grant.as_ref()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9640,7 +10024,9 @@ where
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext
@@ -9654,7 +10040,7 @@ where
             .map(|grant| dispatch_grant_with_mounts(grant.as_ref(), mounts.clone()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9662,7 +10048,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_network<I>(grants: I, network: NetworkPolicy) -> ExecutionContext
@@ -9694,7 +10082,7 @@ where
             })
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9702,7 +10090,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn set_context_scope(
@@ -9814,12 +10204,28 @@ fn trust_policy() -> HostTrustPolicy {
             builtin_effects(),
             None,
         ),
+        // Native memory rides the always-on lane alongside builtin and carries
+        // its own first-party trust entry (mirrors the composition trust policy).
+        AdminEntry::for_local_manifest(
+            PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            builtin_effects(),
+            None,
+        ),
     ]))])
     .unwrap()
 }
 
 fn provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
-    BTreeMap::from([(provider_id(), trust_decision())])
+    BTreeMap::from([
+        (provider_id(), trust_decision()),
+        (
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            trust_decision(),
+        ),
+    ])
 }
 
 fn trust_decision() -> TrustDecision {

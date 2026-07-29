@@ -5,7 +5,7 @@ use ironclaw_reborn_openai_compat::openai_compat_router;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn mounted_routes_fail_closed_until_product_workflow_is_wired() {
+async fn mounted_routes_fail_closed_until_product_surface_is_wired() {
     let cases = [
         (
             "POST",

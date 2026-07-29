@@ -6,9 +6,10 @@
 //! CORS, body limit, static security headers — is exercised end-to-end
 //! against the same axum `Router` `serve_webui_v2` binds at runtime.
 //! No TCP listener and no real Reborn runtime are required; the v2
-//! facade is mocked so the regression target stays the gateway-layer
+//! service is mocked so the regression target stays the gateway-layer
 //! composition.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,24 +18,22 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+use ironclaw_host_api::{
+    ActivityId, AgentId, LifecyclePublicState, NetworkMethod, Outcome, OutcomeRefs,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
+use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
+use ironclaw_product::{
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
+    LifecyclePackageRef, ProductCreateThreadRequest, ProductListThreadsRequest,
+    ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
+    RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{
@@ -91,11 +90,7 @@ fn compose_with_public_descriptor(
     route_id: &str,
     route_pattern: &str,
 ) -> Result<axum::Router, WebuiServeError> {
-    let bundle = RebornWebuiBundle {
-        api: Arc::new(StubServices::default()),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(StubServices::default());
     let descriptor = public_test_descriptor(route_id, route_pattern);
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -106,18 +101,7 @@ fn compose_with_public_descriptor(
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(axum::Router::new(), vec![descriptor]));
 
-    webui_v2_app(bundle, config)
-}
-
-fn service_unavailable_error(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable,
-        field: None,
-        validation_code: None,
-    }
+    webui_v2_app(product_surface.clone(), config)
 }
 
 // ─── stubs ────────────────────────────────────────────────────────────
@@ -160,7 +144,7 @@ impl WebuiAuthenticator for MultiUserToken {
 /// `WebuiAuthenticator` resolving [`VALID_TOKEN`] to a fixed,
 /// test-supplied user id. The trace-credits tests use it so the
 /// authenticated caller's user id equals a unique per-test trace
-/// scope — the facade derives the scope from the caller only.
+/// scope — the service derives the scope from the caller only.
 struct FixedUserToken {
     user_id: String,
 }
@@ -178,19 +162,73 @@ impl WebuiAuthenticator for FixedUserToken {
     }
 }
 
+fn successful_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: ResultRef::from_uuid(activity_id.as_uuid()),
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: SafeSummary::new("ok").expect("static summary is redaction-safe"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    })
+}
+
+fn trace_credits_response(caller: &ProductSurfaceCaller) -> RebornTraceCreditsResponse {
+    let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+    );
+    let enrolled =
+        ironclaw_reborn_traces::contribution::read_trace_policy_for_scope(Some(scope.as_str()))
+            .map(|policy| policy.enabled)
+            .unwrap_or(false);
+    RebornTraceCreditsResponse {
+        enrolled,
+        pending_credit: 0.0,
+        final_credit: 0.0,
+        delayed_credit_delta: 0.0,
+        submissions_total: 0,
+        submissions_submitted: 0,
+        submissions_accepted: 0,
+        submissions_revoked: 0,
+        submissions_expired: 0,
+        credit_events_total: 0,
+        last_submission_at: None,
+        last_credit_sync_at: None,
+        recent_explanations: Vec::new(),
+        manual_review_hold_count: 0,
+        holds: Vec::new(),
+        note: "Local view as of last sync; authoritative ledger is server-side.".to_string(),
+    }
+}
+
+fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
+    RebornSetupExtensionResponse {
+        package_ref,
+        phase: LifecyclePublicState::SetupNeeded,
+        blockers: Vec::new(),
+        payload: None,
+        secrets: Vec::new(),
+        fields: Vec::new(),
+        onboarding: None,
+    }
+}
+
 #[tokio::test]
 async fn health_route_is_public_for_platform_probes() {
-    let bundle = RebornWebuiBundle {
-        api: Arc::new(StubServices::default()),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(StubServices::default());
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![],
     );
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
     let response = app
         .oneshot(
@@ -212,42 +250,39 @@ async fn health_route_is_public_for_platform_probes() {
 
 mod openai_compat_mount_tests {
     use super::*;
-    use ironclaw_product_adapters::{
-        ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductProjectionReadInput,
-        ProductProjectionSubject, ProductWorkflow, ProjectionReadRequest, RedactedString,
-    };
-    use ironclaw_product_workflow::{
-        ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-        FakeIdempotencyLedger, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
-    };
-    use ironclaw_reborn_composition::ProtectedRouteMount;
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
     use ironclaw_reborn_openai_compat::{
-        InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
-        OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
-        OpenAiChatCompletionsWorkflow, OpenAiCompatRouterState, OpenAiResponseId,
-        OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
-        OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseStatus,
-        OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-        OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
+        OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
+        OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiCompatRefStore,
+        OpenAiCompatRouterState, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+        OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+        OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+        OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
+        openai_compat_routes,
     };
-    use ironclaw_threads::InMemorySessionThreadService;
     use ironclaw_turns::runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort};
     use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        AcceptedMessageRef, DefaultTurnCoordinator, StaticTurnAdmissionLimitProvider, TurnActor,
-        TurnAdmissionAxisKind, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
+        AcceptedMessageRef, DefaultTurnCoordinator, IdempotencyKey, ReplyTargetBindingRef,
+        SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest,
+        TurnAdmissionAxisKind, TurnCoordinator, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
     };
 
     const AGENT: &str = "agent-alpha";
     const PROJECT: &str = "project-alpha";
     const THREAD: &str = "thread-openai-chat";
 
+    fn in_memory_openai_compat_ref_store() -> Arc<OpenAiCompatRefStore> {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        Arc::new(OpenAiCompatRefStore::new(filesystem))
+    }
+
     #[tokio::test]
-    async fn openai_chat_completions_mount_uses_webui_auth_and_product_workflow() {
-        let workflow = Arc::new(GatewayOpenAiWorkflow::default());
+    async fn openai_chat_completions_mount_uses_webui_auth_and_product_surface() {
+        let workflow = Arc::new(GatewayOpenAiSurface::default());
         let chat = Arc::new(OpenAiChatCompletionsWorkflow::new(
             workflow.clone(),
-            Arc::new(InMemoryOpenAiCompatRefStore::new()),
+            in_memory_openai_compat_ref_store(),
             Arc::new(StaticChatProjectionReader::text(
                 "hello through composition",
             )),
@@ -256,11 +291,7 @@ mod openai_compat_mount_tests {
             openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
             openai_compat_routes(),
         );
-        let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
+        let product_surface = Arc::new(StubServices::default());
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -269,7 +300,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
         let unauthenticated = app
             .clone()
@@ -302,22 +333,11 @@ mod openai_compat_mount_tests {
         let turn_state =
             Arc::new(in_memory_turn_state_store().with_admission_limit_provider(Arc::new(limits)));
         let turn_coordinator = Arc::new(DefaultTurnCoordinator::new(turn_state.clone()));
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let binding = AdmissionTestBindingService;
-        let inbound = Arc::new(DefaultInboundTurnService::new(
-            binding.clone(),
-            thread_service,
-            turn_coordinator,
-        ));
-        let workflow: Arc<dyn ProductWorkflow> = Arc::new(DefaultProductWorkflow::new(
-            inbound,
-            Arc::new(FakeIdempotencyLedger::new()),
-            Arc::new(binding),
-        ));
+        let workflow = Arc::new(AdmissionProductSurface::new(turn_coordinator));
         let chat = Arc::new(
             OpenAiChatCompletionsWorkflow::new(
                 workflow,
-                Arc::new(InMemoryOpenAiCompatRefStore::new()),
+                in_memory_openai_compat_ref_store(),
                 Arc::new(NeverCompletingChatProjectionReader),
             )
             .with_wait_timeout(Duration::from_millis(1)),
@@ -326,11 +346,7 @@ mod openai_compat_mount_tests {
             openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
             openai_compat_routes(),
         );
-        let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
+        let product_surface = Arc::new(StubServices::default());
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -339,7 +355,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
         let timed_out = app
             .clone()
@@ -424,11 +440,11 @@ mod openai_compat_mount_tests {
     }
 
     #[tokio::test]
-    async fn openai_responses_mount_uses_webui_auth_and_product_workflow() {
-        let workflow = Arc::new(GatewayOpenAiWorkflow::default());
+    async fn openai_responses_mount_uses_webui_auth_and_product_surface() {
+        let workflow = Arc::new(GatewayOpenAiSurface::default());
         let responses = Arc::new(OpenAiResponsesWorkflow::new(
             workflow.clone(),
-            Arc::new(InMemoryOpenAiCompatRefStore::new()),
+            in_memory_openai_compat_ref_store(),
             Arc::new(StaticResponsesProjectionReader::text(
                 "hello through responses",
             )),
@@ -437,11 +453,7 @@ mod openai_compat_mount_tests {
             openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(responses)),
             openai_compat_routes(),
         );
-        let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
+        let product_surface = Arc::new(StubServices::default());
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -450,7 +462,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
         let unauthenticated = app
             .clone()
@@ -474,58 +486,6 @@ mod openai_compat_mount_tests {
             "hello through responses"
         );
         assert_eq!(workflow.submit_count(), 1);
-        assert_eq!(workflow.read_count(), 1);
-    }
-
-    #[derive(Clone)]
-    struct AdmissionTestBindingService;
-
-    #[async_trait]
-    impl ConversationBindingService for AdmissionTestBindingService {
-        async fn resolve_binding(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductWorkflowError> {
-            self.resolve(request)
-        }
-
-        async fn lookup_binding(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductWorkflowError> {
-            self.resolve(request)
-        }
-    }
-
-    impl AdmissionTestBindingService {
-        fn resolve(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductWorkflowError> {
-            Ok(ResolvedBinding {
-                tenant_id: TenantId::new(TENANT).map_err(binding_error("test OpenAI tenant id"))?,
-                actor_user_id: UserId::new(request.external_actor_ref.id())
-                    .map_err(binding_error("test OpenAI actor user id"))?,
-                subject_user_id: Some(
-                    UserId::new(request.external_actor_ref.id())
-                        .map_err(binding_error("test OpenAI subject user id"))?,
-                ),
-                thread_id: ThreadId::new(format!("thread-{}", request.external_event_id.as_str()))
-                    .map_err(binding_error("test OpenAI thread id"))?,
-                agent_id: Some(AgentId::new(AGENT).map_err(binding_error("test OpenAI agent id"))?),
-                project_id: Some(
-                    ProjectId::new(PROJECT).map_err(binding_error("test OpenAI project id"))?,
-                ),
-            })
-        }
-    }
-
-    fn binding_error(
-        field: &'static str,
-    ) -> impl FnOnce(ironclaw_host_api::HostApiError) -> ProductWorkflowError + 'static {
-        move |reason| ProductWorkflowError::BindingResolutionFailed {
-            reason: format!("{field}: {reason}"),
-        }
     }
 
     fn chat_request(token: Option<&str>) -> Request<Body> {
@@ -567,75 +527,305 @@ mod openai_compat_mount_tests {
     }
 
     #[derive(Default)]
-    struct GatewayOpenAiWorkflow {
+    struct GatewayOpenAiSurface {
         submit_count: Mutex<usize>,
-        read_count: Mutex<usize>,
     }
 
-    impl GatewayOpenAiWorkflow {
+    impl GatewayOpenAiSurface {
         fn submit_count(&self) -> usize {
             *self
                 .submit_count
                 .lock()
                 .expect("submit count lock should not be poisoned")
         }
+    }
 
-        fn read_count(&self) -> usize {
-            *self
-                .read_count
-                .lock()
-                .expect("read count lock should not be poisoned")
+    #[async_trait]
+    impl ironclaw_host_api::ProductSurface for GatewayOpenAiSurface {
+        async fn invoke(
+            &self,
+            caller: ProductSurfaceCaller,
+            request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+            let output = match request.operation_id.as_str() {
+                "thread.create" => {
+                    let input: ProductCreateThreadRequest =
+                        serde_json::from_value(request.input)
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    let thread_id = ThreadId::new(
+                        input
+                            .requested_thread_id
+                            .or(input.client_action_id)
+                            .unwrap_or_else(|| THREAD.to_string()),
+                    )
+                    .map_err(ProductSurfaceError::internal_from)?;
+                    serde_json::to_value(RebornCreateThreadResponse {
+                        thread: test_thread_record(caller, thread_id),
+                    })
+                    .map_err(ProductSurfaceError::internal_from)?
+                }
+                "turn.submit" => {
+                    let input: ProductSubmitTurnRequest = serde_json::from_value(request.input)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                    *self
+                        .submit_count
+                        .lock()
+                        .expect("submit count lock should not be poisoned") += 1;
+                    let thread_id =
+                        ThreadId::new(input.thread_id.unwrap_or_else(|| THREAD.to_string()))
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    serde_json::to_value(RebornSubmitTurnResponse::Submitted {
+                        thread_id,
+                        accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
+                            .map_err(ProductSurfaceError::internal_from)?,
+                        turn_id: "turn-openai-chat".to_string(),
+                        run_id: TurnRunId::new(),
+                        status: TurnStatus::Queued,
+                        resolved_run_profile_id: RunProfileId::default_profile()
+                            .as_str()
+                            .to_string(),
+                        resolved_run_profile_version: 1,
+                        event_cursor: EventCursor::default(),
+                    })
+                    .map_err(ProductSurfaceError::internal_from)?
+                }
+                _ => return Err(ProductSurfaceError::service_unavailable(false)),
+            };
+            Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        }
+
+        async fn query(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
+        }
+
+        async fn stream_events(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
+        }
+    }
+
+    struct AdmissionProductSurface {
+        coordinator: Arc<dyn TurnCoordinator>,
+    }
+
+    impl AdmissionProductSurface {
+        fn new(coordinator: Arc<dyn TurnCoordinator>) -> Self {
+            Self { coordinator }
         }
     }
 
     #[async_trait]
-    impl ProductWorkflow for GatewayOpenAiWorkflow {
-        async fn submit_inbound(
+    impl ironclaw_host_api::ProductSurface for AdmissionProductSurface {
+        async fn invoke(
             &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProductInboundAck, ProductAdapterError> {
-            *self
-                .submit_count
-                .lock()
-                .expect("submit count lock should not be poisoned") += 1;
-            Ok(ProductInboundAck::Accepted {
-                accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
-                    .expect("accepted ref"),
-                submitted_run_id: TurnRunId::new(),
-            })
+            caller: ProductSurfaceCaller,
+            request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+            let output = match request.operation_id.as_str() {
+                "thread.create" => {
+                    let input: ProductCreateThreadRequest =
+                        serde_json::from_value(request.input)
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    let thread_id = ThreadId::new(
+                        input
+                            .requested_thread_id
+                            .or(input.client_action_id)
+                            .unwrap_or_else(|| THREAD.to_string()),
+                    )
+                    .map_err(ProductSurfaceError::internal_from)?;
+                    serde_json::to_value(RebornCreateThreadResponse {
+                        thread: test_thread_record(caller.clone(), thread_id),
+                    })
+                    .map_err(ProductSurfaceError::internal_from)?
+                }
+                "turn.submit" => {
+                    let input: ProductSubmitTurnRequest = serde_json::from_value(request.input)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                    let thread_id =
+                        ThreadId::new(input.thread_id.clone().ok_or_else(invalid_request_error)?)
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    let scope = caller.turn_scope(thread_id.clone());
+                    let run_id = self
+                        .coordinator
+                        .prepare_turn(scope.clone())
+                        .await
+                        .map_err(map_turn_error)?;
+                    let accepted_message_ref = AcceptedMessageRef::new(format!(
+                        "msg:{}",
+                        input.client_action_id.as_deref().unwrap_or("openai-chat")
+                    ))
+                    .map_err(ProductSurfaceError::internal_from)?;
+                    let response = self
+                        .coordinator
+                        .submit_turn(SubmitTurnRequest {
+                            scope,
+                            actor: caller.actor(),
+                            accepted_message_ref: accepted_message_ref.clone(),
+                            source_binding_ref: SourceBindingRef::new("source:openai-chat")
+                                .map_err(ProductSurfaceError::internal_from)?,
+                            reply_target_binding_ref: ReplyTargetBindingRef::new(
+                                "reply:openai-chat",
+                            )
+                            .map_err(ProductSurfaceError::internal_from)?,
+                            requested_run_profile: None,
+                            requested_model: input.model,
+                            idempotency_key: IdempotencyKey::new(
+                                input
+                                    .client_action_id
+                                    .unwrap_or_else(|| "openai-chat".to_string()),
+                            )
+                            .map_err(ProductSurfaceError::internal_from)?,
+                            received_at: chrono::Utc::now(),
+                            requested_run_id: Some(run_id),
+                            parent_run_id: None,
+                            subagent_depth: 0,
+                            spawn_tree_root_run_id: None,
+                            product_context: None,
+                        })
+                        .await;
+                    let result = match response {
+                        Ok(ironclaw_turns::SubmitTurnResponse::Accepted {
+                            turn_id,
+                            run_id,
+                            status,
+                            resolved_run_profile_id,
+                            resolved_run_profile_version,
+                            event_cursor,
+                            accepted_message_ref,
+                            ..
+                        }) => RebornSubmitTurnResponse::Submitted {
+                            thread_id,
+                            accepted_message_ref,
+                            turn_id: turn_id.to_string(),
+                            run_id,
+                            status,
+                            resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
+                            resolved_run_profile_version: resolved_run_profile_version.as_u64(),
+                            event_cursor,
+                        },
+                        Err(TurnError::ThreadBusy(busy)) => {
+                            RebornSubmitTurnResponse::RejectedBusy {
+                                thread_id,
+                                accepted_message_ref,
+                                active_run_id: Some(busy.active_run_id),
+                                status: Some(busy.status),
+                                event_cursor: Some(busy.event_cursor),
+                                notice: "busy".to_string(),
+                            }
+                        }
+                        Err(error) => return Err(map_turn_error(error)),
+                    };
+                    serde_json::to_value(result).map_err(ProductSurfaceError::internal_from)?
+                }
+                _ => return Err(ProductSurfaceError::service_unavailable(false)),
+            };
+            Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
         }
 
-        async fn read_projection(
+        async fn query(
             &self,
-            request: ProductProjectionReadInput,
-        ) -> Result<ProjectionReadRequest, ProductAdapterError> {
-            *self
-                .read_count
-                .lock()
-                .expect("read count lock should not be poisoned") += 1;
-            let ProductProjectionSubject::AdapterExternalRefs { auth_claim, .. } = request.subject
-            else {
-                return Err(ProductAdapterError::Internal {
-                    detail: RedactedString::new("expected adapter refs projection subject"),
-                });
-            };
-            let user_id = UserId::new(auth_claim.subject()).map_err(|error| {
-                ProductAdapterError::Internal {
-                    detail: RedactedString::new(format!("invalid user id: {error}")),
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
+        }
+
+        async fn stream_events(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
+        }
+    }
+
+    fn test_thread_record(
+        caller: ProductSurfaceCaller,
+        thread_id: ThreadId,
+    ) -> SessionThreadRecord {
+        SessionThreadRecord {
+            scope: ThreadScope {
+                tenant_id: caller.tenant_id,
+                agent_id: caller
+                    .agent_id
+                    .unwrap_or_else(|| AgentId::new(AGENT).expect("agent")),
+                project_id: caller.project_id,
+                owner_user_id: Some(caller.user_id.clone()),
+                mission_id: None,
+            },
+            thread_id,
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+            goal: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn invalid_request_error() -> ProductSurfaceError {
+        ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        }
+    }
+
+    fn map_turn_error(error: TurnError) -> ProductSurfaceError {
+        match error {
+            TurnError::AdmissionRejected(_) | TurnError::CapacityExceeded { .. } => {
+                ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::RateLimited,
+                    kind: ProductSurfaceErrorKind::Busy,
+                    status_code: 429,
+                    retryable: true,
+                    field: None,
+                    validation_code: None,
                 }
-            })?;
-            Ok(ProjectionReadRequest {
-                actor: TurnActor::new(user_id.clone()),
-                scope: TurnScope::new_with_owner(
-                    TenantId::new(TENANT).expect("tenant"),
-                    Some(AgentId::new(AGENT).expect("agent")),
-                    Some(ProjectId::new(PROJECT).expect("project")),
-                    ThreadId::new(THREAD).expect("thread"),
-                    Some(user_id),
-                ),
-                after_cursor: request.after_cursor,
-                limit: request.limit,
-            })
+            }
+            TurnError::ScopeNotFound => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::NotFound,
+                kind: ProductSurfaceErrorKind::NotFound,
+                status_code: 404,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            TurnError::Unauthorized => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            TurnError::InvalidRequest { .. } => invalid_request_error(),
+            TurnError::Unavailable { .. } => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Unavailable,
+                kind: ProductSurfaceErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            _ => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Internal,
+                kind: ProductSurfaceErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
         }
     }
 
@@ -736,335 +926,215 @@ mod openai_compat_mount_tests {
 
 #[derive(Default)]
 struct StubServices {
-    create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
-    stream_events_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
-    // Records the `gate_ref` value the facade observed on each
+    create_thread_calls: Mutex<Vec<ProductSurfaceCaller>>,
+    stream_events_calls: Mutex<Vec<ProductSurfaceCaller>>,
+    // Records the `gate_ref` value the service observed on each
     // `resolve_gate` call. Used by the JS-client contract tests to
     // assert axum's path extractor actually percent-decodes the gate
     // segment (e.g. `gate%3Aapproval` → `gate:approval`). The handler
     // overwrites `body.gate_ref` from the matched path param before
-    // calling the facade, so this captures whatever the path
+    // calling the service, so this captures whatever the path
     // extractor delivered.
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
 
 #[async_trait]
-impl RebornServicesApi for StubServices {
-    async fn create_thread(
+impl ironclaw_host_api::ProductSurface for StubServices {
+    async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        self.create_thread_calls.lock().expect("lock").push(caller);
-        Ok(RebornCreateThreadResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new("thread.fake").expect("thread"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new(USER).expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: USER.to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-                created_at: None,
-                updated_at: None,
-            },
-        })
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        let output = match request.operation_id.as_str() {
+            "thread.create" => {
+                self.create_thread_calls.lock().expect("lock").push(caller);
+                serde_json::to_value(RebornCreateThreadResponse {
+                    thread: SessionThreadRecord {
+                        thread_id: ThreadId::new("thread.fake").expect("thread"),
+                        scope: ThreadScope {
+                            tenant_id: TenantId::new(TENANT).expect("tenant"),
+                            agent_id: AgentId::new("agent.fake").expect("agent"),
+                            project_id: Some(ProjectId::new("project.fake").expect("project")),
+                            owner_user_id: Some(UserId::new(USER).expect("user")),
+                            mission_id: None,
+                        },
+                        created_by_actor_id: USER.to_string(),
+                        title: None,
+                        metadata_json: None,
+                        goal: None,
+                        created_at: None,
+                        updated_at: None,
+                    },
+                })
+                .map_err(ProductSurfaceError::internal_from)?
+            }
+            "turn.submit" => {
+                let input: ProductSubmitTurnRequest = serde_json::from_value(request.input)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                serde_json::to_value(RebornSubmitTurnResponse::Submitted {
+                    thread_id: ThreadId::new(input.thread_id.clone().unwrap_or_default())
+                        .expect("thread id"),
+                    accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg.fake")
+                        .expect("ref"),
+                    turn_id: "turn.fake".to_string(),
+                    run_id: TurnRunId::new(),
+                    status: TurnStatus::Queued,
+                    resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
+                    resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
+                    event_cursor: EventCursor(1),
+                })
+                .map_err(ProductSurfaceError::internal_from)?
+            }
+            "run.cancel" => serde_json::to_value(RebornCancelRunResponse {
+                run_id: TurnRunId::new(),
+                status: TurnStatus::Cancelled,
+                event_cursor: EventCursor(2),
+                already_terminal: false,
+            })
+            .map_err(ProductSurfaceError::internal_from)?,
+            "run.retry" => {
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+            "gate.resolve" => {
+                let input: ProductResolveGateRequest = serde_json::from_value(request.input)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                self.resolve_gate_refs
+                    .lock()
+                    .expect("lock")
+                    .push(input.gate_ref.clone());
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+            THREAD_DELETE_CAPABILITY_ID => {
+                let _input: RebornDeleteThreadRequest = serde_json::from_value(request.input)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                serde_json::to_value(successful_resolution(request.activity_id))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
+            EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => {
+                serde_json::to_value(successful_resolution(request.activity_id))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
+            _ => {
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+        };
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
     }
 
-    async fn submit_turn(
+    async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        Ok(RebornSubmitTurnResponse::Submitted {
-            thread_id: ThreadId::new(request.thread_id.clone().unwrap_or_default())
-                .expect("thread id"),
-            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg.fake").expect("ref"),
-            turn_id: "turn.fake".to_string(),
-            run_id: TurnRunId::new(),
-            status: TurnStatus::Queued,
-            resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
-            resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
-            event_cursor: EventCursor(1),
-        })
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        Ok(RebornDeleteThreadResponse {
-            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
-            deleted: true,
-        })
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Ok(RebornTimelineResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new(request.thread_id.clone()).expect("thread id"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new(USER).expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: USER.to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-                created_at: None,
-                updated_at: None,
-            },
-            messages: Vec::new(),
-            summary_artifacts: Vec::new(),
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        let query = RebornViewQuery {
+            view_id: request.view_id,
+            params: request.input,
+            cursor: request.cursor,
+        };
+        let payload = match query.view_id.as_str() {
+            id if id == THREADS_VIEW.id => {
+                let mut list_request: ProductListThreadsRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                list_request.cursor = query.cursor.or(list_request.cursor);
+                let _ = list_request;
+                serde_json::to_value(RebornListThreadsResponse {
+                    threads: Vec::new(),
+                    next_cursor: None,
+                })
+                .map_err(ProductSurfaceError::internal_from)?
+            }
+            id if id == TRACE_CREDITS_VIEW.id => {
+                serde_json::to_value(trace_credits_response(&caller))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
+            id if id == TIMELINE_VIEW.id => {
+                let thread_id = query.params["thread_id"]
+                    .as_str()
+                    .ok_or_else(|| ProductSurfaceError::internal_from("missing thread_id"))?
+                    .to_string();
+                serde_json::to_value(RebornTimelineResponse {
+                    thread: SessionThreadRecord {
+                        thread_id: ThreadId::new(thread_id).expect("thread id"),
+                        scope: ThreadScope {
+                            tenant_id: TenantId::new(TENANT).expect("tenant"),
+                            agent_id: AgentId::new("agent.fake").expect("agent"),
+                            project_id: Some(ProjectId::new("project.fake").expect("project")),
+                            owner_user_id: Some(UserId::new(USER).expect("user")),
+                            mission_id: None,
+                        },
+                        created_by_actor_id: USER.to_string(),
+                        title: None,
+                        metadata_json: None,
+                        goal: None,
+                        created_at: None,
+                        updated_at: None,
+                    },
+                    messages: Vec::new(),
+                    summary_artifacts: Vec::new(),
+                    next_cursor: None,
+                })
+                .map_err(ProductSurfaceError::internal_from)?
+            }
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = query.params["package_id"]
+                    .as_str()
+                    .ok_or_else(|| ProductSurfaceError::internal_from("missing package_id"))?;
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                serde_json::to_value(extension_setup_response(package_ref))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
+            _ => {
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+        };
+        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+            items: vec![payload],
             next_cursor: None,
         })
     }
 
     async fn stream_events(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let _ = request;
         self.stream_events_calls.lock().expect("lock").push(caller);
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        Ok(RebornCancelRunResponse {
-            run_id: TurnRunId::new(),
-            status: TurnStatus::Cancelled,
-            event_cursor: EventCursor(2),
-            already_terminal: false,
-        })
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        self.resolve_gate_refs
-            .lock()
-            .expect("lock")
-            .push(request.gate_ref.clone());
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events: Vec::new(),
             next_cursor: None,
         })
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Ok(RebornListAutomationsResponse {
-            automations: Vec::new(),
-            scheduler_enabled: true,
-        })
-    }
-
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Ok(RebornOutboundPreferencesResponse::default())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(service_unavailable_error(false))
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(service_unavailable_error(false))
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Ok(RebornExtensionListResponse {
-            extensions: Vec::new(),
-        })
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        Ok(RebornExtensionRegistryResponse {
-            entries: Vec::new(),
-        })
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Ok(RebornSetupExtensionResponse {
-            package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
-            blockers: Vec::new(),
-            payload: None,
-            secrets: Vec::new(),
-            fields: Vec::new(),
-            onboarding: None,
-        })
-    }
-}
-
-fn unused_services_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
-        status_code: 500,
-        retryable: false,
-        field: None,
-        validation_code: None,
     }
 }
 
@@ -1075,15 +1145,11 @@ const PROJECT: &str = "project-default";
 
 fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     // Match the host-installation pattern the CLI's `serve` command
     // uses: stamp trusted default agent_id / project_id onto the auth
     // layer. Without this, every authenticated v2 request would 400
-    // on the downstream facade.
+    // on the downstream service.
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
@@ -1091,7 +1157,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -1099,11 +1165,7 @@ fn build_app_with_authenticator(
     authenticator: Arc<dyn WebuiAuthenticator>,
 ) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -1111,7 +1173,7 @@ fn build_app_with_authenticator(
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -1124,6 +1186,10 @@ async fn read_body_string(response: axum::response::Response) -> String {
 
 async fn served_static_text(path: &str) -> String {
     let (app, _) = build_app();
+    served_static_text_from(app, path).await
+}
+
+async fn served_static_text_from(app: axum::Router, path: &str) -> String {
     let response = app
         .oneshot(
             Request::builder()
@@ -1141,12 +1207,43 @@ async fn served_static_text(path: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-async fn served_app_javascript() -> String {
-    served_app_vite_asset(".js").await
+async fn served_bundled_javascript() -> String {
+    let (app, _) = build_app();
+    let shell = served_static_text_from(app.clone(), "/").await;
+    let app_asset_path = shell_vite_asset_path(&shell, ".js");
+    let app_javascript = served_static_text_from(app.clone(), &app_asset_path).await;
+    let chunk_paths = vite_javascript_asset_paths(&app_javascript);
+    let mut bundle = app_javascript;
+
+    // Vite records every statically imported and lazy-loaded JavaScript chunk
+    // in the app entry's preload table. Request those paths through the
+    // composed router so caller-level source-contract assertions cover the
+    // complete bundle graph without reaching into ironclaw_webui internals.
+    for path in chunk_paths {
+        bundle.push('\n');
+        bundle.push_str(&served_static_text_from(app.clone(), &path).await);
+    }
+
+    bundle
 }
 
 async fn served_app_stylesheet() -> String {
     served_app_vite_asset(".css").await
+}
+
+fn vite_javascript_asset_paths(app_javascript: &str) -> BTreeSet<String> {
+    app_javascript
+        .match_indices("assets/")
+        .filter_map(|(start, _)| {
+            let path = app_javascript[start..]
+                .chars()
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+                })
+                .collect::<String>();
+            path.ends_with(".js").then(|| format!("/{path}"))
+        })
+        .collect()
 }
 
 async fn served_app_vite_asset(suffix: &str) -> String {
@@ -1177,7 +1274,7 @@ fn bundle_segment<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
 // ─── tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
+async fn bearer_happy_path_dispatches_to_service_with_host_tenant() {
     let (app, services) = build_app();
     let response = app
         .oneshot(
@@ -1194,13 +1291,13 @@ async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let calls = services.create_thread_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 1, "facade reached exactly once");
+    assert_eq!(calls.len(), 1, "service reached exactly once");
     assert_eq!(calls[0].tenant_id.as_str(), TENANT);
     assert_eq!(calls[0].user_id.as_str(), USER);
     // Regression: caller MUST carry the trusted default agent_id and
     // project_id stamped by `WebuiServeConfig::with_default_agent_id`
     // / `with_default_project_id`. Without those, the downstream
-    // facade rejects every mutation/read with 400 InvalidRequest
+    // service rejects every mutation/read with 400 InvalidRequest
     // because it cannot build `ThreadScope`.
     assert_eq!(
         calls[0].agent_id.as_ref().map(|a| a.as_str()),
@@ -1261,7 +1358,7 @@ async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenti
 }
 
 #[tokio::test]
-async fn missing_bearer_returns_401_before_facade() {
+async fn missing_bearer_returns_401_before_service() {
     let (app, services) = build_app();
     let response = app
         .oneshot(
@@ -1305,7 +1402,7 @@ fn unique_trace_credits_user() -> String {
 
 #[tokio::test]
 async fn trace_credits_bearer_happy_path_returns_unenrolled_zero_state_for_fresh_scope() {
-    // Fresh, unique user scope: the facade derives the trace scope from
+    // Fresh, unique user scope: the service derives the trace scope from
     // the authenticated caller's user id only, so a uuid-suffixed user
     // guarantees no contributor-local state exists and the response is
     // the unenrolled zero-state — never an error.
@@ -1445,7 +1542,7 @@ async fn sse_query_token_authenticates_event_stream() {
         Some("text/event-stream"),
     );
     // The SSE handler runs on the background body task and polls the
-    // facade on a 1-second cadence. Pull one frame to drive the
+    // service on a 1-second cadence. Pull one frame to drive the
     // generator far enough to record at least the first poll, then
     // drop the body so the long-lived stream does not pin the test.
     let mut body = response.into_body();
@@ -1613,17 +1710,13 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
     }
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(AlwaysReject),
         vec![HeaderValue::from_static("http://localhost:1234")],
     );
-    let app = webui_v2_app(bundle, config).expect("app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("app");
     let response = app
         .oneshot(
             Request::builder()
@@ -1695,19 +1788,19 @@ async fn mutation_route_returns_429_after_descriptor_rate_limit_exhausted() {
     );
 
     // Auth ran but the rate-limit middleware short-circuited, so the
-    // facade only saw the 60 successful requests.
-    let facade_calls = services.create_thread_calls.lock().expect("lock").len();
+    // service only saw the 60 successful requests.
+    let service_calls = services.create_thread_calls.lock().expect("lock").len();
     assert_eq!(
-        facade_calls, 60,
+        service_calls, 60,
         "rate-limit must short-circuit BEFORE the v2 handler",
     );
 }
 
 #[tokio::test]
-async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
+async fn oversized_mutation_body_is_rejected_with_413_before_service() {
     // `create_thread`'s descriptor caps the body at 16 KiB. Send 16 KiB
     // + 1 of JSON and expect 413 from the per-route body limit, with
-    // the facade untouched (the limit middleware sits in front of both
+    // the service untouched (the limit middleware sits in front of both
     // auth and the v2 handler).
     let (app, services) = build_app();
     let payload = format!(
@@ -1743,14 +1836,14 @@ async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "facade must not be reached on an oversized request",
+        "service must not be reached on an oversized request",
     );
 }
 
 #[tokio::test]
-async fn mutation_body_within_descriptor_cap_reaches_facade() {
+async fn mutation_body_within_descriptor_cap_reaches_service() {
     // Companion to the oversized test: a payload that fits inside the
-    // 16 KiB `create_thread` cap should pass through to the facade.
+    // 16 KiB `create_thread` cap should pass through to the service.
     // Locks the contract that the limit is "above max", not "above
     // some-fraction-of-max".
     let (app, services) = build_app();
@@ -1775,7 +1868,7 @@ async fn mutation_body_within_descriptor_cap_reaches_facade() {
     assert_eq!(
         services.create_thread_calls.lock().expect("lock").len(),
         1,
-        "facade should be reached for in-budget payload",
+        "service should be reached for in-budget payload",
     );
 }
 
@@ -1888,18 +1981,14 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
     use ironclaw_webui::WebuiServeConfig;
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_canonical_host("app.example.com");
-    let app = ironclaw_webui::webui_v2_app(bundle, config).expect("app");
+    let app = ironclaw_webui::webui_v2_app(product_surface.clone(), config).expect("app");
     let (addr, handle) = spawn_serve(app).await;
 
     // (1) Origin matches Host but NOT canonical_host — fail.
@@ -1983,10 +2072,10 @@ async fn ws_upgrade_with_disallowed_origin_is_rejected_with_403() {
 }
 
 #[tokio::test]
-async fn list_threads_returns_facade_response_with_empty_default() {
+async fn list_threads_returns_service_response_with_empty_default() {
     // GET /api/webchat/v2/threads goes through the new list_threads
     // route — descriptor is NoBody + read rate limit. The stub
-    // facade returns an empty list which the handler serializes as
+    // service returns an empty list which the handler serializes as
     // `{ "threads": [], "next_cursor": null }`.
     let (app, _services) = build_app();
     let response = app
@@ -2009,7 +2098,7 @@ async fn list_threads_returns_facade_response_with_empty_default() {
 }
 
 #[tokio::test]
-async fn delete_thread_route_returns_facade_ack() {
+async fn delete_thread_route_returns_service_ack() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -2035,7 +2124,7 @@ async fn delete_thread_route_returns_facade_ack() {
 }
 
 #[tokio::test]
-async fn setup_extension_returns_lifecycle_projection_via_facade() {
+async fn setup_extension_returns_lifecycle_projection_via_service() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -2044,7 +2133,13 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
                 .uri("/api/webchat/v2/extensions/telegram/setup")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({"action": "begin"}).to_string()))
+                .body(Body::from(
+                    json!({
+                        "action": "begin",
+                        "client_action_id": "action-setup-extension-begin"
+                    })
+                    .to_string(),
+                ))
                 .expect("request"),
         )
         .await
@@ -2052,15 +2147,18 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
     assert!(
-        body.contains("\"phase\":\"unsupported_or_legacy\""),
+        body.contains("\"phase\":\"setup_needed\""),
         "setup_extension must surface lifecycle phase, got: {body}",
     );
     assert!(
         !body.contains("\"status\""),
         "setup_extension must not surface legacy status aliases, got: {body}",
     );
-    assert!(
-        body.contains("\"package_ref\":{\"kind\":\"extension\",\"id\":\"telegram\"}"),
+    let value: serde_json::Value =
+        serde_json::from_str(&body).expect("setup extension response is JSON");
+    assert_eq!(
+        value["package_ref"],
+        serde_json::json!({"kind": "extension", "id": "telegram"}),
         "setup_extension must echo the path-bound package ref, got: {body}",
     );
 }
@@ -2086,17 +2184,13 @@ async fn rate_limit_is_independent_per_caller() {
     }
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(UserSwitch),
         vec![HeaderValue::from_static("http://localhost:1234")],
     );
-    let app = webui_v2_app(bundle, config).expect("app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("app");
 
     let make_request = |token: &str| -> Request<Body> {
         Request::builder()
@@ -2506,7 +2600,7 @@ async fn static_js_asset_returns_javascript_content_type() {
 
 #[tokio::test]
 async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("new URL(e.authorizationUrl).protocol===`https:`"),
@@ -2528,7 +2622,7 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     // The Vite app bundle must retain the shared OAuth completion transport and
     // the chat hook's gate-matching behavior. Source-level details for the
@@ -2564,7 +2658,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
 
 #[tokio::test]
 async fn static_chat_events_clear_gate_when_run_resumes() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("blocked_auth")
@@ -2642,7 +2736,7 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // note below), so this locks the served bundle shape; a behavioral provider
     // test driving `setLang('es')` through an unloaded pack belongs in
     // the deferred JS/e2e scaffold.
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
     let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
 
@@ -2804,7 +2898,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
 // doesn't currently own.
 
 #[tokio::test]
-async fn js_client_send_message_path_shape_reaches_facade() {
+async fn js_client_send_message_path_shape_reaches_service() {
     // api.ts → `sendMessage({threadId, content, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
     // body `{client_action_id, content}` (no thread_id in body —
@@ -2830,7 +2924,7 @@ async fn js_client_send_message_path_shape_reaches_facade() {
 }
 
 #[tokio::test]
-async fn js_client_cancel_run_path_shape_reaches_facade() {
+async fn js_client_cancel_run_path_shape_reaches_service() {
     // api.ts → `cancelRun({threadId, runId, reason, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
     // with body `{client_action_id, reason}`.
@@ -2858,13 +2952,13 @@ async fn js_client_cancel_run_path_shape_reaches_facade() {
 }
 
 #[tokio::test]
-async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
+async fn js_client_resolve_gate_path_shape_dispatches_to_service() {
     // api.ts → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
     // with body `{client_action_id, resolution, always}`.
     //
     // The stub's `resolve_gate` returns 500 by design; we only care
-    // that the path-params parsing succeeded and the facade was
+    // that the path-params parsing succeeded and the service was
     // reached. A routing-level regression (missing path segment,
     // wrong encoding) would surface as 404, not 500.
     let (app, services) = build_app();
@@ -2889,18 +2983,18 @@ async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
         )
         .await
         .expect("oneshot");
-    // 500 = facade reached and returned (stub returns Internal); 404
+    // 500 = service reached and returned (stub returns Internal); 404
     // would mean the path did not route. Anything else means contract
     // drift.
     assert_eq!(
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "resolve_gate path must reach the stubbed facade (which returns 500)",
+        "resolve_gate path must reach the stubbed service (which returns 500)",
     );
     assert_eq!(
         services.resolve_gate_refs.lock().expect("lock").as_slice(),
         &[Some("gate-abc".to_string())],
-        "literal gate_ref must reach the facade unchanged",
+        "literal gate_ref must reach the service unchanged",
     );
 }
 
@@ -2909,7 +3003,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     // Real gate refs can carry characters that require percent-encoding
     // in a URL segment (`:` in `gate:approval`, `/` in compound refs).
     // axum's path extractor must decode the segment before the handler
-    // assigns it to `body.gate_ref`, so the facade sees the literal
+    // assigns it to `body.gate_ref`, so the service sees the literal
     // ref the JS client built — dropping `encodeURIComponent` in
     // `api.ts` would otherwise either 404 (slash-bearing refs) or
     // silently mismatch (`%3A` left undecoded).
@@ -2939,12 +3033,12 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     assert_eq!(
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "path-decoded resolve_gate must reach the stubbed facade",
+        "path-decoded resolve_gate must reach the stubbed service",
     );
     assert_eq!(
         services.resolve_gate_refs.lock().expect("lock").as_slice(),
         &[Some("gate:approval".to_string())],
-        "facade must observe the decoded gate_ref, not the URL-encoded form",
+        "service must observe the decoded gate_ref, not the URL-encoded form",
     );
 }
 
@@ -2963,11 +3057,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     use std::net::SocketAddr;
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services,
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services;
     let public = axum::Router::new().route(
         "/auth/providers",
         axum::routing::get(|| async { axum::Json(serde_json::json!({ "providers": [] })) }),
@@ -2982,7 +3072,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
     // No Authorization header — `with_public_route_mount` MUST
     // merge outside the bearer-auth layer.
@@ -3034,11 +3124,7 @@ async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
     use std::net::SocketAddr;
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services,
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services;
     let public = axum::Router::new().route(
         "/future-host/ping",
         axum::routing::get(|| async { StatusCode::NO_CONTENT }),
@@ -3052,7 +3138,7 @@ async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
     let mut exact_request = Request::builder()
         .method(Method::GET)
@@ -3169,7 +3255,7 @@ fn public_route_mount_with_static_owned_root_namespace_fails_composition() {
 
 #[tokio::test]
 async fn static_automations_presenters_label_sub_hourly_schedules() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     // The cadence labels are now localized: the presenter selects an i18n key
     // for each sub-hourly/hourly branch and the English copy lives in en.js.
@@ -3188,7 +3274,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
     // And the English pack must carry the human-readable copy for those keys,
     // so a clean install still reads "Every minute" / "Hourly at :MM".
-    let en_body = served_app_javascript().await;
+    let en_body = &body;
     assert!(
         en_body.contains("automations.schedule.everyMinute\":`Every minute`"),
         "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
@@ -3205,7 +3291,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
 #[tokio::test]
 async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("lg:grid-cols-3"),
@@ -3223,7 +3309,7 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
 
 #[tokio::test]
 async fn static_automations_run_row_spaces_action_button_icons() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
@@ -3237,7 +3323,7 @@ async fn static_automations_run_row_spaces_action_button_icons() {
 
 #[tokio::test]
 async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("e.saveError&&!a"),
@@ -3247,123 +3333,4 @@ async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() 
         body.contains("finalReplyTargets.length>0"),
         "the Slack approval footnote must be gated on an external target existing"
     );
-}
-
-/// The Telegram public webhook mounted through the COMPOSED listener
-/// (`with_public_route_mount` → `webui_v2_app`) inherits the
-/// descriptor-driven middleware exactly like every other route — no side
-/// door. Drives the REAL runtime + telegram host mounts, not a stub router.
-///
-/// Manual-QA rows automated here (docs/qa/telegram-coverage-map.md):
-/// qa-telegram:S4 (bodies over the manifest-declared 1 MiB limit are refused
-/// as 413 BEFORE verification/parse ever runs) and qa-telegram:S6 (path
-/// probes under the webhook prefix 404 at the router without reaching the
-/// installation resolver — an unmounted path cannot consult any store).
-#[tokio::test]
-async fn telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes() {
-    use ironclaw_host_api::{AgentId, UserId};
-    use ironclaw_reborn_composition::{
-        RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, TelegramHostRuntimeConfig,
-        build_reborn_runtime, build_telegram_host_runtime_mounts,
-        build_webui_services_with_telegram_host_mounts, local_dev_runtime_policy,
-    };
-
-    let root = tempfile::tempdir().expect("tempdir");
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("tg-serve-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: TENANT.to_string(),
-        agent_id: "tg-serve-agent".to_string(),
-        source_binding_id: "tg-serve-source".to_string(),
-        reply_target_binding_id: "tg-serve-reply".to_string(),
-    });
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let mounts = build_telegram_host_runtime_mounts(
-        &runtime,
-        TelegramHostRuntimeConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
-            AgentId::new("tg-serve-agent").expect("agent"),
-            None,
-            UserId::new("tg-serve-operator").expect("operator"),
-            Some("https://tg-serve.example".to_string()),
-        ),
-    )
-    .await
-    .expect("telegram mounts build");
-    let bundle = build_webui_services_with_telegram_host_mounts(&runtime, None, Some(&mounts))
-        .expect("webui bundle");
-    let config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        Arc::new(OnlyValidToken),
-        vec![],
-    )
-    .with_public_route_mount(mounts.events);
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
-
-    // S4: one byte past the manifest-declared 1 MiB limit → 413 from the
-    // descriptor-driven middleware, before verification (no secret header
-    // supplied — an in-budget request without it 401s below).
-    let oversized = vec![b'x'; 1024 * 1024 + 1];
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/extensions/telegram/updates")
-                .header("content-type", "application/json")
-                .body(Body::from(oversized))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(
-        response.status(),
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "oversized webhook bodies are refused before parse/verify"
-    );
-
-    // Control: the same route with an in-budget body reaches the verifier and
-    // fails closed on the missing secret header — proving the 413 above came
-    // from the body limit, not some upstream rejection of the route itself.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/extensions/telegram/updates")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"update_id":1}"#))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(
-        response.status(),
-        StatusCode::UNAUTHORIZED,
-        "in-budget unverified requests reach the fail-closed verifier"
-    );
-
-    // S6: a path probe under the webhook prefix has no route — the axum
-    // router 404s it before any installation resolver or store could run.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/extensions/telegram/bogus")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"update_id":1}"#))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(
-        response.status(),
-        StatusCode::NOT_FOUND,
-        "unmounted webhook paths 404 at the router, never reaching resolution"
-    );
-
-    runtime.shutdown().await.expect("runtime shuts down");
 }

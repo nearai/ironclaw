@@ -37,7 +37,10 @@ Storybook is organized:
   Tailwind classes bound to CSS custom properties.
 - **Tokens, not values.** Colors, radii, control heights, spacing, type
   sizes, shadows, durations, z-layers — all `--v2-*` custom properties.
-  Components never restate a raw value.
+  Components consume tokens instead of restating raw values: CI enforces
+  this for color via the token ratchet
+  (`scripts/check-design-tokens.mjs`); the other scales are held by
+  convention and review.
 
 ## Installing it
 

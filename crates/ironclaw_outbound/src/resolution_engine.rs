@@ -72,8 +72,13 @@ impl<'a> OutboundResolutionEngine<'a> {
             RunNotificationOrigin::LiveSourceRoute { source_route } => {
                 source_route.reply_target_binding_ref.clone()
             }
+            RunNotificationOrigin::RunScopedTarget { target } => target.clone(),
             RunNotificationOrigin::Triggered { .. } => {
                 self.resolve_triggered_target(scope, actor, kind).await?
+            }
+            RunNotificationOrigin::TriggeredWithTarget { target, .. } => {
+                self.resolve_triggered_explicit_target(kind, target, scope, actor)
+                    .await?
             }
             RunNotificationOrigin::TriggeredFromSourceRoute { source_route, .. } => {
                 self.resolve_triggered_from_source_route_target(
@@ -101,6 +106,17 @@ impl<'a> OutboundResolutionEngine<'a> {
         scope: &ironclaw_turns::TurnScope,
         actor: &ironclaw_turns::TurnActor,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
+        self.resolve_triggered_explicit_target(kind, source_route_target, scope, actor)
+            .await
+    }
+
+    async fn resolve_triggered_explicit_target(
+        &self,
+        kind: CommunicationDeliveryKind,
+        ordinary_notification_target: &ReplyTargetBindingRef,
+        scope: &ironclaw_turns::TurnScope,
+        actor: &ironclaw_turns::TurnActor,
+    ) -> Result<ReplyTargetBindingRef, OutboundError> {
         match kind {
             CommunicationDeliveryKind::ApprovalPrompt => {
                 self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
@@ -112,7 +128,7 @@ impl<'a> OutboundResolutionEngine<'a> {
             }
             CommunicationDeliveryKind::FinalReply
             | CommunicationDeliveryKind::ProgressUpdate
-            | CommunicationDeliveryKind::DeliveryStatus => Ok(source_route_target.clone()),
+            | CommunicationDeliveryKind::DeliveryStatus => Ok(ordinary_notification_target.clone()),
         }
     }
 
@@ -683,6 +699,51 @@ mod tests {
 
         assert_eq!(candidate.target, reply_ref("reply:owner-default"));
         assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+    }
+
+    #[tokio::test]
+    async fn triggered_with_target_routes_ordinary_result_without_global_preference() {
+        let store = in_memory_backed_outbound_state_store();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::FinalReplyReady,
+            RunNotificationOrigin::TriggeredWithTarget {
+                trigger: trigger_context(),
+                target: reply_ref("reply:per-trigger"),
+            },
+            "reply:per-trigger",
+            CommunicationDeliveryKind::FinalReply,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_with_target_does_not_select_authority_prompt_destination() {
+        let store = in_memory_backed_outbound_state_store();
+        let engine = OutboundResolutionEngine::new(&store);
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None,
+                Some("reply:approval"),
+                None,
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::TriggeredWithTarget {
+                trigger: trigger_context(),
+                target: reply_ref("reply:per-trigger"),
+            },
+            "reply:approval",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
     }
 
     #[tokio::test]

@@ -449,7 +449,7 @@ mod tests {
             .map(|name| {
                 format!(
                     r#"
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.{name}"
 description = "{name}"
 effects = ["network"]
@@ -473,6 +473,12 @@ trust = "third_party"
 [runtime]
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
 {capability_blocks}
 "#
         );
@@ -480,6 +486,7 @@ module = "wasm/{extension_id}.wasm"
             &manifest,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         ExtensionPackage::from_manifest(
@@ -487,6 +494,16 @@ module = "wasm/{extension_id}.wasm"
             VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
         )
         .expect("package builds")
+    }
+
+    fn capability_provider_contracts() -> crate::HostApiContractRegistry {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
     }
 
     fn extension_id(value: &str) -> ExtensionId {

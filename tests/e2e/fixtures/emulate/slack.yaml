@@ -43,6 +43,7 @@ slack:
         - files:write
         - reactions:read
         - reactions:write
+        - search:read
     - token: emulate-slack-limited-token
       user: qa-reviewer
       scopes:

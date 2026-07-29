@@ -47,6 +47,7 @@ import {
 } from "../lib/connection-status";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
 import { failureMessageForRequestError } from "../lib/failureMessages";
+import { useT } from "../../../lib/i18n";
 import { useHistory } from "./useHistory";
 import { useSSE } from "./useSSE";
 
@@ -119,6 +120,7 @@ function isPendingOAuthGate(gate) {
 //   a v1-style `requestId`.
 // - cancelRun is a first-class action and posts to the v2 cancel route.
 export function useChat(threadId) {
+  const t = useT();
   const threadIdRef = React.useRef(threadId);
   const pendingMessagesRef = React.useRef(new Map());
   const pendingSeqRef = React.useRef(1);
@@ -134,13 +136,14 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
-  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
-  // the ref current for back-to-back synchronous reads inside event handlers;
-  // this effect additionally covers paths that set the state directly — the
-  // per-thread reset below uses the raw setter so render stays side-effect
-  // free (no ref mutation during render, which a concurrent render could
-  // discard without rolling back).
-  React.useEffect(() => {
+  // Mirror committed activeRun into the ref before asynchronous continuations
+  // can observe the commit. The setActiveRun wrapper keeps the ref current for
+  // back-to-back synchronous reads inside event handlers; this layout effect
+  // additionally covers paths that set the state directly — the per-thread
+  // reset below uses the raw setter so render stays side-effect free (no ref
+  // mutation during render, which a concurrent render could discard without
+  // rolling back).
+  React.useLayoutEffect(() => {
     activeRunRef.current = activeRun;
   }, [activeRun]);
   const getPendingMessages = React.useCallback(
@@ -202,17 +205,12 @@ export function useChat(threadId) {
     messages,
     messagesThreadId,
     pendingGate,
-    pendingGateRef,
-    setPendingGate,
-    setIsProcessing,
     sendRef,
   });
   const {
     pendingOnboarding,
     pendingOnboardingRef,
     setPendingOnboardingState,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = channelOnboarding;
@@ -265,7 +263,10 @@ export function useChat(threadId) {
     setActiveRunState(null);
   }
 
-  React.useEffect(() => {
+  // A cancellation acknowledgement can resume in a microtask immediately
+  // after this thread commits. Update the identity fence in the layout phase
+  // so it cannot still identify the previously committed thread.
+  React.useLayoutEffect(() => {
     threadIdRef.current = threadId;
   }, [threadId]);
   React.useEffect(
@@ -409,6 +410,7 @@ export function useChat(threadId) {
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
     onStreamError: handleStreamError,
+    t,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -474,21 +476,21 @@ export function useChat(threadId) {
     }
     setMessages((prev) =>
       upsertConnectionLostRunFailure(
-        runId ? rewriteConnectionLostRunFailures(prev, { runId }) : prev,
-        { runId },
+        runId ? rewriteConnectionLostRunFailures(prev, { runId, t }) : prev,
+        { runId, t },
       ),
     );
-  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId]);
+  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId, t]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.ts`
-  // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
+  // (`stageFiles`); we split them into the `ProductInboundAttachment` wire
   // shape for the send and the render shape for the optimistic bubble so
   // cards/thumbnails appear immediately, matching what the timeline
   // projection returns after the run.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
-  // facade refuses to implicitly create a missing thread. When the
+  // service refuses to implicitly create a missing thread. When the
   // caller is on the landing screen (no active thread yet), we
   // eagerly POST `/threads` first and use the returned id. The
   // returned response carries `thread_id` so the chat.tsx navigation
@@ -564,6 +566,7 @@ export function useChat(threadId) {
           appendRequestFailureMessage(setMessages, {
             id: requestFailureIdForMessage(`create-${pendingSeqRef.current++}`),
             error: err,
+            t,
           });
           throw err;
         }
@@ -654,7 +657,10 @@ export function useChat(threadId) {
           if (connectionInterruptedUnknownRef.current) {
             noteConnectionInterruptedRunId(response.run_id);
             setMessages((prev) =>
-              rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
+              rewriteConnectionLostRunFailures(prev, {
+                runId: response.run_id,
+                t,
+              }),
             );
           }
           if (streamErrorClosedAdmission) {
@@ -776,7 +782,7 @@ export function useChat(threadId) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
-        const failureContent = failureMessageForRequestError(err);
+        const failureContent = failureMessageForRequestError(err, t);
         // Mark the optimistic user bubble as retryable and append a separate
         // assistant-side error bubble. Apply each updater to both stores because
         // the rendered current thread and seeded target thread are distinct caches.
@@ -834,6 +840,7 @@ export function useChat(threadId) {
       setPendingGate,
       setActiveRun,
       noteConnectionInterruptedRunId,
+      t,
     ],
   );
   sendRef.current = send;
@@ -967,6 +974,18 @@ export function useChat(threadId) {
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
+      await cancelRunRequest({ threadId, runId, reason });
+      // The cancellation acknowledgement is the authority for clearing local
+      // run state. A failed request may leave the backend run executing, so
+      // keep the stop control and processing state visible for a retry. The
+      // run/thread check also prevents a late acknowledgement from clearing a
+      // newer run or state restored after navigation.
+      if (
+        activeRunRef.current?.runId !== runId ||
+        threadIdRef.current !== threadId
+      ) {
+        return;
+      }
       setPendingGate(null);
       // Cancelling abandons any pairing panel for this thread: forget its waiter
       // and remember the dismissal so a later channel connect can't blast a
@@ -986,7 +1005,6 @@ export function useChat(threadId) {
       }
       connectionInterruptedRunIdsRef.current.delete(runId);
       connectionInterruptedUnknownRef.current = false;
-      await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId, dismissOnboardingPairing],
   );
@@ -1004,8 +1022,7 @@ export function useChat(threadId) {
     async (_requestId, action, _kind) => {
       let resolution = "approved";
       let always = false;
-      if (action === "deny") resolution = "denied";
-      else if (action === "cancel") resolution = "cancelled";
+      if (action === "deny" || action === "cancel") resolution = "declined";
       else if (action === "always") {
         resolution = "approved";
         always = true;
@@ -1090,8 +1107,6 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
     cancelRun,
@@ -1107,7 +1122,7 @@ export function useChat(threadId) {
 }
 
 function isDeclinedGateResolution(resolution) {
-  return resolution === "denied" || resolution === "cancelled";
+  return resolution === "declined";
 }
 
 function retryAfterMs(err) {
@@ -1117,10 +1132,10 @@ function retryAfterMs(err) {
   return 2000;
 }
 
-function requestFailureMessageForError(messageId, error) {
+function requestFailureMessageForError(messageId, error, t) {
   return requestFailureMessageForContent(
     messageId,
-    failureMessageForRequestError(error),
+    failureMessageForRequestError(error, t),
   );
 }
 
@@ -1132,8 +1147,8 @@ function requestFailureMessageForContent(messageId, content) {
   });
 }
 
-function appendRequestFailureMessage(setMessages, { id, error }) {
-  const content = failureMessageForRequestError(error);
+function appendRequestFailureMessage(setMessages, { id, error, t }) {
+  const content = failureMessageForRequestError(error, t);
   setMessages((prev) => [
     ...prev,
     createErrorChatMessage({

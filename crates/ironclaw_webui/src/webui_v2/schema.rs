@@ -5,7 +5,7 @@
 //! metadata such as installation ids, reply binding refs, external conversation
 //! refs, or delivery attempt ids.
 
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     AuthPromptView, CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView,
     GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse,

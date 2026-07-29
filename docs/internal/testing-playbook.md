@@ -295,7 +295,7 @@ and replay tests run hermetically in CI.
 
 ```bash
 scripts/ci/check-reborn-qa-fixtures.sh
-cargo test --test reborn_qa_recorded_behavior --features libsql
+cargo test --test reborn_qa_recorded_behavior
 ```
 
 ### Browser E2E
@@ -455,3 +455,77 @@ layer is omitted, explain why in one sentence.
 - Use browser tests only when browser behavior matters.
 - Live canaries supplement deterministic tests; they never replace them.
 - Extend an existing test when it already covers the same workflow.
+
+## Provider capability coverage is counted per outcome, not per capability
+
+A capability with one passing happy-path case is not covered. The gate in
+`tests/e2e/scenarios/test_provider_capability_inventory.py` counts
+*capability x outcome class* and enforces two rules, both derived from the
+shipped manifests rather than a hand-maintained list:
+
+| Operation kind | Required evidence |
+|----------------|-------------------|
+| `external_write` | A `ProviderOperationCase` with provider-side readback, an `integration_evidence` entry, or a `journey_evidence` entry naming the exact test **and** its readback assertion helper. |
+| read | A `ProviderOperationCase` with `outcome_class = "success"` **and** one with `outcome_class = "empty"`. |
+
+The read/write split comes from each tool's `effects` in
+`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`
+(`external_write`), so shipping a new tool classifies it automatically.
+
+**A harvested tool-call name is not evidence for a write.** A recorded model
+response naming `slack__send_message` proves the model chose the tool. It says
+nothing about whether the provider committed the effect, so it cannot stand in
+for a readback. That distinction is the whole point of the rule — before it
+existed, eight write capabilities were classified `tested` on the strength of a
+recorded tool-call name, and auditing them found two (`google-sheets.write_values`
+and `google-sheets.rename_sheet`) whose only journey issues them alongside
+`append_values` against one spreadsheet, so nothing isolates either.
+
+`outcome_class` covers only the per-operation *semantic* outcomes. Status and
+transport failures belong to the fault profiles below — do not duplicate them
+here.
+
+Anything not yet meeting the rules goes in `coverage_backlog` in
+`tests/e2e/fixtures/provider_capability_coverage.toml` with an owner, reason,
+issue, and review condition. It is a ratchet: the gate fails when a backlog
+entry names a capability that has since been covered, so entries must be
+deleted as work lands.
+
+## Provider fault profiles
+
+Use `tests/e2e/provider_fault_proxy.py` when a provider operation must cross
+the real Reborn extension and network path while Emulate retains authoritative
+provider state. The proxy supplies reusable HTTP, malformed-response, timeout,
+connection-reset, and lost-acknowledgement profiles. Its ledger records only
+request metadata, body digests, and credential fingerprints.
+
+Apply profiles by operation equivalence class instead of multiplying every
+provider operation by every failure. A representative read, idempotent write,
+and non-idempotent write must assert the model-visible result, proxy attempt
+count, whether the provider received the request, and direct provider
+readback. A lost-acknowledgement test must prove the provider committed while
+the runtime did not report success, and must prove that no blind duplicate
+request occurred.
+
+Keep missing credentials, credential refresh, and account-scope behavior at
+their existing auth/runtime seams when a provider proxy cannot create the
+condition faithfully. Fault state must be reset independently from provider
+state after every case.
+
+## Whole-path journey inventory
+
+Use `tests/e2e/journey_types.py` and `tests/e2e/journey_cases.py` to register
+representative compositions across ingress, execution, provider state, and
+delivery. A `JourneyCase` is evidence metadata, not a workflow DSL: execution
+logic, provider setup, and readback remain in their owning test modules.
+
+Each case names its trace when it has one, isolated provider worlds, ingress,
+execution lane, delivery target, observable assertions, and an exact Pytest or
+Cargo test declaration. `test_journey_coverage.py` verifies that the evidence
+still exists and is executable. It also derives inbound and outbound channel
+surfaces from shipped first-party manifests, so adding a production channel
+without representative journey evidence fails CI.
+
+Prefer one representative whole-path case per supported ingress and delivery
+mechanism. Do not multiply every provider operation by every ingress or move
+provider-specific assertions into the generic registry.

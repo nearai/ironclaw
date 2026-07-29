@@ -50,12 +50,11 @@
 // does not exercise every variant.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_llm::testing::provider_chain_over;
@@ -65,17 +64,18 @@ use ironclaw_loop_host::{
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
-use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+use ironclaw_product::ProductTriggerReason;
+use ironclaw_product::{
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
+use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
-use ironclaw_reborn_composition::test_support::SlackChannelConnectionTestBundle;
+use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryResourceGovernor,
+    BudgetEventSink, BudgetGateStorePort, InMemoryBudgetEventSink, InMemoryResourceGovernor,
     ResourceAccount, ResourceGovernor,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
@@ -89,11 +89,10 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_runner::subagent::{
     await_edge::{
-        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-        store::FilesystemAwaitEdgeStore,
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
-    goal_store::InMemoryBoundedSubagentGoalStore,
+    goal_store::in_memory_backed_subagent_goal_store,
 };
 use ironclaw_runner::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_threads::SessionThreadService;
@@ -102,8 +101,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateRowStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
-    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
+    InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
+    TurnStateRowStore, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -120,14 +119,15 @@ use super::harness::{
 use super::planned_runtime_parts_shape::{
     DefaultPlannedRuntimePartsShape, harness_planned_runtime_parts_shape,
 };
-use super::product_workflow::RebornProductWorkflowHarness;
+use super::product_surface::RebornProductSurfaceHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
+    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
-use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
 
 /// Per-capability preset constructors layered on `build_base`/`into_group`
@@ -165,25 +165,26 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 pub(crate) struct GroupSharedStorage {
     /// Thread history + turn state composite, shared across all threads.
     pub(crate) composite: Arc<CompositeRootFilesystem>,
-    /// Path to the on-disk SQLite file for `StorageMode::LibSql`; `None` for
-    /// `StorageMode::InMemory`. Used by `assert_reply_persists_after_reopen`.
-    pub(crate) libsql_db_path: Option<PathBuf>,
+    /// Fresh-connection reopen handle per storage mode (SQLite file path /
+    /// Postgres URL + live container). Used by
+    /// `assert_reply_persists_after_reopen`.
+    pub(crate) storage_reopen: super::builder::StorageReopen,
     /// Durable root TempDir: keeps the composite's on-disk files alive for
     /// the group's lifetime. `Drop` deletes the directory (req 3).
     pub(crate) turn_root: Arc<tempfile::TempDir>,
     /// Product-workflow harness (binding service + idempotency ledger).
     /// Shared so all threads resolve bindings within the same product context.
     /// `product_harness.scope` is the single-source `ResourceScope` (R5).
-    pub(crate) product_harness: RebornProductWorkflowHarness,
+    pub(crate) product_harness: RebornProductSurfaceHarness,
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
-    /// C-SLACK-LIFECYCLE (issue #6105): the REAL Slack channel-connection
-    /// facade + OAuth-callback-shaped connect handles, built over the
-    /// capability harness's own `RebornServices` (same durable host state,
-    /// same late-bound cleanup slot `extension_remove` dispatches to).
+    /// C-SLACK-LIFECYCLE (issue #6105): the REAL generic channel-connection
+    /// service + OAuth-callback-shaped connect handles, built over the
+    /// capability harness's own `RebornServices` (same durable stores, same
+    /// late-bound cleanup slot `extension_remove` dispatches to).
     /// `Some` only for `extension_lifecycle()` groups.
-    pub(crate) slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
+    pub(crate) channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
     /// The group's single shared `TurnCoordinator`, over the ONE planned
     /// runtime built once at group construction (Option P: one
     /// scheduler/coordinator/executor over the shared turn-run queue, exactly
@@ -203,9 +204,9 @@ pub(crate) struct GroupSharedStorage {
     /// model hot path.
     pub(crate) scope_gateway: Arc<ScopeRegistryGateway>,
     /// The group's single shared turn-state store. All threads share one
-    /// `FilesystemTurnStateRowStore` (isolation is by `run_id`, not by path —
+    /// `TurnStateRowStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
-    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
     /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
     /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
     /// rebuild the identical scoped path independently, instead of
@@ -276,7 +277,9 @@ impl GroupSharedStorage {
                 scope.user_id = arc.user_id().clone();
                 Some(scope)
             }
-            GroupCapability::Recording => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -295,7 +298,9 @@ impl GroupSharedStorage {
                 scope.user_id = owner.clone();
                 Some(scope)
             }
-            GroupCapability::Recording => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 }
@@ -305,12 +310,18 @@ impl GroupSharedStorage {
 // ---------------------------------------------------------------------------
 
 /// Shared capability backend for a group. Groups always use `HostRuntime`
-/// (sharing the approval/memory/credential stores across threads). `Recording`
-/// is the single-shot echo path for text-only turns.
+/// (sharing the approval/memory/credential stores across threads). The
+/// recording variants are single-shot echo paths for text-only turns.
 pub(crate) enum GroupCapability {
     /// Echo recorder — records invocations, executes nothing. Default for a
     /// text-only single-shot harness; no stores to share.
     Recording,
+    /// Recording echo whose results deliberately report `NoChange`.
+    RecordingNoProgress,
+    /// Recording echo whose port returns a caller-shaped `InvalidInvocation`
+    /// error instead of a resolution, projecting to `FailureKind::InputEncode`
+    /// (#6284 capability-stage contract).
+    RecordingRecoverablePortError,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
     /// `Arc` is cloned per thread.
@@ -320,32 +331,42 @@ pub(crate) enum GroupCapability {
 impl GroupCapability {
     /// Return a fresh `HarnessCapabilityMode` for one thread.
     ///
-    /// `Recording` creates a fresh echo port each call (ports are consumed by
-    /// `into_parts`). `HostRuntime` clones the `Arc` — N threads share the
-    /// same underlying harness and all its stores.
+    /// Recording variants create a fresh echo port each call (ports are
+    /// consumed by `into_parts`). `HostRuntime` clones the `Arc` — N threads
+    /// share the same underlying harness and all its stores.
     pub(crate) fn mode(&self) -> HarnessCapabilityMode {
         match self {
             Self::Recording => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
+            Self::RecordingNoProgress => {
+                HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::no_progress())
+            }
+            Self::RecordingRecoverablePortError => HarnessCapabilityMode::Recording(
+                RecordingTestCapabilityPort::recoverable_port_error(),
+            ),
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
     }
 
     /// The durable gate-record store this backend's capability port persists
     /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
-    /// re-read an auth block's `credential_requirements` from. `None` only for
-    /// the `Recording` (echo) backend; the host-runtime backend always resolves
-    /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
-    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+    /// re-read an auth block's `credential_requirements` from. Recording
+    /// backends return `None`; the host-runtime backend always resolves a store
+    /// (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
+    pub(crate) fn gate_record_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
-            Self::Recording => None,
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
         }
     }
 
     /// E-DURABLE core: assert `extension_id` is present in a FRESHLY reopened
-    /// `ExtensionInstallationStore` at this backend's on-disk `storage_root`
+    /// `ExtensionInstallationStorePort` at this backend's on-disk `storage_root`
     /// (a handle independent of the live `Arc`) — proving the install
     /// persisted to disk, not just to in-memory state. One implementation
     /// behind both the harness- and group-level
@@ -357,7 +378,7 @@ impl GroupCapability {
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
-            Self::Recording => {
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 return Err("no host-runtime capability backend for durable reopen".into());
             }
         };
@@ -425,10 +446,13 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
+            planned_default_iteration_limit: None,
             real_gate_dispatch_services: false,
-            slack_channel_connection: None,
+            channel_connection: None,
+            bound_memory: None,
         }
     }
 
@@ -440,11 +464,11 @@ impl RebornIntegrationGroup {
         self.shared.trace_capture_scope.as_deref()
     }
 
-    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the real generic channel-connection
     /// bundle for this group. `Some` only for [`Self::extension_lifecycle`]
     /// groups.
-    pub fn slack_channel_connection(&self) -> Option<Arc<SlackChannelConnectionTestBundle>> {
-        self.shared.slack_channel_connection.clone()
+    pub fn channel_connection(&self) -> Option<Arc<ChannelConnectionTestBundle>> {
+        self.shared.channel_connection.clone()
     }
 
     /// The group-canonical binding's ACTOR user id — the identity capability
@@ -453,6 +477,67 @@ impl RebornIntegrationGroup {
     /// the caller identity extension-removal channel cleanup disconnects.
     pub fn canonical_actor_user(&self) -> UserId {
         self.shared.canonical_binding.actor_user_id.clone()
+    }
+
+    /// Register a hermetic external delivery target on the exact local
+    /// outbound registry `builtin.trigger_create` consults. Scenarios pass the
+    /// host-sealed reply binding read from an already-submitted source run;
+    /// no model-authored id participates in this setup.
+    pub fn register_source_delivery_target_for_test(
+        &self,
+        provider_key: &str,
+        target_id: &str,
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef,
+    ) -> HarnessResult<()> {
+        let GroupCapability::HostRuntime(harness) = &self.shared.capability else {
+            return Err("source delivery target requires a host-runtime capability backend".into());
+        };
+        let runtime = harness
+            .reborn_services_for_test()
+            .ok_or("source delivery target requires composed Reborn runtime")?;
+        let target_id = ironclaw_product::RebornOutboundDeliveryTargetId::new(target_id)?;
+        let display_name = target_id.as_str().to_string();
+        runtime.register_static_outbound_delivery_target_for_test(
+            provider_key,
+            target_id,
+            provider_key,
+            display_name.as_str(),
+            None,
+            reply_target_binding_ref,
+        )?;
+        Ok(())
+    }
+
+    /// Register the same real scripted provider chain used by ordinary group
+    /// threads for a caller scope materialized from a channel adapter. This
+    /// lets channel-origin whole-path tests execute model tool calls on the
+    /// exact admitted run instead of pre-writing the side effect under test.
+    pub async fn register_scope_script_for_test(
+        &self,
+        scope: TurnScope,
+        session_label: &str,
+        replies: impl IntoIterator<Item = RebornScriptedReply>,
+    ) -> HarnessResult<Arc<TraceLlm>> {
+        let scripted_llm = Arc::new(scripted_trace_llm(replies));
+        let raw: Arc<dyn LlmProvider> = scripted_llm.clone();
+        let session = create_session_manager(SessionConfig {
+            session_path: self
+                .shared
+                .turn_root
+                .path()
+                .join(format!("{session_label}.session.json")),
+            ..SessionConfig::default()
+        })
+        .await;
+        let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        let provider = provider_chain_over(raw, &llm_config, session).await?;
+        let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
+            .map_err(|reason| format!("invalid model profile id: {reason}"))?;
+        let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+        let gateway: Arc<dyn HostManagedModelGateway> =
+            Arc::new(LlmProviderModelGateway::new(provider, policy));
+        self.shared.scope_gateway.register(scope, gateway);
+        Ok(scripted_llm)
     }
 
     /// Create a per-thread *workflow* builder for `conversation_id`, over the
@@ -492,7 +577,9 @@ impl RebornIntegrationGroup {
     pub fn capability_harness(&self) -> Option<&Arc<HostRuntimeCapabilityHarness>> {
         match &self.shared.capability {
             GroupCapability::HostRuntime(arc) => Some(arc),
-            GroupCapability::Recording => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -519,7 +606,7 @@ impl RebornIntegrationGroup {
 
     /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
     /// owner's `(tenant, user)` scope over the shared CAS-persisted
-    /// `AutoApproveSettingStore`. In a `multiuser_approvals` group (built with
+    /// `AutoApproveSettingStorePort`. In a `multiuser_approvals` group (built with
     /// `with_run_owner_scoped_capability_dispatch`), a turn OWNED by `owner`
     /// then dispatches its capability without raising an approval gate, while
     /// any OTHER owner's identical call still gates — the per-actor isolation
@@ -536,7 +623,7 @@ impl RebornIntegrationGroup {
     }
 
     /// C-MULTIUSER: set a SPECIFIC run owner's always-allow OFF over the shared
-    /// `AutoApproveSettingStore`. Auto-approve defaults ON when a user has no
+    /// `AutoApproveSettingStorePort`. Auto-approve defaults ON when a user has no
     /// record (`AUTO_APPROVE_DEFAULT_ENABLED = true`, production), so a per-actor
     /// isolation test that needs owner B to still GATE must give B its own
     /// explicit OFF setting — exactly as `live_approvals` disables its dispatch
@@ -568,7 +655,7 @@ impl RebornIntegrationGroup {
 
 /// Shared base data produced by [`RebornIntegrationGroupBuilder::build_base`].
 ///
-/// Replaces the 4-tuple `(RebornProductWorkflowHarness, Arc<CompositeRootFilesystem>,
+/// Replaces the 4-tuple `(RebornProductSurfaceHarness, Arc<CompositeRootFilesystem>,
 /// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
 /// position-destructure a tuple.
 ///
@@ -581,9 +668,9 @@ impl RebornIntegrationGroup {
 /// between `build_base` and `into_group`; `build_base`/`into_group` themselves
 /// stay module-private too.
 struct GroupBaseData {
-    product_harness: RebornProductWorkflowHarness,
+    product_harness: RebornProductSurfaceHarness,
     composite: Arc<CompositeRootFilesystem>,
-    libsql_db_path: Option<PathBuf>,
+    storage_reopen: super::builder::StorageReopen,
     turn_root: Arc<tempfile::TempDir>,
     /// A throwaway probe binding resolved once at group construction, used
     /// ONLY to derive the group-level shared turn store path and the
@@ -645,6 +732,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional observer wired into the group's ONE production
+    /// capability-port factory. Default `None`.
+    trajectory_observer: Option<Arc<dyn RebornTrajectoryObserver>>,
     /// Lease-wedge coverage: overrides the turn-state store's
     /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
     /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
@@ -653,17 +743,30 @@ pub struct RebornIntegrationGroupBuilder {
     /// `lease_recovery_interval` (default 10s) when set. Builder method lives
     /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
     lease_recovery_interval_override: Option<Duration>,
+    /// Test-only override for the canonical loop's default iteration limit.
+    planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// When `true`, wire the REAL approval/auth interaction services into
-    /// every thread's `DefaultProductWorkflow` (see
+    /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
     real_gate_dispatch_services: bool,
-    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the real generic channel-connection
     /// bundle built over the capability harness's own `RebornServices`.
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
-    slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
+    channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
+    /// E-MEMORY: a bound memory provider + the lifecycle set its manifest
+    /// declares. When set, `into_group` derives the three memory consumers
+    /// (prompt-context service, after-turn writer, profile source) through
+    /// the PRODUCTION decision helper
+    /// (`ironclaw_reborn_composition::memory_lifecycle_consumers`), so the
+    /// integration tier drives the same lifecycle gating runtime assembly
+    /// wires. Default `None` (no memory consumers, today's behavior).
+    bound_memory: Option<(
+        Arc<dyn ironclaw_memory::MemoryService>,
+        ironclaw_host_api::MemoryDescriptor,
+    )>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -682,9 +785,9 @@ impl RebornIntegrationGroupBuilder {
             "agent-itest",
             Some("project-itest"),
         );
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
+        let product_harness = RebornProductSurfaceHarness::filesystem_temp(scope)?;
         let turn_root = Arc::new(tempfile::tempdir()?);
-        let (composite, libsql_db_path) =
+        let (composite, storage_reopen) =
             build_storage_composite(self.storage, turn_root.path()).await?;
 
         // Resolve the group-canonical binding ONCE here so `into_group` can
@@ -696,8 +799,7 @@ impl RebornIntegrationGroupBuilder {
         // drift. The probe persists one deterministic, inert binding for
         // `conv-canonical-probe` (no thread submits turns against it); group
         // tests assert on cross-thread persistence, not binding counts.
-        let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-itest", "itest-install")?;
         let probe = ingress.verified_text_envelope_with_trigger(
             "group-canonical-probe",
             HARNESS_ACTOR_ID,
@@ -713,7 +815,7 @@ impl RebornIntegrationGroupBuilder {
         Ok(GroupBaseData {
             product_harness,
             composite,
-            libsql_db_path,
+            storage_reopen,
             turn_root,
             canonical_binding,
         })
@@ -741,7 +843,7 @@ impl RebornIntegrationGroupBuilder {
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
-        // public builder method (`ironclaw_turns::filesystem_store`); this only
+        // public builder method (`ironclaw_turns::turn_state_row_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
         // `TurnStateStoreLimits::default()` untouched, byte-identical to
@@ -752,9 +854,8 @@ impl RebornIntegrationGroupBuilder {
         }
         let turns_scoped_fs =
             scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
-        let turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs))
-                .with_limits(turn_state_limits),
+        let turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>> = Arc::new(
+            TurnStateRowStore::new(Arc::clone(&turns_scoped_fs)).with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = in_memory_checkpoint_state_store();
@@ -778,6 +879,7 @@ impl RebornIntegrationGroupBuilder {
             milestone_sink.clone(),
             group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             Arc::clone(&turn_store),
+            self.trajectory_observer.clone(),
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
@@ -806,9 +908,8 @@ impl RebornIntegrationGroupBuilder {
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
         // "one shared handle, never a per-store fixed view" rule.
-        let await_edge_store =
-            Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
-        let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
+        let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
             await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
@@ -900,7 +1001,7 @@ impl RebornIntegrationGroupBuilder {
             let accountant = build_default_budget_accountant(
                 Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
                 Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
-                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStore>,
+                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStorePort>,
                 Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
                 &BudgetDefaults::compiled_defaults(),
             );
@@ -923,6 +1024,33 @@ impl RebornIntegrationGroupBuilder {
         // struct value exists before `build_default_planned_runtime` takes it
         // by value.
         let milestone_sink_for_assertions = Arc::clone(&milestone_sink);
+        // E-MEMORY: derive the memory consumers through the production
+        // decision helper so an undeclared lifecycle hook is never wired here
+        // either — the same gate `build_reborn_runtime` applies.
+        let memory_consumers = self.bound_memory.as_ref().map(|(provider, lifecycle)| {
+            ironclaw_reborn_composition::memory_lifecycle_consumers(
+                Some(Arc::clone(provider)),
+                lifecycle,
+            )
+        });
+        // E-PROFILE / E-MEMORY: resolve ONE effective profile source and wire
+        // the SAME `Arc` into the runtime parts and `GroupSharedStorage` (so
+        // `user_profile_source_for_test()` reads what the runtime uses). A
+        // bound provider's declaration is authoritative, mirroring production
+        // (`runtime.rs`): ProfileRead → the provider-backed adapter; bound
+        // WITHOUT ProfileRead → `EmptyUserProfileSource` — never the group's
+        // local-dev filesystem source, which would fabricate profile reads
+        // production skips. No bound provider → the group default (HostRuntime
+        // mode: local-dev memory filesystem so `profile_set` writes read back;
+        // other backends: Empty).
+        let effective_user_profile_source: Arc<dyn HostUserProfileSource> =
+            match memory_consumers.as_ref() {
+                Some(consumers) => consumers.user_profile_source.clone().unwrap_or_else(|| {
+                    Arc::new(ironclaw_loop_host::EmptyUserProfileSource)
+                        as Arc<dyn HostUserProfileSource>
+                }),
+                None => Arc::clone(&user_profile_source),
+            };
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -968,6 +1096,7 @@ impl RebornIntegrationGroupBuilder {
                 planned_model_availability_retry_attempts: Some(
                     std::num::NonZeroU32::new(1).expect("nonzero"),
                 ),
+                planned_default_iteration_limit: self.planned_default_iteration_limit,
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
@@ -986,12 +1115,22 @@ impl RebornIntegrationGroupBuilder {
             skill_context_source: capability_recorder.skill_context_source(),
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
-            // E-PROFILE: HostRuntime mode backs this with the local-dev memory
-            // filesystem so `profile_set` writes read back; other backends fall
-            // back to `EmptyUserProfileSource`. Built as a local (not inline) so
-            // the SAME `Arc` is also stashed on `GroupSharedStorage` for a
-            // profile-round-trip test to read directly.
-            user_profile_source: Arc::clone(&user_profile_source),
+            // E-PROFILE / E-MEMORY: the ONE effective profile source (also
+            // stashed on `GroupSharedStorage`, so
+            // `user_profile_source_for_test()` reads exactly what the runtime
+            // wires).
+            user_profile_source: Arc::clone(&effective_user_profile_source),
+            // E-MEMORY: derived through the PRODUCTION lifecycle-gating helper
+            // when a bound memory provider is opted in
+            // (`with_bound_memory_provider`); `None` for every other group, so
+            // existing tests are behavior-identical. wiring_parity.rs carries
+            // the explicit divergence for the un-opted default.
+            memory_context_service: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.memory_context_service.clone()),
+            after_turn_memory_writer: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.after_turn_memory_writer.clone()),
             model_policy_guard: None,
             // C-BUDGET: production `build_default_budget_accountant` (Some only
             // for `budget_accounting()` groups; `None` otherwise, so all existing
@@ -1026,7 +1165,7 @@ impl RebornIntegrationGroupBuilder {
         Ok(RebornIntegrationGroup {
             shared: Arc::new(GroupSharedStorage {
                 composite: base.composite,
-                libsql_db_path: base.libsql_db_path,
+                storage_reopen: base.storage_reopen,
                 turn_root: base.turn_root,
                 product_harness: base.product_harness,
                 capability,
@@ -1036,7 +1175,7 @@ impl RebornIntegrationGroupBuilder {
                 turn_store,
                 canonical_binding: base.canonical_binding,
                 capability_recorder,
-                user_profile_source,
+                user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
@@ -1045,7 +1184,7 @@ impl RebornIntegrationGroupBuilder {
                 budget_account,
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
-                slack_channel_connection: self.slack_channel_connection,
+                channel_connection: self.channel_connection,
             }),
         })
     }
@@ -1112,23 +1251,26 @@ pub struct RebornThreadBuilder<'g> {
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
-/// parked-until-released, or unconditional failure. One enum instead of an
-/// `Option<ParkingModelGate>` + `bool` pair (mirrors `ShellMode` in
-/// `builder.rs`) so the three modes are mutually exclusive BY CONSTRUCTION —
+/// parked-until-released, bounded recoverable failure, or unconditional
+/// failure. One enum instead of an `Option<ParkingModelGate>` + `bool` pair
+/// (mirrors `ShellMode` in `builder.rs`) so the four modes are mutually exclusive BY CONSTRUCTION —
 /// no tuple-priority rule needed at the dispatch site, and no state can
 /// silently ask for "parked AND failing" at once.
 #[derive(Default)]
-enum ThreadModelMode {
+pub(crate) enum ThreadModelMode {
     /// Normal scripted playback (the default).
     #[default]
     Normal,
     /// This thread's model call parks until the gate is released (E-GATEWAY
     /// seam), enabling a mid-turn cancel test.
     Parked(ParkingModelGate),
+    /// Reports a recoverable provider failure a bounded number of times, then
+    /// resumes normal scripted playback.
+    Recoverable(RecoverableModelFailureScript),
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
-    Failing,
+    Failing(ErrLlmKind),
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -1139,21 +1281,16 @@ impl<'g> RebornThreadBuilder<'g> {
         self
     }
 
+    pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
+        self.model_mode = mode;
+        self
+    }
+
     /// Park this thread's model call until `gate` is released (E-GATEWAY seam).
     /// The parking provider sits at the same vendor-SDK seam as the scripted
     /// provider, so the real decorator chain still runs on top.
-    pub fn park_model(self, gate: ParkingModelGate) -> Self {
-        self.park_model_opt(Some(gate))
-    }
-
-    /// Internal: set the optional park gate (used by the flat builder to thread
-    /// its own park gate through the degenerate one-thread group). A `Some`
-    /// gate always wins, matching the old tuple-priority contract, even if
-    /// `fail_model_opt` is called first.
-    pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
-        if let Some(gate) = gate {
-            self.model_mode = ThreadModelMode::Parked(gate);
-        }
+    pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -1170,18 +1307,17 @@ impl<'g> RebornThreadBuilder<'g> {
     /// Fail this thread's model call unconditionally with a fixed, non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS — provider-`Err` failure category).
     /// Sits at the same vendor-SDK seam as `park_model`/scripted playback.
-    pub fn fail_model(self) -> Self {
-        self.fail_model_opt(true)
+    pub fn fail_model(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
+        self
     }
 
-    /// Internal: set the fail-model flag (used by the flat builder to thread
-    /// its own knob through the degenerate one-thread group). Never downgrades
-    /// an already-`Parked` mode, matching the old tuple-priority contract
-    /// (`park_model` always wins over `fail_model`).
-    pub(crate) fn fail_model_opt(mut self, fail: bool) -> Self {
-        if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
-            self.model_mode = ThreadModelMode::Failing;
-        }
+    /// Credentials arm of [`Self::fail_model`]: the model call always fails
+    /// with non-retryable `LlmError::AuthFailed`, driving the pinned
+    /// `model_credentials_unavailable` failure category through the real
+    /// provider-error mapping.
+    pub fn fail_model_auth(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
         self
     }
 
@@ -1215,8 +1351,7 @@ impl<'g> RebornThreadBuilder<'g> {
         // service is backed by `shared.product_harness`, which is shared; the
         // idempotency ledger is also shared (per-binding idempotency).
         let actor_id = self.actor_id.as_deref().unwrap_or(HARNESS_ACTOR_ID);
-        let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-itest", "itest-install")?;
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
             actor_id,
@@ -1250,15 +1385,28 @@ impl<'g> RebornThreadBuilder<'g> {
         // way.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
-        // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
-        // three modes mutually exclusive by construction — no priority rule
-        // needed here.
-        let raw: Arc<dyn LlmProvider> = match self.model_mode {
-            ThreadModelMode::Parked(gate) => {
-                Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
+        // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
+        // provider modes mutually exclusive by construction — no priority
+        // rule is needed here.
+        let (raw, model_provider_call_probe): (
+            Arc<dyn LlmProvider>,
+            Option<ModelProviderCallProbe>,
+        ) = match self.model_mode {
+            ThreadModelMode::Parked(gate) => (
+                Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+                None,
+            ),
+            ThreadModelMode::Recoverable(script) => {
+                let (provider, probe) = recoverable_failure_trace_llm(
+                    script.failure,
+                    script.successful_calls_before_failures,
+                    script.failures,
+                    scripted_llm.clone(),
+                );
+                (Arc::new(provider), Some(probe))
             }
-            ThreadModelMode::Failing => Arc::new(ErrLlm),
-            ThreadModelMode::Normal => scripted_llm.clone(),
+            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
+            ThreadModelMode::Normal => (scripted_llm.clone(), None),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
@@ -1319,7 +1467,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
-        let mut workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let mut workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         // Real gate-dispatch seam: wire the harness's own local-dev interaction
         // services, but over the GROUP's shared `turn_store` (not the harness's
@@ -1330,7 +1478,9 @@ impl<'g> RebornThreadBuilder<'g> {
         if shared.real_gate_dispatch_services {
             let harness = match &shared.capability {
                 GroupCapability::HostRuntime(arc) => arc,
-                GroupCapability::Recording => {
+                GroupCapability::Recording
+                | GroupCapability::RecordingNoProgress
+                | GroupCapability::RecordingRecoverablePortError => {
                     return Err(
                         "with_real_gate_dispatch_services requires a HostRuntime capability backend"
                             .into(),
@@ -1371,7 +1521,7 @@ impl<'g> RebornThreadBuilder<'g> {
 
         Ok(RebornIntegrationHarness {
             ingress,
-            workflow,
+            workflow: Arc::new(workflow),
             conversation_id: self.conversation_id,
             actor_id: actor_id.to_owned(),
             binding,
@@ -1382,6 +1532,7 @@ impl<'g> RebornThreadBuilder<'g> {
             event_seq: AtomicU64::new(1),
             capability_recorder,
             scripted_llm,
+            model_provider_call_probe,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,

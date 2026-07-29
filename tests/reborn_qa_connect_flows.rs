@@ -221,7 +221,7 @@ async fn reborn_qa_connect_github_auth_flow() {
 /// host (issue + deep-link consume + `BlockedAuth` resume via the
 /// provider=`telegram` auth continuation); that contract is pinned in
 /// `crates/ironclaw_reborn_composition/src/telegram/` — see
-/// `docs/reborn/contracts/telegram-v2.md`.
+/// `docs/reborn/extension-runtime/overview.md` and the live Telegram adapter.
 /// No per-user Telegram credential exists in the shipped model (bot setup
 /// is admin-only), so this leg exercises the shared blocked-gate plumbing,
 /// not a Telegram credential surface.

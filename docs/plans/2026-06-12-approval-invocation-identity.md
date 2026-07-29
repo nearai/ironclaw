@@ -35,7 +35,7 @@ Root cause chain (all verified against main):
 
 The same hole exists for the *legitimate* flow: user completes OAuth →
 `dispatch_turn_gate_resume` resumes the run (`BlockedAuthGate` precondition,
-`crates/ironclaw_product_workflow/src/auth_continuation.rs:99-110`) → re-dispatch mints a
+`crates/ironclaw_product/src/auth_continuation.rs:99-110`) → re-dispatch mints a
 new invocation → a second approval is demanded for an action the user already approved.
 
 Persistent "Always allow" policies (`persistent_approval_grant` branch,
@@ -45,7 +45,7 @@ Persistent "Always allow" policies (`persistent_approval_grant` branch,
 
 - WebUI approval/auth flows currently work and must not regress. WebUI resolves gates
   through the same `ApprovalInteractionService` / `AuthInteractionService` workflow
-  services (`crates/ironclaw_product_workflow/src/approval_interaction/service.rs`,
+  services (`crates/ironclaw_product/src/approval_interaction/service.rs`,
   `auth_interaction/service.rs`); the fix must live below that boundary (loop executor /
   capability host), not in any channel adapter.
 - `ironclaw_capabilities` guardrail: "Approval resume must validate and claim the matching
@@ -126,7 +126,7 @@ the invocation-independent input fingerprint — such that the existing
 `has_matching_approval_grant` matching
 (`crates/ironclaw_reborn_composition/src/profile_approval_authorization.rs:159-190`) and
 the `PersistentApprovalPolicyInput` shape
-(`crates/ironclaw_product_workflow/src/approval_interaction/service.rs:249-265`, today
+(`crates/ironclaw_product/src/approval_interaction/service.rs:249-265`, today
 hardcoding `max_invocations: None`) absorb it. One approval-reuse mechanism, not three.
 
 Scope guard: run-scoped and input-fingerprint-exact; never crosses runs, users, or
@@ -156,7 +156,7 @@ confirmable the same way.
 - Capability-host contract: auth-resume with original invocation id reuses run record;
   fingerprint mismatch still rejected.
 - Product-workflow contract: WebUI-path approve/auth resolution unchanged
-  (`crates/ironclaw_product_workflow/tests/approval_interaction_contract.rs`,
+  (`crates/ironclaw_product/tests/approval_interaction_contract.rs`,
   `auth_interaction_contract.rs`).
 - E2E (tests/e2e): Slack DM scenario — approve once, complete OAuth, run completes; no
   duplicate approval gates.

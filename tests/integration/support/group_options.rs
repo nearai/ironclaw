@@ -43,6 +43,20 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// E-MEMORY: bind `provider` as the group's memory provider with the
+    /// lifecycle set its manifest declares. The group's ONE planned runtime
+    /// derives its memory consumers through the production
+    /// `memory_lifecycle_consumers` helper, so an undeclared hook is never
+    /// queried, recorded to, or profile-read from.
+    pub fn with_bound_memory_provider(
+        mut self,
+        provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
+        lifecycle: ironclaw_host_api::MemoryDescriptor,
+    ) -> Self {
+        self.bound_memory = Some((provider, lifecycle));
+        self
+    }
+
     /// Install an in-memory `InMemoryTurnEventSink` into the group's ONE
     /// planned runtime via production's `subscribe_best_effort` seam
     /// (C-TRACECAP). Read back via
@@ -129,6 +143,16 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Wire a raw trajectory observer into the group's ONE production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     /// Shorten the group's turn-state store lease TTL (default 90s,
     /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
@@ -148,10 +172,17 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Override the canonical default-family iteration limit for a focused
+    /// whole-turn recovery scenario. Production defaults remain unchanged.
+    pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
+        self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's
-    /// `DefaultProductWorkflow`, so `submit_inbound(ApprovalResolution/
+    /// `DefaultProductSurface`, so `submit_inbound(ApprovalResolution/
     /// AuthResolution)` dispatches through the SAME arms a real adapter reply
     /// hits, instead of every workflow's default `Rejecting*InteractionService`
     /// stubs. Requires a `HostRuntime` capability backend built via

@@ -19,7 +19,6 @@ mod recording_test_capability_port;
 mod static_capability_surface_profile_resolver;
 mod static_network_resolver;
 mod static_secret_store;
-mod trigger_active_run_lookup_host_runtime;
 mod unavailable_project_service;
 
 pub(crate) use empty_identity_context_source::EmptyIdentityContextSource;
@@ -47,5 +46,4 @@ pub(crate) use recording_test_capability_port::{
 pub(crate) use static_capability_surface_profile_resolver::StaticCapabilitySurfaceProfileResolver;
 pub(crate) use static_network_resolver::StaticNetworkResolver;
 pub(crate) use static_secret_store::StaticSecretStore;
-pub(crate) use trigger_active_run_lookup_host_runtime::TriggerActiveRunLookupHostRuntime;
 pub(crate) use unavailable_project_service::UnavailableProjectService;

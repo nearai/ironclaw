@@ -18,7 +18,7 @@
 //!
 //! 2. **Automation-service-stack path**
 //!    (`timeline_opens_for_creator_via_automation_service_stack`):
-//!    Same setup, second independent trigger. Confirms the automation facade
+//!    Same setup, second independent trigger. Confirms the automation service
 //!    wiring is correct across multiple trigger fires.
 //!
 //!    The thread_id is discovered via `list_trigger_run_history` on the
@@ -61,8 +61,8 @@ use ironclaw_loop_host::{
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, RebornWebuiBundle, TriggerPollerSettings, build_reborn_runtime,
-    build_webui_services, local_runtime_build_input_with_options,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -137,7 +137,7 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -187,7 +187,7 @@ async fn wait_for_trigger_fire(
 /// `mark_fire_accepted`).
 ///
 /// This polls `list_trigger_run_history` — the same repository method the WebUI
-/// Automations panel uses via `AutomationProductFacade::list_automations`. Once
+/// Automations panel uses via `AutomationProductService::list_automations`. Once
 /// the row's `thread_id` is a parseable UUID we know the panel's `chat_path`
 /// would open a real thread.
 ///
@@ -271,8 +271,7 @@ fn make_trigger_record(
 // in the fallback authz check.
 
 fn build_timeline_app(runtime: &RebornRuntime) -> axum::Router {
-    let bundle: RebornWebuiBundle =
-        build_webui_services(runtime, None).expect("build_webui_services");
+    let product_surface = runtime.product_surface(None).expect("product surface");
 
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let owner_user_id = UserId::new(USER).expect("owner user id");
@@ -290,7 +289,7 @@ fn build_timeline_app(runtime: &RebornRuntime) -> axum::Router {
     // NOTE: with_default_project_id intentionally omitted — trigger records
     // use project_id = None and the caller scope must match.
 
-    webui_v2_app(bundle, config).expect("webui_v2_app")
+    webui_v2_app(product_surface, config).expect("webui_v2_app")
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -350,7 +349,7 @@ async fn fire_trigger_and_get_run_thread_id(
     agent_id: &AgentId,
     trigger_name: &str,
 ) -> (TriggerId, String) {
-    let repo = runtime.trigger_repository().expect("trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("conversation pairing");
@@ -451,10 +450,10 @@ async fn timeline_opens_for_creator() {
     );
 }
 
-/// Exercises the composed automation product facade through the full HTTP→
+/// Exercises the composed automation product service through the full HTTP→
 /// product-workflow path using a second independent trigger.
 ///
-/// Confirms the automation facade wiring is correct across multiple trigger
+/// Confirms the automation service wiring is correct across multiple trigger
 /// fires. Uses `list_trigger_run_history` to discover the canonical UUID —
 /// the same data path the WebUI Automations panel uses.
 #[tokio::test]

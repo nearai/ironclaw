@@ -1,8 +1,12 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
+use ironclaw_extension_host::extension_lifecycle_command::{
+    RebornExtensionLifecycleCommand, execute_reborn_extension_lifecycle_command,
+    render_reborn_extension_lifecycle_response,
+};
+use ironclaw_host_api::public_lifecycle_response_json;
 use ironclaw_reborn_composition::{
-    LifecycleProductResponse, RebornExtensionLifecycleCommand, build_reborn_services,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
+    LifecycleProductResponse, RebornRuntimeInput, build_reborn_runtime,
 };
 
 use crate::context::RebornCliContext;
@@ -24,8 +28,6 @@ enum ExtensionSubcommand {
     Search(ExtensionSearchCommand),
     /// Install a local Reborn extension package.
     Install(ExtensionPackageCommand),
-    /// Activate an installed local Reborn extension package.
-    Activate(ExtensionPackageCommand),
     /// Remove an installed local Reborn extension package.
     Remove(ExtensionPackageCommand),
 }
@@ -66,11 +68,6 @@ impl ExtensionCommand {
                 command.json,
                 "install",
             ),
-            ExtensionSubcommand::Activate(command) => (
-                RebornExtensionLifecycleCommand::Activate { id: command.id },
-                command.json,
-                "activate",
-            ),
             ExtensionSubcommand::Remove(command) => (
                 RebornExtensionLifecycleCommand::Remove { id: command.id },
                 command.json,
@@ -79,7 +76,10 @@ impl ExtensionCommand {
         };
         let response = execute_lifecycle_command(context, command, self.confirm_host_access)?;
         if json {
-            println!("{}", serde_json::to_string(&response)?);
+            println!(
+                "{}",
+                serde_json::to_string(&public_lifecycle_response_json(&response)?)?
+            );
         } else {
             print!(
                 "{}",
@@ -107,11 +107,18 @@ fn execute_lifecycle_command(
         .build()
         .context("failed to build tokio runtime for extension lifecycle command")?;
     runtime.block_on(async move {
-        let services = build_reborn_services(runtime_services.services_input)
+        let services_input =
+            crate::runtime::with_binary_host_extension_bindings(runtime_services.services_input)?;
+        let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(services_input))
             .await
-            .context("failed to assemble Reborn services for extension lifecycle command")?;
-        execute_reborn_extension_lifecycle_command(&services, command)
+            .context("failed to assemble Reborn runtime for extension lifecycle command")?;
+        let response = execute_reborn_extension_lifecycle_command(&runtime, command)
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from)?;
+        runtime
+            .shutdown()
+            .await
+            .context("failed to shut down Reborn runtime after extension lifecycle command")?;
+        Ok(response)
     })
 }

@@ -14,9 +14,12 @@ export function normalizeConnectionChannel(channel) {
     .replace(/[-_\s]+/g, "-");
 }
 
-export function channelConnectionDisplayName(channel) {
-  const normalized = normalizeConnectionChannel(channel);
-  if (normalized === "slack") return "Slack";
+// Prefer the display name the caller already has from the wire (extension
+// info `display_name`); fall back to prettifying the raw channel id. No
+// per-channel special cases live here.
+export function channelConnectionDisplayName(channel, displayName = null) {
+  const wireName = String(displayName || "").trim();
+  if (wireName) return wireName;
   const raw = String(channel || "the channel").trim();
   if (!raw) return "the channel";
   return raw

@@ -127,10 +127,12 @@ pub fn plan_capability(
             EffectKind::ReadFilesystem | EffectKind::WriteFilesystem | EffectKind::DeleteFilesystem
         )
     });
-    let needs_process = descriptor.runtime == RuntimeKind::Script
-        || effects
-            .iter()
-            .any(|e| matches!(e, EffectKind::SpawnProcess | EffectKind::ExecuteCode));
+    let needs_process = matches!(
+        descriptor.runtime,
+        RuntimeKind::Script | RuntimeKind::Sandbox
+    ) || effects
+        .iter()
+        .any(|e| matches!(e, EffectKind::SpawnProcess | EffectKind::ExecuteCode));
     if needs_process && matches!(policy.process_backend, ProcessBackendKind::None) {
         return Err(
             PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
@@ -196,7 +198,9 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            max_egress_bytes: None,
             resource_profile: None,
+            origin_gate_matrix: None,
         }
     }
 
@@ -354,6 +358,28 @@ mod tests {
     #[test]
     fn rejects_script_runtime_when_policy_disables_processes_even_without_process_effects() {
         let desc = descriptor(vec![EffectKind::DispatchCapability]);
+        let policy = policy_with(
+            FilesystemBackendKind::ScopedVirtual,
+            ProcessBackendKind::None,
+            NetworkMode::Brokered,
+            SecretMode::BrokeredHandles,
+        );
+        let err = plan_capability(&desc, &policy).unwrap_err();
+        assert!(matches!(
+            err,
+            PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_sandbox_runtime_when_policy_disables_processes_even_without_process_effects() {
+        // `RuntimeLane::from_runtime_kind` documents Sandbox as running on
+        // `RuntimeLane::Process`. A Sandbox descriptor that doesn't
+        // redundantly declare `SpawnProcess`/`ExecuteCode` must still be
+        // treated as needing a process backend, or `ProcessBackendKind::None`
+        // policies fail open for it.
+        let desc =
+            descriptor_with_runtime(RuntimeKind::Sandbox, vec![EffectKind::DispatchCapability]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,

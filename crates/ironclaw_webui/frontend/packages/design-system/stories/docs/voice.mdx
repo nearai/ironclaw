@@ -54,14 +54,19 @@ closer to how Claude's product copy reads than to edgy tech branding.
 9. **Every message stands alone.** Channel-first (Brand principles §4)
    means copy delivered in Slack, email, or chat carries the finding, the
    action, and the escape hatch by itself. "Open the app for details" is
-   a fallback, never the payload.
+   a fallback, never the payload. Standing alone never means dumping
+   data: external channels get the summary of the finding, not the raw
+   records behind it, and only through channels the user connected
+   (Brand principles §4 spells out the boundary).
 
 ## Built-in component strings
 
 `Modal` (close) and `ConfirmDialog` (cancel) carry built-in strings that
 default to English. Localized hosts bridge their translator via
 `DesignSystemI18nProvider`; the keys are `common.close` and
-`common.cancel`.
+`common.cancel`. Provider, hook, and the English defaults are defined in
+`packages/design-system/src/i18n.tsx` (`useDesignSystemT`); the
+consuming call sites are `src/modal.tsx` and `src/confirm-dialog.tsx`.
 
 ## Microcopy patterns
 

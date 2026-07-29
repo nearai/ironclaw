@@ -23,8 +23,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_resources::{
     BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
-    BudgetGateStore, NoOpBudgetEventSink, ResourceAccount, ResourceApprovalNeeded, ResourceError,
-    ResourceGovernor, ResourceLimits,
+    BudgetGateStorePort, NoOpBudgetEventSink, ResourceAccount, ResourceApprovalNeeded,
+    ResourceError, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
@@ -82,7 +82,8 @@ pub struct GovernorBackedAccountant {
     /// can resolve it. Without a store, the approval-required error
     /// still propagates — the only thing the store adds is durable
     /// pending-gate state.
-    gate_store: Option<Arc<dyn BudgetGateStore>>,
+    // arch-exempt: optional_arc, budget gates are only wired when approval recovery is enabled, plan #4539
+    gate_store: Option<Arc<dyn BudgetGateStorePort>>,
     /// Default expiry window for gates opened by this accountant. Tests
     /// can shrink this to drive F5 (expiry).
     gate_expires_after: chrono::Duration,
@@ -188,7 +189,7 @@ impl GovernorBackedAccountant {
     /// available to user-facing handlers / tests via
     /// `gate_store.list_pending()`; resolving the gate (Approve with a
     /// higher limit, Cancel, or expiry) is the caller's responsibility.
-    pub fn with_gate_store(mut self, store: Arc<dyn BudgetGateStore>) -> Self {
+    pub fn with_gate_store(mut self, store: Arc<dyn BudgetGateStorePort>) -> Self {
         self.gate_store = Some(store);
         self
     }
@@ -774,7 +775,7 @@ mod tests {
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
-    use ironclaw_host_api::{ResourceReceipt, TenantId, ThreadId};
+    use ironclaw_host_api::{ResourceReceipt, ResourceReservation, TenantId, ThreadId};
     use ironclaw_resources::{
         AccountSnapshot, BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor,
         ReservationOutcome, ResourceAccount, ResourceLimits,
@@ -917,6 +918,13 @@ mod tests {
             actual: ResourceUsage,
         ) -> Result<ResourceReceipt, ResourceError> {
             self.inner.reconcile(reservation_id, actual)
+        }
+
+        fn validate_reservation(
+            &self,
+            reservation: &ResourceReservation,
+        ) -> Result<(), ResourceError> {
+            self.inner.validate_reservation(reservation)
         }
 
         fn release(
@@ -1422,6 +1430,12 @@ mod tests {
             ) -> Result<ResourceReceipt, ResourceError> {
                 self.inner.reconcile(reservation_id, actual)
             }
+            fn validate_reservation(
+                &self,
+                reservation: &ResourceReservation,
+            ) -> Result<(), ResourceError> {
+                self.inner.validate_reservation(reservation)
+            }
             fn release(
                 &self,
                 reservation_id: ResourceReservationId,
@@ -1531,6 +1545,13 @@ mod tests {
                     });
                 }
                 self.inner.reconcile(reservation_id, actual)
+            }
+
+            fn validate_reservation(
+                &self,
+                reservation: &ResourceReservation,
+            ) -> Result<(), ResourceError> {
+                self.inner.validate_reservation(reservation)
             }
 
             fn release(

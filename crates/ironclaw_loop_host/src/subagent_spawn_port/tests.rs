@@ -37,10 +37,6 @@ struct StaticSpawnInputCodec {
 
 struct RegisteringSpawnInputCodec;
 
-struct RejectingSpawnInputCodec {
-    error: AgentLoopHostError,
-}
-
 struct FixedToolPort {
     definition: ProviderToolDefinition,
     capability_ids: ProviderToolCallCapabilityIds,
@@ -67,14 +63,14 @@ struct StrictSpawnAuthPort {
 
 #[derive(Default)]
 struct RecordingBatchPort {
-    batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
+    batches: std::sync::Mutex<Vec<LoopRequestBatch>>,
 }
 
 struct FailingBatchPort;
 
 #[derive(Default)]
 struct SuspendedBatchPort {
-    batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
+    batches: std::sync::Mutex<Vec<LoopRequestBatch>>,
 }
 
 struct NoopResultWriter;
@@ -221,17 +217,6 @@ impl SpawnSubagentInputCodec for RegisteringSpawnInputCodec {
 }
 
 #[async_trait]
-impl SpawnSubagentInputCodec for RejectingSpawnInputCodec {
-    async fn decode(
-        &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-    ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
-        Err(self.error.clone())
-    }
-}
-
-#[async_trait]
 impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         if *self.visible_calls.lock().unwrap() == 0 {
@@ -285,7 +270,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
 
     async fn invoke_capability(
         &self,
-        _request: CapabilityInvocation,
+        _request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(resolution::completed(
             LoopResultRef::new("result:auth").unwrap(),
@@ -300,7 +285,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
@@ -355,7 +340,7 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
 
     async fn invoke_capability(
         &self,
-        _request: CapabilityInvocation,
+        _request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -365,7 +350,7 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
@@ -410,7 +395,7 @@ impl LoopCapabilityPort for AuthPassPort {
 
     async fn invoke_capability(
         &self,
-        _request: CapabilityInvocation,
+        _request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(resolution::completed(
             LoopResultRef::new("result:auth").unwrap(),
@@ -425,7 +410,7 @@ impl LoopCapabilityPort for AuthPassPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
@@ -470,14 +455,14 @@ impl LoopCapabilityPort for FixedToolPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
@@ -505,14 +490,14 @@ impl LoopCapabilityPort for RecordingBatchPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.batches.lock().unwrap().push(request.clone());
         Ok(ResolutionBatch {
@@ -541,7 +526,7 @@ impl LoopCapabilityPort for SuspendedBatchPort {
 
     async fn invoke_capability(
         &self,
-        _request: CapabilityInvocation,
+        _request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(resolution::approval_required(
             LoopGateRef::new("gate:inner-suspended").unwrap(),
@@ -553,7 +538,7 @@ impl LoopCapabilityPort for SuspendedBatchPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.batches.lock().unwrap().push(request);
         Ok(ResolutionBatch {
@@ -621,14 +606,14 @@ impl LoopCapabilityPort for FailingBatchPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
         &self,
-        _request: CapabilityBatchInvocation,
+        _request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
@@ -1073,15 +1058,12 @@ fn custom_tool_definition() -> ProviderToolDefinition {
     }
 }
 
-fn invocation(capability_id: &str) -> CapabilityInvocation {
+fn invocation(capability_id: &str) -> LoopRequest {
     invocation_for_activity(capability_id, ironclaw_turns::CapabilityActivityId::new())
 }
 
-fn invocation_for_activity(
-    capability_id: &str,
-    activity_id: CapabilityActivityId,
-) -> CapabilityInvocation {
-    CapabilityInvocation {
+fn invocation_for_activity(capability_id: &str, activity_id: CapabilityActivityId) -> LoopRequest {
+    LoopRequest {
         activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -1334,7 +1316,7 @@ async fn invoke_spawn_for_activity(
     port: &SubagentSpawnCapabilityPort,
     activity_id: CapabilityActivityId,
 ) -> Resolution {
-    port.invoke_capability(CapabilityInvocation {
+    port.invoke_capability(LoopRequest {
         activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -1823,7 +1805,7 @@ async fn spawn_provider_tool_call_invoke_rejects_changed_activity_id_before_chil
     assert_ne!(changed_activity_id, candidate.activity_id);
 
     let error = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: changed_activity_id,
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,
@@ -1923,7 +1905,7 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
     assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
 
     let outcome = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -2036,7 +2018,7 @@ async fn invoke_spawn_fails_when_parent_record_is_missing() {
         .test_spawn_authorization(&input_ref())
         .expect("spawn authorization");
     let error = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id,
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -2324,7 +2306,7 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
     let activity_id = authorize_spawn_input(&port);
 
     let outcome = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
                 invocation("regular.one"),
                 invocation_for_activity(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, activity_id),
@@ -2393,7 +2375,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     let activity_id = authorize_spawn_input(&port);
 
     let error = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
                 invocation_for_activity(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, activity_id),
                 invocation("regular.fails"),
@@ -2486,7 +2468,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
     let activity_id = authorize_spawn_input(&port);
 
     let outcome = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
                 invocation_for_activity(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, activity_id),
                 invocation("regular.after"),
@@ -2569,9 +2551,9 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
     let inner_id = CapabilityId::new("inner.suspended").unwrap();
     let surface_version = CapabilitySurfaceVersion::new("surface:test").unwrap();
     let outcome = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: activity_id_a,
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
@@ -2579,7 +2561,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     approval_resume: None,
                     auth_resume: None,
                 },
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: activity_id_b,
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id,
@@ -2587,7 +2569,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     approval_resume: None,
                     auth_resume: None,
                 },
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version,
                     capability_id: inner_id,
@@ -2612,7 +2594,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
     // §3 replacement: `InMemoryAwaitEdgeWriter` keys per-child
     // `(parent_run_id, child_run_id)`, not per-`gate_ref` — two batch
     // children sharing one shared gate_ref now record 2 distinct edges
-    // (matching the real `FilesystemAwaitEdgeStore`'s per-child tracking,
+    // (matching the real `AwaitEdgeStore`'s per-child tracking,
     // D3's group-based settling), not 1 collapsed record as the deleted
     // `BoundedSubagentGateResolutionStore`'s gate_ref-keyed map did.
     assert_eq!(gate_store.records().len(), 2);
@@ -2654,7 +2636,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     let activity_id = authorize_spawn_input(&port);
 
     let error = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id,
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -2867,62 +2849,99 @@ async fn json_spawn_input_codec_accepts_legacy_blocking_inputs() {
     }
 }
 
+/// Regression: malformed MODEL-SUPPLIED spawn input (JSON that fails the
+/// spawn-args decode, or model-correctable wire-args rejections such as
+/// requesting the disabled background mode) must surface as a model-visible
+/// `Denied` resolution — the `spawn_rejected` channel — so the model can
+/// correct the call. It must NOT propagate as `Err(AgentLoopHostError)`,
+/// which the executor maps to a run-ending `HostUnavailable`.
 #[tokio::test]
-async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
-    let context = test_run_context_with_agent_actor("spawn-background-disabled").await;
-    let harness = spawn_test_port_with_codec_and_recorders(
-        context,
-        Arc::new(RejectingSpawnInputCodec {
-            error: background_subagents_disabled(),
-        }),
-    );
+async fn invoke_spawn_denies_malformed_model_input_without_side_effects() {
+    for (label, input_value, expected_summary_fragment) in [
+        (
+            "malformed-json",
+            json!("not a spawn args object"),
+            "invalid spawn_subagent input",
+        ),
+        (
+            "background-disabled",
+            json!({
+                "flavor_id": "general",
+                "task": "background task",
+                "mode": "background"
+            }),
+            "background subagents are disabled",
+        ),
+    ] {
+        let context = test_run_context_with_agent_actor(&format!("spawn-denied-{label}")).await;
+        let harness = spawn_test_port_with_codec_and_recorders(
+            context,
+            Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+                StaticInputResolver {
+                    value: Ok(input_value),
+                },
+            ))),
+        );
 
-    let activity_id = harness
-        .port
-        .test_spawn_authorization(&input_ref())
-        .expect("spawn authorization");
-    let error = harness
-        .port
-        .invoke_capability(CapabilityInvocation {
-            activity_id,
-            surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
-            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-            input_ref: input_ref(),
-            approval_resume: None,
-            auth_resume: None,
-        })
-        .await
-        .unwrap_err();
+        let activity_id = harness
+            .port
+            .test_spawn_authorization(&input_ref())
+            .expect("spawn authorization");
+        let resolution = harness
+            .port
+            .invoke_capability(LoopRequest {
+                activity_id,
+                surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                input_ref: input_ref(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("malformed model-supplied spawn input must not end the run");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    assert!(
-        error
-            .safe_summary
-            .contains("background subagents are disabled")
-    );
-    assert!(harness.child_runs.requests().is_empty());
-    assert!(harness.goal_store.puts().is_empty());
-    assert!(harness.await_edge_writer.records().is_empty());
+        let Resolution::Denied(denial) = resolution else {
+            panic!("{label}: expected denied resolution");
+        };
+        let summary = denial
+            .summary
+            .as_ref()
+            .map(ironclaw_host_api::SafeSummary::as_str)
+            .expect("denial carries a model-visible summary");
+        assert!(
+            summary.contains(expected_summary_fragment),
+            "{label}: summary {summary:?} should contain {expected_summary_fragment:?}"
+        );
+        assert!(harness.child_runs.requests().is_empty());
+        assert!(harness.goal_store.puts().is_empty());
+        assert!(harness.await_edge_writer.records().is_empty());
+    }
 }
 
+/// Batch sibling of the malformed-input regression: the pre-decode pass in
+/// `invoke_capability_batch` must convert a model-supplied decode failure into
+/// a per-invocation `Denied` resolution instead of `Err`-ing out the whole
+/// batch (and with it, the run).
 #[tokio::test]
-async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
-    let context = test_run_context_with_agent_actor("spawn-background-disabled-batch").await;
+async fn invoke_spawn_batch_denies_malformed_model_input_without_side_effects() {
+    let context = test_run_context_with_agent_actor("spawn-denied-batch").await;
     let harness = spawn_test_port_with_codec_and_recorders(
         context,
-        Arc::new(RejectingSpawnInputCodec {
-            error: background_subagents_disabled(),
-        }),
+        Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            StaticInputResolver {
+                value: Ok(json!("not a spawn args object")),
+            },
+        ))),
     );
 
     let activity_id = harness
         .port
         .test_spawn_authorization(&input_ref())
         .expect("spawn authorization");
-    let error = harness
+    let batch = harness
         .port
-        .invoke_capability_batch(CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id,
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -2933,13 +2952,21 @@ async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
             stop_on_first_suspension: true,
         })
         .await
-        .unwrap_err();
+        .expect("malformed model-supplied spawn input must not end the run");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(batch.resolutions.len(), 1);
+    assert!(!batch.stopped_on_suspension);
+    let Resolution::Denied(denial) = &batch.resolutions[0] else {
+        panic!("expected denied resolution");
+    };
+    let summary = denial
+        .summary
+        .as_ref()
+        .map(ironclaw_host_api::SafeSummary::as_str)
+        .expect("denial carries a model-visible summary");
     assert!(
-        error
-            .safe_summary
-            .contains("background subagents are disabled")
+        summary.contains("invalid spawn_subagent input"),
+        "summary {summary:?} should name the malformed spawn input"
     );
     assert!(harness.child_runs.requests().is_empty());
     assert!(harness.goal_store.puts().is_empty());
@@ -3127,7 +3154,7 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     let activity_id_a = authorize_spawn_input_ref(&port, input_ref_a.clone());
     let activity_id_b = authorize_spawn_input_ref(&port, input_ref_b.clone());
 
-    let make_invocation = |input_ref: CapabilityInputRef, activity_id| CapabilityInvocation {
+    let make_invocation = |input_ref: CapabilityInputRef, activity_id| LoopRequest {
         activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -3136,7 +3163,7 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
         auth_resume: None,
     };
     let batch_outcome = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
                 make_invocation(input_ref_a, activity_id_a),
                 make_invocation(input_ref_b, activity_id_b),
@@ -3224,9 +3251,9 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
     let inner_id = CapabilityId::new("inner.echo").unwrap();
     let surface_version = CapabilitySurfaceVersion::new("surface:test").unwrap();
     let batch_outcome = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: activity_id_a,
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
@@ -3234,7 +3261,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     approval_resume: None,
                     auth_resume: None,
                 },
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface_version.clone(),
                     capability_id: inner_id,
@@ -3242,7 +3269,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     approval_resume: None,
                     auth_resume: None,
                 },
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: activity_id_b,
                     surface_version,
                     capability_id: spawn_id,
@@ -3346,8 +3373,8 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
     let activity_id = authorize_spawn_input(&port);
 
     let batch_outcome = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id,
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -3682,7 +3709,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
 
     // Invoke the registered capability and assert the spawn is dispatched.
     let outcome = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -3790,3 +3817,4 @@ async fn new_with_schema_propagates_schema_to_spawn_tool_definition() {
         "parameters must carry the marker schema injected via new_with_schema"
     );
 }
+// arch-exempt: large_file, subagent port contract coverage remains centralized, plan #6175

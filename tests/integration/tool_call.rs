@@ -29,6 +29,34 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "chat:write",
 ];
 
+fn github_webhook_normalization_call() -> RebornScriptedReply {
+    RebornScriptedReply::tool_call(
+        "github.handle_webhook",
+        json!({
+            "webhook": {
+                "headers": {
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-capability-evidence"
+                },
+                "body_json": {
+                    "action": "opened",
+                    "repository": {
+                        "full_name": "nearai/ironclaw",
+                        "owner": {"login": "nearai"}
+                    },
+                    "pull_request": {
+                        "number": 6573,
+                        "state": "open",
+                        "base": {"ref": "main"},
+                        "head": {"ref": "codex/provider-evidence"}
+                    },
+                    "sender": {"login": "serrrfirat"}
+                }
+            }
+        }),
+    )
+}
+
 #[tokio::test]
 async fn runs_numeric_time_input_through_builtin_tools_group() {
     let g = RebornIntegrationGroup::builtin_tools()
@@ -109,10 +137,42 @@ async fn runs_http_tool_call_through_recorded_egress() {
         .expect("final reply finalized");
 }
 
+/// `github.handle_webhook` is local normalization rather than a provider API
+/// call. Drive it through the real bundled GitHub WASM capability and assert
+/// the emitted event plus the absence of network egress.
+#[tokio::test]
+async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_github_issue_tools()
+        .script([
+            github_webhook_normalization_call(),
+            RebornScriptedReply::text("webhook normalized"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("normalize this GitHub webhook")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("github.handle_webhook")
+        .await
+        .expect("bundled GitHub WASM capability ran");
+    h.assert_tool_result_contains(r#""event_type":"pr.opened""#)
+        .await
+        .expect("normalized event type reached the model-facing result");
+    h.assert_tool_result_contains(r#""delivery_id":"delivery-capability-evidence""#)
+        .await
+        .expect("delivery identity survived normalization");
+    h.assert_network_egress_count(0)
+        .await
+        .expect("local webhook normalization made no provider request");
+}
+
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A prior assistant refusal is conversation history, not capability truth.
-/// Once Slack is installed and activated, the refreshed tool definitions must
+/// Once Slack is installed and ready, the refreshed tool definitions must
 /// be authoritative and the same conversation must be able to dispatch a real
 /// bundled `slack.*` capability through the production extension runtime.
 #[tokio::test]
@@ -154,31 +214,23 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "slack"}),
-            ),
             RebornScriptedReply::text("Slack is ready."),
         ])
         .build()
         .await
         .expect("Slack lifecycle thread builds");
     lifecycle
-        .seed_capability_credential_account(
-            "slack_personal",
-            "itest Slack personal",
-            SLACK_PERSONAL_SCOPES,
-        )
+        .seed_capability_credential_account("slack", "itest Slack personal", SLACK_PERSONAL_SCOPES)
         .await
         .expect("Slack personal credential is seeded with real test material");
     lifecycle
-        .submit_turn("Install and activate Slack")
+        .submit_turn("Install Slack")
         .await
         .expect("Slack lifecycle turn completes");
     lifecycle
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await
-        .expect("Slack activation publishes its capability surface");
+        .expect("Slack install publishes its capability surface once ready");
 
     caller
         .submit_turn("Now list my Slack conversations")
@@ -193,7 +245,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     caller
         .assert_model_tools_contains("slack__list_conversations")
         .await
-        .expect("current model request advertises the activated Slack tool");
+        .expect("current model request advertises the active Slack tool");
     caller
         .assert_system_prompt_contains(
             "The current tool definitions are authoritative for this turn",
@@ -203,7 +255,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     caller
         .assert_tool_invoked("slack.list_conversations")
         .await
-        .expect("activated Slack capability dispatches through the real runtime");
+        .expect("active Slack capability dispatches through the real runtime");
     caller
         .assert_tool_result_contains("\"conversations\":[]")
         .await
@@ -411,49 +463,43 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
 /// at the gateway (`CapabilitySurfaceDenyFilter`, before
-/// `register_provider_tool_call` ever stages an invocation) — the whole
-/// provider response fails with `InvalidOutput` → `Unavailable`, reaching a
-/// terminal `TurnStatus::Failed`/`"model_unavailable"` after exactly one
-/// scripted turn. No `ToolResultReference` is persisted; `assert_tool_invoked`
-/// returning `Err` proves the capability was never dispatched.
+/// `register_provider_tool_call` ever stages an invocation). The loop must
+/// surface the precise `outside_capability_surface` observation to the model,
+/// let it repair the response on the next call, and complete without ever
+/// dispatching or reporting the rejected call as successful.
 #[tokio::test]
-async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
+async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     let h = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::tool_call(
-            "builtin.spawn_subagent",
-            json!({"goal": "test"}),
-        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.spawn_subagent", json!({"goal": "test"})),
+            RebornScriptedReply::text(
+                "I cannot use that capability, so I will continue without it.",
+            ),
+        ])
         .build()
         .await
         .expect("harness builds");
 
-    let run_id = h
-        .submit_turn_async("spawn a subagent")
+    h.submit_turn("spawn a subagent")
         .await
-        .expect("turn submitted");
-    let state = h
-        .wait_for_status(run_id, ironclaw_turns::TurnStatus::Failed)
+        .expect("run recovers from the disabled capability call");
+    h.assert_reply_contains("continue without it")
         .await
-        .expect("run reaches Failed after the disabled capability is rejected at the gateway");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("a Failed run must carry a failure detail");
-    assert_eq!(
-        failure.category(),
-        "model_unavailable",
-        "expected the Unavailable fidelity category (InvalidOutput -> Unavailable), got {failure:?}"
-    );
+        .expect("repaired reply is finalized");
+    h.assert_model_request_contains(
+        "model error observation: invalid_output reason=outside_capability_surface; \
+         repair the response and continue",
+    )
+    .await
+    .expect("the retry tells the model precisely why its tool call was rejected");
 
-    // No side effect: the capability was rejected before dispatch, so it was
-    // never invoked.
-    assert!(
-        h.assert_tool_invoked("builtin.spawn_subagent")
-            .await
-            .is_err(),
-        "disabled capability must never be dispatched, even when the model calls it anyway"
-    );
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("the rejected capability must never be dispatched");
+    h.assert_capability_result_count("builtin.spawn_subagent", 0)
+        .await
+        .expect("the rejected call must not produce a successful capability result");
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
@@ -815,4 +861,50 @@ where
     if let Err(panic) = handle.join() {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// #6284 item 1, at the seam that matters: a **caller-shaped capability port
+/// error ends the tool call, not the run**.
+///
+/// Before the capability-stage fix, `capability_host_error` mapped every
+/// non-`Cancelled` `AgentLoopHostError` from the port to a terminal
+/// `HostUnavailable{Capability}` — so an expired credential, a scope
+/// mismatch, or a malformed invocation killed a run the model could have
+/// recovered from. The executor now splits the port-error kinds exhaustively:
+/// caller-shaped ones (`InvalidInvocation` here) surface as a model-visible tool
+/// error and the loop continues; genuine host faults stay terminal.
+///
+/// Asserted at the durable seam — the persisted `ToolResultReference` envelope
+/// and the finalized reply — not on a completed status, so it proves the model
+/// actually saw the failure *and* kept working. Crate-tier coverage of the same
+/// split lives in `ironclaw_agent_loop`'s executor tests; this pins it through
+/// the production composition.
+#[tokio::test]
+async fn caller_shaped_capability_port_error_is_a_tool_error_not_a_dead_run() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_recoverable_port_error_for_test()
+        .script([
+            RebornScriptedReply::tool_call("test_echo", json!({"message": "hi"})),
+            RebornScriptedReply::text("the tool was refused, so here is what I can say instead"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("use the echo tool")
+        .await
+        .expect("turn completes");
+
+    // The model was told, in the durable envelope the next turn reads from.
+    h.assert_tool_error(
+        reborn_support::assertions::ToolErrorClass::Failed,
+        "input_encode",
+    )
+    .await
+    .expect("a caller-shaped port error reaches the model as a recoverable tool error");
+
+    // …and the run kept going rather than dying on the port error.
+    h.assert_reply_contains("here is what I can say instead")
+        .await
+        .expect("the run continues past a recoverable port error");
 }

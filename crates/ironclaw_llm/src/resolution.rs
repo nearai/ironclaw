@@ -128,7 +128,7 @@ pub fn resolve_provider_config_from_env(
                 provider: backend.clone(),
             })?;
         if provider.protocol == ProviderProtocol::OpenAiCodex
-            && (codex_auth_enabled_from_env() || std::env::var_os("CODEX_AUTH_PATH").is_some())
+            && (codex_auth_enabled_from_env() || nonempty_env("CODEX_AUTH_PATH").is_some())
         {
             return resolve_codex_cli_auth_provider().map(Some);
         }
@@ -367,7 +367,7 @@ fn resolve_provider_definition(
 }
 
 fn resolve_codex_cli_auth_provider() -> Result<ResolvedProviderConfig, LlmError> {
-    let auth_path = std::env::var_os("CODEX_AUTH_PATH").map(PathBuf::from);
+    let auth_path = nonempty_env("CODEX_AUTH_PATH").map(PathBuf::from);
     let credentials =
         auth::load_persisted_credentials(CredentialSource::CodexCli, auth_path.as_deref())
             .ok_or_else(|| LlmError::AuthFailed {
@@ -694,13 +694,13 @@ fn merge_extra_headers(
 }
 
 fn codex_auth_enabled_from_env() -> bool {
-    std::env::var("LLM_USE_CODEX_AUTH")
+    nonempty_env("LLM_USE_CODEX_AUTH")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
+    ironclaw_common::env_helpers::env_or_override(name)
 }
 
 fn parse_optional_u32(name: &str, provider: &str) -> Result<Option<u32>, LlmError> {

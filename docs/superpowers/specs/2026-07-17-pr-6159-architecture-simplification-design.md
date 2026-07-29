@@ -6,7 +6,8 @@
 
 **Baseline:** `nearai/ironclaw#6159` at `0575d3815d03fce0d43e6247f0bb3956af9e9ada`
 
-**Governing direction:** `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
+**Governing direction:** current host/product contracts and
+`docs/reborn/contracts/kernel-boundary.md`
 
 ## Goal
 
@@ -17,7 +18,8 @@ state uses the existing filesystem seam instead of local test-store families, an
 represent distinct states rather than mirrored transport wrappers.
 
 This is a structure-preserving refactor. The Telegram setup, webhook, pairing, identity,
-delivery, security, and rollback contracts in `docs/reborn/contracts/telegram-v2.md` remain
+delivery, security, and rollback contracts in the current extension/channel
+contracts remain
 unchanged.
 
 ## Scope boundary
@@ -208,8 +210,9 @@ The lifecycle algorithm is generic:
 
 Telegram constructs and registers its pairing requirement from its host module. Generic
 lifecycle source contains no Telegram identifiers, feature-specific fields, or imports.
-The existing pairing challenge shape, provider id, `SetupOnly` continuation, and resumed
-run recomputation remain unchanged.
+The existing pairing challenge shape and provider id remain unchanged. Pairing
+dispatches the extension-scoped `LifecycleActivation` continuation, and the
+resumed run recomputes readiness.
 
 ### 5. Telegram behavior leaves composition
 
@@ -332,7 +335,7 @@ generic lifecycle loads installation
   -> Telegram registration queries concrete pairing service
   -> disconnected: generic RuntimeCredentialAuthRequirement is returned
   -> blocked run renders Pairing challenge
-  -> Telegram pairing consume dispatches SetupOnly continuation
+  -> Telegram pairing consume dispatches LifecycleActivation continuation
   -> resumed activation recomputes status and succeeds
 ```
 

@@ -750,6 +750,17 @@ impl LoopExitViolationKind {
             | Self::NoReplyNotAllowed => "driver_protocol_violation",
         }
     }
+
+    /// Host-authored, secret-free failure detail naming the specific violation.
+    ///
+    /// The coarse [`Self::failure_category`] is the wire-stable user-facing
+    /// signal; this detail rides `SanitizedFailure::detail` so the specific
+    /// violation kind survives on the durable failure record (run state +
+    /// `TurnLifecycleEvent.detail`) and reaches the failure explainer instead
+    /// of being collapsed away.
+    fn failure_detail(self) -> String {
+        format!("loop exit violation: {}", self.category())
+    }
 }
 
 const MAX_LOOP_EXIT_REF_COUNT: usize = 64;
@@ -874,7 +885,11 @@ fn invalid_exit_decision(
     exit_id: LoopExitId,
     kind: LoopExitViolationKind,
 ) -> LoopExitValidationDecision {
-    let failure = SanitizedFailure::from_trusted_static(kind.failure_category());
+    // Persist the specific violation kind on the sanitized failure detail so
+    // the durable record keeps WHICH protocol rule was broken, not only the
+    // coarse category (docs/plans/2026-07-03-loop-failure-matrix.md).
+    let failure = SanitizedFailure::from_trusted_static(kind.failure_category())
+        .with_detail(kind.failure_detail());
     let mapping = TurnRunnerOutcome::Failed { failure }.into();
 
     LoopExitValidationDecision {

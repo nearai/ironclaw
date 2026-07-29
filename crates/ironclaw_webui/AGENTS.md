@@ -15,14 +15,14 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
   - `src/webui_serve.rs` — the `webui_v2_app` gateway assembly + middleware order.
-  - `Cargo.toml` — the `test-support` feature gate and the
-    (deliberately narrow) dependency shape.
+  - `Cargo.toml` — feature gates (`openai-compat-beta`,
+    `dev-in-memory-session`) and the (deliberately narrow) dependency shape.
 
 ## What this crate owns (composed subsystems)
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, folded from the former
    `ironclaw_webui_v2` crate): axum handlers dispatching to
-   `ironclaw_product_workflow::RebornServicesApi`, the `webui_v2_router` builder,
+   `ironclaw_host_api::ProductSurface`, the `webui_v2_router` builder,
    the `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE + WebSocket streaming with a shared `SseCapacity` budget, and the
    Vite SPA under `frontend/` (built by `build.rs`, served from
@@ -32,36 +32,44 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   Slack / OpenAI-compat mounts.
+   feature-gated OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs`):
    `serve_webui_v2` (listener bind + `axum::serve` + graceful shutdown), the
-   `Env` / `Session` / `Oidc` authenticators, the `SessionStore` trait + stores,
-   and the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
+   `Env` / `Session` / `Oidc` authenticators, `SignedTokenSessionStore`, and
+   the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
    trait).
+4. **Product-auth HTTP route serving** (`src/product_auth/`): host-owned
+   WebUI routes that parse/bound HTTP input and call
+   `ironclaw_auth::RebornProductAuthServices`. The auth contracts and durable
+   services stay in `ironclaw_auth`; composition only wires the configured
+   service bundle into this gateway.
 
 ## Do not move in here
 
-- **Product/API business logic.** Handlers consume only `RebornServicesApi`;
+- **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
-  `ironclaw_product_workflow` / `ironclaw_reborn_composition`.
-- **A direct `ironclaw_product_adapters` dependency**, or any lower substrate /
-  runtime / DB crate. Reach that surface through composition's public facade
-  (e.g. `mark_bearer_token_verified_for_tenant` is re-exported from composition,
-  not imported from adapters). The architecture boundary test forbids the direct
-  edge.
+  `ironclaw_product` / `ironclaw_reborn_composition`.
+- **Product service or domain dependencies.** `ironclaw_product` is allowed here
+  only for wire DTOs and product command/view descriptors. Do not import product
+  workflow services, facades, lower substrates, runtime, or DB crates; reach
+  execution through `ProductSurface` supplied by host assembly. The architecture
+  boundary test enforces this DTO/descriptor-only edge.
 - **v1 anything** — no `src/` (monolith) import, no `ironclaw_engine`, no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
   surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
 - **Business/durable state.** Everything the gateway needs flows through
-  `RebornServicesApi`; this crate stores no threads, transcripts, or projections.
+  `ProductSurface`; this crate stores no threads, transcripts, or projections.
 
 ## Allowed dependencies
 
-`ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
-mount builders + `WebuiAuthenticator` trait + mount vocabulary),
-`ironclaw_product_workflow` (`RebornServicesApi` + wire DTOs), `ironclaw_host_api`
-(identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+`ironclaw_host_ingress` (Axum route-mount carriers),
+`ironclaw_auth` (product-auth service facade and route DTOs),
+`ironclaw_common` (shared hashing primitive used to redact auth-token samples),
+`ironclaw_product` (wire DTOs and product command/view descriptors),
+`ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
+newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
+carriers), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test
@@ -71,7 +79,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
 
 - **Adding a route** requires a handler **and** a matching entry in
   `webui_v2_routes()` — the descriptor contract test fails otherwise. Handlers
-  receive `WebUiAuthenticatedCaller` via `axum::Extension`; a missing extension
+  receive `ProductSurfaceCaller` via `axum::Extension`; a missing extension
   surfaces `500` (locked by a regression test — do not hand-roll a fallback).
 - **All HTTP errors travel through `WebUiV2HttpError`**, never hand-built
   `StatusCode` returns — that keeps the redacted-error vocabulary intact.
@@ -88,7 +96,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
   `src/auth/<provider>.rs` (providers must not depend on each other) and add
   caller-level route tests mirroring `tests/google_oauth_routes.rs`.
 - **Streaming / events:** never broadcast durable-looking state directly from a
-  handler; project through `RebornServicesApi` into the redacted
+  handler; project through `ProductSurface` into the redacted
   `WebChatV2EventFrame` first (see `.claude/rules/gateway-events.md`).
 
 ## Validation

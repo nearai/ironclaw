@@ -143,32 +143,33 @@ These are the only host capabilities available. A WASM tool cannot call arbitrar
 
 ## Tool Discovery
 
-WASM tools are discovered at startup from two locations:
+Tools reach the agent as **extension packages**. Each package is a directory under the
+runtime's `/system/extensions/<extension-id>/` root containing a `manifest.toml` that
+declares the tools it provides, alongside the compiled `.wasm` module.
 
-- `~/.ironclaw/tools/` — User-installed tools
-- `<workspace>/tools/` — Per-workspace tools
-
-Each tool directory must contain:
-- `<toolname>.wasm` — The compiled WebAssembly module
-- `capabilities.json` — The capability declaration
+`ironclaw extension search` lists the packages the runtime can see.
 
 ---
 
 ## Installing WASM Tools
 
 ```bash
-# Install from a local file
-ironclaw tool install ./my-tool.wasm
+# Find an available package
+ironclaw extension search my-tool
 
-# Install from a URL
-ironclaw tool install https://example.com/tools/my-tool.wasm
+# List every package the install knows about
+ironclaw extension search
 
-# List installed tools
-ironclaw tool list
+# Install one by id
+ironclaw extension install my-tool
 ```
 
-Or via the `extension_install` tool in chat:
-> "Install the tool from https://example.com/tools/my-tool.wasm"
+`extension install` takes an **extension id** from `extension search` — never a file path
+or a URL. Passing `./my-tool.wasm` or an `https://` URL fails.
+
+To add a package you built yourself, import the packaged archive from **Extensions** in
+the [web interface](/using/webui). That is the supported path for getting a new package
+into the runtime; once it's there, `extension search` lists it and you install it by id.
 
 ---
 

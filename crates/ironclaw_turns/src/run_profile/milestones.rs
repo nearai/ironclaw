@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ExtensionId, FailureKind, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -10,9 +10,9 @@ use crate::{
 };
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-    CapabilitySurfaceVersion, LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind,
-    LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
+    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRunContext,
+    LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
@@ -108,7 +108,7 @@ pub enum LoopHostMilestoneKind {
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
+        reason_kind: FailureKind,
         /// Bounded, host-authored failure summary (e.g. a builtin's
         /// `"invalid JSON: ..."` message). Additive; pre-existing producers
         /// emit `None`. Product projections and durable runtime events must
@@ -523,7 +523,7 @@ where
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
+        reason_kind: FailureKind,
         safe_summary: Option<LoopSafeSummary>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityFailed {

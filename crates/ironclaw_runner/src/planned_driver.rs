@@ -427,23 +427,24 @@ mod tests {
         MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     };
     use ironclaw_agent_loop::test_support::{
-        MockAgentLoopDriverHost, MockHostCall, test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
+        test_run_context,
     };
     use ironclaw_turns::{
         LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityInvocation,
-            CheckpointSchemaId, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
-            LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal,
-            LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-            LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
-            LoopContextBundle, LoopContextPort, LoopContextRequest, LoopDriverId,
-            LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
-            LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-            LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-            LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, StageCheckpointPayloadRequest,
-            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+            BeginAssistantDraft, CheckpointSchemaId, FinalizeAssistantMessage,
+            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
+            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+            LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+            LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+            LoopTranscriptPort, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+            VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -1122,14 +1123,14 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
@@ -1295,8 +1296,16 @@ mod tests {
         };
         let checkpoint_id = TurnCheckpointId::new();
 
+        // The denied resume crosses the capability port as a typed terminal
+        // auth resume (the host terminalizes it as gate-declined); the loop
+        // then continues to the model, which closes the turn.
         let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
             .run_context(context.clone())
+            .script(
+                ScenarioScript::reply_only("denial surfaced").with_capability_outcomes(vec![vec![
+                    ScriptedCapabilityOutcome::failed("gate_declined"),
+                ]]),
+            )
             .build();
         let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
 

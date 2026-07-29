@@ -141,7 +141,7 @@ There's also an internal tell: `SameCallRetryConstraint` (`crates/ironclaw_agent
 
 ### 6.2 Handler-level Err-instead-of-Ok(Failed) — Invariant 1 (confirmed)
 
-A handler `invoke` returning `Err(AgentLoopHostError)` is mapped by `capability_host_error` (`mapping.rs:117`) to terminal `HostUnavailable{Capability}` — every non-`Cancelled` kind kills the run. Per `.claude/rules/agent-loop-capabilities.md`, model-fixable conditions must be `Ok(CapabilityOutcome::Failed/Denied)`.
+A handler `invoke` returning `Err(AgentLoopHostError)` is mapped by `capability_host_error` (`mapping.rs:117`) to terminal `HostUnavailable{Capability}` — every non-`Cancelled` kind kills the run. Per the capability-access contract, model-fixable conditions must be `Ok(CapabilityOutcome::Failed/Denied)`.
 
 **Confirmed defects:**
 

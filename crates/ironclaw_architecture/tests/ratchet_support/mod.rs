@@ -1,5 +1,4 @@
-//! Shared scanner machinery for the §10 anti-slippage ratchets
-//! (`reborn_inmemory_store_ratchet.rs`, `reborn_localdev_typename_ratchet.rs`).
+//! Shared scanner machinery for the §10 anti-slippage ratchets.
 //!
 //! One hardened implementation of the walk/strip/match pipeline, so every
 //! ratchet gets the same guarantees: comment/string stripping, restricted
@@ -36,6 +35,7 @@ pub fn workspace_root() -> PathBuf {
 /// EXCEPT when every occurrence is `#[cfg(...)]`-gated (mutually exclusive
 /// compile branches of the same type, the factory durable/no-durable pattern).
 /// A mix of gated and ungated occurrences is still flagged.
+#[allow(dead_code)]
 pub fn duplicate_definitions(
     found: &BTreeMap<String, Vec<TypeDefOccurrence>>,
 ) -> Vec<(&str, &Vec<TypeDefOccurrence>)> {

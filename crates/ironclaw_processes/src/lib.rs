@@ -7,12 +7,12 @@
 //! # Module map
 //!
 //! - [`types`] — public data types, errors, and core traits
-//!   ([`ProcessStore`], [`ProcessResultStore`], [`ProcessExecutor`],
+//!   ([`ProcessStorePort`], [`ProcessResultStorePort`], [`ProcessExecutor`],
 //!   [`ProcessManager`])
 //! - [`cancellation`] — cooperative cancellation tokens + per-process registry
 //! - [`host`] — read/poll/await/cancel surface ([`ProcessHost`],
 //!   [`ProcessSubscription`])
-//! - [`filesystem_store`] — the process `ProcessStore` / `ProcessResultStore`
+//! - [`process_store`] — the process `ProcessStorePort` / `ProcessResultStorePort`
 //!   (durable over libSQL/Postgres; in-memory-backed over `InMemoryBackend` in
 //!   tests, via the `test-support` helpers — arch-simplification §4.3)
 //! - [`wrappers`] — composable decorators ([`EventingProcessStore`],
@@ -21,8 +21,8 @@
 //!   production [`BackgroundProcessManager`]
 
 mod cancellation;
-mod filesystem_store;
 mod host;
+mod process_store;
 mod services;
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
@@ -30,8 +30,8 @@ mod types;
 mod wrappers;
 
 pub use cancellation::{ProcessCancellationRegistry, ProcessCancellationToken};
-pub use filesystem_store::{FilesystemProcessResultStore, FilesystemProcessStore};
 pub use host::{ProcessHost, ProcessSubscription};
+pub use process_store::{ProcessResultStore, ProcessStore};
 pub use services::{
     BackgroundErrorHandler, BackgroundFailure, BackgroundFailureStage, BackgroundProcessManager,
     ProcessServices,
@@ -44,6 +44,6 @@ pub use test_support::{
 pub use types::{
     ProcessError, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
     ProcessExecutor, ProcessExit, ProcessManager, ProcessRecord, ProcessResultRecord,
-    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    ProcessResultStorePort, ProcessStart, ProcessStatus, ProcessStorePort,
 };
 pub use wrappers::{EventingProcessStore, ResourceManagedProcessStore};

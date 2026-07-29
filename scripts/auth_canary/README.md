@@ -116,7 +116,7 @@ The runner does this in order:
 1. create `tests/e2e/.venv` if needed
 2. `pip install -e tests/e2e`
 3. install Playwright Chromium
-4. `cargo build --no-default-features --features libsql`
+4. `cargo build`
 5. run the selected auth matrix tests
 
 That makes it suitable for a clean CI VM or a brand-new dev box.

@@ -8,6 +8,7 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, Fault, FaultInjecting, FileStat, FileType, FilesystemError,
     FilesystemOperation, RootFilesystem,
 };
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -17,9 +18,9 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, CommandExecutionOutput,
     CommandExecutionRequest, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort, SandboxCommandTransport,
+    TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -224,7 +225,7 @@ async fn builtin_coding_grep_fails_on_explicit_file_read_error() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
 }
 
 #[tokio::test]
@@ -248,7 +249,7 @@ async fn builtin_coding_grep_treats_backend_infrastructure_as_backend_failure() 
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
 }
 
 #[tokio::test]
@@ -266,7 +267,7 @@ async fn builtin_coding_list_fails_when_visited_entry_budget_is_exceeded() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Resource);
+    assert_eq!(error, FailureKind::Resource);
 }
 
 #[tokio::test]
@@ -405,7 +406,7 @@ async fn builtin_write_file_maps_filesystem_provider_write_failure_to_backend() 
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
     assert_eq!(
         std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
         "old\n"
@@ -476,7 +477,7 @@ async fn builtin_apply_patch_maps_filesystem_provider_write_failure_to_backend()
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(error, FailureKind::Backend);
     assert_eq!(
         std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
         "old\n"
@@ -513,7 +514,7 @@ async fn builtin_apply_patch_failure_reports_path_and_match_count() {
     )
     .await;
 
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     assert_eq!(
         failure.message.as_deref(),
         Some("apply_patch failed for path workspace main.rs: old_string matched 0 times")
@@ -694,7 +695,7 @@ async fn builtin_apply_patch_rejects_active_null_string_placeholders() {
         )
         .await;
 
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
         assert_eq!(
             std::fs::read_to_string(temp.path().join(file_name)).unwrap(),
             expected_content
@@ -802,7 +803,7 @@ async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
     )
     .await;
 
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     assert_eq!(
         failure.message.as_deref(),
         Some(
@@ -845,7 +846,7 @@ async fn builtin_coding_read_state_is_scoped_to_the_run() {
         run_b.clone(),
     )
     .await;
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     let message = failure.message.as_deref().unwrap_or_default();
     assert!(
         message.contains("read it in full with read_file"),
@@ -862,7 +863,7 @@ async fn builtin_coding_read_state_is_scoped_to_the_run() {
         run_b,
     )
     .await;
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     assert_eq!(
         std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
         "original content\n",
@@ -921,7 +922,7 @@ async fn builtin_write_file_rejects_edit_when_default_read_was_truncated_by_line
         context.clone(),
     )
     .await;
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     let message = failure.message.as_deref().unwrap_or_default();
     assert!(
         message.contains("read it in full with read_file"),
@@ -950,7 +951,7 @@ async fn builtin_write_file_rejects_edit_when_default_read_was_truncated_by_line
         context,
     )
     .await;
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
 
     assert_eq!(
         std::fs::read_to_string(temp.path().join("long.txt")).unwrap(),
@@ -998,7 +999,7 @@ async fn builtin_apply_patch_rejects_edit_when_default_read_was_truncated_by_byt
         context,
     )
     .await;
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     let message = failure.message.as_deref().unwrap_or_default();
     assert!(
         message.contains("read it in full with read_file"),
@@ -1026,7 +1027,7 @@ async fn builtin_read_file_failure_reports_missing_path() {
     )
     .await;
 
-    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
     assert_eq!(
         failure.message.as_deref(),
         Some("read_file failed for path workspace missing.py: file not found")
@@ -1054,8 +1055,8 @@ async fn builtin_read_file_out_of_scope_rejection_reaches_the_model_through_the_
     )
     .await;
 
-    // FilesystemDenied maps to Authorization at the runtime boundary.
-    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    // FilesystemDenied is carried 1:1 through the runtime boundary.
+    assert_eq!(failure.kind, FailureKind::FilesystemDenied);
     let message = failure
         .message
         .as_deref()
@@ -1098,8 +1099,8 @@ async fn builtin_write_file_to_read_only_mount_reports_an_actionable_denial() {
     )
     .await;
 
-    // FilesystemDenied maps to Authorization at the runtime boundary.
-    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    // FilesystemDenied is carried 1:1 through the runtime boundary.
+    assert_eq!(failure.kind, FailureKind::FilesystemDenied);
     let message = failure
         .message
         .as_deref()
@@ -1517,9 +1518,9 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     capability: &str,
     input: Value,
     context: ExecutionContext,
-) -> Result<Value, RuntimeFailureKind> {
+) -> Result<Value, FailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
@@ -1541,7 +1542,7 @@ async fn invoke_completed_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> ironclaw_host_runtime::RuntimeCapabilityCompleted {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
@@ -1562,7 +1563,7 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> ironclaw_host_runtime::RuntimeCapabilityFailure {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
@@ -2011,7 +2012,7 @@ fn execution_context_with_mounts<const N: usize>(
             .map(|grant| dispatch_grant_with_mounts(grant, mounts.clone()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -2019,7 +2020,9 @@ fn execution_context_with_mounts<const N: usize>(
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant_with_mounts(capability: &str, mounts: MountView) -> CapabilityGrant {

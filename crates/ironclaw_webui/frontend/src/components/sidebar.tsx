@@ -30,7 +30,7 @@ export function Sidebar({
           className="flex items-center gap-2.5 opacity-90 hover:opacity-100"
           aria-label="IronClaw"
         >
-          <img src="/assets/logo.jpg" alt="IronClaw" className="h-7 w-auto" />
+          <img src="/assets/logo.png" alt="IronClaw" className="h-7 w-auto" />
         </Link>
       </div>
 
@@ -47,9 +47,13 @@ export function Sidebar({
         <SidebarThreads
           threads={threadsState.threads}
           activeThreadId={threadsState.activeThreadId}
+          hasMore={threadsState.hasMore}
+          isLoadingMore={threadsState.isLoadingMore}
+          loadMoreError={threadsState.loadMoreError}
           rebornProjectsEnabled={rebornProjectsEnabled}
           onSelect={onSelectThread}
           onDelete={onDeleteThread}
+          onLoadMore={threadsState.loadMore}
           onNavigate={onClose}
         />
       </div>

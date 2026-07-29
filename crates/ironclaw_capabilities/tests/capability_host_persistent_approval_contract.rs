@@ -95,12 +95,12 @@ async fn persistent_grant_flips_to_allow_and_dispatches_without_gate() {
     let context = execution_context(CapabilitySet::default());
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "persistent allow"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "persistent allow"}),
+        )
         .await
         .expect("persistent grant must authorize dispatch without an approval gate");
 
@@ -131,12 +131,12 @@ async fn non_flipping_persistent_grant_still_raises_approval_gate() {
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "still needs approval"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "still needs approval"}),
+        )
         .await
         .unwrap_err();
 

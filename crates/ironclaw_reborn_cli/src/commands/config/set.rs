@@ -202,15 +202,13 @@ fn write_slack_enabled(home: &RebornHome, value: &str) -> anyhow::Result<()> {
         .map_err(anyhow::Error::from)
 }
 
-#[cfg(feature = "libsql")]
 fn write_llm_api_key(
     context: &RebornCliContext,
     provider_id: &str,
     value: &str,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
-    let admin =
-        ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+    let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
     let canonical_provider_id = admin
         .resolve_provider_id(provider_id)
         .map_err(anyhow::Error::from)?;
@@ -228,20 +226,6 @@ fn write_llm_api_key(
     })
 }
 
-#[cfg(not(feature = "libsql"))]
-fn write_llm_api_key(
-    _context: &RebornCliContext,
-    _provider_id: &str,
-    _value: &str,
-    _store_opener: &dyn SecretStoreOpener,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`config set <provider>.api_key` requires the binary to be built with the `libsql` Cargo \
-         feature"
-    )
-}
-
-#[cfg(feature = "libsql")]
 fn write_google_client_secret(
     context: &RebornCliContext,
     value: &str,
@@ -259,18 +243,6 @@ fn write_google_client_secret(
             .await
             .map_err(anyhow::Error::from)
     })
-}
-
-#[cfg(not(feature = "libsql"))]
-fn write_google_client_secret(
-    _context: &RebornCliContext,
-    _value: &str,
-    _store_opener: &dyn SecretStoreOpener,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`config set google.client_secret` requires the binary to be built with the `libsql` \
-         Cargo feature"
-    )
 }
 
 // ── Apply step ──────────────────────────────────────────────────
@@ -397,13 +369,11 @@ impl SecretValueSource for StdinSecretValueSource {
 /// code in this crate must not depend on `ironclaw_secrets` (enforced by
 /// `reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`).
 trait SecretStoreOpener {
-    #[cfg(feature = "libsql")]
     fn open_llm_key_store(
         &self,
         home_path: &Path,
-    ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
+    ) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
 
-    #[cfg(feature = "libsql")]
     fn open_google_oauth_secret_store(
         &self,
         home_path: &Path,
@@ -413,11 +383,10 @@ trait SecretStoreOpener {
 struct LocalDevSecretStoreOpener;
 
 impl SecretStoreOpener for LocalDevSecretStoreOpener {
-    #[cfg(feature = "libsql")]
     fn open_llm_key_store(
         &self,
         home_path: &Path,
-    ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+    ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
         // `config set` is a write command: create the reborn home directory
         // (if missing) before opening the store, mirroring
         // `onboard::llm_credentials::open_llm_key_store` — a never-onboarded
@@ -431,11 +400,10 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::LlmKeyStore::new(store))
+            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
         })
     }
 
-    #[cfg(feature = "libsql")]
     fn open_google_oauth_secret_store(
         &self,
         home_path: &Path,
@@ -491,35 +459,30 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "libsql")]
     struct FakeSecretStoreOpener {
-        store: Arc<dyn ironclaw_secrets::SecretStore>,
+        store: Arc<dyn ironclaw_secrets::SecretStorePort>,
         opened_paths: Mutex<Vec<std::path::PathBuf>>,
     }
 
-    #[cfg(feature = "libsql")]
     impl FakeSecretStoreOpener {
         fn new() -> Self {
             Self {
-                store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+                store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
                 opened_paths: Mutex::new(Vec::new()),
             }
         }
     }
 
-    #[cfg(feature = "libsql")]
     impl SecretStoreOpener for FakeSecretStoreOpener {
         fn open_llm_key_store(
             &self,
             home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+        ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
             self.opened_paths
                 .lock()
                 .expect("opened paths lock")
                 .push(home_path.to_path_buf());
-            Ok(ironclaw_reborn_composition::LlmKeyStore::new(
-                self.store.clone(),
-            ))
+            Ok(ironclaw_operator::LlmKeyStore::new(self.store.clone()))
         }
 
         fn open_google_oauth_secret_store(
@@ -550,15 +513,13 @@ mod tests {
 
     struct FailingStoreOpener;
     impl SecretStoreOpener for FailingStoreOpener {
-        #[cfg(feature = "libsql")]
         fn open_llm_key_store(
             &self,
             _home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+        ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
             anyhow::bail!("store opener should not be called")
         }
 
-        #[cfg(feature = "libsql")]
         fn open_google_oauth_secret_store(
             &self,
             _home_path: &Path,
@@ -752,7 +713,6 @@ mod tests {
         assert!(config_toml(&context).is_empty(), "must not write");
     }
 
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_client_secret_writes_secret_store_only() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -804,7 +764,6 @@ mod tests {
     /// `FakeSecretStoreOpener`) so it actually reaches
     /// `open_local_dev_secret_store`'s libSQL file-open and needs
     /// `create_dir_all` to succeed.
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_client_secret_write_creates_the_reborn_home_directory_on_a_never_onboarded_host() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
@@ -839,7 +798,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_client_secret_prompts_hidden_when_no_value_given() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -868,7 +826,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "libsql")]
     #[test]
     fn llm_api_key_writes_to_secret_store_and_not_config_toml() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -892,7 +849,7 @@ mod tests {
         );
         let store = opener.store.clone();
         let stored = crate::runtime::block_on_cli(async move {
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
         })

@@ -10,7 +10,7 @@ use ironclaw_reborn_traces::contribution::{
 };
 
 fn unwrap_traces_command(cli: Cli) -> TracesSubcommand {
-    let Command::Traces(command) = cli.command else {
+    let Some(Command::Traces(command)) = cli.command else {
         panic!("expected traces command");
     };
     command.command
@@ -116,6 +116,7 @@ fn trace_queue_envelope_fixture(
             feature_flags: BTreeMap::new(),
             channel: TraceChannel::Cli,
             model_name: None,
+            channel_origin: None,
         },
         consent: ConsentMetadata {
             policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),

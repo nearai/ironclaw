@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeKind,
+    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind,
+    VendorId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use serde_json::json;
@@ -13,7 +13,7 @@ use super::*;
 #[tokio::test]
 async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["repo".to_string()],
         },
@@ -35,8 +35,9 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -88,8 +89,9 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -129,7 +131,13 @@ kind = "mcp"
 transport = "http"
 url = "https://mcp.example.test/rpc"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test.capability"
 description = "Search through MCP"
 effects = ["network"]

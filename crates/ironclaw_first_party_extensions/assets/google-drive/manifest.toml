@@ -1,4 +1,4 @@
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "google-drive"
 name = "Google Drive"
 version = "0.1.0"
@@ -9,170 +9,237 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/google_drive_tool.wasm"
 
-[[capabilities]]
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.list_files"
 description = "Search or list files and folders, including Google Sheets/spreadsheets by name or title."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/list_files.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/list_files.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.get_file"
 description = "Get file metadata."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/get_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/get_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.download_file"
 description = "Download a file's content as text — including binary documents (PDF, PPTX, DOCX, XLSX), which are converted to extracted text automatically — or export a Google Workspace file. No shell or separate downloader needed."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/download_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/download_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.upload_file"
 description = "Upload a new text file."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/upload_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/upload_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.update_file"
 description = "Update file metadata or move/star a file."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/update_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/update_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.create_folder"
 description = "Create a folder."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/create_folder.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/create_folder.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.delete_file"
 description = "Permanently delete a file or folder."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/delete_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/delete_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.trash_file"
 description = "Move a file or folder to trash."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/trash_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/trash_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.share_file"
 description = "Share a file or folder with someone."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/share_file.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/share_file.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.list_permissions"
 description = "List file permissions."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/list_permissions.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/list_permissions.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.remove_permission"
 description = "Revoke a file permission."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/remove_permission.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/remove_permission.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.list_shared_drives"
 description = "List shared drives."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-drive/list_shared_drives.input.v1.json"
-output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/list_shared_drives.md"
-required_host_ports = ["host.runtime.http_egress"]
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.google]
+method = "oauth2_code"
+display_name = "Google account"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+pkce = "s256"
+scopes = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive"]
+extra_authorize_params = { access_type = "offline", include_granted_scopes = "true", prompt = "consent" }
+client_credentials = { client_id_handle = "google_oauth_client_id", client_secret_handle = "google_oauth_client_secret" }
+
+[auth.google.refresh]
+# Google refresh tokens for apps in "testing" publishing status expire after
+# 7 days of inactivity; the host auth engine's keepalive sweep proactively
+# refreshes idle accounts well before this vendor lifetime.
+keepalive_idle_seconds = 604800
+
+[auth.google.token_response]
+access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
+scope = { path = "/scope" }

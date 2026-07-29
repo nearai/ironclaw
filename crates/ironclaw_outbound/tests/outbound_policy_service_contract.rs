@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)] // test helper constructs FilesystemOutboundStateStore directly (arch-simplification §4.3)
+#![allow(clippy::disallowed_methods)] // test helper constructs OutboundStateStore directly (arch-simplification §4.3)
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -11,8 +11,8 @@ use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, Vir
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
-fn in_memory_outbound_store() -> FilesystemOutboundStateStore<InMemoryBackend> {
-    // §4.3: the deleted `InMemoryOutboundStateStore` is replaced by the one
+fn in_memory_outbound_store() -> OutboundStateStore<InMemoryBackend> {
+    // §4.3: the deleted `OutboundStateStore<ironclaw_filesystem::InMemoryBackend>` is replaced by the one
     // production store over a volatile in-memory backend (mirrors the merged
     // budget-gate/run-state consolidations). A local helper because this crate's
     // own integration tests cannot enable its `test-support` feature.
@@ -26,7 +26,7 @@ fn in_memory_outbound_store() -> FilesystemOutboundStateStore<InMemoryBackend> {
         std::sync::Arc::new(InMemoryBackend::new()),
         mounts,
     ));
-    FilesystemOutboundStateStore::new(scoped)
+    OutboundStateStore::new(scoped)
 }
 
 #[tokio::test]
@@ -99,7 +99,7 @@ async fn subscription_access_policy_gates_cursor_checkpoint_creation() {
 }
 
 #[tokio::test]
-async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_without_target() {
+async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_identity() {
     let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
@@ -115,7 +115,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
     let OutboundDeliveryDecision::Authorized { attempt, target } = first else {
         panic!("expected authorized delivery decision");
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &candidate.target);
 
     let second = service
@@ -123,9 +123,17 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         .await
         .expect("second authorized delivery attempt");
     assert!(matches!(
-        second,
+        &second,
         OutboundDeliveryDecision::Authorized { .. }
     ));
+    let OutboundDeliveryDecision::Authorized {
+        attempt: second_attempt,
+        ..
+    } = second
+    else {
+        unreachable!("matched above")
+    };
+    assert_eq!(second_attempt.delivery_id, attempt.delivery_id);
     assert_eq!(
         validator.calls(),
         2,
@@ -150,21 +158,9 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         .list_delivery_attempts(scope)
         .await
         .expect("list delivery attempts");
-    assert_eq!(attempts.len(), 3);
-    assert_eq!(
-        attempts
-            .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Pending)
-            .count(),
-        2
-    );
-    assert_eq!(
-        attempts
-            .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Failed)
-            .count(),
-        1
-    );
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].delivery_id, attempt.delivery_id);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
 }
 
 #[tokio::test]
@@ -337,7 +333,7 @@ async fn communication_delivery_requested_outbound_validates_requested_target() 
     assert_eq!(attempt.candidate.target, reply_ref("reply:requested"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
     assert_eq!(attempt.candidate.turn_run_id, Some(turn_run_id()));
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(validator.calls(), 1);
 }
 
@@ -842,7 +838,7 @@ async fn communication_delivery_actor_and_modality_forwarded_through_lowering() 
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &reply_ref("reply:requested"));
     assert_eq!(validator.calls(), 1);
     assert_eq!(

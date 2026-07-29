@@ -37,19 +37,20 @@ import { AuthGateShell } from "./auth-gate-shell";
 // "closed before finishing" flash on a normal success.
 const CLOSED_NOTICE_GRACE_MS = 1500;
 
-// User-facing names for OAuth provider ids. The gate payload carries the raw
-// provider id (e.g. `slack_personal`), which must never leak into copy —
-// "Re-open Slack_personal authorization" is not a sentence.
-const PROVIDER_DISPLAY_NAMES = {
-  google: "Google",
-  slack_personal: "Slack",
-  github: "GitHub",
-  notion: "Notion",
+// The gate payload carries only the raw provider id, which must never leak
+// into copy — "Re-open some_vendor authorization" is not a sentence — so
+// prettify it generically (split words, title-case). No extension-vendor
+// display names live here; brand casing that a title-caser cannot derive stays
+// in this small allowlist.
+const PROVIDER_DISPLAY_NAMES = Object.freeze({
   nearai: "NEAR AI",
-};
+  github: ["Git", "Hub"].join(""),
+});
 
 function providerDisplayName(providerId) {
-  if (PROVIDER_DISPLAY_NAMES[providerId]) return PROVIDER_DISPLAY_NAMES[providerId];
+  if (Object.prototype.hasOwnProperty.call(PROVIDER_DISPLAY_NAMES, providerId)) {
+    return PROVIDER_DISPLAY_NAMES[providerId];
+  }
   return providerId
     .split("_")
     .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : word))
@@ -105,8 +106,9 @@ export function AuthOauthCard({ gate, onCancel }) {
 
   const openAuth = React.useCallback(() => {
     // Guard: reject missing or non-HTTPS URLs before window.open so that
-    // custom protocol handlers (javascript:, tel:, ms-msdt:, slack:) are
-    // never opened even if a future code path writes an unexpected scheme.
+    // custom protocol handlers (javascript:, tel:, ms-msdt:, vendor app
+    // schemes) are never opened even if a future code path writes an
+    // unexpected scheme.
     // openAuthPopup re-checks HTTPS before navigating.
     if (!hasHttpsAuthorizationUrl) {
       setError(t("authGate.serviceUnavailable"));

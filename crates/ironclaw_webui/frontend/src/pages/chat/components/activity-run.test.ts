@@ -81,9 +81,9 @@ test("ActivityRun auto-expands declined tool activity", () => {
   const tree = context.globalThis.__testExports.ActivityRun({
     activity: [
       {
-        id: "tool-activate",
+        id: "tool-install",
         role: "tool_activity",
-        toolName: "extension_activate",
+        toolName: "extension_install",
         toolStatus: "declined",
       },
     ],

@@ -464,13 +464,16 @@ fn http_error(error: RuntimeHttpEgressError, save_mode: HttpSaveMode) -> FirstPa
     let save_error = save_error_kind_and_summary(&error, save_mode);
     let kind = match save_error {
         Some((kind, _summary)) => kind,
-        // Host credential injection failures are backend/client integration faults;
-        // production maps RuntimeDispatchErrorKind::Client to RuntimeFailureKind::Backend.
+        // Host credential injection failures are host-client integration faults.
         None => match error.reason_code() {
             RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
             RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
             RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
-            RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
+            // Transport fault (unreachable, reset, timeout) — retryable. The
+            // policy-denial cousin rides `PolicyDenied` above; conflating the
+            // two made denied calls burn retry budget (and, post-fix, would
+            // have made real network blips non-retryable).
+            RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::Network,
             RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
                 RuntimeDispatchErrorKind::OutputTooLarge
@@ -646,6 +649,7 @@ mod tests {
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            origin: None,
             capability_id: CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
             run_id: None,

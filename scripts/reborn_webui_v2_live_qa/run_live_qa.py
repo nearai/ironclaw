@@ -104,8 +104,6 @@ from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
 )
 from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     SLACK_BOT_TOKEN_ENV,
-    SLACK_OAUTH_CLIENT_ID_ENV,
-    SLACK_OAUTH_CLIENT_SECRET_ENV,
     SLACK_PERSONAL_ACCESS_TOKEN_ENV,
     SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES,
     SLACK_SECOND_USER_TOKEN_ENV,
@@ -126,6 +124,7 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_setup_payload,
     _slack_setup_preflight,
     _slack_auth_test,
+    _slack_auth_provider,
     _slack_config_value,
     _slack_enabled,
 )
@@ -222,7 +221,6 @@ HN_KEYWORD_SEARCH_URL = (
 )
 EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
-EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 SLACK_EXTENSION_REQUIREMENT = {
@@ -768,6 +766,44 @@ def server_env(
     return env
 
 
+def case_llm_trace_env(output_dir: Path, case_name: str) -> dict[str, str]:
+    """Per-case env that makes the spawned ``ironclaw serve`` record a
+    replayable ``LlmTrace`` for this case.
+
+    The lane restarts a fresh serve process per case (see ``run_cases``), so a
+    per-case ``IRONCLAW_TRACE_OUTPUT`` path attributes every trace to exactly one
+    case with no timestamp/turn correlation needed. Recording flushes
+    incrementally after each model step, so the trace still lands even though the
+    process is signalled (not gracefully drained) at case teardown. These traces
+    are harvested as CI artifacts for fixture curation and cross-run drift
+    detection; the harness does not replay them in-line."""
+    trace_path = output_dir / "llm-traces" / f"{case_name}.json"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    return {
+        "IRONCLAW_RECORD_TRACE": "1",
+        "IRONCLAW_TRACE_OUTPUT": str(trace_path),
+        "IRONCLAW_TRACE_MODEL_NAME": f"reborn-qa-{case_name}",
+    }
+
+
+def validate_case_llm_trace(output_dir: Path, case_name: str) -> Path:
+    """Require a complete, parseable trace for a successful model-driving case."""
+    trace_path = output_dir / "llm-traces" / f"{case_name}.json"
+    try:
+        payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LiveQaError(
+            f"expected LLM trace for {case_name} is missing or invalid: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("steps"), list):
+        raise LiveQaError(
+            f"expected LLM trace for {case_name} does not contain a steps list"
+        )
+    if not payload["steps"]:
+        raise LiveQaError(f"expected LLM trace for {case_name} contains no steps")
+    return trace_path
+
+
 async def start_reborn_server(
     binary: Path,
     reborn_home: Path,
@@ -784,32 +820,6 @@ async def start_reborn_server(
     ):
         process_extra_env["IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI"] = (
             f"{base_url}/api/reborn/product-auth/oauth/google/callback"
-        )
-    slack_oauth_client_configured = _env_present(
-        SLACK_OAUTH_CLIENT_ID_ENV,
-        process_extra_env,
-    )
-    config_path = reborn_home / "config.toml"
-    if not slack_oauth_client_configured and config_path.exists():
-        config_text = _config_text(config_path)
-        if _slack_enabled(config_text):
-            slack_oauth_client_configured = bool(
-                _slack_setup_preflight(
-                    reborn_home,
-                    config_text,
-                    process_extra_env,
-                ).get("oauth_client_id_configured")
-            )
-    if (
-        slack_oauth_client_configured
-        and _env_present(SLACK_OAUTH_CLIENT_SECRET_ENV, process_extra_env)
-        and not _env_present(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-            process_extra_env,
-        )
-    ):
-        process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
-            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
@@ -851,6 +861,324 @@ async def start_reborn_server(
     return proc, base_url
 
 
+def _extension_setup_submission(
+    setup: dict[str, object],
+    values: dict[str, object],
+) -> tuple[dict[str, str], dict[str, str]]:
+    # #6520: the setup view declares only per-user `secrets`; non-secret
+    # deployment values moved to the operator extension-configuration surface
+    # (an absent `fields` collection is the current contract, not an error).
+    declared: dict[str, str] = {}
+    for collection in ("secrets", "fields"):
+        descriptors = setup.get(collection)
+        if not isinstance(descriptors, list):
+            if collection == "fields":
+                continue
+            raise LiveQaError(
+                f"Extension setup API omitted the manifest-declared {collection} descriptors"
+            )
+        for descriptor in descriptors:
+            name = descriptor.get("name") if isinstance(descriptor, dict) else None
+            if not isinstance(name, str) or not name:
+                raise LiveQaError(
+                    f"Extension setup API returned an invalid {collection} descriptor"
+                )
+            declared[name] = collection
+
+    submission: dict[str, dict[str, str]] = {"secrets": {}, "fields": {}}
+    for source_name, raw_value in values.items():
+        value = str(raw_value or "").strip()
+        if not value:
+            continue
+        matches = [
+            name
+            for name in declared
+            if name == source_name or name.endswith(f"_{source_name}")
+        ]
+        if len(matches) == 1:
+            handle = matches[0]
+            submission[declared[handle]][handle] = value
+            continue
+        if not matches:
+            # Not a declared secret: route to the operator admin-configuration
+            # API under its own handle.
+            submission["fields"][source_name] = value
+            continue
+        raise LiveQaError(
+            "Extension setup descriptors did not uniquely declare supplied field "
+            f"{source_name!r}: matches={matches!r}"
+        )
+    return submission["secrets"], submission["fields"]
+
+
+def _require_extension_setup_response(
+    response: object,
+    operation: str,
+) -> dict[str, object]:
+    status_code = getattr(response, "status_code", None)
+    if not isinstance(status_code, int) or status_code < 200 or status_code >= 300:
+        raise LiveQaError(
+            f"Extension setup API {operation} returned HTTP {status_code}; "
+            "response body omitted because this endpoint handles secrets"
+        )
+    body = response.json()
+    if not isinstance(body, dict):
+        raise LiveQaError(f"Extension setup API {operation} returned non-object JSON")
+    return body
+
+
+def _extension_projection(
+    extensions: list[object],
+    package_id: str,
+) -> dict[str, object] | None:
+    for extension in extensions:
+        if not isinstance(extension, dict):
+            continue
+        package_ref = extension.get("package_ref")
+        if isinstance(package_ref, dict) and package_ref.get("id") == package_id:
+            return extension
+    return None
+
+
+def _extension_setup_secret_readiness(status: object) -> dict[str, object]:
+    if not isinstance(status, dict):
+        return {"ready": False, "missing": ["setup_status"]}
+    projected_secrets = status.get("secrets")
+    if not isinstance(projected_secrets, list):
+        return {"ready": False, "missing": ["secrets_projection"]}
+    required = [
+        secret
+        for secret in projected_secrets
+        if isinstance(secret, dict) and secret.get("optional") is not True
+    ]
+    missing = sorted(
+        str(secret.get("name") or "unnamed_required_secret")
+        for secret in required
+        if secret.get("provided") is not True
+    )
+    return {
+        "ready": not missing,
+        "missing": missing,
+        "required_secret_count": len(required),
+    }
+
+
+def _map_admin_configuration_values(
+    fields: dict[str, object],
+    declared_handles: set[str],
+) -> tuple[dict[str, object], list[str]]:
+    """Map bare setup-source names onto the admin group's declared handles.
+
+    Same exact-or-``_{name}``-suffix rule the secrets matcher uses. Returns
+    the mapped values plus the sorted unmapped source names. A source that
+    would overwrite an already-mapped handle (e.g. declared ``foo_bar`` fed
+    by both ``foo_bar`` and ``bar``) is ambiguous and raises: the submitted
+    value must never depend on dict order.
+    """
+    declared: dict[str, object] = {}
+    mapped_sources: dict[str, str] = {}
+    unmapped: list[str] = []
+    for source_name, value in fields.items():
+        if source_name in declared_handles:
+            target = source_name
+        else:
+            matches = [
+                handle
+                for handle in declared_handles
+                if handle.endswith(f"_{source_name}")
+            ]
+            if len(matches) != 1:
+                unmapped.append(source_name)
+                continue
+            target = matches[0]
+        if target in declared:
+            raise LiveQaError(
+                "Ambiguous admin-configuration mapping: sources "
+                f"{mapped_sources[target]!r} and {source_name!r} both resolve to "
+                f"declared handle {target!r}"
+            )
+        declared[target] = value
+        mapped_sources[target] = source_name
+    return declared, sorted(unmapped)
+
+
+
+async def _apply_extension_setup_api_after_start(
+    *,
+    base_url: str,
+    package_id: str,
+    values: dict[str, object],
+) -> dict[str, object]:
+    import httpx
+
+    headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+    encoded_package_id = urllib.parse.quote(package_id, safe="")
+    extensions_url = f"{base_url}/api/webchat/v2/extensions"
+    setup_url = f"{extensions_url}/{encoded_package_id}/setup"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        extensions_response = await client.get(extensions_url, headers=headers)
+        extensions_body = _require_extension_setup_response(
+            extensions_response,
+            "list",
+        )
+        extensions = extensions_body.get("extensions")
+        if not isinstance(extensions, list):
+            raise LiveQaError("Extensions API response omitted the extensions list")
+        if not _extension_is_listed(extensions, package_id):
+            install_response = await client.post(
+                f"{extensions_url}/install",
+                headers=headers,
+                json={
+                    "package_ref": {"kind": "extension", "id": package_id},
+                    "client_action_id": f"live-qa-{uuid.uuid4()}",
+                },
+            )
+            install_body = _require_extension_setup_response(install_response, "install")
+            if install_body.get("success") is not True:
+                raise LiveQaError("Extension setup API install did not report success")
+
+        setup_response = await client.get(setup_url, headers=headers)
+        setup = _require_extension_setup_response(setup_response, "view")
+        secrets, fields = _extension_setup_submission(setup, values)
+        # #6520: non-secret deployment values go through the operator
+        # extension-configuration surface; setup submit rejects them.
+        if fields:
+            admin_url = (
+                f"{base_url}/api/webchat/v2/operator/extension-configuration/"
+                f"extension.{encoded_package_id}"
+            )
+            catalog_response = await client.get(
+                f"{base_url}/api/webchat/v2/operator/extension-configuration",
+                headers=headers,
+            )
+            catalog_response.raise_for_status()
+            # Fail closed on catalog drift: an absent group would otherwise
+            # degrade to revision=0 + an empty payload and resurface later as
+            # an opaque conflict or missing-field error.
+            group = next(
+                (
+                    entry
+                    for entry in catalog_response.json().get("groups", [])
+                    if isinstance(entry, dict)
+                    and entry.get("group_id") == f"extension.{package_id}"
+                ),
+                None,
+            )
+            if group is None or group.get("revision") is None:
+                raise LiveQaError(
+                    f"Operator catalog does not declare group extension.{package_id} "
+                    "with a revision; cannot route non-secret setup values"
+                )
+            revision = int(group.get("revision") or 0)
+            declared_handles: set[str] = set()
+            for descriptor in group.get("fields") or []:
+                handle = descriptor.get("handle") if isinstance(descriptor, dict) else None
+                if isinstance(handle, str) and handle:
+                    declared_handles.add(handle)
+            if not declared_handles:
+                raise LiveQaError(
+                    f"Operator group extension.{package_id} declares no field handles; "
+                    "cannot route non-secret setup values"
+                )
+            # The capability rejects handles the group does not declare. The
+            # setup payload uses bare source names (team_id, bot_user_id, ...);
+            # map each onto the group's declared handle (see
+            # _map_admin_configuration_values), send only mapped ones, and
+            # surface leftovers loudly so a real gap fails later at the
+            # group-complete/setup assertions with context.
+            declared, undeclared = _map_admin_configuration_values(fields, declared_handles)
+            if undeclared:
+                print(
+                    "[reborn-webui-v2-live-qa] WARNING: skipping values undeclared by "
+                    f"extension.{package_id} admin group: {undeclared}"
+                )
+            admin_response = await client.put(
+                admin_url,
+                headers=headers,
+                json={
+                    # The operator surface takes a sequence of {handle, value}
+                    # entries, not a map (Vec<ExtensionAdminConfigurationValue>).
+                    "values": [
+                        {"handle": handle, "value": value}
+                        for handle, value in declared.items()
+                    ],
+                    "expected_revision": revision,
+                    "idempotency_key": f"live-qa-{uuid.uuid4()}",
+                },
+            )
+            if admin_response.status_code != 200:
+                raise LiveQaError(
+                    "Operator extension-configuration save failed: "
+                    f"HTTP {admin_response.status_code}: {admin_response.text[:300]}; "
+                    f"sent_handles={sorted(declared)} undeclared_skipped={undeclared}"
+                )
+        response = await client.post(
+            setup_url,
+            headers=headers,
+            json={
+                "action": "submit",
+                "payload": {"secrets": secrets},
+                "client_action_id": f"live-qa-{uuid.uuid4()}",
+            },
+        )
+        status = _require_extension_setup_response(response, "submit")
+        package_ref = status.get("package_ref")
+        if not isinstance(package_ref, dict) or package_ref.get("id") != package_id:
+            raise LiveQaError("Extension setup API returned a mismatched package projection")
+        projected_secrets = status.get("secrets")
+        projected_secret_presence = (
+            {
+                secret.get("name"): secret.get("provided")
+                for secret in projected_secrets
+                if isinstance(secret, dict) and isinstance(secret.get("name"), str)
+            }
+            if isinstance(projected_secrets, list)
+            else {}
+        )
+        missing_secret_presence = sorted(
+            handle for handle in secrets if projected_secret_presence.get(handle) is not True
+        )
+        # #6520: non-secret values live on the operator configuration surface
+        # and no longer echo through the setup projection.
+        if missing_secret_presence:
+            raise LiveQaError(
+                "Extension setup API returned incomplete setup projection: "
+                f"missing_secret_presence={missing_secret_presence!r}"
+            )
+
+        active_response = await client.get(extensions_url, headers=headers)
+        active_body = _require_extension_setup_response(active_response, "active read-back")
+        active_extensions = active_body.get("extensions")
+        if not isinstance(active_extensions, list):
+            raise LiveQaError("Extensions API active read-back omitted the extensions list")
+        active_projection = _extension_projection(active_extensions, package_id)
+        # #6520: the readiness booleans (active/authenticated/needs_setup) are
+        # retired; installation_state is the sole public lifecycle phase and
+        # auth state rides auth_accounts.
+        if (
+            not isinstance(active_projection, dict)
+            or active_projection.get("installation_state") != "active"
+        ):
+            raise LiveQaError(
+                "Extension setup completion did not produce a fully ready projection "
+                "(required installation_state=active)"
+            )
+    return {
+        "applied": True,
+        "status_code": response.status_code,
+        "request": {
+            "package_id": package_id,
+            "secret_handles": sorted(secrets),
+            "field_handles": sorted(fields),
+        },
+        "status": status,
+        "read_back": {
+            "projection": active_projection,
+            "verified_active": True,
+        },
+    }
+
+
 async def _apply_slack_setup_api_after_start(
     *,
     base_url: str,
@@ -859,62 +1187,43 @@ async def _apply_slack_setup_api_after_start(
     config_text = _config_text(prepared_home.path / "config.toml")
     if not _slack_enabled(config_text):
         return {"applied": False, "reason": "slack_disabled"}
+    slack_preflight = prepared_home.preflight.get("slack")
+    auth_test = (
+        slack_preflight.get("auth_test")
+        if isinstance(slack_preflight, dict)
+        else None
+    )
+    bot_user_id = (
+        str(auth_test.get("user_id") or "").strip()
+        if isinstance(auth_test, dict)
+        else ""
+    )
+    shared_subject_user_id = (
+        str(slack_preflight.get("auth_user_id") or "").strip()
+        if isinstance(slack_preflight, dict)
+        else ""
+    ) or _auth_user_id()
     payload, preflight = _slack_setup_payload(
         prepared_home.path,
         config_text,
         prepared_home.env,
+        bot_user_id=bot_user_id,
+        shared_subject_user_id=shared_subject_user_id,
     )
     if payload is None:
         return {"applied": False, "reason": "setup_payload_missing", **preflight}
     try:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.put(
-                f"{base_url}/api/webchat/v2/channels/slack/setup",
-                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
-                json=payload,
-            )
-            if response.status_code < 200 or response.status_code >= 300:
-                raise LiveQaError(
-                    "Slack setup API returned HTTP "
-                    f"{response.status_code}; response body omitted because "
-                    "this endpoint handles Slack secrets"
-                )
-            status = response.json()
+        return await _apply_extension_setup_api_after_start(
+            base_url=base_url,
+            package_id="slack",
+            values=payload,
+        )
     except LiveQaError:
         raise
     except Exception as exc:
-        raise LiveQaError(f"Slack setup API call failed: {type(exc).__name__}: {exc}") from exc
-    if not isinstance(status, dict):
-        raise LiveQaError(f"Slack setup API returned non-object JSON: {status!r}")
-    required_flags = ["configured", "bot_token_configured", "signing_secret_configured"]
-    if payload.get("oauth_client_id") or payload.get("oauth_client_secret"):
-        required_flags.extend(["oauth_client_id_configured", "oauth_client_secret_configured"])
-    missing_flags = [flag for flag in required_flags if status.get(flag) is not True]
-    mismatched_identity = [
-        key
-        for key in ("installation_id", "team_id", "api_app_id")
-        if str(status.get(key) or "") != str(payload.get(key) or "")
-    ]
-    if missing_flags or mismatched_identity:
         raise LiveQaError(
-            "Slack setup API returned incomplete setup status: "
-            f"missing_flags={missing_flags!r} "
-            f"mismatched_identity={mismatched_identity!r}"
-        )
-    return {
-        "applied": True,
-        "status_code": response.status_code,
-        "request": {
-            "installation_id": payload.get("installation_id"),
-            "team_id": payload.get("team_id"),
-            "api_app_id": payload.get("api_app_id"),
-            "oauth_client_id_configured": bool(payload.get("oauth_client_id")),
-            "oauth_client_secret_configured": bool(payload.get("oauth_client_secret")),
-        },
-        "status": status,
-    }
+            f"Extension setup API call failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 _BROWSER_EVENT_LIMIT = 1_000
@@ -2004,11 +2313,17 @@ async def _webui_json(
             const response = await fetch(path, {
                 ...init,
             });
-            let body = null;
-            try {
-                body = await response.json();
-            } catch (_error) {
-                body = await response.text();
+            const rawBody = await response.text();
+            let body = rawBody;
+            if (rawBody) {
+                try {
+                    body = JSON.parse(rawBody);
+                } catch (_error) {
+                    // Preserve a non-JSON error body verbatim. The response
+                    // stream has already been consumed exactly once.
+                }
+            } else {
+                body = null;
             }
             return { status: response.status, body };
         }""",
@@ -2367,7 +2682,10 @@ def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | Non
         row = db.execute(
             """
             SELECT contents FROM root_filesystem_entries
-            WHERE path LIKE '%/slack-product-workflow/idempotency/actions/%'
+            WHERE (
+                    path LIKE '%/slack-product-workflow/idempotency/actions/%'
+                 OR path LIKE '%/channel-extensions/slack/product-workflow/idempotency/actions/%'
+            )
               AND CAST(contents AS TEXT) LIKE '%' || ? || '%'
             ORDER BY updated_at DESC, path DESC
             LIMIT 1
@@ -2538,6 +2856,32 @@ def _extension_is_listed(extensions: list[object], package_id: str) -> bool:
     )
 
 
+def _extension_entry(
+    entries: list[object], package_id: str
+) -> dict[str, object] | None:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        package_ref = entry.get("package_ref")
+        if isinstance(package_ref, dict) and package_ref.get("id") == package_id:
+            return entry
+    return None
+
+
+def _extension_channel_surface(entry: dict[str, object]) -> dict[str, object] | None:
+    surfaces = entry.get("surfaces")
+    if not isinstance(surfaces, list):
+        return None
+    return next(
+        (
+            surface
+            for surface in surfaces
+            if isinstance(surface, dict) and surface.get("kind") == "channel"
+        ),
+        None,
+    )
+
+
 async def _ensure_extension_installed_on_page(
     page: object,
     observed: dict[str, object],
@@ -2561,7 +2905,10 @@ async def _ensure_extension_installed_on_page(
         page,
         "POST",
         "/api/webchat/v2/extensions/install",
-        {"package_ref": {"kind": "extension", "id": package_id}},
+        {
+            "package_ref": {"kind": "extension", "id": package_id},
+            "client_action_id": f"live-qa-{uuid.uuid4()}",
+        },
     )
     if install_body.get("success") is not True:
         raise AssertionError(
@@ -2608,7 +2955,7 @@ async def _installed_active_extension_ids(ctx: LiveQaContext) -> dict[str, objec
             continue
         package_ref = extension.get("package_ref")
         ref_id = package_ref.get("id") if isinstance(package_ref, dict) else None
-        if ref_id and extension.get("active") is True:
+        if ref_id and extension.get("installation_state") == "active":
             active_ids.append(str(ref_id))
     return {"checked": True, "active_extension_ids": active_ids}
 
@@ -3379,42 +3726,64 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
-        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
-        channels = body.get("channels")
-        if not isinstance(channels, list):
-            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
-        slack_channels = [
-            channel
-            for channel in channels
-            if isinstance(channel, dict) and channel.get("channel") == "slack"
-        ]
-        observed["connectable_channel_count"] = len(channels)
-        observed["slack_strategy_count"] = len(slack_channels)
-        observed["slack_strategies"] = [
-            channel.get("strategy")
-            for channel in slack_channels
-            if isinstance(channel, dict)
-        ]
-        personal = next(
-            (
-                channel
-                for channel in slack_channels
-                if isinstance(channel, dict)
-                and channel.get("strategy") == "oauth"
-            ),
-            None,
+        await expect(page.locator("body")).to_contain_text("Slack", timeout=15000)  # type: ignore[attr-defined]
+        extensions_body = await _fetch_webui_json(page, "/api/webchat/v2/extensions")
+        extensions = extensions_body.get("extensions")
+        if not isinstance(extensions, list):
+            raise AssertionError(f"extensions body did not include a list: {extensions_body!r}")
+        registry_body = await _fetch_webui_json(
+            page, "/api/webchat/v2/extensions/registry"
         )
-        if not isinstance(personal, dict):
-            raise AssertionError(f"Slack oauth connect strategy missing: {channels!r}")
-        action_body = personal.get("action")
-        if not isinstance(action_body, dict):
-            raise AssertionError(f"Slack connect action missing: {personal!r}")
-        title = str(action_body.get("title") or "")
-        if not title:
-            raise AssertionError(f"Slack connect action title missing: {personal!r}")
-        instructions = str(action_body.get("instructions") or "")
+        registry_entries = registry_body.get("entries")
+        if not isinstance(registry_entries, list):
+            raise AssertionError(
+                f"extension registry body did not include a list: {registry_body!r}"
+            )
+        slack_extension = _extension_entry(extensions, "slack")
+        catalog_source = "installed"
+        if slack_extension is None:
+            slack_extension = _extension_entry(registry_entries, "slack")
+            catalog_source = "registry"
+        if slack_extension is None:
+            raise AssertionError("Slack extension missing from installed and registry catalogs")
+        channel_surface = _extension_channel_surface(slack_extension)
+        if channel_surface is None:
+            raise AssertionError(
+                f"Slack extension did not declare a channel surface: {slack_extension!r}"
+            )
+        connection = channel_surface.get("connection")
+        if not isinstance(connection, dict) or connection.get("strategy") != "oauth":
+            raise AssertionError(
+                f"Slack channel surface did not declare OAuth connection: {channel_surface!r}"
+            )
+        display_name = str(
+            connection.get("display_name")
+            or slack_extension.get("display_name")
+            or ""
+        )
+        if not display_name:
+            raise AssertionError(
+                f"Slack channel surface display name missing: {channel_surface!r}"
+            )
+        instructions = str(connection.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        auth_provider = _slack_auth_provider()
+        channel_provider = str(connection.get("channel") or "").strip()
+        if channel_provider and channel_provider != auth_provider:
+            raise AssertionError(
+                "Slack channel and auth surfaces disagree on provider: "
+                f"channel={channel_provider!r} auth={auth_provider!r}"
+            )
+        observed["extension_count"] = len(extensions)
+        observed["extension_registry_count"] = len(registry_entries)
+        observed["slack_catalog_source"] = catalog_source
+        observed["slack_surface_kinds"] = [
+            surface.get("kind")
+            for surface in slack_extension.get("surfaces", [])
+            if isinstance(surface, dict)
+        ]
+        observed["slack_connection_strategy"] = connection.get("strategy")
         # Extension-scoped OAuth deliberately rejects an absent installation.
         # Exercise the same global install transition as the product UI before
         # probing the OAuth start surface; do not manufacture per-user setup
@@ -3433,7 +3802,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
                 "Slack personal product-auth preflight did not include an invocation_id"
             )
         accounts_request: dict[str, object] = {
-            "provider": "slack_personal",
+            "provider": auth_provider,
             "requester_extension": "slack",
             "invocation_id": invocation_id,
             "limit": 10,
@@ -3453,37 +3822,32 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             account
             for account in accounts
             if isinstance(account, dict)
-            and account.get("provider") == "slack_personal"
+            and account.get("provider") == auth_provider
             and account.get("status") == "configured"
         ]
         if not configured_accounts:
             raise AssertionError(
                 f"Slack product-auth accounts list did not include a configured account: {accounts_list!r}"
             )
+        # #6520: OAuth start takes only the installed manifest credential
+        # requirement handle; provider/label/scopes resolve server-side from
+        # the lifecycle setup projection.
         oauth_start = await _webui_json(
             page,
             "POST",
             "/api/webchat/v2/extensions/slack/setup/oauth/start",
             {
-                "provider": "slack_personal",
-                "account_label": "Slack personal OAuth",
-                "scopes": [],
+                "requirement": "slack_user_token",
                 "expires_at": _slack_oauth_start_expires_at(),
                 "invocation_id": str(uuid.uuid4()),
             },
         )
-        if oauth_start.get("provider") != "slack_personal":
+        if oauth_start.get("provider") != auth_provider:
             raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
             raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
-        if "admin_managed_channels" in observed["slack_strategies"]:
-            await expect(page.locator("body")).to_contain_text("Slack workspace setup", timeout=15000)  # type: ignore[attr-defined]
-        else:
-            await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-            await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
-        observed["slack_display_name"] = personal.get("display_name")
-        observed["slack_connect_title"] = title
+        observed["slack_connect_display_name"] = display_name
         observed["slack_connect_instructions"] = instructions
         observed["slack_product_auth_account_count"] = len(accounts)
         observed["slack_product_auth_configured_account_count"] = len(configured_accounts)
@@ -3497,17 +3861,25 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     try:
         slack = _slack_preflight(ctx)
         auth_test = slack.get("auth_test")
-        setup = slack.get("setup")
+        setup_api = slack.get("setup_api")
+        setup_status = (
+            setup_api.get("status")
+            if isinstance(setup_api, dict)
+            else None
+        )
+        setup_readiness = _extension_setup_secret_readiness(setup_status)
         if not slack.get("enabled_in_config") or not slack.get("env_present"):
             raise AssertionError(f"Slack was not enabled with env in preflight: {slack!r}")
-        if not isinstance(setup, dict) or not setup.get("personal_oauth_ready"):
-            raise AssertionError(f"Slack personal OAuth is not ready in preflight: {setup!r}")
+        if setup_readiness.get("ready") is not True:
+            raise AssertionError(
+                "Slack generic setup projection is not ready; missing required secrets: "
+                f"{setup_readiness.get('missing')!r}"
+            )
         if not isinstance(auth_test, dict) or not auth_test.get("ok"):
             raise AssertionError(f"Slack auth.test did not pass in preflight: {auth_test!r}")
-        observed["slack_personal_oauth_ready"] = setup.get("personal_oauth_ready")
-        observed["slack_oauth_client_id_configured"] = setup.get("oauth_client_id_configured")
-        observed["slack_oauth_client_secret_configured"] = setup.get(
-            "oauth_client_secret_configured"
+        observed["slack_generic_setup_ready"] = setup_readiness.get("ready")
+        observed["slack_required_setup_secret_count"] = setup_readiness.get(
+            "required_secret_count"
         )
         observed["slack_auth_team_id"] = auth_test.get("team_id")
         observed["slack_auth_user_id"] = auth_test.get("user_id")
@@ -3868,7 +4240,6 @@ async def _extension_chat_connect_case(
     setup_capabilities = [
         EXTENSION_SEARCH_CAPABILITY_ID,
         EXTENSION_INSTALL_CAPABILITY_ID,
-        EXTENSION_ACTIVATE_CAPABILITY_ID,
     ]
     prompt = QA_SHEET_PROMPTS.get(case_name)
     sheet_prompt = prompt is not None
@@ -3881,8 +4252,8 @@ async def _extension_chat_connect_case(
     if prompt is None:
         prompt = (
             f"QA connect case {case_name}: connect my {display_name} from this chat. "
-            f"Use extension_search for `{package_id}`, then install and activate "
-            f"`{package_id}` if it is not already active. {verification_instruction} "
+            f"Use extension_search for `{package_id}`, then install `{package_id}` "
+            f"if it is not already active and complete any returned setup. {verification_instruction} "
             "Do not create, update, send, or delete anything. In the final answer "
             f"include the exact marker {marker} and include the words "
             f"{display_name} connected."
@@ -3984,32 +4355,23 @@ async def _ensure_extension_authenticated_on_page(
         return None
 
     match = find_extension(extensions)
-    should_install = ensure_installed and not isinstance(match, dict)
-    should_activate = (
-        ensure_installed
-        and isinstance(match, dict)
-        and match.get("active") is not True
+    should_reconcile_install = ensure_installed and (
+        not isinstance(match, dict)
+        or match.get("installation_state") != "active"
     )
     prefix = package_id.replace("-", "_")
-    if should_install:
+    if should_reconcile_install:
         install_body = await _webui_json(
             page,
             "POST",
             "/api/webchat/v2/extensions/install",
-            {"package_ref": {"kind": "extension", "id": package_id}},
+            {
+                "package_ref": {"kind": "extension", "id": package_id},
+                "client_action_id": f"live-qa-{uuid.uuid4()}",
+            },
         )
         observed[f"{prefix}_install_message"] = install_body.get("message")
         observed[f"{prefix}_install_onboarding_state"] = install_body.get("onboarding_state")
-        should_activate = True
-    if should_activate:
-        activate_body = await _webui_json(
-            page,
-            "POST",
-            f"/api/webchat/v2/extensions/{package_id}/activate",
-        )
-        observed[f"{prefix}_activate_message"] = activate_body.get("message")
-        observed[f"{prefix}_activated"] = activate_body.get("activated")
-    if should_install or should_activate:
         body = await _fetch_webui_json(page, "/api/webchat/v2/extensions")
         extensions = body.get("extensions")
         if not isinstance(extensions, list):
@@ -4022,22 +4384,21 @@ async def _ensure_extension_authenticated_on_page(
         tools = []
     observed.update(
         {
-            f"{prefix}_active": match.get("active"),
-            f"{prefix}_authenticated": match.get("authenticated"),
-            f"{prefix}_activation_status": match.get("activation_status"),
-            f"{prefix}_needs_setup": match.get("needs_setup"),
+            f"{prefix}_installation_state": match.get("installation_state"),
+            f"{prefix}_lifecycle_error": match.get("activation_error"),
             f"{prefix}_tool_count": len(tools),
         }
     )
     missing_tools = [tool for tool in required_tools if tool not in tools]
     if missing_tools:
         raise AssertionError(f"{display_name} missing expected tools: {missing_tools!r}")
-    if match.get("active") is not True:
-        raise AssertionError(f"{display_name} extension is not active: {match!r}")
-    if match.get("authenticated") is not True:
-        raise AssertionError(f"{display_name} extension is not authenticated: {match!r}")
-    if match.get("needs_setup") is not False:
-        raise AssertionError(f"{display_name} extension still needs setup: {match!r}")
+    # #6520: installation_state == "active" already implies the caller's
+    # credential requirements resolved (the retired active/authenticated/
+    # needs_setup booleans are gone from the wire).
+    if match.get("installation_state") != "active":
+        raise AssertionError(
+            f"{display_name} extension did not reach the active lifecycle state: {match!r}"
+        )
 
 
 async def case_qa_2a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
@@ -4453,7 +4814,12 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             ctx,
             channel_id=channel_id,
             user_id=slack_user_id,
-            text=f"{_qa_sheet_prompt('qa_5d_slack_strategy_doc_answer')}\nGoogle doc link: {doc_url}",
+            text=(
+                "What is the strategy north star described in this Google Docs "
+                f"document? {doc_url} Read the document, answer the question "
+                "directly in your reply to this message, and include the exact "
+                f"nonce {nonce} plus the word strategy."
+            ),
             event_id=f"EvREBORNQA5D{suffix}",
         )
         observed["signed_event"] = post_result
@@ -5281,7 +5647,7 @@ async def _post_signed_slack_dm_event(
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{ctx.base_url}/webhooks/slack/events",
+            f"{ctx.base_url}/webhooks/extensions/slack/events",
             content=body,
             headers=_slack_event_headers(body, signing_secret),
         )
@@ -5825,8 +6191,8 @@ async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> Pro
         # structurally inert (nothing to self-send with).
         creation_prompt_extra=(
             "Before creating the routine, make sure the Slack tools extension "
-            "is installed and activated (the Slack account is already "
-            "connected); install and activate it if it is not."
+            "is active (the Slack account is already connected); install it "
+            "and complete any returned setup if it is not."
         ),
         exactly_once_grace_seconds=60.0,
         require_slack_tools_on_surface=True,
@@ -5970,8 +6336,8 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
         ),
         creation_prompt_extra=(
             "Before creating the routine, make sure the Slack tools extension "
-            "is installed and activated (the Slack account is already "
-            "connected); install and activate it if it is not. "
+            "is active (the Slack account is already connected); install it "
+            "and complete any returned setup if it is not. "
             "Route THIS routine's results to my Slack DM by listing my outbound "
             "delivery targets and passing the Slack DM target id as "
             "delivery_target_id when creating the trigger. Do not change my "
@@ -7823,6 +8189,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_3a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),
     "qa_3c_endpoint_status_slack_routine": CaseSpec(
@@ -7859,6 +8226,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_5a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_5b_drive_connect": CaseSpec(
         case_qa_5b_drive_connect,
@@ -7906,6 +8274,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_7a_slack_product_channel_connect,
         requires_slack=True,
         requires_slack_target=True,
+        expects_llm_trace=False,
     ),
     "qa_7b_sheets_connect": CaseSpec(
         case_qa_7b_sheets_connect,
@@ -7934,6 +8303,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_8a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_8b_hn_keyword_live_chat": CaseSpec(case_qa_8b_hn_keyword_live_chat),
     "qa_8c_hn_keyword_slack_routine": CaseSpec(
@@ -7950,6 +8320,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_9a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_9b_routine_dm_delivery_exactly_once": CaseSpec(
         case_qa_9b_routine_dm_delivery_exactly_once,
@@ -8087,6 +8458,7 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "requires_google_runtime_access": spec.requires_google_runtime_access,
                 "requires_telegram": spec.requires_telegram,
                 "requires_github_auth": spec.requires_github_auth,
+                "expects_llm_trace": spec.expects_llm_trace,
                 "implemented": spec.implemented,
                 "status": (
                     "default"
@@ -8513,14 +8885,22 @@ async def run_cases(args: argparse.Namespace) -> int:
                 flush=True,
             )
             continue
+        # Merge per-case trace-recording env over the prepared home env without
+        # mutating `prepared_home.env` (reused below for the context and Slack
+        # setup). This is what switches on replayable per-case LlmTrace capture.
+        server_extra_env = {
+            **prepared_home.env,
+            **case_llm_trace_env(args.output_dir, name),
+        }
         proc, base_url = await start_reborn_server(
             binary,
             prepared_home.path,
             args.output_dir,
-            prepared_home.env,
+            server_extra_env,
         )
         if not first_base_url:
             first_base_url = base_url
+        completed_result: ProbeResult | None = None
         try:
             ctx = LiveQaContext(
                 base_url=base_url,
@@ -8557,9 +8937,6 @@ async def run_cases(args: argparse.Namespace) -> int:
                     )
                     continue
                 slack_preflight["setup_api"] = setup_api
-                setup_status = setup_api.get("status") if isinstance(setup_api, dict) else None
-                if isinstance(setup_status, dict):
-                    slack_preflight["setup"] = setup_status
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
@@ -8570,6 +8947,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                 is_retriable=_is_case_retriable,
             )
             result = _attach_browser_diagnostics(args.output_dir, result)
+            completed_result = result
             results.append(result)
             print(
                 f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
@@ -8613,6 +8991,30 @@ async def run_cases(args: argparse.Namespace) -> int:
                 break
         finally:
             stop_process(proc)
+            if (
+                completed_result is not None
+                and completed_result.success
+                and case_spec.expects_llm_trace
+            ):
+                try:
+                    trace_path = validate_case_llm_trace(args.output_dir, name)
+                    completed_result.details["llm_trace_path"] = str(trace_path)
+                except LiveQaError as exc:
+                    completed_result.success = False
+                    completed_result.details.update(
+                        {
+                            "blocking": True,
+                            "failure_class": "infrastructure",
+                            "failure_category": "trace_harvest",
+                            "failure_status": "failed",
+                            "error": str(exc),
+                        }
+                    )
+                    print(
+                        f"[reborn-webui-v2-live-qa] case={name} success=False "
+                        "blocked=trace_harvest",
+                        flush=True,
+                    )
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
             trace_exports.append(trace_export)
             print(

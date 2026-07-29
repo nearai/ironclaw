@@ -108,7 +108,10 @@ export function SelectMenu({
 
   return (
     <div
-      className={cn("relative inline-block min-w-[9.5rem] text-left", className)}
+      className={cn(
+        "relative inline-block min-w-[9.5rem] text-left font-sans text-ui",
+        className
+      )}
       {...rootPassthroughProps}
     >
       <Select.Root
@@ -122,7 +125,9 @@ export function SelectMenu({
           className={cn(
             "group inline-flex h-8 w-full items-center justify-between gap-2 rounded-[8px] border",
             "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5",
-            "font-mono text-[11px] text-[var(--v2-text-strong)] shadow-none",
+            // Shared controls read in the sans UI face at the semantic
+            // control size (#6706); monospace is opt-in via buttonClassName.
+            "font-sans text-ui text-[var(--v2-text-strong)] shadow-none",
             "transition-[background,border-color,color,box-shadow] duration-[var(--v2-duration-fast)]",
             "ease-[var(--v2-ease-standard)] hover:bg-[var(--v2-surface-muted)]",
             "focus-visible:outline-none focus-visible:ring-2",
@@ -175,7 +180,8 @@ export function SelectMenu({
                     disabled={option.disabled}
                     className={cn(
                       "relative flex w-full cursor-default items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
-                      "text-left font-mono text-[11px] text-[var(--v2-text)] outline-none select-none",
+                      // Portaled outside the root, so restate the control face.
+                      "text-left font-sans text-ui text-[var(--v2-text)] outline-none select-none",
                       "transition-colors duration-[var(--v2-duration-fast)]",
                       "data-[highlighted]:bg-[var(--v2-surface-muted)] data-[highlighted]:text-[var(--v2-text-strong)]",
                       "data-[state=checked]:bg-[var(--v2-accent-soft)] data-[state=checked]:text-[var(--v2-text-strong)]",

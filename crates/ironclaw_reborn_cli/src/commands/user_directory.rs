@@ -2,7 +2,7 @@
 //!
 //! Thin adapter over the canonical Reborn identity resolver
 //! ([`RebornIdentityResolver`](ironclaw_reborn_composition::RebornIdentityResolver),
-//! reached through the composition facade): it applies the operator's
+//! reached through the composition service): it applies the operator's
 //! email-domain admission policy (fail-closed), then delegates identity
 //! resolution/persistence to the canonical resolver as an `oauth`-surface
 //! external identity. Keeping admission here — in the host adapter —

@@ -1722,3 +1722,4 @@ fn evaluate_uses_injected_clock_for_evaluated_at() {
     assert_eq!(second.evaluated_at, frozen);
     assert_eq!(first.evaluated_at, second.evaluated_at);
 }
+// arch-exempt: large_file, trust policy contract coverage remains centralized, plan #6175

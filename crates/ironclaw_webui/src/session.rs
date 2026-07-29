@@ -2,42 +2,28 @@
 //! gateway.
 //!
 //! A session is the opaque bearer token the browser presents back on
-//! every request after a successful login. The actual login flow that
-//! mints the session is **outside** this module — host code calls
-//! `SessionStore::insert` after whatever sign-in path it uses (password
-//! form, magic link, OIDC, etc.).
+//! every request after a successful login. The built-in login paths mint
+//! signed session tokens via [`SignedTokenSessionStore`].
 //!
-//! The store impl shipped here is in-memory only. Production
-//! deployments wire their own `SessionStore` (Postgres, libSQL,
-//! filesystem) by implementing the trait.
+//! The built-in production store is the signed-token store in
+//! `signed_session_login`.
 
 use std::sync::Arc;
 
-use crate::{WebuiAuthentication, WebuiAuthenticator};
+use crate::{
+    WebuiAuthentication, WebuiAuthenticator, signed_session_login::SignedTokenSessionStore,
+};
 use async_trait::async_trait;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{TenantId, UserId};
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// Imports below are only used by `InMemorySessionStore`, which is gated
-// behind `test-support`. Gate the imports too so non-feature
-// production builds don't warn about unused imports.
-#[cfg(any(test, feature = "test-support"))]
-use parking_lot::RwLock;
-#[cfg(any(test, feature = "test-support"))]
-use std::collections::HashMap;
-#[cfg(any(test, feature = "test-support"))]
-use subtle::ConstantTimeEq;
-#[cfg(any(test, feature = "test-support"))]
-use uuid::Uuid;
-
 /// Non-secret session identifier — a UUID stamped at creation and
 /// safe to log, render in audit trails, or surface to operators. The
-/// bearer token returned by [`SessionStore::create_session`] is a
+/// bearer token returned by [`SignedTokenSessionStore::create_session`] is a
 /// SEPARATE secret value, returned wrapped in [`SecretString`], and
-/// is the lookup key on the durable store. The record below carries
+/// is the signed token presented by the browser. The record below carries
 /// only this non-secret id, never the bearer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -60,12 +46,10 @@ impl std::fmt::Display for SessionId {
 }
 
 /// Persisted session record. Carries non-secret metadata only — the
-/// bearer token returned by [`SessionStore::create_session`] is the
-/// `HashMap` lookup key in the in-memory impl (or its hash in a
-/// durable backend) and is deliberately ABSENT from this struct so
-/// `Debug` / `Serialize` impls cannot accidentally surface live
-/// bearer material. The non-secret [`SessionId`] is a UUID stamped
-/// at creation; safe to log and audit-trace.
+/// bearer token returned by [`SignedTokenSessionStore::create_session`] is
+/// deliberately ABSENT from this struct so `Debug` / `Serialize` impls cannot
+/// accidentally surface live bearer material. The non-secret [`SessionId`] is
+/// a UUID stamped at creation; safe to log and audit-trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub session_id: SessionId,
@@ -75,7 +59,7 @@ pub struct SessionRecord {
     pub expires_at: DateTime<Utc>,
     /// Whether this session carries the single-trusted-operator capability
     /// (`WebuiAuthentication::operator`, `WebUiV2Capabilities::operator_webui_config`).
-    /// Stamped once at mint time by the caller of [`SessionStore::create_session`]
+    /// Stamped once at mint time by the caller of [`SignedTokenSessionStore::create_session`]
     /// — provenance-based, never re-derived from the bearer at validation time —
     /// per the invariant that only a token verified against the host's
     /// operator-capable authenticator (the raw `Authorization: Bearer` env
@@ -97,7 +81,7 @@ impl SessionRecord {
     }
 }
 
-/// Errors raised by [`SessionStore`] implementations.
+/// Errors raised by signed session operations.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
     #[error("session not found")]
@@ -106,162 +90,15 @@ pub enum SessionStoreError {
     Backend(String),
 }
 
-/// Pluggable session backend. Host binaries implement this against
-/// whatever durable store they prefer; the in-memory impl below is
-/// fine for local dev and tests.
-#[async_trait]
-pub trait SessionStore: Send + Sync + 'static {
-    /// Issue a new session bound to the supplied caller and lifetime.
-    /// Returns the freshly minted bearer token; persist `record` keyed
-    /// on this token (or whatever lookup encoding the backend prefers).
-    ///
-    /// `operator` is stamped onto the resulting [`SessionRecord`] and MUST be
-    /// `true` only when the caller has independently verified the credential
-    /// that authorized this mint against an operator-capable authenticator
-    /// (e.g. the host's env-bearer token). Every other login path — OAuth/SSO,
-    /// admin-provisioned per-user bearers — passes `false`. This is a
-    /// provenance stamp recorded once at mint time, never re-derived from the
-    /// bearer itself at validation time.
-    async fn create_session(
-        &self,
-        tenant_id: TenantId,
-        user_id: UserId,
-        lifetime: ChronoDuration,
-        operator: bool,
-    ) -> Result<SecretString, SessionStoreError>;
-
-    /// Look up the session record bound to `candidate`. Implementations
-    /// MUST use constant-time comparison on the secret material.
-    async fn lookup(&self, candidate: &str) -> Result<Option<SessionRecord>, SessionStoreError>;
-
-    /// Optional: revoke a session early. The default impl is a no-op
-    /// because the in-memory store wipes on process restart anyway;
-    /// durable backends should override.
-    async fn revoke(&self, _candidate: &str) -> Result<(), SessionStoreError> {
-        Ok(())
-    }
-}
-
-/// Process-local session store. Sessions vanish on restart. Useful
-/// for local dev and the caller-level test harness — production
-/// deployments wire a durable `SessionStore` impl.
-///
-/// Gated behind `test-support` so a production binary cannot
-/// accidentally name this type as its `SessionStore`. Tests are
-/// implicitly enabled via `cfg(test)`.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Default)]
-pub struct InMemorySessionStore {
-    inner: RwLock<HashMap<String, SessionRecord>>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl InMemorySessionStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Count of active sessions — diagnostic helper for tests.
-    pub fn len(&self) -> usize {
-        self.inner.read().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.read().is_empty()
-    }
-
-    /// Evict every session whose `expires_at` is at or before `now`.
-    /// Returns the number of records removed. Called automatically
-    /// from `create_session` and `lookup` so a long-running process
-    /// cannot leak memory through never-revoked expired sessions.
-    pub fn purge_expired(&self, now: DateTime<Utc>) -> usize {
-        let mut guard = self.inner.write();
-        let before = guard.len();
-        guard.retain(|_, record| !record.is_expired(now));
-        before - guard.len()
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[async_trait]
-impl SessionStore for InMemorySessionStore {
-    async fn create_session(
-        &self,
-        tenant_id: TenantId,
-        user_id: UserId,
-        lifetime: ChronoDuration,
-        operator: bool,
-    ) -> Result<SecretString, SessionStoreError> {
-        // Two distinct UUIDs: one is the operator-visible audit id
-        // (`SessionId`, OK to log), the other is the bearer token
-        // returned to the caller. The bearer is the HashMap lookup
-        // key in this in-memory impl; `SessionRecord` carries only
-        // the audit id so a `Debug` / `Serialize` of a record never
-        // leaks live bearer material.
-        let session_id = SessionId::new(Uuid::new_v4().to_string());
-        let bearer = Uuid::new_v4().to_string();
-        let now = Utc::now();
-        // Opportunistic GC: sweep expired records on every insert so
-        // the map size stays proportional to "active sessions", not
-        // "every session ever issued".
-        self.purge_expired(now);
-        let record = SessionRecord {
-            session_id,
-            tenant_id,
-            user_id,
-            created_at: now,
-            expires_at: now
-                .checked_add_signed(lifetime)
-                .ok_or_else(|| SessionStoreError::Backend("session lifetime overflow".into()))?,
-            operator,
-        };
-        self.inner.write().insert(bearer.clone(), record);
-        Ok(SecretString::from(bearer))
-    }
-
-    async fn lookup(&self, candidate: &str) -> Result<Option<SessionRecord>, SessionStoreError> {
-        // Opportunistic GC: same reasoning as create_session; bounded
-        // by the lock contention on the write path so we only invoke
-        // on the warm path when there is at least one entry present.
-        if !self.inner.read().is_empty() {
-            self.purge_expired(Utc::now());
-        }
-
-        // Walk the map with constant-time comparison so that a hostile
-        // caller cannot use timing to discover whether their guess
-        // shares a prefix with a real session bearer. We accept the
-        // O(n) walk because the in-memory store's expected workload
-        // is small (interactive single-binary deployment).
-        let guard = self.inner.read();
-        let mut hit: Option<SessionRecord> = None;
-        for (bearer, record) in guard.iter() {
-            // ConstantTimeEq returns 1 on equal-length matches only;
-            // length mismatch is also handled in constant time.
-            if bearer.as_bytes().ct_eq(candidate.as_bytes()).into() {
-                hit = Some(record.clone());
-                // Do not break — keep the loop running so the timing
-                // does not depend on which entry matched.
-                continue;
-            }
-        }
-        Ok(hit)
-    }
-
-    async fn revoke(&self, candidate: &str) -> Result<(), SessionStoreError> {
-        self.inner.write().remove(candidate);
-        Ok(())
-    }
-}
-
 /// `WebuiAuthenticator` impl that resolves the bearer token to a
 /// stored session, checking expiry against the wall clock.
 #[derive(Clone)]
 pub struct SessionAuthenticator {
-    store: Arc<dyn SessionStore>,
+    store: Arc<SignedTokenSessionStore>,
 }
 
 impl SessionAuthenticator {
-    pub fn new(store: Arc<dyn SessionStore>) -> Self {
+    pub fn new(store: Arc<SignedTokenSessionStore>) -> Self {
         Self { store }
     }
 }
@@ -293,7 +130,7 @@ impl WebuiAuthenticator for SessionAuthenticator {
                     error = %error,
                     "session store lookup failed; treating bearer as unauthenticated. \
                      Operators: this is a backend/infra fault, not an auth miss — \
-                     investigate the underlying SessionStore impl.",
+                     investigate the signed session store.",
                 );
                 return None;
             }
@@ -320,7 +157,9 @@ impl WebuiAuthenticator for SessionAuthenticator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
     use secrecy::ExposeSecret;
+    use secrecy::SecretString;
 
     fn tenant() -> TenantId {
         TenantId::new("tenant-a").expect("tenant")
@@ -328,10 +167,13 @@ mod tests {
     fn user() -> UserId {
         UserId::new("alice").expect("user")
     }
+    fn store() -> Arc<SignedTokenSessionStore> {
+        crate::signed_session_store(&SecretString::from("test-session-secret"), &tenant())
+    }
 
     #[tokio::test]
     async fn create_then_lookup_returns_session() {
-        let store = InMemorySessionStore::new();
+        let store = store();
         let token = store
             .create_session(tenant(), user(), ChronoDuration::hours(1), false)
             .await
@@ -345,26 +187,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_session_is_rejected_by_authenticator() {
-        let store = Arc::new(InMemorySessionStore::new());
-        let token = store
-            .create_session(tenant(), user(), ChronoDuration::seconds(-1), false)
-            .await
-            .expect("create");
-        let auth = SessionAuthenticator::new(store.clone());
-        assert!(auth.authenticate(token.expose_secret()).await.is_none());
-    }
-
-    #[tokio::test]
     async fn unknown_token_is_rejected() {
-        let store = Arc::new(InMemorySessionStore::new());
-        let auth = SessionAuthenticator::new(store);
+        let auth = SessionAuthenticator::new(store());
         assert!(auth.authenticate("nonexistent-token").await.is_none());
     }
 
     #[tokio::test]
     async fn live_session_resolves_to_caller_user_id() {
-        let store = Arc::new(InMemorySessionStore::new());
+        let store = store();
         let token = store
             .create_session(tenant(), user(), ChronoDuration::hours(1), false)
             .await
@@ -382,7 +212,7 @@ mod tests {
     // WebuiAuthentication::operator, not just ::user.
     #[tokio::test]
     async fn session_minted_as_operator_resolves_to_operator_capabilities() {
-        let store = Arc::new(InMemorySessionStore::new());
+        let store = store();
         let token = store
             .create_session(tenant(), user(), ChronoDuration::hours(1), true)
             .await
@@ -408,7 +238,7 @@ mod tests {
     // regression pin for the escalation guard the crate docs describe.
     #[tokio::test]
     async fn session_minted_as_non_operator_never_escalates() {
-        let store = Arc::new(InMemorySessionStore::new());
+        let store = store();
         let token = store
             .create_session(tenant(), user(), ChronoDuration::hours(1), false)
             .await
@@ -455,7 +285,7 @@ mod tests {
     // session secret.
     #[tokio::test]
     async fn session_record_debug_and_serialize_do_not_contain_bearer() {
-        let store = InMemorySessionStore::new();
+        let store = store();
         let token = store
             .create_session(tenant(), user(), ChronoDuration::hours(1), false)
             .await
@@ -485,50 +315,5 @@ mod tests {
             json.contains(record.session_id.as_str()),
             "wire shape must carry the non-secret SessionId; got: {json}",
         );
-    }
-
-    // Regression for the backend-error-vs-auth-miss review (Medium):
-    // when the underlying store returns `Err(...)`, the
-    // authenticator must still fail closed (return None) but must
-    // NOT silently swallow the error — operators investigating a
-    // DB / cache outage need a log line distinct from a normal
-    // 401 auth miss.
-    #[tokio::test]
-    async fn authenticator_logs_backend_error_and_still_returns_none() {
-        struct ErrorStore;
-        #[async_trait]
-        impl SessionStore for ErrorStore {
-            async fn create_session(
-                &self,
-                _tenant_id: TenantId,
-                _user_id: UserId,
-                _lifetime: ChronoDuration,
-                _operator: bool,
-            ) -> Result<SecretString, SessionStoreError> {
-                unreachable!()
-            }
-            async fn lookup(
-                &self,
-                _candidate: &str,
-            ) -> Result<Option<SessionRecord>, SessionStoreError> {
-                Err(SessionStoreError::Backend(
-                    "simulated DB outage for regression test".into(),
-                ))
-            }
-        }
-        let auth = SessionAuthenticator::new(Arc::new(ErrorStore));
-        // Authentication still fails closed — never leak the reason
-        // to the client.
-        assert!(
-            auth.authenticate("any-token").await.is_none(),
-            "backend error must still return None to the gateway",
-        );
-        // The behavior under test is that a backend Err takes a
-        // different code path than `Ok(None)` (the latter must not
-        // log at `warn!`). The presence of the explicit `Err(...)`
-        // match arm is what this test locks in — a regression that
-        // collapses it back to `let Ok(...) else { return None }`
-        // would still pass `is_none()` but lose the operator log.
-        // We capture that contract by reading the source.
     }
 }

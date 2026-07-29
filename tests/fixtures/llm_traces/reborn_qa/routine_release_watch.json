@@ -68,7 +68,11 @@
             "arguments": {
               "name": "nearai/ironclaw GitHub Release Monitor",
               "prompt": "Check the public GitHub releases API for https://github.com/nearai/ironclaw by fetching this URL (no auth required):\nhttps://api.github.com/repos/nearai/ironclaw/releases\n\nCompare the releases returned against any previously seen release IDs stored in memory (memory path: \"github_releases/nearai_ironclaw_seen.md\"). \n\nSteps:\n1. Fetch https://api.github.com/repos/nearai/ironclaw/releases via HTTP GET (no Authorization header).\n2. Read memory at \"github_releases/nearai_ironclaw_seen.md\" to get the list of previously seen release IDs.\n3. Identify any releases whose `id` field is NOT in the previously seen list — these are new releases.\n4. If there are new releases, send a Slack DM summarizing each new release with: release name, tag, published date, and the HTML URL. Format it clearly.\n5. Update the memory file \"github_releases/nearai_ironclaw_seen.md\" to include all current release IDs (seen + new), replacing the old content.\n6. If there are no new releases, do not send a Slack message — just confirm silently by updating nothing.\n",
-              "schedule": { "kind": "cron", "expression": "*/5 * * * *", "timezone": "UTC" }
+              "schedule": {
+                "kind": "cron",
+                "expression": "*/5 * * * *",
+                "timezone": "UTC"
+              }
             }
           }
         ],

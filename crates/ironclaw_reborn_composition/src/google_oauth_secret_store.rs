@@ -6,13 +6,13 @@
 //! `ironclaw_reborn_config::reject_inline_secret` enforces file-wide), so
 //! `config set google.client_secret` puts it in this store instead.
 //!
-//! Mirrors [`crate::LlmKeyStore`]'s shape but with a single fixed handle,
+//! Mirrors [`ironclaw_operator::LlmKeyStore`]'s shape but with a single fixed handle,
 //! since there is exactly one Google OAuth client per instance today.
 
 use std::sync::Arc;
 
 use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError};
 use thiserror::Error;
 
 const HANDLE: &str = "google_oauth_client_secret";
@@ -21,12 +21,12 @@ const HANDLE: &str = "google_oauth_client_secret";
 /// Google OAuth client secret.
 #[derive(Clone)]
 pub struct GoogleOauthSecretStore {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 }
 
 impl GoogleOauthSecretStore {
     /// Wrap the instance's shared secret store.
-    pub fn new(store: Arc<dyn SecretStore>) -> Self {
+    pub fn new(store: Arc<dyn ironclaw_secrets::SecretStorePort>) -> Self {
         Self { store }
     }
 
@@ -61,7 +61,7 @@ impl GoogleOauthSecretStore {
 
     /// Read back the stored client secret, if any. Uses a one-shot lease +
     /// consume; the underlying secret persists, so this is repeatable
-    /// across reloads (mirrors [`crate::LlmKeyStore::read`]).
+    /// across reloads (mirrors [`ironclaw_operator::LlmKeyStore::read`]).
     pub async fn read(&self) -> Result<Option<SecretMaterial>, GoogleOauthSecretStoreError> {
         let scope = scope();
         let lease = match self.store.lease_once(&scope, &handle()?).await {
@@ -108,10 +108,10 @@ pub enum GoogleOauthSecretStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     fn store() -> GoogleOauthSecretStore {
-        GoogleOauthSecretStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
+        GoogleOauthSecretStore::new(Arc::new(SecretStore::ephemeral()))
     }
 
     #[tokio::test]

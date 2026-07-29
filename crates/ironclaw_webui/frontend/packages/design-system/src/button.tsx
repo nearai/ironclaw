@@ -58,8 +58,8 @@ const buttonVariants = cva(
           "border border-[color-mix(in_srgb,var(--v2-danger-text)_60%,transparent)] bg-transparent text-[var(--v2-danger-text)] hover:bg-[var(--v2-danger-soft)] active:bg-[var(--v2-danger-soft)]",
       },
       size: {
-        sm: "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] px-[var(--v2-control-px-sm)] text-[length:var(--v2-font-size-caption)]",
-        md: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] text-[length:var(--v2-font-size-body-sm)]",
+        sm: "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] px-[var(--v2-control-px-sm)] text-ui-sm",
+        md: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] text-ui",
         lg: "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-lg)] text-[length:var(--v2-font-size-body)]",
         icon: "h-[var(--v2-control-h-md)] w-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)]",
         "icon-sm": "h-[var(--v2-control-h-sm)] w-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)]",

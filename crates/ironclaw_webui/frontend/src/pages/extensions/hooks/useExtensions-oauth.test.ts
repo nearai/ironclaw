@@ -14,6 +14,10 @@ function flushAsyncWork() {
 }
 
 function useExtensionsOauthSourceForTest() {
+  const extensionActions = readFileSync(
+    new URL("../lib/extension-actions.ts", import.meta.url),
+    "utf8",
+  ).replaceAll("export function ", "function ");
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
@@ -28,8 +32,94 @@ function useExtensionsOauthSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { extensionListItemIsConfigured, useOauthSetup, useSetupSubmit };`;
 }
+
+test("OAuth completion uses the canonical three-state lifecycle predicate", () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  const { extensionListItemIsConfigured } = context.globalThis.__testExports;
+
+  assert.equal(extensionListItemIsConfigured({ installation_state: "active" }), true);
+  assert.equal(extensionListItemIsConfigured({ installation_state: "setup_needed" }), false);
+  assert.equal(extensionListItemIsConfigured({}), false);
+});
+
+function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
+  const mutationConfigs = [];
+  const context = {
+    Date,
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    URL,
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    removeExtension: () => {},
+    startExtensionOauth,
+    submitExtensionSetup,
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => `localized:${key}`,
+    window: {
+      clearInterval: () => {},
+      setInterval: () => 1,
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  return { context, mutationConfigs };
+}
+
+test("extension setup fallbacks use translated client-generated errors", async () => {
+  const { context, mutationConfigs } = loadLocalizedMutationHooks({
+    startExtensionOauth: () => Promise.resolve({ success: false }),
+    submitExtensionSetup: () => Promise.resolve({ success: false }),
+  });
+
+  context.globalThis.__testExports.useSetupSubmit({ id: "slack" });
+  context.globalThis.__testExports.useOauthSetup({ id: "slack" });
+
+  await assert.rejects(
+    mutationConfigs[0].mutationFn({ secrets: {}, fields: {} }),
+    { message: "localized:extensions.setupFailed" },
+  );
+  await assert.rejects(
+    mutationConfigs[1].mutationFn({ secret: null, popup: null }),
+    { message: "localized:extensions.oauthSetupFailed" },
+  );
+});
+
+test("OAuth setup rejects an insecure authorization URL with translated copy", async () => {
+  const { context, mutationConfigs } = loadLocalizedMutationHooks({
+    startExtensionOauth: () =>
+      Promise.resolve({ success: true, authorization_url: "http://provider.example/authorize" }),
+    submitExtensionSetup: () => Promise.resolve({ success: true }),
+  });
+
+  context.globalThis.__testExports.useOauthSetup({ id: "slack" });
+
+  await assert.rejects(
+    mutationConfigs[0].mutationFn({ secret: null, popup: null }),
+    { message: "localized:extensions.oauthInvalidAuthorizationUrl" },
+  );
+});
 
 test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
   const stateUpdates = [];
@@ -53,18 +143,13 @@ test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -130,18 +215,13 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -156,8 +236,8 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -204,7 +284,7 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -243,20 +323,17 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
   ]);
 });
 
-test("useOauthSetup completes reconnect when polling sees Slack become configured without a callback event", () => {
+test("useOauthSetup does not treat persisted first-time OAuth credentials as active", () => {
   const stateUpdates = [];
   const intervals = [];
   const storage = new Map();
   let mutationConfig = null;
   let stateIndex = 0;
   let configuredCount = 0;
+  let setupSecretProvided = false;
   let extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: false,
-    needs_setup: true,
-    activation_status: "active",
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
@@ -275,18 +352,13 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -301,9 +373,9 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
-                provided: true,
+                name: "slack_oauth",
+                provider: "slack",
+                provided: setupSecretProvided,
               },
             ],
           };
@@ -352,22 +424,23 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     },
     {
       secret: {
-        provider: "slack_personal",
-        provided: true,
+        provider: "slack",
+        provided: false,
       },
     },
   );
 
+  setupSecretProvided = true;
   intervals[0]();
-  assert.equal(configuredCount, 0);
+  assert.equal(
+    configuredCount,
+    0,
+    "credential persistence alone must not complete setup while installation_state is setup_needed",
+  );
 
   extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: true,
-    needs_setup: false,
-    activation_status: "active",
-    onboarding_state: null,
+    installation_state: "active",
   };
   intervals[0]();
 
@@ -387,11 +460,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
   let configuredCount = 0;
   let extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: false,
-    needs_setup: true,
-    activation_status: "active",
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
@@ -410,18 +479,13 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -436,8 +500,8 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -487,7 +551,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -499,11 +563,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
 
   extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: true,
-    needs_setup: false,
-    activation_status: "active",
-    onboarding_state: null,
+    installation_state: "active",
   };
   intervals[0]();
 
@@ -538,18 +598,13 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -623,7 +678,7 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /authorization failed/i.test(update.value),
+        update.value === "extensions.oauthFailed",
     ),
     "a flow-matched failure must surface a retryable error",
   );
@@ -656,7 +711,7 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
         (update) =>
           update.index === 1 &&
           typeof update.value === "string" &&
-          /authorization failed/i.test(update.value),
+          update.value === "extensions.oauthFailed",
       ),
     "a foreign flow's failure must not error this watcher",
   );
@@ -675,11 +730,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
   // first poll tick while the user was still on Slack's consent screen.
   const extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: true,
-    needs_setup: false,
-    activation_status: "active",
-    onboarding_state: null,
+    installation_state: "active",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
@@ -698,18 +749,13 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -724,8 +770,8 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -775,7 +821,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -828,18 +874,13 @@ test("useOauthSetup ignores a stale OAuth callback when the flow response carrie
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -950,8 +991,6 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
@@ -962,12 +1001,9 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
       flowStatusCalls.push({ flowId, invocationId });
       return Promise.resolve({ status: "completed" });
     },
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -986,8 +1022,8 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -1035,7 +1071,7 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -1059,13 +1095,14 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
   ]);
 });
 
-test("useOauthSetup surfaces an expired flow-status poll as a retryable error when no browser signal arrives", async () => {
+test("useOauthSetup translates expired and canceled flow-status failures", async () => {
   const stateUpdates = [];
   const intervals = [];
   const storage = new Map();
   let mutationConfig = null;
   let stateIndex = 0;
   let configuredCount = 0;
+  let flowStatus = "expired";
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
     Date,
@@ -1084,18 +1121,13 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchOauthFlowStatus: () => Promise.resolve({ status: "expired" }),
-    fetchPairingRequests: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve({ status: flowStatus }),
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -1110,8 +1142,8 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -1159,7 +1191,7 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -1178,9 +1210,37 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /authorization expired/i.test(update.value),
+        update.value === "extensions.oauthExpired",
     ),
     "an expired flow-status poll must surface a retryable error",
+  );
+
+  flowStatus = "canceled";
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-canceled",
+        callback_scope: { invocation_id: "invocation-canceled" },
+      },
+      popup,
+    },
+    {
+      secret: {
+        provider: "oauth_test_provider",
+        provided: true,
+      },
+    },
+  );
+
+  intervals.at(-1)();
+  await flushAsyncWork();
+
+  assert.ok(
+    stateUpdates.some(
+      (update) => update.index === 1 && update.value === "extensions.oauthCanceled",
+    ),
+    "a canceled flow-status poll must surface translated retryable copy",
   );
 });
 
@@ -1227,19 +1287,14 @@ test("useOauthSetup ignores flow A status after flow B becomes current", async (
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: (flowId) =>
       flowId === "flow-a" ? flowAStatus : Promise.resolve({ status: "completed" }),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () =>
       new Promise((resolve) => {
@@ -1339,18 +1394,13 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.reject(new Error("status unavailable")),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -1414,7 +1464,7 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /timed out/i.test(update.value),
+        update.value === "extensions.oauthTimedOut",
     ),
     "a persistent status outage must surface a retryable timeout",
   );

@@ -42,7 +42,7 @@ fn expected_table() -> Vec<Expected> {
             body_limit: body_limit_kib(14 * 1024),
             rate_limit_max: 60,
             streaming: StreamingMode::Sse,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: OPENAI_COMPAT_ROUTE_MODELS_LIST,
@@ -69,7 +69,7 @@ fn expected_table() -> Vec<Expected> {
             body_limit: body_limit_kib(1024),
             rate_limit_max: 60,
             streaming: StreamingMode::Sse,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE,
@@ -78,7 +78,7 @@ fn expected_table() -> Vec<Expected> {
             body_limit: body_limit_kib(1024),
             rate_limit_max: 60,
             streaming: StreamingMode::Sse,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: OPENAI_COMPAT_ROUTE_RESPONSES_API_RETRIEVE,
@@ -105,7 +105,7 @@ fn expected_table() -> Vec<Expected> {
             body_limit: body_limit_kib(4),
             rate_limit_max: 60,
             streaming: StreamingMode::None,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: OPENAI_COMPAT_ROUTE_RESPONSES_V1_CANCEL,
@@ -114,7 +114,7 @@ fn expected_table() -> Vec<Expected> {
             body_limit: body_limit_kib(4),
             rate_limit_max: 60,
             streaming: StreamingMode::None,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
     ]
 }

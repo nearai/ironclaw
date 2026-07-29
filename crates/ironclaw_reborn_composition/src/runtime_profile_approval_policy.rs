@@ -1,7 +1,10 @@
-use ironclaw_host_api::{CapabilityId, EffectKind, runtime_policy::ApprovalPolicy};
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, InvocationOrigin, OriginGateMatrix, OriginGatePolicy,
+    runtime_policy::ApprovalPolicy,
+};
 use ironclaw_runtime_policy::MinimalApprovalBypass;
 
-use crate::profile_approval_authorization::ProfileApprovalGatePolicy;
+use crate::profile_approval_authorization::{OriginGateRequirement, ProfileApprovalGatePolicy};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeProfileApprovalGateEffectSets {
@@ -91,6 +94,56 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
             // Any future ApprovalPolicy variants default to fail-safe: require
             // approval for non-empty effects rather than silently disabling gates.
             _ => !effects.is_empty(),
+        }
+    }
+
+    fn origin_gate_requirement(
+        &self,
+        approval_policy: ApprovalPolicy,
+        origin: Option<&InvocationOrigin>,
+        matrix: Option<&OriginGateMatrix>,
+    ) -> OriginGateRequirement {
+        // No resolvable origin: a test-only context that stamped neither
+        // `origin` nor `run_id`. The matrix is not consulted, so it contributes
+        // nothing — this is the path that keeps pre-S4 decisions neutral.
+        let Some(origin) = origin else {
+            return OriginGateRequirement::None;
+        };
+        // Production descriptors always declare a matrix (S3). A missing matrix
+        // with a real origin is fail-closed: `Forbidden` for every origin. Only
+        // test fixtures leave it `None`, and those never stamp an origin, so
+        // this Deny arm is unreachable outside deliberate fail-closed tests.
+        let policy = match matrix {
+            Some(matrix) => matrix.policy_for(origin),
+            None => OriginGatePolicy::Forbidden,
+        };
+        match policy {
+            // A forbidden origin is denied regardless of profile — NOT
+            // suppressed by the Minimal (yolo) bypass.
+            OriginGatePolicy::Forbidden => OriginGateRequirement::Deny,
+            // `AskAlways` is a hard-floor gate (§5.2.7): every invocation gates
+            // and no stored auto-approve/always-allow can bypass it. Like
+            // `effects_force_approval` (which fires for Financial/ModifyApproval/
+            // ModifyBudget even under yolo), it is NOT suppressed by the Minimal
+            // bypass — AskAlways gates even in yolo.
+            OriginGatePolicy::AskAlways => OriginGateRequirement::GateHardFloor,
+            // `GatedUnlessGranted` is a soft gate satisfied by a scoped
+            // persistent/policy grant. Suppress it behind the SAME Minimal-bypass
+            // guard `effects_require_approval` uses (see the
+            // `ApprovalPolicy::Minimal` arm above), so yolo stays "no prompts"
+            // and the fold is behavior-neutral under it.
+            OriginGatePolicy::GatedUnlessGranted => {
+                if approval_policy == ApprovalPolicy::Minimal
+                    && self.profile_allows_minimal_bypass()
+                {
+                    OriginGateRequirement::None
+                } else {
+                    OriginGateRequirement::GateSoft
+                }
+            }
+            OriginGatePolicy::ConsentSufficient | OriginGatePolicy::Ungated => {
+                OriginGateRequirement::None
+            }
         }
     }
 }

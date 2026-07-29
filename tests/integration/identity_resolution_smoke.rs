@@ -4,12 +4,12 @@
 //! identity crate: the crate's own 790-line inline suite never runs under the
 //! coverage-lane invocation (which passes only suite names, never `--lib`).
 //!
-//! Reaches the crate through the composition facade only —
+//! Reaches the crate through the composition service only —
 //! `open_reborn_identity_resolver` (the existing `test-support` gated
 //! factory mirroring production's
 //! `RebornRuntime::open_reborn_identity_resolver`) plus the re-exported
 //! resolver vocabulary. Composition deliberately keeps the concrete
-//! `FilesystemRebornIdentityStore` private ("keep lower substrate handles
+//! `RebornIdentityStore` private ("keep lower substrate handles
 //! private"), so this suite takes no direct `ironclaw_reborn_identity`
 //! dependency. The factory's in-memory host filesystem replaces the plan's
 //! "tempdir" wording — same store code path, no on-disk state.

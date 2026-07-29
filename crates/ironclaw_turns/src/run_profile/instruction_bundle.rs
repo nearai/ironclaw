@@ -134,19 +134,24 @@ pub trait InstructionMaterializationStore: Send + Sync {
     ) -> Result<Option<InstructionBundleMaterializedMessage>, AgentLoopHostError>;
 }
 
-/// In-memory, per-process materialization store for model-visible safe context.
+/// Ephemeral, per-process materialization store for model-visible prompt context.
+///
+/// This is intentionally not filesystem-backed. It stages raw model-visible
+/// prompt material between prompt construction and model resolution for one
+/// claimed run, and `ironclaw_turns` must not define a durable row shape for
+/// raw prompts.
 #[derive(Default)]
-pub struct InMemoryInstructionMaterializationStore {
+pub struct EphemeralInstructionMaterializationStore {
     messages: Mutex<HashMap<String, InstructionBundleMaterializedMessage>>,
 }
 
-impl InMemoryInstructionMaterializationStore {
+impl EphemeralInstructionMaterializationStore {
     fn key(context: &LoopRunContext, content_ref: &LoopMessageRef) -> String {
         format!("{}:{}", context.run_id, content_ref.as_str())
     }
 }
 
-impl InstructionMaterializationStore for InMemoryInstructionMaterializationStore {
+impl InstructionMaterializationStore for EphemeralInstructionMaterializationStore {
     fn put_materialized_messages(
         &self,
         context: &LoopRunContext,
@@ -328,11 +333,16 @@ impl InstructionBundleBuilder {
             }
         }
 
-        let mut memory_snippets = request.context_bundle.memory_snippets;
+        // Memory snippets arrive already ordered by the host's two-lane retrieval
+        // (short-term before long-term) so the active conversation keeps priority
+        // under the shared budget. Preserve that insertion order — do NOT re-sort
+        // by opaque ref like instruction snippets do, which would scramble the lane
+        // priority before the model sees it. (CR review: lane priority at the
+        // render boundary.)
+        let memory_snippets = request.context_bundle.memory_snippets;
         if !memory_snippets.is_empty() {
             requires_materialization_store = true;
         }
-        memory_snippets.sort_by(compare_snippet_refs);
         for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
             let content_ref =
                 snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;

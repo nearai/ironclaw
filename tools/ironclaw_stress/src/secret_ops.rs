@@ -6,8 +6,7 @@ use ironclaw_host_api::{
     VirtualPath,
 };
 use ironclaw_secrets::{
-    FilesystemSecretStore, SecretError, SecretMaterial, SecretStore, SecretStoreError,
-    SecretsCrypto,
+    SecretError, SecretMaterial, SecretStore, SecretStoreError, SecretStorePort, SecretsCrypto,
 };
 
 use crate::{
@@ -22,7 +21,7 @@ const STRESS_SECRET_HANDLE: &str = "ironclaw_stress_secret";
 const STRESS_SECRET_MASTER_KEY: &str = "0123456789abcdef0123456789abcdef";
 
 pub(crate) struct SecretConsumeWorkload {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn SecretStorePort>,
     target: String,
 }
 
@@ -75,7 +74,7 @@ where
         SecretsCrypto::new(SecretMaterial::from(STRESS_SECRET_MASTER_KEY.to_string()))
             .map_err(secret_crypto_error)?,
     );
-    let store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::new(scoped, crypto));
+    let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::new(scoped, crypto));
     Ok(SecretConsumeWorkload { store, target })
 }
 

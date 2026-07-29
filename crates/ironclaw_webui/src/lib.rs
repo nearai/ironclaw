@@ -3,13 +3,10 @@
 //! Host-owned listener binding + serve loop for the Reborn WebChat v2
 //! HTTP gateway.
 //!
-//! `ironclaw_reborn_composition::webui_v2_app` returns a fully composed
-//! axum [`Router`] but deliberately stops at the
-//! `reborn_product_api_crates_do_not_bind_http_ingress` boundary — that
-//! crate must not bind sockets or call `axum::serve`. This crate is
-//! the host-owned counterpart: it accepts the `Router` from composition
-//! plus the listen address, binds a `TcpListener`, and runs the serve
-//! loop with graceful shutdown.
+//! `webui_v2_app` returns a fully composed axum [`Router`] but deliberately
+//! stops before listener binding. This crate owns both the WebUI ingress
+//! assembly and the host-owned serve loop helper that binds a `TcpListener`
+//! and runs graceful shutdown.
 //!
 //! Path A (`docs/reborn/how-to-port-channel-to-reborn.md`) native
 //! host-surface invariants:
@@ -24,6 +21,7 @@
 mod auth;
 mod cli_token_login;
 mod oidc;
+mod product_auth;
 mod session;
 mod signed_session_login;
 // Folded in from the former `ironclaw_webui_v2` crate: the WebChat v2 HTTP
@@ -31,10 +29,9 @@ mod signed_session_login;
 // composition's `#[cfg(test)]` unit tests, and downstream test crates can
 // reach the route/handler/descriptor items.
 pub mod webui_v2;
-// Reborn WebChat v2 HTTP gateway assembly + middleware, folded up from
-// `ironclaw_reborn_composition::webui`. `webui_v2_app` composes the fully
-// wired axum Router (auth + rate/body limit + CORS + security headers + the
-// v2 route surface); the middleware modules back it.
+// Reborn WebChat v2 HTTP gateway assembly + middleware. `webui_v2_app`
+// composes the fully wired axum Router (auth + rate/body limit + CORS +
+// security headers + the v2 route surface); the middleware modules back it.
 mod webui_body_limit;
 mod webui_operator_auth;
 mod webui_rate_limit;
@@ -42,11 +39,14 @@ mod webui_route_match;
 mod webui_serve;
 mod webui_ws_origin;
 
-// WebChat v2 gateway assembly + the host-auth vocabulary it carries. Folded up
-// from `ironclaw_reborn_composition::webui::webui_serve`. The mount vocabulary
-// (`PublicRouteMount`, `ProtectedRouteMount`) stays in composition;
-// `PublicRouteMount` is already re-exported through the `auth` module above,
-// and `ProtectedRouteMount` callers import it from composition directly.
+// WebChat v2 gateway assembly + the host-auth vocabulary it carries.
+// Route-mount carriers live in `ironclaw_host_ingress`: composition can build
+// mounts and this ingress crate can consume them without a reverse dependency
+// on WebUI.
+pub use ironclaw_host_ingress::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
+};
+pub use product_auth::{ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount};
 pub use webui_rate_limit::RateLimitConfigError;
 pub use webui_serve::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
@@ -58,8 +58,8 @@ pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
-    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
-    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
+    ProviderInitError, UserDirectory, UserDirectoryError, empty_webui_v2_auth_providers_mount,
+    webui_v2_auth_router,
 };
 // Host-owned CLI-token bootstrap login (`GET /login?token=`); shares the
 // OAuth surface's bearer/ticket-exchange contract (`POST
@@ -70,19 +70,14 @@ pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,
 };
-pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError};
+pub use session::{SessionAuthenticator, SessionRecord, SessionStoreError};
 // Host-owned signed-token login surface (production-suitable, non-dev):
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.
 pub use signed_session_login::{
     CompositeAuthenticator, SignedSessionLoginConfig, SignedSessionLoginWiring,
-    build_signed_session_login, signed_session_store,
+    SignedTokenSessionStore, build_signed_session_login, signed_session_store,
 };
-// `InMemorySessionStore` is gated behind `test-support` so a
-// production binary cannot accidentally wire a process-local store as
-// a `SessionStore` impl. Local dev and tests opt in via the feature.
-#[cfg(any(test, feature = "test-support"))]
-pub use session::InMemorySessionStore;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;

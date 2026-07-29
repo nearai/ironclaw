@@ -32,11 +32,11 @@ use ironclaw_loop_host::{
     LoopCapabilityResultWriter,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityInvocation, CapabilityProgress, CapabilitySurfaceVersion, ConcurrencyHint,
-    LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityProgress,
+    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
 };
 use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -181,7 +181,7 @@ impl ExternalToolCapabilityPort {
 
     async fn complete_or_park(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if request.surface_version != self.surface_version()? {
             return Err(AgentLoopHostError::new(
@@ -415,7 +415,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !self.owns_capability(&request.capability_id) {
             return self.inner.invoke_capability(request).await;
@@ -426,7 +426,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
@@ -531,7 +531,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -541,7 +541,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -1029,7 +1029,7 @@ mod tests {
             .expect("submit output");
 
         let error = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,

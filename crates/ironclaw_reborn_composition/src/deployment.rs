@@ -1,10 +1,8 @@
 //! Deployment configuration: a deployment mode is policy *data* resolved at
 //! the composition edge, never a type the kernel or a substrate names.
 //!
-//! This is the Slice B artifact of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
-//! (§4.4 "Eliminate `Local*`", §5.6 "The deployment interface — modes are
-//! data"). Each deployment target is one [`DeploymentConfig`] value built by a
+//! Deployment modes are configuration data resolved at the composition edge;
+//! each deployment target is one [`DeploymentConfig`] value built by a
 //! named constructor; the difference between local-dev, local-dev-yolo, and
 //! the hosted volume preview is readable on this one page as data.
 //!
@@ -22,27 +20,73 @@ use ironclaw_reborn_event_store::RebornProfile;
 use ironclaw_runtime_policy::{
     EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest,
 };
+use ironclaw_turns::TurnStateStoreLimits;
 
 use std::path::PathBuf;
 
 use thiserror::Error;
 
 use crate::RebornCompositionProfile;
-use crate::input::RebornBuildInput;
-use crate::readiness::{RebornReadinessDiagnostic, RebornReadinessState};
+use crate::input::RebornHostBindings;
+use crate::readiness::{
+    RebornReadinessDiagnostic, RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus,
+    RebornReadinessState,
+};
+
+impl RebornReadinessDiagnostic {
+    pub fn disabled() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::Disabled,
+            RebornReadinessDiagnosticReason::Disabled,
+            RebornReadinessDiagnosticStatus::Blocking,
+            true,
+        )
+    }
+
+    pub fn local_dev() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::LocalDev)
+    }
+
+    pub fn local_dev_yolo() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
+    }
+
+    pub fn hosted_single_tenant_volume() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview,
+            RebornReadinessDiagnosticStatus::Warning,
+            true,
+        )
+    }
+
+    pub fn hosted_single_tenant() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessDiagnosticReason::Unverified,
+            RebornReadinessDiagnosticStatus::Info,
+            false,
+        )
+    }
+
+    fn dev_only_profile(profile: RebornCompositionProfile) -> Self {
+        Self::composition_profile(
+            profile,
+            RebornReadinessDiagnosticReason::DevOnlyProfile,
+            RebornReadinessDiagnosticStatus::Blocking,
+            true,
+        )
+    }
+}
 
 /// Which runtime substrate a deployment assembles.
 ///
-/// Replaces the `requires_production_shape` / `uses_local_runtime_substrate`
-/// profile predicates as the value `build_reborn_services` and
-/// `build_reborn_runtime` dispatch on: a deployment selects a substrate, it
-/// does not *have a mode that implies one*.
+/// Replaces profile predicates as the value `build_runtime_substrate` dispatches on: a
+/// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {
-    /// No runtime is assembled — the facades report disabled.
+    /// No runtime is assembled — the services report disabled.
     None,
-    /// The local runtime substrate (in-memory / on-disk / libSQL volume).
-    Local,
     /// The production-shaped substrate (libSQL or PostgreSQL store graph).
     ProductionShaped,
 }
@@ -92,6 +136,17 @@ impl TrafficPolicy {
         matches!(self, Self::Serve { .. })
     }
 
+    pub(crate) fn requires_production_runtime_policy_preflight(self) -> bool {
+        matches!(
+            self,
+            Self::ValidateOnly
+                | Self::Serve {
+                    veto_on_production_blocking_diagnostic: true,
+                    ..
+                }
+        )
+    }
+
     /// The operator-facing reason this deployment refuses live traffic, or
     /// `None` when it serves.
     ///
@@ -126,7 +181,7 @@ pub struct ReadinessContract {
 ///
 /// Absent for deployments that assemble no local runtime policy: the disabled
 /// profile and the production-shaped profiles, which carry an operator-supplied
-/// policy on `RebornBuildInput` instead.
+/// policy on `RebornHostBindings` instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimePolicyRequest {
     /// Where IronClaw is running and who owns the machine boundary.
@@ -157,7 +212,10 @@ pub(crate) struct RuntimePolicyRequest {
 ///   *handles*, not deployment policy — they continue to ride
 ///   `RebornStorageInput`. This value carries only the policy request and the
 ///   shape selections.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Deliberately not `PartialEq`/`Eq`: the DATA fields below (oauth/nearai
+// configs) carry secret material and connection settings that don't derive
+// equality. Compare observable axes (profile, storage_shape) instead.
+#[derive(Debug, Clone)]
 pub struct DeploymentConfig {
     /// The profile name this config was built from. A **label** — carried for
     /// logging, telemetry, and the readiness diagnostics the operator reads.
@@ -173,6 +231,39 @@ pub struct DeploymentConfig {
     /// Whether this deployment reads hosted extension installation state.
     hosted_extension_installation_state: bool,
     storage_shape: StorageShape,
+    /// Runtime backends the build must provision (extension-runtime): a
+    /// declarative requirement carried on the deployment rather than injected
+    /// as a separate build-input field. Defaulted empty by every profile
+    /// preset; populated by the assembling caller via
+    /// [`DeploymentConfig::with_required_runtime_backends`].
+    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
+    /// Whether the build must provision runtime HTTP egress. Declarative
+    /// deployment requirement; defaulted `false` by every preset.
+    pub(crate) require_runtime_http_egress: bool,
+    /// Whether the build must provision WASM credential injection. Declarative
+    /// deployment requirement; defaulted `false` by every preset.
+    pub(crate) require_wasm_credentials: bool,
+    // --- Declarative DATA the assembling binary supplies (Phase A) ---
+    // These carry *what* the deployment is, not live handles. The binary sets
+    // them through the `RebornHostBindings` builders, which delegate here; the
+    // bindings struct keeps only the irreducible code (trait objects,
+    // factories, registrars, pre-opened handles).
+    /// Owner id (string form) used to mint the runtime's `UserId` actor.
+    /// Late-overridable via [`DeploymentConfig::with_owner_id`] (WebChat serve
+    /// pins the authenticated user after the disclosure gate is built).
+    pub(crate) owner_id: String,
+    pub(crate) local_runtime_identity: Option<crate::input::RebornLocalRuntimeIdentity>,
+    /// Resolved runtime policy. Populated late (the yolo host-access disclosure
+    /// is not known at preset-construction time); the profile→bindings bridge
+    /// installs the accurate value.
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
+    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
+    pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
+    pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
+    pub(crate) nearai_mcp_bootstrap_config:
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+    pub(crate) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
 }
 
 impl DeploymentConfig {
@@ -190,6 +281,18 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::LocalDev,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::None,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -203,7 +306,7 @@ impl DeploymentConfig {
                 yolo_disclosure_acknowledged: false,
                 org_policy: OrgPolicyConstraints::default(),
             }),
-            substrate: RuntimeSubstrate::Local,
+            substrate: RuntimeSubstrate::ProductionShaped,
             traffic: TrafficPolicy::Serve {
                 required_readiness: RebornReadinessState::DevOnly,
                 veto_on_production_blocking_diagnostic: false,
@@ -215,6 +318,18 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::LocalDev,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::LocalDevRoot,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -249,7 +364,7 @@ impl DeploymentConfig {
                 yolo_disclosure_acknowledged: false,
                 org_policy: OrgPolicyConstraints::default(),
             }),
-            substrate: RuntimeSubstrate::Local,
+            substrate: RuntimeSubstrate::ProductionShaped,
             traffic: TrafficPolicy::Serve {
                 required_readiness: RebornReadinessState::HostedSingleTenantValidated,
                 veto_on_production_blocking_diagnostic: false,
@@ -261,6 +376,18 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::LocalDev,
             hosted_extension_installation_state: true,
             storage_shape: StorageShape::HostedSingleTenantPool,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -309,6 +436,18 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::Production,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::OperatorSupplied,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -376,6 +515,12 @@ impl DeploymentConfig {
         self.storage_shape
     }
 
+    /// Whether this deployment must reuse scheduler wake wiring pre-minted by
+    /// the production-shaped services builder.
+    pub(crate) fn requires_pre_minted_scheduler_wake(&self) -> bool {
+        self.storage_shape == StorageShape::OperatorSupplied
+    }
+
     pub(crate) fn uses_local_dev_storage_input(&self) -> bool {
         self.storage_shape == StorageShape::LocalDevRoot
     }
@@ -385,7 +530,7 @@ impl DeploymentConfig {
     ///
     /// `Ok(None)` for deployments that make no policy request — disabled and
     /// the production-shaped profiles, which carry an operator-supplied policy
-    /// on `RebornBuildInput` instead. Distinguishing "no request" from "a
+    /// on `RebornHostBindings` instead. Distinguishing "no request" from "a
     /// request that failed" keeps the fail-closed resolver error visible
     /// rather than collapsing both into an absent policy.
     pub(crate) fn resolve(&self) -> Result<Option<EffectiveRuntimePolicy>, ResolveError> {
@@ -400,35 +545,12 @@ impl DeploymentConfig {
         })
         .map(Some)
     }
-
-    /// The deployment's capability-policy *data* (§4.4.1 category 1): the
-    /// embedded `builtin_capability_policy.toml` — provider policy, approval
-    /// gates/defaults, and capability grants — parsed once through the
-    /// `OnceLock`-cached loader. Like [`DeploymentConfig::resolve`], this is a
-    /// thin adapter over the owning module's loader, not a second policy
-    /// source.
-    // dead_code allow: config-scoped accessor added by the §4.4 relocation;
-    // existing composition call sites still reach the module loader directly
-    // and migrate here separately.
-    #[allow(dead_code)]
-    pub(crate) fn builtin_capability_policy(
-        &self,
-    ) -> Result<
-        crate::builtin_capability_policy::BuiltinCapabilityPolicy,
-        crate::builtin_capability_policy::BuiltinCapabilityPolicyError,
-    > {
-        crate::builtin_capability_policy::builtin_capability_policy()
-    }
 }
 
 #[derive(Debug, Error)]
 pub enum RebornRuntimeProfileError {
     #[error("profile={profile} is not a local Reborn runtime profile")]
     UnsupportedProfile { profile: RebornCompositionProfile },
-    #[error(
-        "profile=hosted-single-tenant-volume requires a binary built with the `libsql` feature"
-    )]
-    MissingLibsqlFeature,
     #[error("failed to resolve local runtime policy: {0}")]
     Policy(#[from] ResolveError),
     #[error("profile={profile} carries no runtime-policy request to resolve")]
@@ -464,7 +586,7 @@ pub fn local_runtime_build_input(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     local_runtime_build_input_with_options(
         profile,
         owner_id,
@@ -480,7 +602,7 @@ pub fn local_runtime_build_input_with_options(
     owner_id: impl Into<String>,
     root: PathBuf,
     options: RebornRuntimeProfileOptions,
-) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     if profile == RebornCompositionProfile::HostedSingleTenantVolume {
         return hosted_single_tenant_volume_build_input(owner_id, root);
     }
@@ -493,7 +615,7 @@ pub fn local_runtime_build_input_with_options(
         .resolve()?
         .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })?;
     Ok(
-        RebornBuildInput::local_dev_from_deployment(deployment, owner_id, root)
+        RebornHostBindings::local_dev_from_deployment(deployment, owner_id, root)
             .with_runtime_policy(policy),
     )
 }
@@ -503,24 +625,62 @@ pub fn local_runtime_build_input_with_options(
 pub(crate) fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
-    #[cfg(not(feature = "libsql"))]
-    {
-        let _ = owner_id;
-        let _ = root;
-        Err(RebornRuntimeProfileError::MissingLibsqlFeature)
-    }
-
-    #[cfg(feature = "libsql")]
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    #[cfg(feature = "libsql")]
-    Ok(RebornBuildInput::local_dev_with_profile(
-        RebornCompositionProfile::HostedSingleTenantVolume,
+    Ok(RebornHostBindings::local_dev_from_deployment(
+        DeploymentConfig::for_profile(RebornCompositionProfile::HostedSingleTenantVolume, false),
         owner_id,
         root,
     )
     .with_runtime_policy(policy))
+}
+
+/// Test-support constructor for a local-dev-shaped build input.
+///
+/// Replaces the removed `RebornHostBindings::local_dev` associated
+/// constructor: a local-dev deployment is *data* (`DeploymentConfig::local_dev`)
+/// plus generic bindings, not a bindings-typed constructor. Behaviour is
+/// identical to the former method — it builds the local-dev deployment and
+/// resolves its runtime policy through `local_dev_from_deployment`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn local_dev_build_input(owner_id: impl Into<String>, root: PathBuf) -> RebornHostBindings {
+    let bindings = RebornHostBindings::local_dev_from_deployment(
+        DeploymentConfig::local_dev(),
+        owner_id,
+        root,
+    );
+    // Composition's own unit tests expect the first-party extension surface
+    // (catalog + capability handlers) the production binary injects; mirror that
+    // assembly from the dev-dependency inventory so a test can install /
+    // activate / dispatch first-party extensions through the production seam. In
+    // a downstream `test-support` build the dev-dependency is absent, so the
+    // injection is `#[cfg(test)]`-only (composition's own tests) — a
+    // `test-support` consumer supplies bundles itself, exactly like the binary.
+    #[cfg(test)]
+    let bindings = bindings.with_bundled_first_party_for_test();
+    bindings
+}
+
+/// Test-support constructor for a local-dev-shaped build input on a specific
+/// profile (e.g. `LocalDevYolo`, `HostedSingleTenantVolume`). Replaces the
+/// removed `RebornHostBindings::local_dev_with_profile` associated constructor.
+#[cfg(any(test, feature = "test-support"))]
+pub fn local_dev_build_input_with_profile(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    root: PathBuf,
+) -> RebornHostBindings {
+    let bindings = RebornHostBindings::local_dev_from_deployment(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        root,
+    );
+    // See `local_dev_build_input`: inject the production first-party surface for
+    // composition's own unit tests (dev-dependency), absent in `test-support`.
+    #[cfg(test)]
+    let bindings = bindings.with_bundled_first_party_for_test();
+    bindings
 }
 
 /// Resolved policy for the standalone local development runtime profile.
@@ -565,9 +725,6 @@ pub fn local_dev_yolo_runtime_policy(
     )
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
-        RebornRuntimeProfileError::MissingLibsqlFeature => {
-            unreachable!("local-dev-yolo is not the hosted volume profile")
-        }
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev-yolo is a local runtime profile")
         }
@@ -595,9 +752,6 @@ fn local_runtime_policy_for_local_dev_shape(
     )
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
-        RebornRuntimeProfileError::MissingLibsqlFeature => {
-            unreachable!("{profile_name} is not the hosted volume profile")
-        }
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("{profile_name} uses the local-dev runtime policy shape")
         }
@@ -656,22 +810,22 @@ mod tests {
             ),
             (
                 RebornCompositionProfile::LocalDev,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
                 RebornCompositionProfile::LocalDevYolo,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
                 RebornCompositionProfile::HostedSingleTenant,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
                 RebornCompositionProfile::HostedSingleTenantVolume,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
@@ -705,14 +859,6 @@ mod tests {
             assert_eq!(
                 profile.to_event_store_profile(),
                 config.event_store_profile()
-            );
-            assert_eq!(
-                profile.requires_production_shape(),
-                substrate == RuntimeSubstrate::ProductionShaped
-            );
-            assert_eq!(
-                profile.uses_local_runtime_substrate(),
-                substrate == RuntimeSubstrate::Local
             );
         }
     }
@@ -858,12 +1004,16 @@ mod tests {
     #[test]
     fn deployment_targets_differ_only_as_data() {
         // The whole local/hosted diff is field values on one struct — the
-        // §4.4 claim this module exists to make true.
-        assert_ne!(
-            DeploymentConfig::local_dev(),
-            DeploymentConfig::hosted_single_tenant_volume()
+        // §4.4 claim this module exists to make true. `DeploymentConfig` is no
+        // longer `PartialEq` (it now carries non-`Eq` secret/config DATA), so
+        // compare the observable axes the claim is actually about.
+        let local = DeploymentConfig::local_dev();
+        let hosted = DeploymentConfig::hosted_single_tenant_volume();
+        assert_ne!(local.readiness().state, hosted.readiness().state);
+        assert_eq!(
+            DeploymentConfig::local_dev().readiness().state,
+            DeploymentConfig::local_dev().readiness().state
         );
-        assert_eq!(DeploymentConfig::local_dev(), DeploymentConfig::local_dev());
     }
 }
 
@@ -877,7 +1027,7 @@ mod local_runtime_profile_tests {
     fn yolo_disclosure_reaches_both_the_carried_deployment_and_the_resolved_policy() {
         // This module is the one place that holds the operator's host-access
         // confirmation, so it must be the place that builds the deployment.
-        // The hazard being pinned: `RebornBuildInput::new` cannot know the
+        // The hazard being pinned: `RebornHostBindings::new` cannot know the
         // disclosure, so a config built there would carry
         // `yolo_disclosure_acknowledged: false` and resolve fail-closed. The
         // input must carry the config built *here* instead.

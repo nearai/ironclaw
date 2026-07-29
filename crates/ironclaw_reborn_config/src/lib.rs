@@ -39,17 +39,16 @@ pub use budget::{
     ROUTINE_LIGHTWEIGHT_USD_ENV, ROUTINE_STANDARD_USD_ENV, USER_DAILY_USD_ENV,
 };
 pub use capability_remediation::{
-    HostRemediationText, SlackSetupGaps, apply_step_text, google_backend_auth_text,
-    google_not_configured_text, google_remediation_text, google_setup_steps_text,
-    slack_remediation_text, slack_remediation_text_with_base_url,
+    HostRemediationText, apply_step_text, google_backend_auth_text, google_not_configured_text,
+    google_remediation_text, google_setup_steps_text,
 };
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
     GoogleFieldUpdate, GoogleOauthConfigUpdate, GoogleOauthConfigUpdateSession, GoogleSection,
-    HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, PolicySection,
-    REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
-    RebornConfigFileUpdateError, RunnerSection, SlackChannelRouteSection, SlackSection,
-    StorageBackend, StorageSection, TelegramSection, TriggerPollerConfigSection,
+    HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, MemoryAdminOverride,
+    MemorySection, PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile,
+    RebornConfigFileError, RebornConfigFileUpdateError, RunnerSection, SlackChannelRouteSection,
+    SlackSection, StorageBackend, StorageSection, TelegramSection, TriggerPollerConfigSection,
     begin_default_llm_slot_update, begin_google_oauth_config_update, update_default_llm_slot,
     update_google_oauth_config, update_slack_enabled,
 };

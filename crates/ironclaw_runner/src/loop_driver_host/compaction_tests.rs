@@ -154,7 +154,7 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         thread_service,
         thread_scope,
         model_gateway,
-        in_memory_checkpoint_state_store() as Arc<dyn CheckpointStateStore>,
+        in_memory_checkpoint_state_store() as Arc<dyn CheckpointStateStorePort>,
         Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
         Arc::new(in_memory_turn_state_store()) as Arc<dyn LoopCheckpointStore>,
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,

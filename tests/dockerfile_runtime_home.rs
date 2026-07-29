@@ -156,9 +156,9 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --features libsql,postgres"
+            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --recipe-path recipe.json"
         ),
-        "cargo chef cook must target the Reborn CLI package with the same features as the final build"
+        "cargo chef cook must target the Reborn CLI package"
     );
     assert!(
         dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
@@ -233,37 +233,14 @@ fn reborn_hosted_single_tenant_volume_seed_config_uses_volume_storage() {
 }
 
 #[test]
-fn reborn_hosted_single_tenant_seed_config_keeps_disabled_slack_legacy_free() {
+fn reborn_hosted_single_tenant_seed_config_omits_retired_slack_section() {
     let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
     let parsed =
         toml::from_str::<toml::Value>(&config).expect("hosted seed config should be valid TOML");
-    let slack = parsed
-        .get("slack")
-        .and_then(toml::Value::as_table)
-        .expect("hosted seed config should include [slack]");
-
-    assert_eq!(
-        slack.get("enabled").and_then(toml::Value::as_bool),
-        Some(false),
-        "hosted seed config should keep Slack disabled until WebUI setup enables it",
+    assert!(
+        parsed.get("slack").is_none(),
+        "hosted seed config must not recreate the retired specialized [slack] section",
     );
-
-    for legacy_field in [
-        "installation_id",
-        "team_id",
-        "api_app_id",
-        "slack_user_id",
-        "user_id",
-        "shared_subject_user_id",
-        "channel_routes",
-        "signing_secret_env",
-        "bot_token_env",
-    ] {
-        assert!(
-            !slack.contains_key(legacy_field),
-            "disabled hosted seed config must not include legacy Slack field `{legacy_field}`"
-        );
-    }
 }
 
 #[test]

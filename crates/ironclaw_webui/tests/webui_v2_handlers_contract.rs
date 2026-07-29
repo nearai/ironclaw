@@ -1,11 +1,17 @@
+// arch-exempt: large_file, lifecycle handler regressions reuse the existing WebUI contract harness, plan #6175
 //! Caller-level contract tests for the WebChat v2 axum handlers.
 //!
 //! Per `.claude/rules/testing.md` "Test Through the Caller", these tests
 //! drive a real axum [`Router`] (built from [`webui_v2_router`]) against a
-//! stub [`RebornServicesApi`] so the regression target is the wire
+//! stub [`ProductSurface`] so the regression target is the wire
 //! contract — body shape, path/query plumbing, error mapping — not just
-//! the facade method bodies that are already covered in
-//! `ironclaw_product_workflow`.
+//! the service method bodies that are already covered in
+//! `ironclaw_product`.
+
+// arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
+
+#[path = "support/product_surface.rs"]
+mod programmable_surface;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -15,60 +21,87 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderName, Method, Request, StatusCode, header};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
-    UserId,
+    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
+    LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode, ProjectId, Resolution, ResultPreviewMeta, ResultProgress,
+    ResultRef, RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
+    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
+    ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
+    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
+    AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus, CodexLoginStart,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
+    PROJECT_VIEW, PROJECTS_VIEW, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSubmitTurnRequest, ProjectFsEntry, ProjectFsEntryKind,
+    ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
+    RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
+    RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, RebornViewPage, RebornViewQuery, RunArtifactLogs,
+    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, rejecting_product_surface_error,
+};
+use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
-};
-use ironclaw_product_workflow::{
-    FsMount, LOGS_VIEW, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_LOGS_VIEW,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
-    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
-    RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
-    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorSurfaceStatus,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -79,16 +112,158 @@ use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
     webui_v2_router, webui_v2_router_with_options,
 };
+use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
-fn caller() -> WebUiAuthenticatedCaller {
+use programmable_surface::ProgrammableProductSurface;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ProductSurfaceCallId {
+    CreateThread,
+    SubmitTurn,
+    CancelRun,
+    ResolveGate,
+    RetryRun,
+    ProjectCreate,
+    ProjectFsRead,
+    FsRead,
+    AttachmentRead,
+    TraceAccountLoginLink,
+    TraceHoldAuthorize,
+    OperatorConfigSetKey,
+    OperatorServiceLifecycle,
+    LlmTestConnection,
+    LlmListModels,
+    LlmNearAiLogin,
+    LlmNearAiWalletLogin,
+    LlmCodexLogin,
+    AdminUserCreate,
+    AdminUserDeleteSecret,
+    AutomationPause,
+    AutomationResume,
+    AutomationRename,
+    AutomationDelete,
+}
+
+impl ProductSurfaceCallId {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateThread => "thread.create",
+            Self::SubmitTurn => "turn.submit",
+            Self::CancelRun => "run.cancel",
+            Self::ResolveGate => "gate.resolve",
+            Self::RetryRun => "run.retry",
+            Self::ProjectCreate => "project.create",
+            Self::ProjectFsRead => "project.fs.read",
+            Self::FsRead => "fs.read",
+            Self::AttachmentRead => "attachment.read",
+            Self::TraceAccountLoginLink => "trace.account_login_link",
+            Self::TraceHoldAuthorize => "trace.hold_authorize",
+            Self::OperatorConfigSetKey => "operator.config.set_key",
+            Self::OperatorServiceLifecycle => "operator.service.lifecycle",
+            Self::LlmTestConnection => "llm.test_connection",
+            Self::LlmListModels => "llm.list_models",
+            Self::LlmNearAiLogin => "llm.nearai.login",
+            Self::LlmNearAiWalletLogin => "llm.nearai.wallet_login",
+            Self::LlmCodexLogin => "llm.codex.login",
+            Self::AdminUserCreate => "admin.user.create",
+            Self::AdminUserDeleteSecret => "admin.user.delete_secret",
+            Self::AutomationPause => "automation.pause",
+            Self::AutomationResume => "automation.resume",
+            Self::AutomationRename => "automation.rename",
+            Self::AutomationDelete => "automation.delete",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "thread.create" => Some(Self::CreateThread),
+            "turn.submit" => Some(Self::SubmitTurn),
+            "run.cancel" => Some(Self::CancelRun),
+            "gate.resolve" => Some(Self::ResolveGate),
+            "run.retry" => Some(Self::RetryRun),
+            "project.create" => Some(Self::ProjectCreate),
+            "project.fs.read" => Some(Self::ProjectFsRead),
+            "fs.read" => Some(Self::FsRead),
+            "attachment.read" => Some(Self::AttachmentRead),
+            "trace.account_login_link" => Some(Self::TraceAccountLoginLink),
+            "trace.hold_authorize" => Some(Self::TraceHoldAuthorize),
+            "operator.config.set_key" => Some(Self::OperatorConfigSetKey),
+            "operator.service.lifecycle" => Some(Self::OperatorServiceLifecycle),
+            "llm.test_connection" => Some(Self::LlmTestConnection),
+            "llm.list_models" => Some(Self::LlmListModels),
+            "llm.nearai.login" => Some(Self::LlmNearAiLogin),
+            "llm.nearai.wallet_login" => Some(Self::LlmNearAiWalletLogin),
+            "llm.codex.login" => Some(Self::LlmCodexLogin),
+            "admin.user.create" => Some(Self::AdminUserCreate),
+            "admin.user.delete_secret" => Some(Self::AdminUserDeleteSecret),
+            "automation.pause" => Some(Self::AutomationPause),
+            "automation.resume" => Some(Self::AutomationResume),
+            "automation.rename" => Some(Self::AutomationRename),
+            "automation.delete" => Some(Self::AutomationDelete),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RecordedProductSurfaceCallRequest {
+    call_id: String,
+    input: Value,
+}
+
+impl RecordedProductSurfaceCallRequest {
+    fn from_value(call_id: ProductSurfaceCallId, input: Value) -> Self {
+        Self {
+            call_id: call_id.as_str().to_string(),
+            input,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RecordedProductSurfaceCallResponse {
+    Json(Value),
+    ProjectFile(ProjectFsFile),
+    Attachment(RebornAttachmentBytes),
+}
+
+impl RecordedProductSurfaceCallResponse {
+    fn json<T: Serialize>(value: T) -> Result<Self, ProductSurfaceError> {
+        Ok(Self::Json(
+            serde_json::to_value(value).map_err(ProductSurfaceError::internal_from)?,
+        ))
+    }
+
+    fn project_file(file: ProjectFsFile) -> Self {
+        Self::ProjectFile(file)
+    }
+
+    fn attachment(bytes: RebornAttachmentBytes) -> Self {
+        Self::Attachment(bytes)
+    }
+
+    fn into_value(self) -> Result<Value, ProductSurfaceError> {
+        match self {
+            Self::Json(value) => Ok(value),
+            Self::ProjectFile(file) => {
+                serde_json::to_value(file).map_err(ProductSurfaceError::internal_from)
+            }
+            Self::Attachment(bytes) => {
+                serde_json::to_value(bytes).map_err(ProductSurfaceError::internal_from)
+            }
+        }
+    }
+}
+
+fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
 }
 
-fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
@@ -96,14 +271,14 @@ fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     )
 }
 
-fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
+fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     router_with_caller(services, WebUiV2Capabilities::default(), caller())
 }
 
 fn router_with_caller(
-    services: Arc<dyn RebornServicesApi>,
+    services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
@@ -117,13 +292,13 @@ fn router_with_caller(
 }
 
 fn router_with_capabilities(
-    services: Arc<dyn RebornServicesApi>,
+    services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
 ) -> Router {
     router_with_caller(services, capabilities, caller())
 }
 
-fn router_with_caller_only(services: Arc<dyn RebornServicesApi>) -> Router {
+fn router_with_caller_only(services: Arc<dyn ProductSurface>) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
@@ -131,10 +306,10 @@ fn router_with_caller_only(services: Arc<dyn RebornServicesApi>) -> Router {
     .layer(axum::Extension(caller()))
 }
 
-fn service_unavailable_error(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn service_unavailable_error(retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -142,8 +317,32 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
     }
 }
 
-type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
+fn successful_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: ResultRef::from_uuid(activity_id.as_uuid()),
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: SafeSummary::new("ok").expect("static summary is redaction-safe"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    })
+}
+
+fn blocked_auth_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Blocked(Blocked::Auth(GateWaypoint::new(GateRef::from_uuid(
+        activity_id.as_uuid(),
+    ))))
+}
+
 type OperatorConfigSetCall = (String, Value);
+type LlmUpsertCall = (String, bool);
+type LlmActiveCall = (String, Option<String>);
 type LogsCall = RebornLogQueryRequest;
 type OperatorLogsCall = RebornOperatorLogsQuery;
 
@@ -245,98 +444,68 @@ fn operator_config_diagnostic_command_plane_response(
 
 #[derive(Default)]
 struct StubServices {
-    create_thread_calls: Mutex<Vec<WebUiCreateThreadRequest>>,
-    delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
-    submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
+    create_thread_calls: Mutex<Vec<ProductCreateThreadRequest>>,
+    submit_turn_calls: Mutex<Vec<ProductSubmitTurnRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
-    next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
+    next_global_auto_approve_error: Mutex<Option<ProductSurfaceError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
+    next_extensions_view: Mutex<Option<RebornExtensionListResponse>>,
+    invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
+    surface_calls: Mutex<Vec<RecordedProductSurfaceCallRequest>>,
+    next_surface_response:
+        Mutex<Option<Result<RecordedProductSurfaceCallResponse, ProductSurfaceError>>>,
+    next_invoke_response: Mutex<Option<Result<Resolution, ProductSurfaceError>>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
-    cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
-    resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
-    retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
-    list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
-    list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
-    pause_automation_calls: Mutex<Vec<String>>,
-    resume_automation_calls: Mutex<Vec<String>>,
-    rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
-    delete_automation_calls: Mutex<Vec<String>>,
+    cancel_run_calls: Mutex<Vec<ProductCancelRunRequest>>,
+    resolve_gate_calls: Mutex<Vec<ProductResolveGateRequest>>,
+    retry_run_calls: Mutex<Vec<ProductRetryRunRequest>>,
+    list_threads_calls: Mutex<Vec<ProductListThreadsRequest>>,
+    list_automations_calls: Mutex<Vec<ProductListAutomationsRequest>>,
     /// Captures the authenticated caller's user id for each
     /// `trace_account_traces` call, so the contract test can assert the handler
     /// forwards the caller (the route is caller-scoped).
     trace_account_traces_callers: Mutex<Vec<String>>,
     /// Forwarded caller user-ids for each `trace_account_login_link` call.
     trace_account_login_link_callers: Mutex<Vec<String>>,
-    next_list_automations_error: Mutex<Option<RebornServicesError>>,
-    next_rename_automation_error: Mutex<Option<RebornServicesError>>,
-    next_delete_automation_error: Mutex<Option<RebornServicesError>>,
+    next_list_automations_error: Mutex<Option<ProductSurfaceError>>,
     get_outbound_preferences_calls: Mutex<usize>,
-    set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
-    next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
-    list_connectable_channels_calls: Mutex<usize>,
-    next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
-    get_operator_setup_calls: Mutex<usize>,
-    run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
     operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
-    next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
+    next_set_operator_config_key_error: Mutex<Option<ProductSurfaceError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
-    get_operator_diagnostics_calls: Mutex<usize>,
-    get_operator_status_calls: Mutex<usize>,
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
-    list_extensions_calls: Mutex<usize>,
-    list_extension_registry_calls: Mutex<usize>,
-    install_extension_calls: Mutex<Vec<String>>,
-    /// Raw zip bytes each `import_extension` call forwards, so the route test
-    /// can assert the uploaded body reaches the facade intact.
-    import_extension_calls: Mutex<Vec<Vec<u8>>>,
-    activate_extension_calls: Mutex<Vec<String>>,
-    remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
-    upsert_llm_provider_calls: Mutex<Vec<String>>,
+    upsert_llm_provider_calls: Mutex<Vec<LlmUpsertCall>>,
     delete_llm_provider_calls: Mutex<Vec<String>>,
-    set_active_llm_calls: Mutex<Vec<(String, Option<String>)>>,
+    set_active_llm_calls: Mutex<Vec<LlmActiveCall>>,
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
-    next_create_thread_error: Mutex<Option<RebornServicesError>>,
-    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, RebornServicesError>>>,
+    next_create_thread_error: Mutex<Option<ProductSurfaceError>>,
+    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, ProductSurfaceError>>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
     /// drive the handler through specific projection envelopes, error
     /// branches, or empty drains in a deterministic order.
-    next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
+    next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, ProductSurfaceError>>>,
     stream_events_notify: Arc<Notify>,
-    stream_events_subscription_enabled: Mutex<bool>,
-    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
-    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
-    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
-    /// so the handler test can assert the request body reaches the facade.
-    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
-    // Project routes — recorded requests so path-param-override behavior can be
-    // asserted (the path id must win over any body value).
-    update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
-    delete_project_calls: Mutex<Vec<RebornDeleteProjectRequest>>,
-    add_project_member_calls: Mutex<Vec<RebornAddMemberRequest>>,
-    update_project_member_calls: Mutex<Vec<RebornUpdateMemberRoleRequest>>,
-    remove_project_member_calls: Mutex<Vec<RebornRemoveMemberRequest>>,
 }
 
 impl StubServices {
-    fn fail_create_thread(&self, error: RebornServicesError) {
+    fn fail_create_thread(&self, error: ProductSurfaceError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
     }
 
@@ -346,40 +515,33 @@ impl StubServices {
         *self.read_attachment_response.lock().expect("lock") = Some(bytes);
     }
 
-    fn fail_list_automations(&self, error: RebornServicesError) {
+    fn fail_list_automations(&self, error: ProductSurfaceError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
     }
 
-    fn fail_delete_automation(&self, error: RebornServicesError) {
-        *self.next_delete_automation_error.lock().expect("lock") = Some(error);
+    fn enqueue_invoke_response(&self, response: Result<Resolution, ProductSurfaceError>) {
+        *self.next_invoke_response.lock().expect("lock") = Some(response);
     }
 
-    fn fail_rename_automation(&self, error: RebornServicesError) {
-        *self.next_rename_automation_error.lock().expect("lock") = Some(error);
+    fn enqueue_operation_response(
+        &self,
+        response: Result<RecordedProductSurfaceCallResponse, ProductSurfaceError>,
+    ) {
+        *self.next_surface_response.lock().expect("lock") = Some(response);
     }
 
-    fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
-        *self
-            .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock") = Some(error);
+    fn set_extensions_view(&self, response: RebornExtensionListResponse) {
+        *self.next_extensions_view.lock().expect("lock") = Some(response);
     }
 
-    fn fail_list_connectable_channels(&self, error: RebornServicesError) {
-        *self
-            .next_list_connectable_channels_error
-            .lock()
-            .expect("lock") = Some(error);
-    }
-
-    fn fail_set_operator_config_key(&self, error: RebornServicesError) {
+    fn fail_set_operator_config_key(&self, error: ProductSurfaceError) {
         *self
             .next_set_operator_config_key_error
             .lock()
             .expect("lock") = Some(error);
     }
 
-    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, RebornServicesError>) {
+    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, ProductSurfaceError>) {
         self.next_retry_run
             .lock()
             .expect("lock")
@@ -392,7 +554,7 @@ impl StubServices {
     /// is empty.
     fn enqueue_stream_events(
         &self,
-        response: Result<RebornStreamEventsResponse, RebornServicesError>,
+        response: Result<RebornStreamEventsResponse, ProductSurfaceError>,
     ) {
         self.next_stream_events
             .lock()
@@ -400,25 +562,8 @@ impl StubServices {
             .push_back(response);
     }
 
-    fn enable_stream_events_subscription(
-        &self,
-        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
-    ) {
-        let (sender, receiver) = mpsc::channel(events.len().max(1));
-        for event in events {
-            sender.try_send(event).expect("subscription test queue");
-        }
-        drop(sender);
-        *self
-            .stream_events_subscription_enabled
-            .lock()
-            .expect("lock") = true;
-        *self.next_stream_events_subscription.lock().expect("lock") =
-            Some(RebornStreamEventsSubscription::new(receiver));
-    }
-
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
-    /// test wait on the actual facade call rather than guessing at a
+    /// test wait on the actual service call rather than guessing at a
     /// timeout — axum's SSE body is lazy, so the handler does not run
     /// until the client polls the body.
     fn stream_events_signal(&self) -> Arc<Notify> {
@@ -430,12 +575,11 @@ impl StubServices {
     }
 }
 
-#[async_trait]
-impl RebornServicesApi for StubServices {
+impl StubServices {
     async fn global_auto_approve_enabled(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<bool, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<bool, ProductSurfaceError> {
         *self.global_auto_approve_calls.lock().expect("lock") += 1;
         if *self.stall_global_auto_approve.lock().expect("lock") {
             std::future::pending::<()>().await;
@@ -453,9 +597,9 @@ impl RebornServicesApi for StubServices {
 
     async fn create_thread(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+        request: ProductCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         self.create_thread_calls
             .lock()
             .expect("lock")
@@ -486,73 +630,11 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn update_project(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        self.update_project_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornProjectResponse {
-            project: sample_project_info(&request.project_id),
-        })
-    }
-
-    async fn delete_project(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteProjectRequest,
-    ) -> Result<(), RebornServicesError> {
-        self.delete_project_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        Ok(())
-    }
-
-    async fn add_project_member(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        self.add_project_member_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(sample_member_info(&request.user_id))
-    }
-
-    async fn update_project_member_role(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        self.update_project_member_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(sample_member_info(&request.user_id))
-    }
-
-    async fn remove_project_member(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornRemoveMemberRequest,
-    ) -> Result<(), RebornServicesError> {
-        self.remove_project_member_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        Ok(())
-    }
-
     async fn submit_turn(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+        request: ProductSubmitTurnRequest,
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         self.submit_turn_calls
             .lock()
             .expect("lock")
@@ -575,26 +657,11 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        self.delete_thread_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornDeleteThreadResponse {
-            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
-            deleted: true,
-        })
-    }
-
     async fn get_timeline(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
+    ) -> Result<RebornTimelineResponse, ProductSurfaceError> {
         self.get_timeline_calls
             .lock()
             .expect("lock")
@@ -623,11 +690,62 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn invoke(
+        &self,
+        _caller: ProductSurfaceCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
+            let provider_id = input
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(ProductSurfaceError::internal)?
+                .to_string();
+            self.upsert_llm_provider_calls
+                .lock()
+                .expect("lock")
+                .push((provider_id, input.get("api_key").is_some()));
+            if let Some(response) = self.next_invoke_response.lock().expect("lock").take() {
+                return response;
+            }
+            return Err(service_unavailable_error(false));
+        }
+        if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID
+            && let Some(provider_id) = input.get("provider_id").and_then(Value::as_str)
+        {
+            self.delete_llm_provider_calls
+                .lock()
+                .expect("lock")
+                .push(provider_id.to_string());
+        }
+        if capability.as_str() == LLM_ACTIVE_SET_CAPABILITY_ID
+            && let Some(provider_id) = input.get("provider_id").and_then(Value::as_str)
+        {
+            self.set_active_llm_calls.lock().expect("lock").push((
+                provider_id.to_string(),
+                input
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            ));
+        }
+        self.invoke_calls
+            .lock()
+            .expect("lock")
+            .push((capability, input, activity_id));
+        if let Some(response) = self.next_invoke_response.lock().expect("lock").take() {
+            return response;
+        }
+        Err(service_unavailable_error(false))
+    }
+
     async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
         self.view_queries.lock().expect("lock").push(query.clone());
         match query.view_id.as_str() {
             id if id == RUN_ARTIFACT_VIEW.id => {
@@ -678,13 +796,13 @@ impl RebornServicesApi for StubServices {
                     serde_json::from_value(query.params).expect("logs params");
                 request.cursor = query.cursor.or(request.cursor);
                 if request.tail && request.follow {
-                    return Err(RebornServicesError {
-                        code: RebornServicesErrorCode::InvalidRequest,
-                        kind: RebornServicesErrorKind::Validation,
+                    return Err(ProductSurfaceError {
+                        code: ProductSurfaceErrorCode::InvalidRequest,
+                        kind: ProductSurfaceErrorKind::Validation,
                         status_code: 400,
                         retryable: false,
                         field: Some("follow".to_string()),
-                        validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                        validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
                     });
                 }
                 self.query_logs_calls.lock().expect("lock").push(request);
@@ -716,68 +834,439 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
-            _ => Err(rejecting_reborn_services_error()),
+            id if id == LLM_CONFIG_VIEW.id => {
+                *self.get_llm_config_calls.lock().expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(llm_snapshot("openai"))
+                        .expect("llm config payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == THREADS_VIEW.id => {
+                let mut request: ProductListThreadsRequest =
+                    serde_json::from_value(query.params).expect("thread list params");
+                request.cursor = query.cursor.or(request.cursor);
+                self.list_threads_calls.lock().expect("lock").push(request);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornListThreadsResponse {
+                        threads: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .expect("thread list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == TIMELINE_VIEW.id => {
+                let mut request: RebornTimelineRequest =
+                    serde_json::from_value(query.params).expect("timeline params");
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self.get_timeline(caller, request).await?;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(response).expect("timeline payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
+                let _: RebornGlobalAutoApproveRequest =
+                    serde_json::from_value(query.params).expect("global auto approve params");
+                let enabled = self.global_auto_approve_enabled(caller).await?;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornGlobalAutoApproveResponse { enabled })
+                        .expect("global auto approve payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_USERS_VIEW.id => {
+                let mut request: RebornAdminUserListQuery =
+                    serde_json::from_value(query.params).expect("admin users params");
+                request.cursor = query.cursor.or(request.cursor);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAdminUserListResponse {
+                        users: vec![sample_admin_user("user-admin")],
+                        next_cursor: None,
+                    })
+                    .expect("admin users payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_USER_VIEW.id => {
+                let request: RebornAdminUserRequest =
+                    serde_json::from_value(query.params).expect("admin user params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAdminUserResponse {
+                        user: sample_admin_user(request.user_id.as_str()),
+                    })
+                    .expect("admin user payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_USER_SECRETS_VIEW.id => {
+                let _: RebornAdminUserRequest =
+                    serde_json::from_value(query.params).expect("admin user secrets params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAdminUserSecretsListResponse {
+                        secrets: vec![AdminUserSecretMeta {
+                            handle: "openai_api_key".to_string(),
+                            created_at: Some("2026-06-17T00:00:00Z".to_string()),
+                            updated_at: Some("2026-06-17T00:00:00Z".to_string()),
+                        }],
+                    })
+                    .expect("admin user secrets payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == AUTOMATIONS_VIEW.id => {
+                let request: ProductListAutomationsRequest =
+                    serde_json::from_value(query.params).expect("automation list params");
+                self.list_automations_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request);
+                if let Some(error) = self
+                    .next_list_automations_error
+                    .lock()
+                    .expect("lock")
+                    .take()
+                {
+                    return Err(error);
+                }
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornListAutomationsResponse {
+                        automations: vec![
+                            automation_info("automation-listed", "Daily status", "0 9 * * *"),
+                            automation_info("automation-alpha", "Renamed status", "0 9 * * *"),
+                        ],
+                        scheduler_enabled: true,
+                    })
+                    .expect("automation list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
+                *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(outbound_preferences_response("slack-dm-alpha"))
+                        .expect("outbound preferences payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
+                *self
+                    .list_outbound_delivery_targets_calls
+                    .lock()
+                    .expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(outbound_delivery_targets_response())
+                        .expect("outbound delivery targets payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == TRACE_CREDITS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(trace_credits_response())
+                    .expect("trace credits payload"),
+                next_cursor: None,
+            }),
+            id if id == TRACE_ACCOUNT_TRACES_VIEW.id => {
+                let user_id = caller.actor().user_id.as_str().to_string();
+                self.trace_account_traces_callers
+                    .lock()
+                    .expect("lock")
+                    .push(user_id);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAccountTracesResponse {
+                        enrolled: false,
+                        traces: vec![],
+                    })
+                    .expect("trace account payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
+                *self.list_operator_config_calls.lock().expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorConfigListResponse {
+                        entries: self.operator_config_entries.lock().expect("lock").clone(),
+                        precedence: vec!["default".to_string()],
+                        diagnostics: Vec::new(),
+                    })
+                    .expect("operator config list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_KEY_VIEW.id => {
+                let key = query.params["key"]
+                    .as_str()
+                    .expect("operator config key param")
+                    .to_string();
+                self.get_operator_config_key_calls
+                    .lock()
+                    .expect("lock")
+                    .push(key.clone());
+                let entry = self
+                    .operator_config_entries
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .find(|entry| entry.key == key)
+                    .cloned()
+                    .unwrap_or_else(|| operator_config_entry(key, serde_json::json!("configured")));
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorConfigGetResponse { entry })
+                        .expect("operator config key payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_VALIDATE_VIEW.id => {
+                let request: RebornOperatorConfigValidateRequest =
+                    serde_json::from_value(query.params).expect("operator config validate params");
+                self.validate_operator_config_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request.keys.clone());
+                let diagnostics = operator_config_validation_diagnostics(request.keys);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorConfigValidateResponse {
+                        valid: diagnostics.is_empty(),
+                        diagnostics,
+                    })
+                    .expect("operator config validate payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_SETUP_VIEW.id => {
+                let setup_input = self
+                    .invoke_calls
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .rev()
+                    .find(|(capability, _, _)| {
+                        capability.as_str() == OPERATOR_SETUP_RUN_CAPABILITY_ID
+                    })
+                    .map(|(_, input, _)| input.clone());
+                let active_provider_id = setup_input
+                    .as_ref()
+                    .and_then(|input| input.get("provider_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let active_model = setup_input
+                    .as_ref()
+                    .and_then(|input| input.get("model"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorSetupResponse {
+                        area: RebornOperatorArea::Setup,
+                        status: RebornOperatorSetupStatus::Incomplete,
+                        message: "setup incomplete".to_string(),
+                        active_provider_id,
+                        active_model,
+                        steps: Vec::new(),
+                        diagnostics: Vec::new(),
+                    })
+                    .expect("operator setup payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_DIAGNOSTICS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(operator_config_diagnostic_command_plane_response(
+                    RebornOperatorArea::Diagnostics,
+                ))
+                .expect("operator diagnostics payload"),
+                next_cursor: None,
+            }),
+            id if id == OPERATOR_STATUS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(operator_config_diagnostic_command_plane_response(
+                    RebornOperatorArea::Status,
+                ))
+                .expect("operator status payload"),
+                next_cursor: None,
+            }),
+            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(
+                    self.next_extensions_view
+                        .lock()
+                        .expect("lock")
+                        .take()
+                        .unwrap_or_else(|| RebornExtensionListResponse {
+                            extensions: vec![extension_info("google-calendar", true)],
+                        }),
+                )
+                .expect("extensions payload"),
+                next_cursor: None,
+            }),
+            id if id == EXTENSION_REGISTRY_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornExtensionRegistryResponse {
+                    entries: Vec::new(),
+                })
+                .expect("extension registry payload"),
+                next_cursor: None,
+            }),
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = query.params["package_id"]
+                    .as_str()
+                    .expect("extension setup package_id param");
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                        .expect("extension setup package ref");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(extension_setup_response(package_ref))
+                        .expect("extension setup payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == SKILLS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornSkillListResponse {
+                    skills: Vec::new(),
+                    count: 0,
+                    auto_activate_learned: true,
+                })
+                .expect("skills payload"),
+                next_cursor: None,
+            }),
+            id if id == SKILL_SEARCH_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornSkillSearchResponse {
+                    catalog: Vec::new(),
+                    installed: Vec::new(),
+                    registry_url: String::new(),
+                    catalog_error: None,
+                })
+                .expect("skill search payload"),
+                next_cursor: None,
+            }),
+            id if id == SKILL_CONTENT_VIEW.id => {
+                let name = query.params["name"].as_str().expect("skill name param");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornSkillContentResponse {
+                        name: name.to_string(),
+                        content: format!("# {name}\n"),
+                    })
+                    .expect("skill content payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECT_FS_LIST_VIEW.id => {
+                let request: RebornProjectFsListRequest =
+                    serde_json::from_value(query.params).expect("project fs list params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornProjectFsListResponse {
+                        entries: vec![ProjectFsEntry {
+                            name: "report.md".to_string(),
+                            path: format!("{}/report.md", request.path.trim_end_matches('/')),
+                            kind: ProjectFsEntryKind::File,
+                        }],
+                    })
+                    .expect("project fs list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECT_FS_STAT_VIEW.id => {
+                let request: RebornProjectFsStatRequest =
+                    serde_json::from_value(query.params).expect("project fs stat params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornProjectFsStatResponse {
+                        stat: ProjectFsStat {
+                            path: request.path,
+                            kind: ProjectFsEntryKind::File,
+                            size_bytes: 7,
+                            mime_type: "text/markdown".to_string(),
+                        },
+                    })
+                    .expect("project fs stat payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == FS_MOUNTS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornFsMountsResponse {
+                    mounts: vec![
+                        RebornFsMountInfo {
+                            mount: FsMount::Memory,
+                            label: "Memory".to_string(),
+                        },
+                        RebornFsMountInfo {
+                            mount: FsMount::Workspace,
+                            label: "Workspace files".to_string(),
+                        },
+                    ],
+                })
+                .expect("fs mounts payload"),
+                next_cursor: None,
+            }),
+            id if id == FS_LIST_VIEW.id => {
+                let request: RebornFsListRequest =
+                    serde_json::from_value(query.params).expect("fs list params");
+                self.browse_fs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request.clone());
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornFsListResponse {
+                        mount: request.mount,
+                        path: request.path,
+                        entries: vec![ProjectFsEntry {
+                            name: "today.md".to_string(),
+                            path: "daily/today.md".to_string(),
+                            kind: ProjectFsEntryKind::File,
+                        }],
+                    })
+                    .expect("fs list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == FS_STAT_VIEW.id => {
+                let request: RebornFsStatRequest =
+                    serde_json::from_value(query.params).expect("fs stat params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornFsStatResponse {
+                        stat: ProjectFsStat {
+                            path: request.path,
+                            kind: ProjectFsEntryKind::File,
+                            size_bytes: 7,
+                            mime_type: "text/markdown".to_string(),
+                        },
+                    })
+                    .expect("fs stat payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECTS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornListProjectsResponse {
+                    projects: vec![sample_project_info("project-alpha")],
+                })
+                .expect("projects payload"),
+                next_cursor: None,
+            }),
+            id if id == PROJECT_VIEW.id => {
+                let request: RebornGetProjectRequest =
+                    serde_json::from_value(query.params).expect("project params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornProjectResponse {
+                        project: sample_project_info(&request.project_id),
+                    })
+                    .expect("project payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECT_MEMBERS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornListMembersResponse {
+                    members: vec![
+                        sample_member_info("user-beta"),
+                        sample_member_info("body-user"),
+                        sample_member_info("path-user"),
+                    ],
+                })
+                .expect("project members payload"),
+                next_cursor: None,
+            }),
+            _ => Err(rejecting_product_surface_error()),
         }
-    }
-
-    async fn list_fs_mounts(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
-        Ok(RebornFsMountsResponse {
-            mounts: vec![
-                RebornFsMountInfo {
-                    mount: FsMount::Memory,
-                    label: "Memory".to_string(),
-                },
-                RebornFsMountInfo {
-                    mount: FsMount::Workspace,
-                    label: "Workspace files".to_string(),
-                },
-            ],
-        })
-    }
-
-    async fn browse_fs_dir(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornFsListRequest,
-    ) -> Result<RebornFsListResponse, RebornServicesError> {
-        self.browse_fs_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornFsListResponse {
-            mount: request.mount,
-            path: request.path,
-            entries: vec![ProjectFsEntry {
-                name: "today.md".to_string(),
-                path: "daily/today.md".to_string(),
-                kind: ProjectFsEntryKind::File,
-            }],
-        })
-    }
-
-    async fn stat_fs_path(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornFsStatRequest,
-    ) -> Result<RebornFsStatResponse, RebornServicesError> {
-        Ok(RebornFsStatResponse {
-            stat: ProjectFsStat {
-                path: request.path,
-                kind: ProjectFsEntryKind::File,
-                size_bytes: 7,
-                mime_type: "text/markdown".to_string(),
-            },
-        })
     }
 
     async fn read_fs_file(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornFsReadRequest,
-    ) -> Result<ProjectFsFile, RebornServicesError> {
+    ) -> Result<ProjectFsFile, ProductSurfaceError> {
         Ok(ProjectFsFile {
             path: request.path,
             filename: Some("today.md".to_string()),
@@ -789,18 +1278,18 @@ impl RebornServicesApi for StubServices {
 
     async fn read_attachment(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornAttachmentRequest,
-    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+    ) -> Result<RebornAttachmentBytes, ProductSurfaceError> {
         self.read_attachment_calls
             .lock()
             .expect("lock")
             .push(request);
         match self.read_attachment_response.lock().expect("lock").clone() {
             Some(bytes) => Ok(bytes),
-            None => Err(RebornServicesError {
-                code: RebornServicesErrorCode::NotFound,
-                kind: RebornServicesErrorKind::NotFound,
+            None => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::NotFound,
+                kind: ProductSurfaceErrorKind::NotFound,
                 status_code: 404,
                 retryable: false,
                 field: None,
@@ -811,9 +1300,9 @@ impl RebornServicesApi for StubServices {
 
     async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.stream_events_calls
             .lock()
             .expect("lock")
@@ -826,53 +1315,11 @@ impl RebornServicesApi for StubServices {
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
 
-    fn supports_stream_events_subscription(&self) -> bool {
-        *self
-            .stream_events_subscription_enabled
-            .lock()
-            .expect("lock")
-    }
-
-    async fn subscribe_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
-        self.subscribe_events_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        self.next_stream_events_subscription
-            .lock()
-            .expect("lock")
-            .take()
-            .ok_or_else(|| service_unavailable_error(true))
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        // Not exercised by any current handler test — `get_run_state` is on
-        // the facade trait but not wired to a WebChat v2 HTTP route. Fail
-        // loud rather than fabricate a response so a future caller-level
-        // test that forgets to program this path can't quietly pass.
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
     async fn cancel_run(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+        request: ProductCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         self.cancel_run_calls
             .lock()
             .expect("lock")
@@ -887,9 +1334,9 @@ impl RebornServicesApi for StubServices {
 
     async fn resolve_gate(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+        request: ProductResolveGateRequest,
+    ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         self.resolve_gate_calls
             .lock()
             .expect("lock")
@@ -905,9 +1352,9 @@ impl RebornServicesApi for StubServices {
 
     async fn retry_run(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+        request: ProductRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, ProductSurfaceError> {
         self.retry_run_calls
             .lock()
             .expect("lock")
@@ -919,333 +1366,12 @@ impl RebornServicesApi for StubServices {
             .expect("retry_run test stub called without queued response")
     }
 
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        self.list_threads_calls.lock().expect("lock").push(request);
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
-        })
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        self.list_automations_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        if let Some(error) = self
-            .next_list_automations_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornListAutomationsResponse {
-            automations: vec![automation_info(
-                "automation-listed",
-                "Daily status",
-                "0 9 * * *",
-            )],
-            scheduler_enabled: true,
-        })
-    }
-
-    async fn pause_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.pause_automation_calls
-            .lock()
-            .expect("lock")
-            .push(automation_id);
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "automation-paused",
-                "Daily status",
-                "0 9 * * *",
-            )),
-        })
-    }
-
-    async fn resume_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.resume_automation_calls
-            .lock()
-            .expect("lock")
-            .push(automation_id);
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "automation-resumed",
-                "Daily status",
-                "0 9 * * *",
-            )),
-        })
-    }
-
-    async fn rename_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-        request: WebUiRenameAutomationRequest,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.rename_automation_calls
-            .lock()
-            .expect("lock")
-            .push((automation_id, request));
-        if let Some(error) = self
-            .next_rename_automation_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "automation-renamed",
-                "Renamed status",
-                "0 9 * * *",
-            )),
-        })
-    }
-
-    async fn delete_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.delete_automation_calls
-            .lock()
-            .expect("lock")
-            .push(automation_id);
-        if let Some(error) = self
-            .next_delete_automation_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: None,
-        })
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        *self.list_extensions_calls.lock().expect("lock") += 1;
-        Ok(RebornExtensionListResponse {
-            extensions: Vec::new(),
-        })
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn set_auto_activate_learned(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.set_auto_activate_learned_calls
-            .lock()
-            .expect("lock")
-            .push(enabled);
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Default skill auto-activation {}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
-        })
-    }
-
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        *self.list_connectable_channels_calls.lock().expect("lock") += 1;
-        if let Some(error) = self
-            .next_list_connectable_channels_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornConnectableChannelListResponse {
-            channels: vec![RebornConnectableChannelInfo {
-                channel: "telegram".to_string(),
-                display_name: "Telegram".to_string(),
-                strategy: RebornChannelConnectStrategy::InboundProofCode,
-                action: RebornChannelConnectAction {
-                    title: "Telegram account connection".to_string(),
-                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Telegram pairing code...".to_string(),
-                    submit_label: "Connect".to_string(),
-                    success_message: "Telegram account connected.".to_string(),
-                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
-                },
-                command_aliases: vec!["telegram".to_string()],
-            }],
-        })
-    }
-
-    async fn get_operator_setup(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        *self.get_operator_setup_calls.lock().expect("lock") += 1;
-        Ok(RebornOperatorSetupResponse {
-            area: RebornOperatorArea::Setup,
-            status: RebornOperatorSetupStatus::Incomplete,
-            message: "setup incomplete".to_string(),
-            active_provider_id: None,
-            active_model: None,
-            steps: Vec::new(),
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn run_operator_setup(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorSetupRequest,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        self.run_operator_setup_calls.lock().expect("lock").push((
-            request.provider_id.clone(),
-            request.model.clone(),
-            request.api_key.is_some(),
-            request.webui_access_token.is_some(),
-        ));
-        Ok(RebornOperatorSetupResponse {
-            area: RebornOperatorArea::Setup,
-            status: RebornOperatorSetupStatus::Incomplete,
-            message: "provider setup accepted".to_string(),
-            active_provider_id: request.provider_id,
-            active_model: request.model,
-            steps: vec![
-                RebornOperatorSetupStep {
-                    name: "provider".to_string(),
-                    status: RebornOperatorSetupStepStatus::Complete,
-                    message: "provider accepted".to_string(),
-                },
-                RebornOperatorSetupStep {
-                    name: "profile".to_string(),
-                    status: RebornOperatorSetupStepStatus::Unsupported,
-                    message: "profile setup is not wired".to_string(),
-                },
-            ],
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn list_operator_config(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        *self.list_operator_config_calls.lock().expect("lock") += 1;
-        Ok(RebornOperatorConfigListResponse {
-            entries: self.operator_config_entries.lock().expect("lock").clone(),
-            precedence: Vec::new(),
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        self.get_operator_config_key_calls
-            .lock()
-            .expect("lock")
-            .push(key.clone());
-        if let Some(entry) = self
-            .operator_config_entries
-            .lock()
-            .expect("lock")
-            .iter()
-            .find(|entry| entry.key == key)
-            .cloned()
-        {
-            return Ok(RebornOperatorConfigGetResponse { entry });
-        }
-        Ok(RebornOperatorConfigGetResponse {
-            entry: operator_config_entry(key, serde_json::json!("configured")),
-        })
-    }
-
     async fn set_operator_config_key(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         key: String,
         request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
         self.set_operator_config_key_calls
             .lock()
             .expect("lock")
@@ -1263,47 +1389,11 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn validate_operator_config(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorConfigValidateRequest,
-    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
-        self.validate_operator_config_calls
-            .lock()
-            .expect("lock")
-            .push(request.keys.clone());
-        let diagnostics = operator_config_validation_diagnostics(request.keys);
-        Ok(RebornOperatorConfigValidateResponse {
-            valid: diagnostics.is_empty(),
-            diagnostics,
-        })
-    }
-
-    async fn get_operator_diagnostics(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        *self.get_operator_diagnostics_calls.lock().expect("lock") += 1;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Diagnostics,
-        ))
-    }
-
-    async fn get_operator_status(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        *self.get_operator_status_calls.lock().expect("lock") += 1;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Status,
-        ))
-    }
-
     async fn run_operator_service_lifecycle(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornOperatorServiceLifecycleRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
         self.run_operator_service_lifecycle_calls
             .lock()
             .expect("lock")
@@ -1313,206 +1403,11 @@ impl RebornServicesApi for StubServices {
         ))
     }
 
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
-        Ok(outbound_preferences_response("slack-dm-alpha"))
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        if let Some(err) = self
-            .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(err);
-        }
-        let target_id = request
-            .final_reply_target_id
-            .as_ref()
-            .map(|id| id.as_str().to_string());
-        self.set_outbound_preferences_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        Ok(match target_id {
-            Some(id) => outbound_preferences_response(&id),
-            None => RebornOutboundPreferencesResponse {
-                final_reply_target: None,
-                final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
-                default_modality: Default::default(),
-            },
-        })
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        *self
-            .list_outbound_delivery_targets_calls
-            .lock()
-            .expect("lock") += 1;
-        Ok(RebornOutboundDeliveryTargetListResponse {
-            targets: vec![
-                RebornOutboundDeliveryTargetOption {
-                    target: outbound_target_summary("slack-dm-alpha"),
-                    capabilities: RebornOutboundDeliveryTargetCapabilities {
-                        final_replies: true,
-                        gate_prompts: true,
-                        auth_prompts: true,
-                    },
-                },
-                RebornOutboundDeliveryTargetOption {
-                    target: RebornOutboundDeliveryTargetSummary::new(
-                        outbound_target_id("slack-status-alpha"),
-                        "slack",
-                        "Slack status",
-                        None,
-                    )
-                    .expect("valid target summary"),
-                    capabilities: RebornOutboundDeliveryTargetCapabilities {
-                        final_replies: false,
-                        gate_prompts: false,
-                        auth_prompts: false,
-                    },
-                },
-            ],
-            next_cursor: None,
-        })
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        *self.list_extension_registry_calls.lock().expect("lock") += 1;
-        Ok(RebornExtensionRegistryResponse {
-            entries: Vec::new(),
-        })
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.install_extension_calls
-            .lock()
-            .expect("lock")
-            .push(package_ref.id.as_str().to_string());
-        Ok(extension_action_response("installed"))
-    }
-
-    async fn import_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        bundle: Vec<u8>,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.import_extension_calls
-            .lock()
-            .expect("lock")
-            .push(bundle);
-        Ok(extension_action_response("discovered"))
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.activate_extension_calls
-            .lock()
-            .expect("lock")
-            .push(package_ref.id.as_str().to_string());
-        Ok(extension_action_response("activated"))
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.remove_extension_calls
-            .lock()
-            .expect("lock")
-            .push(package_ref.id.as_str().to_string());
-        Ok(extension_action_response("removed"))
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Ok(RebornSetupExtensionResponse {
-            package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
-            blockers: Vec::new(),
-            payload: None,
-            secrets: Vec::new(),
-            fields: Vec::new(),
-            onboarding: None,
-        })
-    }
-
-    async fn get_llm_config(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        *self.get_llm_config_calls.lock().expect("lock") += 1;
-        Ok(llm_snapshot("openai"))
-    }
-
-    async fn upsert_llm_provider(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        self.upsert_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .push(request.id.clone());
-        Ok(llm_snapshot(&request.id))
-    }
-
-    async fn delete_llm_provider(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        self.delete_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .push(provider_id);
-        Ok(llm_snapshot("openai"))
-    }
-
-    async fn set_active_llm(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        self.set_active_llm_calls
-            .lock()
-            .expect("lock")
-            .push((request.provider_id.clone(), request.model.clone()));
-        Ok(llm_snapshot(&request.provider_id))
-    }
-
     async fn test_llm_connection(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
-    ) -> Result<LlmProbeResult, RebornServicesError> {
+    ) -> Result<LlmProbeResult, ProductSurfaceError> {
         self.test_llm_connection_calls
             .lock()
             .expect("lock")
@@ -1525,9 +1420,9 @@ impl RebornServicesApi for StubServices {
 
     async fn list_llm_models(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
-    ) -> Result<LlmModelsResult, RebornServicesError> {
+    ) -> Result<LlmModelsResult, ProductSurfaceError> {
         self.list_llm_models_calls
             .lock()
             .expect("lock")
@@ -1539,29 +1434,10 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn trace_account_traces(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
-        // Capture the forwarded caller so the contract test can verify the
-        // caller-scoped route actually threads the authenticated identity.
-        self.trace_account_traces_callers
-            .lock()
-            .expect("lock")
-            .push(caller.actor().user_id.as_str().to_string());
-        // Hermetic zero-state stub — no filesystem or network access.
-        // Mirrors the unenrolled branch of the real `account_traces_for_user`
-        // so the contract test for `GET /traces/account` is fully self-contained.
-        Ok(RebornAccountTracesResponse {
-            enrolled: false,
-            traces: vec![],
-        })
-    }
-
     async fn trace_account_login_link(
         &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, ProductSurfaceError> {
         // Capture the forwarded caller (tenant AND user — this is the trusted
         // identity boundary) so the contract test can verify the caller-scoped
         // route threads the authenticated identity, then return a hermetic
@@ -1578,6 +1454,307 @@ impl RebornServicesApi for StubServices {
             minted: true,
             enrolled: true,
             url: Some("https://commons.example/account/login?code=stub".to_string()),
+        })
+    }
+
+    async fn record_product_surface_call(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RecordedProductSurfaceCallRequest,
+    ) -> Result<RecordedProductSurfaceCallResponse, ProductSurfaceError> {
+        self.surface_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        if let Some(response) = self.next_surface_response.lock().expect("lock").take() {
+            return response;
+        }
+        let call_id = ProductSurfaceCallId::parse(request.call_id.as_str())
+            .ok_or_else(|| service_unavailable_error(false))?;
+        match call_id {
+            ProductSurfaceCallId::CreateThread => RecordedProductSurfaceCallResponse::json(
+                self.create_thread(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::SubmitTurn => RecordedProductSurfaceCallResponse::json(
+                self.submit_turn(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::CancelRun => RecordedProductSurfaceCallResponse::json(
+                self.cancel_run(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::ResolveGate => RecordedProductSurfaceCallResponse::json(
+                self.resolve_gate(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::RetryRun => RecordedProductSurfaceCallResponse::json(
+                self.retry_run(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::ProjectCreate => {
+                let _: RebornCreateProjectRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornProjectResponse {
+                    project: sample_project_info("project-created"),
+                })
+            }
+            ProductSurfaceCallId::ProjectFsRead => {
+                let request: RebornProjectFsReadRequest =
+                    serde_json::from_value(request.input).expect("input");
+                Ok(RecordedProductSurfaceCallResponse::project_file(
+                    ProjectFsFile {
+                        path: request.path,
+                        filename: Some("report.md".to_string()),
+                        mime_type: "text/markdown".to_string(),
+                        size_bytes: 7,
+                        bytes: b"# notes".to_vec(),
+                    },
+                ))
+            }
+            ProductSurfaceCallId::FsRead => Ok(RecordedProductSurfaceCallResponse::project_file(
+                self.read_fs_file(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            )),
+            ProductSurfaceCallId::AttachmentRead => {
+                Ok(RecordedProductSurfaceCallResponse::attachment(
+                    self.read_attachment(
+                        caller,
+                        serde_json::from_value(request.input).expect("input"),
+                    )
+                    .await?,
+                ))
+            }
+            ProductSurfaceCallId::TraceAccountLoginLink => {
+                RecordedProductSurfaceCallResponse::json(
+                    self.trace_account_login_link(caller).await?,
+                )
+            }
+            ProductSurfaceCallId::TraceHoldAuthorize => {
+                let _: RebornTraceHoldAuthorizeProductRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornTraceHoldAuthorizeResponse {
+                    authorized: true,
+                })
+            }
+            ProductSurfaceCallId::OperatorConfigSetKey => {
+                let request: RebornOperatorConfigSetProductRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(
+                    self.set_operator_config_key(
+                        caller,
+                        request.key,
+                        RebornOperatorConfigSetRequest {
+                            value: request.value,
+                        },
+                    )
+                    .await?,
+                )
+            }
+            ProductSurfaceCallId::OperatorServiceLifecycle => {
+                RecordedProductSurfaceCallResponse::json(
+                    self.run_operator_service_lifecycle(
+                        caller,
+                        serde_json::from_value(request.input).expect("input"),
+                    )
+                    .await?,
+                )
+            }
+            ProductSurfaceCallId::LlmTestConnection => RecordedProductSurfaceCallResponse::json(
+                self.test_llm_connection(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::LlmListModels => RecordedProductSurfaceCallResponse::json(
+                self.list_llm_models(
+                    caller,
+                    serde_json::from_value(request.input).expect("input"),
+                )
+                .await?,
+            ),
+            ProductSurfaceCallId::LlmNearAiLogin => {
+                let _: NearAiLoginRequest = serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(NearAiLoginStart {
+                    auth_url: "https://near.ai/login".to_string(),
+                })
+            }
+            ProductSurfaceCallId::LlmNearAiWalletLogin => {
+                let _: NearAiWalletLoginRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(NearAiWalletLoginResult { active: true })
+            }
+            ProductSurfaceCallId::LlmCodexLogin => {
+                RecordedProductSurfaceCallResponse::json(CodexLoginStart {
+                    user_code: "TEST-CODE".to_string(),
+                    verification_uri: "https://openai.com/device".to_string(),
+                })
+            }
+            ProductSurfaceCallId::AdminUserCreate => {
+                let request: RebornAdminCreateUserRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAdminUserCreatedResponse {
+                    user: sample_admin_user(request.email.as_deref().unwrap_or("user-admin")),
+                    api_token: "token-test".to_string(),
+                })
+            }
+            ProductSurfaceCallId::AdminUserDeleteSecret => {
+                let request: RebornAdminDeleteSecretProductRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAdminSecretDeletedResponse {
+                    handle: request.handle,
+                    deleted: true,
+                })
+            }
+            ProductSurfaceCallId::AutomationPause => {
+                let request: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        "Paused status",
+                        "*/5 * * * *",
+                    )),
+                })
+            }
+            ProductSurfaceCallId::AutomationResume => {
+                let request: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        "Resumed status",
+                        "*/5 * * * *",
+                    )),
+                })
+            }
+            ProductSurfaceCallId::AutomationRename => {
+                let request: RebornRenameAutomationProductRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        request.name.as_deref().unwrap_or("Renamed status"),
+                        "*/5 * * * *",
+                    )),
+                })
+            }
+            ProductSurfaceCallId::AutomationDelete => {
+                let _: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: None,
+                })
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn invoke(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
+            let output = self
+                .record_product_surface_call(
+                    caller,
+                    RecordedProductSurfaceCallRequest::from_value(call_id, request.input),
+                )
+                .await?
+                .into_value()?;
+            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+        }
+
+        let output = StubServices::invoke(
+            self,
+            caller,
+            request.operation_id,
+            request.input,
+            request.activity_id,
+        )
+        .await?;
+        let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+    }
+
+    async fn query(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        let page = StubServices::query(
+            self,
+            caller,
+            RebornViewQuery {
+                view_id: request.view_id,
+                params: request.input,
+                cursor: request.cursor,
+            },
+        )
+        .await?;
+        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+            items: vec![page.payload],
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    async fn stream_events(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let thread_id = request.stream_id.ok_or_else(|| {
+            ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
+        })?;
+        let after_cursor = request
+            .after_cursor
+            .map(ProjectionCursor::new)
+            .transpose()
+            .map_err(ProductSurfaceError::internal_from)?;
+        let response = StubServices::stream_events(
+            self,
+            caller,
+            RebornStreamEventsRequest {
+                thread_id,
+                after_cursor,
+            },
+        )
+        .await?;
+        let events = response
+            .events
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events,
+            next_cursor: None,
         })
     }
 }
@@ -1604,16 +1781,37 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
     }
 }
 
-fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
-    RebornExtensionActionResponse {
-        success: true,
-        message: message.to_string(),
-        activated: None,
-        auth_url: None,
-        awaiting_token: None,
-        instructions: None,
-        onboarding_state: None,
+fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
+    RebornSetupExtensionResponse {
+        package_ref,
+        phase: LifecyclePublicState::SetupNeeded,
+        blockers: Vec::new(),
+        payload: None,
+        secrets: Vec::new(),
+        fields: Vec::new(),
         onboarding: None,
+    }
+}
+
+fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
+    RebornExtensionInfo {
+        package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id.to_string())
+            .expect("extension package ref"),
+        display_name: id.to_string(),
+        runtime: "first_party".to_string(),
+        description: format!("{id} extension"),
+        tools: Vec::new(),
+        installation_state: if active {
+            LifecyclePublicState::Active
+        } else {
+            LifecyclePublicState::SetupNeeded
+        },
+        activation_error: None,
+        version: Some("1.0.0".to_string()),
+        onboarding: None,
+        auth_accounts: Vec::new(),
+        surfaces: Vec::new(),
+        install_scope: None,
     }
 }
 
@@ -1636,6 +1834,57 @@ fn outbound_preferences_response(target_id: &str) -> RebornOutboundPreferencesRe
         final_reply_target: Some(outbound_target_summary(target_id)),
         final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
         default_modality: Default::default(),
+    }
+}
+
+fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListResponse {
+    RebornOutboundDeliveryTargetListResponse {
+        targets: vec![
+            RebornOutboundDeliveryTargetOption {
+                target: outbound_target_summary("slack-dm-alpha"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: true,
+                    auth_prompts: true,
+                },
+            },
+            RebornOutboundDeliveryTargetOption {
+                target: RebornOutboundDeliveryTargetSummary::new(
+                    outbound_target_id("slack-status-alpha"),
+                    "slack",
+                    "Slack status",
+                    None,
+                )
+                .expect("valid target summary"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: false,
+                    gate_prompts: false,
+                    auth_prompts: false,
+                },
+            },
+        ],
+        next_cursor: None,
+    }
+}
+
+fn trace_credits_response() -> RebornTraceCreditsResponse {
+    RebornTraceCreditsResponse {
+        enrolled: false,
+        pending_credit: 0.0,
+        final_credit: 0.0,
+        delayed_credit_delta: 0.0,
+        submissions_total: 0,
+        submissions_submitted: 0,
+        submissions_accepted: 0,
+        submissions_revoked: 0,
+        submissions_expired: 0,
+        credit_events_total: 0,
+        last_submission_at: None,
+        last_credit_sync_at: None,
+        recent_explanations: Vec::new(),
+        manual_review_hold_count: 0,
+        holds: Vec::new(),
+        note: "Local view as of last sync; authoritative ledger is server-side.".to_string(),
     }
 }
 
@@ -1699,11 +1948,12 @@ async fn read_json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
-async fn create_thread_dispatches_through_facade() {
+async fn create_thread_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -1721,16 +1971,18 @@ async fn create_thread_dispatches_through_facade() {
     assert_eq!(
         services.create_thread_calls.lock().expect("lock").len(),
         1,
-        "facade called exactly once"
+        "service called exactly once"
     );
 }
 
 #[tokio::test]
-async fn delete_thread_path_dispatches_through_facade() {
+async fn delete_thread_path_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::DELETE)
@@ -1745,9 +1997,16 @@ async fn delete_thread_path_dispatches_through_facade() {
     let body = read_json(response).await;
     assert_eq!(body["thread_id"], "thread-delete");
     assert_eq!(body["deleted"], true);
-    let calls = services.delete_thread_calls.lock().expect("lock").clone();
+    let calls = services.invoke_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].thread_id, "thread-delete");
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(THREAD_DELETE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({ "thread_id": "thread-delete" })
+    );
 }
 
 #[tokio::test]
@@ -1756,6 +2015,7 @@ async fn send_message_path_overrides_body_thread_id() {
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -1839,15 +2099,17 @@ async fn send_message_rejected_busy_wire_shape() {
 }
 
 // Test-through-the-caller: the handler must forward the request body's
-// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
-// hardcoded value. Posting `false` and asserting the facade recorded `false`
-// catches the arg-loss class (e.g. a handler that always passes `true`).
+// `enabled` flag through ProductSurface::invoke, not a hardcoded value.
+// Posting `false` and asserting the capability input recorded `false` catches
+// the arg-loss class (e.g. a handler that always passes `true`).
 #[tokio::test]
-async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+async fn set_auto_activate_learned_invokes_capability_with_enabled_flag() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -1862,14 +2124,13 @@ async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["success"], true);
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        *services
-            .set_auto_activate_learned_calls
-            .lock()
-            .expect("lock"),
-        vec![false],
-        "handler must forward body.enabled=false to the facade verbatim"
+        invoke_calls[0].0.as_str(),
+        SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID
     );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "enabled": false }));
 }
 
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
@@ -1947,6 +2208,9 @@ async fn get_timeline_threads_path_into_request() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), TIMELINE_VIEW.id);
 }
 
 #[tokio::test]
@@ -1986,7 +2250,7 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
 // The attachment-bytes route carries three path segments and returns raw
 // bytes rather than JSON. Per "Test Through the Caller", drive the real router
 // so the Path<(_, _, _)> extractor, the byte response, and the headers are all
-// exercised — a facade-only test would miss the path plumbing and Content-Type.
+// exercised — a service-only test would miss the path plumbing and Content-Type.
 #[tokio::test]
 async fn get_attachment_serves_bytes_with_authoritative_content_type() {
     let services = Arc::new(StubServices::default());
@@ -2028,7 +2292,7 @@ async fn get_attachment_serves_bytes_with_authoritative_content_type() {
         .expect("body bytes");
     assert_eq!(body.as_ref(), &[1, 2, 3, 4]);
 
-    // The whole (thread, message, attachment) triple reaches the facade — the
+    // The whole (thread, message, attachment) triple reaches the service — the
     // attachment id alone is not unique across a thread.
     let calls = services.read_attachment_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
@@ -2059,12 +2323,12 @@ async fn get_attachment_missing_bytes_returns_404() {
 }
 
 // Regression for the timeline pagination wire plumbing. Per
-// `.claude/rules/testing.md` "Test Through the Caller", a facade-only
+// `.claude/rules/testing.md` "Test Through the Caller", a service-only
 // test on `get_timeline` is not enough — the Query<TimelineQuery>
-// extractor sits between the URL and the facade, and a future refactor
+// extractor sits between the URL and the service, and a future refactor
 // that drops or renames a query field would only fail here.
 #[tokio::test]
-async fn get_timeline_forwards_query_params_to_facade() {
+async fn get_timeline_forwards_query_params_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2085,12 +2349,16 @@ async fn get_timeline_forwards_query_params_to_facade() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
-    assert_eq!(calls[0].limit, Some(42), "?limit= must reach the facade");
+    assert_eq!(calls[0].limit, Some(42), "?limit= must reach the service");
     assert_eq!(
         calls[0].cursor.as_deref(),
         Some("opaque-from-browser"),
-        "?cursor= must reach the facade"
+        "?cursor= must reach the service"
     );
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), TIMELINE_VIEW.id);
+    assert_eq!(queries[0].cursor.as_deref(), Some("opaque-from-browser"));
 }
 
 #[tokio::test]
@@ -2182,9 +2450,9 @@ async fn retry_run_path_overrides_body_run_id() {
 #[tokio::test]
 async fn retry_run_non_retryable_error_maps_to_conflict_body() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_retry_run(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
-        kind: RebornServicesErrorKind::Conflict,
+    services.enqueue_retry_run(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
         status_code: 409,
         retryable: false,
         field: None,
@@ -2252,9 +2520,9 @@ async fn retry_run_idempotent_replay_returns_same_response_shape() {
 #[tokio::test]
 async fn create_thread_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_create_thread(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.fail_create_thread(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2282,7 +2550,7 @@ async fn create_thread_error_maps_to_http_status() {
 }
 
 #[tokio::test]
-async fn stream_events_emits_sse_content_type_and_drains_facade() {
+async fn stream_events_emits_sse_content_type_and_drains_service() {
     let services = Arc::new(StubServices::default());
     let signal = services.stream_events_signal();
     let router = router_with(services.clone());
@@ -2325,7 +2593,7 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
     let calls = services.stream_events_calls.lock().expect("lock").len();
     assert!(
         calls >= 1,
-        "facade.stream_events must be called at least once after the first SSE frame is read"
+        "service.stream_events must be called at least once after the first SSE frame is read"
     );
 }
 
@@ -2333,11 +2601,11 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
 async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // Two distinct, parseable cursors so the precedence is observable in
     // the captured RebornStreamEventsRequest — if a future refactor flips
-    // the `.or()` order, the facade will see cursor-B and this test fails.
+    // the `.or()` order, the service will see cursor-B and this test fails.
     let header_cursor =
-        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-header").expect("cursor");
+        ironclaw_product::ProjectionCursor::new("cursor-from-header").expect("cursor");
     let query_cursor =
-        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-query").expect("cursor");
+        ironclaw_product::ProjectionCursor::new("cursor-from-query").expect("cursor");
     let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
     let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
     let query_encoded = url_encode(&query_json);
@@ -2370,7 +2638,7 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
         .expect("stream_events must be called within 2s after the body is polled");
 
     let calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 1, "facade.stream_events called exactly once");
+    assert_eq!(calls.len(), 1, "service.stream_events called exactly once");
     assert_eq!(
         calls[0].after_cursor.as_ref(),
         Some(&header_cursor),
@@ -2379,7 +2647,7 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
 }
 
 #[tokio::test]
-async fn list_automations_forwards_query_limits_to_facade() {
+async fn list_automations_forwards_query_limits_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2477,7 +2745,7 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
-async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
+async fn pause_and_resume_automation_dispatch_path_id_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2497,7 +2765,7 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
     assert_eq!(pause_body["updated"], true);
     assert_eq!(
         pause_body["automation"]["automation_id"],
-        "automation-paused"
+        "automation-alpha"
     );
 
     let resume_response = router
@@ -2515,29 +2783,31 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
     assert_eq!(resume_body["updated"], true);
     assert_eq!(
         resume_body["automation"]["automation_id"],
-        "automation-resumed"
+        "automation-alpha"
     );
 
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2);
     assert_eq!(
-        services
-            .pause_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
+        calls[0].call_id,
+        ProductSurfaceCallId::AutomationPause.as_str()
     );
     assert_eq!(
-        services
-            .resume_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
+        calls[0].input,
+        serde_json::json!({ "automation_id": "automation-alpha" })
+    );
+    assert_eq!(
+        calls[1].call_id,
+        ProductSurfaceCallId::AutomationResume.as_str()
+    );
+    assert_eq!(
+        calls[1].input,
+        serde_json::json!({ "automation_id": "automation-alpha" })
     );
 }
 
 #[tokio::test]
-async fn rename_automation_dispatches_path_id_and_body_to_facade() {
+async fn rename_automation_dispatches_path_id_and_body_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2556,30 +2826,35 @@ async fn rename_automation_dispatches_path_id_and_body_to_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["updated"], true);
-    assert_eq!(body["automation"]["automation_id"], "automation-renamed");
+    assert_eq!(body["automation"]["automation_id"], "automation-alpha");
     assert_eq!(body["automation"]["name"], "Renamed status");
 
-    let calls = services
-        .rename_automation_calls
-        .lock()
-        .expect("lock")
-        .clone();
+    let calls = services.surface_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "automation-alpha");
-    assert_eq!(calls[0].1.name.as_deref(), Some("Renamed status"));
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::AutomationRename.as_str()
+    );
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({
+            "automation_id": "automation-alpha",
+            "name": "Renamed status"
+        })
+    );
 }
 
 #[tokio::test]
 async fn rename_automation_error_maps_to_http_status() {
     for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::InvalidRequest,
+                kind: ProductSurfaceErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: Some("name".to_string()),
-                validation_code: Some(WebUiInboundValidationCode::Blank),
+                validation_code: Some(ProductSurfaceValidationCode::Blank),
             },
             StatusCode::BAD_REQUEST,
             "invalid_request",
@@ -2587,9 +2862,9 @@ async fn rename_automation_error_maps_to_http_status() {
             false,
         ),
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -2602,7 +2877,7 @@ async fn rename_automation_error_maps_to_http_status() {
         ),
     ] {
         let services = Arc::new(StubServices::default());
-        services.fail_rename_automation(error);
+        services.enqueue_operation_response(Err(error));
         let router = router_with(services.clone());
 
         let response = router
@@ -2622,28 +2897,19 @@ async fn rename_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
+        let calls = services.surface_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
         assert_eq!(
-            services
-                .rename_automation_calls
-                .lock()
-                .expect("lock")
-                .iter()
-                .map(|(automation_id, request)| { (automation_id.clone(), request.name.clone()) })
-                .collect::<Vec<_>>(),
-            vec![(
-                "automation-alpha".to_string(),
-                Some("Renamed status".to_string())
-            )]
+            calls[0].call_id,
+            ProductSurfaceCallId::AutomationRename.as_str()
         );
     }
 }
 
 #[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
-    // The facade's default `trace_credits` body reads contributor-local
-    // Trace Commons state scoped by the authenticated caller's user id.
-    // A unique per-test user id guarantees a fresh scope so the
-    // unenrolled zero-state is deterministic on any machine.
+    // The handler reads through the descriptor-backed ProductSurface query.
+    // A unique caller keeps the route shape pinned to authenticated identity.
     let user_id = format!(
         "webui-v2-trace-credits-{}-{}",
         std::process::id(),
@@ -2652,14 +2918,15 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("clock")
             .as_nanos()
     );
-    let unique_caller = WebUiAuthenticatedCaller::new(
+    let unique_caller = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id.as_str()).expect("user"),
         None,
         None,
     );
+    let services = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(
-        Arc::new(StubServices::default()),
+        services.clone(),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(unique_caller))
@@ -2689,14 +2956,20 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("note")
             .contains("authoritative ledger is server-side")
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&TRACE_CREDITS_VIEW.id.to_string()));
 }
 
 #[tokio::test]
 async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
-    // The facade's default `trace_account_traces` body reads contributor-local
-    // Trace Commons state scoped by the authenticated caller's user id.
-    // A unique per-test user id guarantees a fresh scope so the
-    // unenrolled zero-state is deterministic on any machine.
+    // The handler reads through the descriptor-backed ProductSurface query.
+    // A unique caller keeps the route shape pinned to authenticated identity.
     let user_id = format!(
         "webui-v2-account-traces-{}-{}",
         std::process::id(),
@@ -2705,7 +2978,7 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
             .expect("clock")
             .as_nanos()
     );
-    let unique_caller = WebUiAuthenticatedCaller::new(
+    let unique_caller = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id.as_str()).expect("user"),
         None,
@@ -2736,7 +3009,7 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
     assert_eq!(body["traces"].as_array().expect("traces array").len(), 0);
 
     // The route is caller-scoped: the handler must forward the authenticated
-    // caller's user id to the facade (fails if it stops threading the caller).
+    // caller's user id to the service (fails if it stops threading the caller).
     assert_eq!(
         services
             .trace_account_traces_callers
@@ -2745,6 +3018,14 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
             .clone(),
         vec![user_id],
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&TRACE_ACCOUNT_TRACES_VIEW.id.to_string()));
 }
 
 #[tokio::test]
@@ -2776,7 +3057,7 @@ async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
     );
 
     // The route must forward the authenticated caller's tenant AND user id to
-    // the facade — the scope is trusted-caller-derived, never request input
+    // the service — the scope is trusted-caller-derived, never request input
     // (fails if the handler stops threading the caller).
     assert_eq!(
         services
@@ -2789,9 +3070,10 @@ async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
 }
 
 #[tokio::test]
-async fn delete_automation_dispatches_path_id_to_facade() {
+async fn delete_automation_dispatches_path_id_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
         .oneshot(
@@ -2808,13 +3090,15 @@ async fn delete_automation_dispatches_path_id_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["updated"], true);
     assert!(body.get("automation").is_none() || body["automation"].is_null());
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
     assert_eq!(
-        services
-            .delete_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
+        calls[0].call_id,
+        ProductSurfaceCallId::AutomationDelete.as_str()
+    );
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({ "automation_id": "automation-alpha" })
     );
 }
 
@@ -2822,9 +3106,9 @@ async fn delete_automation_dispatches_path_id_to_facade() {
 async fn delete_automation_error_maps_to_http_status() {
     for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -2836,9 +3120,9 @@ async fn delete_automation_error_maps_to_http_status() {
             false,
         ),
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Unavailable,
+                kind: ProductSurfaceErrorKind::ServiceUnavailable,
                 status_code: 503,
                 retryable: true,
                 field: None,
@@ -2851,7 +3135,7 @@ async fn delete_automation_error_maps_to_http_status() {
         ),
     ] {
         let services = Arc::new(StubServices::default());
-        services.fail_delete_automation(error);
+        services.enqueue_operation_response(Err(error));
         let router = router_with(services.clone());
 
         let response = router
@@ -2870,13 +3154,11 @@ async fn delete_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
+        let calls = services.surface_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
         assert_eq!(
-            services
-                .delete_automation_calls
-                .lock()
-                .expect("lock")
-                .clone(),
-            vec!["automation-alpha".to_string()]
+            calls[0].call_id,
+            ProductSurfaceCallId::AutomationDelete.as_str()
         );
     }
 }
@@ -2904,7 +3186,7 @@ async fn list_automations_rejects_invalid_limit_query_with_400() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "invalid query input must be rejected before reaching the facade"
+        "invalid query input must be rejected before reaching the service"
     );
 }
 
@@ -2931,16 +3213,16 @@ async fn list_automations_rejects_invalid_run_limit_query_with_400() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "invalid query input must be rejected before reaching the facade"
+        "invalid query input must be rejected before reaching the service"
     );
 }
 
 #[tokio::test]
 async fn list_automations_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_list_automations(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.fail_list_automations(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2967,9 +3249,9 @@ async fn list_automations_error_maps_to_http_status() {
 }
 
 #[tokio::test]
-async fn list_automations_include_completed_true_forwarded_to_facade() {
+async fn list_automations_include_completed_true_forwarded_to_service() {
     // ?include_completed=true must be parsed and forwarded as `true` in the
-    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    // ProductListAutomationsRequest so the service can widen its exclusion slice.
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2993,7 +3275,7 @@ async fn list_automations_include_completed_true_forwarded_to_facade() {
     assert_eq!(calls.len(), 1);
     assert!(
         calls[0].include_completed,
-        "include_completed=true must be forwarded to the facade"
+        "include_completed=true must be forwarded to the service"
     );
 }
 
@@ -3029,7 +3311,7 @@ async fn list_automations_include_completed_absent_defaults_to_false() {
 }
 
 // Regression: malformed `?include_completed=garbage` must be rejected at the
-// Query extractor level (400 Bad Request) before the handler or facade run.
+// Query extractor level (400 Bad Request) before the handler or service run.
 // The field is a plain `bool`; `serde_urlencoded` does not silently default
 // unparseable values — it returns a deserialization error, which axum maps to
 // 400. There is no silent fallback to `false`.
@@ -3061,12 +3343,12 @@ async fn list_automations_malformed_include_completed_rejected_with_400() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "malformed include_completed must be rejected before reaching the facade"
+        "malformed include_completed must be rejected before reaching the service"
     );
 }
 
 #[tokio::test]
-async fn get_outbound_preferences_dispatches_through_facade() {
+async fn get_outbound_preferences_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -3092,20 +3374,32 @@ async fn get_outbound_preferences_dispatches_through_facade() {
             .expect("lock"),
         1
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&OUTBOUND_PREFERENCES_VIEW.id.to_string()));
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_dispatches_body_through_facade() {
+async fn set_outbound_preferences_dispatches_body_through_invoke() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3113,24 +3407,61 @@ async fn set_outbound_preferences_dispatches_body_through_facade() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-beta");
-    let calls = services
-        .set_outbound_preferences_calls
-        .lock()
-        .expect("lock");
-    assert_eq!(calls.len(), 1);
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 2);
     assert_eq!(
-        calls[0]
-            .final_reply_target_id
-            .as_ref()
-            .map(|target_id| target_id.as_str()),
-        Some("slack-dm-beta")
+        invoke_calls[0].0.as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
+    );
+    assert_eq!(
+        invoke_calls[1].1,
+        serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
+    );
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "identical outbound preference retries should reuse ProductSurface activity ids"
+    );
+    drop(invoke_calls);
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert_eq!(
+        view_ids,
+        vec![
+            OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+            OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+        ]
     );
 }
 
 #[tokio::test]
 async fn set_outbound_preferences_accepts_explicit_clear() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
@@ -3139,7 +3470,9 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":null}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":null,"client_action_id":"outbound-clear-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3147,27 +3480,35 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert!(body.get("final_reply_target").is_none());
-    assert_eq!(body["final_reply_target_status"], "none_configured");
-    let calls = services
-        .set_outbound_preferences_calls
-        .lock()
-        .expect("lock");
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].final_reply_target_id.is_none());
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({}));
+    drop(invoke_calls);
+    assert_eq!(
+        *services
+            .get_outbound_preferences_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
 }
 
 #[tokio::test]
 async fn set_outbound_preferences_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_set_outbound_preferences(RebornServicesError {
-        code: RebornServicesErrorCode::NotFound,
-        kind: RebornServicesErrorKind::NotFound,
+    services.enqueue_invoke_response(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::NotFound,
+        kind: ProductSurfaceErrorKind::NotFound,
         status_code: 404,
         retryable: false,
         field: None,
         validation_code: None,
-    });
+    }));
     let router = router_with(services);
 
     let response = router
@@ -3177,7 +3518,7 @@ async fn set_outbound_preferences_error_maps_to_http_status() {
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"final_reply_target_id":"target-does-not-exist"}"#,
+                    r#"{"final_reply_target_id":"target-does-not-exist","client_action_id":"outbound-error-1"}"#,
                 ))
                 .expect("request"),
         )
@@ -3190,9 +3531,8 @@ async fn set_outbound_preferences_error_maps_to_http_status() {
     assert_eq!(body["kind"], "not_found");
     assert_eq!(body["retryable"], false);
 }
-
 #[tokio::test]
-async fn list_outbound_delivery_targets_dispatches_through_facade() {
+async fn list_outbound_delivery_targets_uses_product_view() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -3223,43 +3563,14 @@ async fn list_outbound_delivery_targets_dispatches_through_facade() {
             .expect("lock"),
         1
     );
-}
-
-#[tokio::test]
-async fn list_connectable_channels_dispatches_through_facade() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "telegram");
-    assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
-    assert_eq!(
-        body["channels"][0]["action"]["instructions"],
-        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
-    );
-    assert_eq!(
-        body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
-    );
-    assert_eq!(
-        *services
-            .list_connectable_channels_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string()));
 }
 
 #[tokio::test]
@@ -3294,7 +3605,7 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     // rather than a static frontend list that can drift. The `accept` tokens
     // must be exactly the shared format registry's output (drift kill), and
     // the budgets must match what `decode_attachments` enforces.
-    let expected = ironclaw_product_workflow::webui_attachment_capabilities();
+    let expected = ironclaw_product::product_attachment_capabilities();
     let accept: Vec<String> = body["attachments"]["accept"]
         .as_array()
         .expect("attachments.accept is an array")
@@ -3400,10 +3711,10 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
 }
 
 // The approval card hint needs the effective global auto-approve setting. Keep
-// that as a narrow facade read surfaced through the session bootstrap feature,
+// that as a narrow service read surfaced through the session bootstrap feature,
 // not an operator config key lookup from the browser or route handler.
 #[tokio::test]
-async fn get_session_reports_global_auto_approve_feature_from_facade() {
+async fn get_session_reports_global_auto_approve_feature_from_service() {
     for enabled in [false, true] {
         let services = Arc::new(StubServices::default());
         *services.global_auto_approve_enabled.lock().expect("lock") = enabled;
@@ -3429,12 +3740,12 @@ async fn get_session_reports_global_auto_approve_feature_from_facade() {
         let body = read_json(response).await;
         assert_eq!(
             body["features"]["global_auto_approve"], enabled,
-            "features.global_auto_approve must mirror the facade flag (enabled={enabled})"
+            "features.global_auto_approve must mirror the service flag (enabled={enabled})"
         );
         assert_eq!(
             *services.global_auto_approve_calls.lock().expect("lock"),
             1,
-            "session handler should read the feature through the narrow facade"
+            "session handler should read the feature through the narrow service"
         );
         assert!(
             services
@@ -3496,7 +3807,7 @@ async fn get_session_refreshes_global_auto_approve_feature_between_requests() {
 }
 
 #[tokio::test]
-async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails() {
+async fn get_session_defaults_global_auto_approve_false_when_service_read_fails() {
     let services = Arc::new(StubServices::default());
     *services
         .next_global_auto_approve_error
@@ -3527,7 +3838,7 @@ async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails()
 }
 
 #[tokio::test]
-async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
+async fn get_session_defaults_global_auto_approve_false_when_service_stalls() {
     let services = Arc::new(StubServices::default());
     *services.stall_global_auto_approve.lock().expect("lock") = true;
     let router = webui_v2_router(WebUiV2State::new(
@@ -3555,7 +3866,245 @@ async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
 }
 
 #[tokio::test]
-async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
+async fn admin_user_reads_query_product_surface_views() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users?limit=25&cursor=user-before")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list users");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = read_json(list).await;
+    assert_eq!(body["users"][0]["user_id"], "user-admin");
+
+    let get = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users/user-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("get user");
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = read_json(get).await;
+    assert_eq!(body["user"]["user_id"], "user-admin");
+
+    let secrets = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users/user-admin/secrets")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list secrets");
+    assert_eq!(secrets.status(), StatusCode::OK);
+    let body = read_json(secrets).await;
+    assert_eq!(body["secrets"][0]["handle"], "openai_api_key");
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 3);
+    assert_eq!(queries[0].view_id.as_str(), ADMIN_USERS_VIEW.id);
+    assert_eq!(queries[0].cursor.as_deref(), Some("user-before"));
+    assert_eq!(queries[1].view_id.as_str(), ADMIN_USER_VIEW.id);
+    assert_eq!(queries[2].view_id.as_str(), ADMIN_USER_SECRETS_VIEW.id);
+}
+
+#[tokio::test]
+async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let update = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/webchat/v2/admin/users/user-admin")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"display_name":"Renamed"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("update user");
+    assert_eq!(update.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let status = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/admin/users/user-admin/status")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"status":"suspended"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("set status");
+    assert_eq!(status.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let role = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/admin/users/user-admin/role")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"role":"member"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("set role");
+    assert_eq!(role.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let delete = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/admin/users/user-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delete user");
+    assert_eq!(delete.status(), StatusCode::OK);
+    let body = read_json(delete).await;
+    assert_eq!(body["user_id"], "user-admin");
+    assert_eq!(body["deleted"], true);
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 4);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(ADMIN_USER_UPDATE_CAPABILITY_ID).expect("capability id")
+    );
+    let update_input: RebornAdminUpdateUserProductRequest =
+        serde_json::from_value(invoke_calls[0].1.clone()).expect("update input");
+    assert_eq!(update_input.user_id.as_str(), "user-admin");
+    assert_eq!(update_input.display_name.as_deref(), Some("Renamed"));
+    assert_eq!(
+        invoke_calls[1].0,
+        CapabilityId::new(ADMIN_USER_SET_STATUS_CAPABILITY_ID).expect("capability id")
+    );
+    let status_input: RebornAdminSetStatusProductRequest =
+        serde_json::from_value(invoke_calls[1].1.clone()).expect("status input");
+    assert_eq!(status_input.user_id.as_str(), "user-admin");
+    assert_eq!(status_input.status, AdminUserStatus::Suspended);
+    assert_eq!(
+        invoke_calls[2].0,
+        CapabilityId::new(ADMIN_USER_SET_ROLE_CAPABILITY_ID).expect("capability id")
+    );
+    let role_input: RebornAdminSetRoleProductRequest =
+        serde_json::from_value(invoke_calls[2].1.clone()).expect("role input");
+    assert_eq!(role_input.user_id.as_str(), "user-admin");
+    assert_eq!(role_input.role, AdminUserRole::Member);
+    assert_eq!(
+        invoke_calls[3].0,
+        CapabilityId::new(ADMIN_USER_DELETE_CAPABILITY_ID).expect("capability id")
+    );
+    let delete_input: RebornAdminUserRequest =
+        serde_json::from_value(invoke_calls[3].1.clone()).expect("delete input");
+    assert_eq!(delete_input.user_id.as_str(), "user-admin");
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 3);
+    assert!(
+        queries
+            .iter()
+            .all(|query| query.view_id == ADMIN_USER_VIEW.id)
+    );
+}
+
+#[tokio::test]
+async fn admin_user_secret_mutations_invoke_product_capabilities() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/admin/users/user-admin/secrets/openai_api_key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":"sk-test"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("put secret");
+    assert_eq!(put.status(), StatusCode::OK);
+    let body = read_json(put).await;
+    assert_eq!(body["secret"]["handle"], "openai_api_key");
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let delete = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/admin/users/user-admin/secrets/openai_api_key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delete secret");
+    assert_eq!(delete.status(), StatusCode::OK);
+    let body = read_json(delete).await;
+    assert_eq!(body["handle"], "openai_api_key");
+    assert_eq!(body["deleted"], true);
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(ADMIN_USER_PUT_SECRET_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "user_id": "user-admin",
+            "handle": "openai_api_key",
+            "value": "sk-test"
+        })
+    );
+
+    let surface_calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(surface_calls.len(), 1);
+    assert_eq!(
+        surface_calls[0].call_id,
+        ProductSurfaceCallId::AdminUserDeleteSecret.as_str()
+    );
+    assert_eq!(
+        surface_calls[0].input,
+        serde_json::json!({
+            "user_id": "user-admin",
+            "handle": "openai_api_key"
+        })
+    );
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), ADMIN_USER_SECRETS_VIEW.id);
+}
+
+#[tokio::test]
+async fn operator_routes_dispatch_to_service_with_body_and_query_inputs() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
         services.clone(),
@@ -3577,6 +4126,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .clone()
         .oneshot(
@@ -3674,19 +4224,19 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
-    assert_eq!(*services.get_operator_setup_calls.lock().expect("lock"), 1);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .run_operator_setup_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [(
-            Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
-            false,
-            true
-        )]
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_SETUP_RUN_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "provider_id": "openai",
+            "model": "gpt-5-mini",
+            "webui_access_token": "webui-secret"
+        })
     );
     assert_eq!(
         *services.list_operator_config_calls.lock().expect("lock"),
@@ -3703,13 +4253,19 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
             "profile.default".to_string()
         ]]
     );
-    assert_eq!(
-        *services
-            .get_operator_diagnostics_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
+    let view_ids: Vec<_> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&OPERATOR_SETUP_VIEW.id.to_string()));
+    assert!(view_ids.contains(&OPERATOR_CONFIG_LIST_VIEW.id.to_string()));
+    assert!(view_ids.contains(&OPERATOR_CONFIG_VALIDATE_VIEW.id.to_string()));
+    assert!(view_ids.contains(&OPERATOR_DIAGNOSTICS_VIEW.id.to_string()));
+    assert!(view_ids.contains(&OPERATOR_STATUS_VIEW.id.to_string()));
+    assert!(view_ids.contains(&OPERATOR_LOGS_VIEW.id.to_string()));
     let operator_log_calls = services.query_operator_logs_calls.lock().expect("lock");
     assert_eq!(operator_log_calls.len(), 1);
     assert_eq!(operator_log_calls[0].limit, Some(25));
@@ -3755,6 +4311,7 @@ async fn operator_config_routes_require_operator_capability() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -3767,14 +4324,39 @@ async fn operator_config_routes_require_operator_capability() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    assert_eq!(*services.get_operator_setup_calls.lock().expect("lock"), 0);
-    assert!(
-        services
-            .run_operator_setup_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
-    );
+    // The extension admin-configuration routes are gated by the same
+    // load-bearing `require_operator_webui_config` operator check: a
+    // non-operator caller is rejected before the deployment-owned admin values
+    // are read or any replacement capability is dispatched.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/extension-configuration")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/operator/extension-configuration/extension.slack")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"values":[],"expected_revision":0,"idempotency_key":"non-operator"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    assert!(services.invoke_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -3795,6 +4377,7 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .clone()
         .oneshot(
@@ -3832,16 +4415,25 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
             .lock()
             .expect("lock")
             .as_slice(),
-        [
-            (
-                "agent.auto_approve_tools".to_string(),
-                serde_json::json!(true)
-            ),
-            (
-                "tool.ext.search".to_string(),
-                serde_json::json!({ "state": "always_allow" })
-            )
-        ]
+        [(
+            "tool.ext.search".to_string(),
+            serde_json::json!({ "state": "always_allow" })
+        )]
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "enabled": true }));
+    assert_eq!(
+        services
+            .get_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["agent.auto_approve_tools"]
     );
 }
 
@@ -3886,6 +4478,7 @@ async fn settings_tool_routes_fail_closed_without_capabilities_extension() {
             .expect("lock")
             .is_empty()
     );
+    assert!(services.invoke_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -3930,6 +4523,7 @@ async fn settings_tool_routes_expose_only_tool_approval_config() {
         .collect::<Vec<_>>();
     assert_eq!(keys, ["agent.auto_approve_tools", "tool.ext.search"]);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .clone()
         .oneshot(
@@ -3963,17 +4557,18 @@ async fn settings_tool_routes_expose_only_tool_approval_config() {
             .lock()
             .expect("lock")
             .as_slice(),
-        [
-            (
-                "agent.auto_approve_tools".to_string(),
-                serde_json::json!(false)
-            ),
-            (
-                "tool.ext.search".to_string(),
-                serde_json::json!({ "state": "disabled" })
-            )
-        ],
+        [(
+            "tool.ext.search".to_string(),
+            serde_json::json!({ "state": "disabled" })
+        )],
     );
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "enabled": false }));
 }
 
 #[tokio::test]
@@ -4137,6 +4732,60 @@ async fn logs_reject_ambiguous_tail_follow_modes() {
     assert_eq!(body["field"], "follow");
     assert_eq!(body["validation_code"], "invalid_value");
     assert!(services.query_logs_calls.lock().expect("lock").is_empty());
+}
+
+/// The operator configuration PUT is an ingress adapter over the canonical
+/// product mutation conduit. It must not call an admin store or vendor handler
+/// directly, and the untrusted wire idempotency key must be consumed at ingress
+/// rather than forwarded as capability input authority.
+#[tokio::test]
+async fn admin_configuration_put_dispatches_through_generic_invoke() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/operator/extension-configuration/extension.slack")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "values": [{"handle": "slack_team_id", "value": "T-ONE"}],
+                        "expected_revision": 7,
+                        "idempotency_key": "opaque-client-retry-key",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let calls = services.invoke_calls.lock().expect("lock");
+
+    assert_eq!(
+        (status, calls.len()),
+        (StatusCode::SERVICE_UNAVAILABLE, 1),
+        "the route must reach generic invoke and preserve its failure status"
+    );
+    let (capability, input, _activity_id) = &calls[0];
+    assert!(
+        !capability.as_str().contains("slack"),
+        "the mutation capability must be extension-generic: {capability}"
+    );
+    assert_eq!(input["group_id"], "extension.slack");
+    assert_eq!(input["expected_revision"], 7);
+    assert_eq!(input["values"][0]["handle"], "slack_team_id");
+    assert!(
+        input.get("idempotency_key").is_none(),
+        "the authorized invocation scope, not untrusted input, owns idempotency: {input}"
+    );
 }
 
 #[tokio::test]
@@ -4340,38 +4989,7 @@ async fn operator_config_set_failure_does_not_echo_secret_value() {
 }
 
 #[tokio::test]
-async fn list_connectable_channels_error_maps_to_http_status() {
-    let services = Arc::new(StubServices::default());
-    services.fail_list_connectable_channels(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    });
-    let router = router_with(services);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = read_json(response).await;
-    assert_eq!(body["error"], "unavailable");
-    assert_eq!(body["kind"], "service_unavailable");
-    assert_eq!(body["retryable"], true);
-}
-
-#[tokio::test]
-async fn extension_list_and_registry_dispatch_through_facade() {
+async fn extension_list_and_registry_use_product_views() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -4394,16 +5012,289 @@ async fn extension_list_and_registry_dispatch_through_facade() {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    assert_eq!(*services.list_extensions_calls.lock().expect("lock"), 1);
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
     assert_eq!(
-        *services.list_extension_registry_calls.lock().expect("lock"),
-        1
+        view_ids,
+        vec![
+            EXTENSIONS_VIEW.id.to_string(),
+            EXTENSION_REGISTRY_VIEW.id.to_string()
+        ]
     );
 }
 
 #[tokio::test]
-async fn install_extension_decodes_body_package_ref_to_facade_call() {
+async fn skill_list_and_search_use_product_views() {
     let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/skills")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let search_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"registry"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(search_response.status(), StatusCode::OK);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].view_id, SKILLS_VIEW.id);
+    assert_eq!(queries[0].params, serde_json::json!({}));
+    assert_eq!(queries[1].view_id, SKILL_SEARCH_VIEW.id);
+    assert_eq!(
+        queries[1].params,
+        serde_json::json!({ "query": "registry" })
+    );
+}
+
+#[tokio::test]
+async fn skill_content_and_mutations_use_product_surface() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let content_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/skills/demo-skill")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(content_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let install_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"demo-skill","content":"---\nname: demo-skill\n---\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(install_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let install_retry_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"demo-skill","content":"---\nname: demo-skill\n---\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(install_retry_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let update_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/skills/demo-skill")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"content":"---\nname: demo-skill\n---\n# Demo\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let toggle_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/demo-skill/auto-activate")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(toggle_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let remove_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/skills/demo-skill")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(remove_response.status(), StatusCode::OK);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, SKILL_CONTENT_VIEW.id);
+    assert_eq!(
+        queries[0].params,
+        serde_json::json!({ "name": "demo-skill" })
+    );
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    let calls = invoke_calls
+        .iter()
+        .map(|(capability, input, _activity_id)| (capability.as_str(), input.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                SKILL_INSTALL_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n",
+                }),
+            ),
+            (
+                SKILL_INSTALL_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n",
+                }),
+            ),
+            (
+                SKILL_UPDATE_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n# Demo\n",
+                }),
+            ),
+            (
+                SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "enabled": false,
+                }),
+            ),
+            (
+                SKILL_REMOVE_CAPABILITY_ID,
+                serde_json::json!({ "name": "demo-skill" }),
+            ),
+        ]
+    );
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "identical ProductSurface requests should reuse the same durable replay key"
+    );
+    assert_ne!(
+        invoke_calls[0].2, invoke_calls[2].2,
+        "changed generic ProductSurface requests should also receive fresh activity ids"
+    );
+}
+
+#[tokio::test]
+async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let router = router_with(services.clone());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"},"client_action_id":"install-google-calendar"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    // The membership read-back must see the newly installed package, so prime
+    // the stub view for the second install target.
+    services.set_extensions_view(RebornExtensionListResponse {
+        extensions: vec![extension_info("nearai-mcp", false)],
+    });
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"},"client_action_id":"install-nearai-mcp"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_INSTALL_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "extension_id": "google-calendar" })
+    );
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+    assert_eq!(queries[1].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn install_extension_accepts_auth_gate_only_after_setup_needed_read_back() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(blocked_auth_resolution(ActivityId::new())));
+    services.set_extensions_view(RebornExtensionListResponse {
+        extensions: vec![extension_info("google-calendar", false)],
+    });
     let router = router_with(services.clone());
 
     let response = router
@@ -4413,7 +5304,7 @@ async fn install_extension_decodes_body_package_ref_to_facade_call() {
                 .uri("/api/webchat/v2/extensions/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"}}"#,
+                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"},"client_action_id":"install-auth-gate"}"#,
                 ))
                 .expect("request"),
         )
@@ -4421,13 +5312,81 @@ async fn install_extension_decodes_body_package_ref_to_facade_call() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn install_extension_rejects_capability_success_without_exact_membership_readback() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"github"},"client_action_id":"install-github"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], true);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn install_extension_uses_client_gesture_idempotency_not_permanent_input_deduplication() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    // Two distinct client gestures, then a response-lost retry of the second.
+    for client_action_id in [
+        "install-gesture-one",
+        "install-gesture-two",
+        "install-gesture-two",
+    ] {
+        services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"package_ref":{{"kind":"extension","id":"google-calendar"}},"client_action_id":"{client_action_id}"}}"#,
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 3);
+    assert_ne!(
+        calls[0].2, calls[1].2,
+        "separate install gestures must never replay one permanent cached lifecycle outcome"
+    );
     assert_eq!(
-        services
-            .install_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["nearai-mcp"]
+        calls[1].2, calls[2].2,
+        "the client action id must survive response-lost retries as the ProductSurface activity id"
     );
 }
 
@@ -4456,17 +5415,13 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
     assert_eq!(body["field"], "package_ref");
     assert_eq!(body["validation_code"], "invalid_id");
     assert!(
-        services
-            .install_extension_calls
-            .lock()
-            .expect("lock")
-            .is_empty(),
-        "invalid package kind must not reach the facade"
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "invalid package kind must not reach the capability path"
     );
 }
 
 /// #5499 review finding #4: the admin-only import route must reject a caller
-/// whose bearer token lacks `operator_webui_config` BEFORE the facade is
+/// whose bearer token lacks `operator_webui_config` BEFORE the service is
 /// reached. Lower-level lifecycle tests cannot catch this route dropping its
 /// `require_operator_webui_config` gate.
 #[tokio::test]
@@ -4490,21 +5445,18 @@ async fn import_extension_requires_operator_webui_config() {
     let body = read_json(response).await;
     assert_eq!(body["error"], "forbidden");
     assert!(
-        services
-            .import_extension_calls
-            .lock()
-            .expect("lock")
-            .is_empty(),
-        "a non-operator caller must never reach the import facade"
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "a non-operator caller must never reach the import service"
     );
 }
 
 /// #5499 review finding #4: an operator upload must forward the raw zip bytes
-/// to the facade unmodified — a route regression that drops or re-encodes the
-/// body would pass every lifecycle-tier test.
+/// through the single ProductSurface capability path. The HTTP boundary encodes
+/// bytes as base64; product-workflow decodes before reaching lifecycle import.
 #[tokio::test]
-async fn import_extension_forwards_zip_bytes_to_facade_call() {
+async fn import_extension_invokes_product_surface_with_zip_bytes() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with_capabilities(
         services.clone(),
         WebUiV2Capabilities {
@@ -4528,13 +5480,15 @@ async fn import_extension_forwards_zip_bytes_to_facade_call() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .import_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [bundle]
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_IMPORT_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "bundle_base64": STANDARD.encode(&bundle) })
     );
 }
 
@@ -4590,49 +5544,61 @@ async fn import_extension_is_stripped_alongside_operator_routes() {
 }
 
 #[tokio::test]
-async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
+async fn remove_extension_decodes_path_package_id_to_lifecycle_path() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
-    for uri in [
-        "/api/webchat/v2/extensions/google-calendar/activate",
-        "/api/webchat/v2/extensions/google-calendar/remove",
-    ] {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
+    let activate_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/google-calendar/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"activate-google-calendar"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
 
-        assert_eq!(response.status(), StatusCode::OK);
-    }
+    assert_eq!(activate_response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "the removed activate action must not reach the lifecycle capability path"
+    );
 
+    let remove_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/google-calendar/remove")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"remove-google-calendar"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(remove_response.status(), StatusCode::OK);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .activate_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["google-calendar"]
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_REMOVE_CAPABILITY_ID).expect("capability id")
     );
     assert_eq!(
-        services
-            .remove_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["google-calendar"]
+        invoke_calls[0].1,
+        serde_json::json!({ "extension_id": "google-calendar" })
     );
 }
 
 #[tokio::test]
-async fn get_extension_setup_dispatches_package_ref_to_facade() {
+async fn get_extension_setup_queries_product_surface_view() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -4651,24 +5617,37 @@ async fn get_extension_setup_dispatches_package_ref_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "setup_needed");
+
+    let queries = services.view_queries.lock().expect("lock");
+    assert!(
+        queries
+            .iter()
+            .any(|query| query.view_id == EXTENSION_SETUP_VIEW.id
+                && query.params == serde_json::json!({ "package_id": "telegram" })),
+        "GET setup must read through the ProductSurface extension_setup view: {queries:?}",
+    );
 }
 
 // The path segment must become a lifecycle package ref at the
-// handler/facade boundary. A well-formed package id reaches the facade
+// handler/service boundary. A well-formed package id reaches the service
 // and round-trips into the response.
 #[tokio::test]
-async fn setup_extension_dispatches_package_ref_to_facade() {
+async fn setup_extension_invokes_product_surface_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/telegram/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"action":"begin"}"#))
+                .body(Body::from(
+                    r#"{"client_action_id":"setup-telegram","action":"begin"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -4678,22 +5657,71 @@ async fn setup_extension_dispatches_package_ref_to_facade() {
     let body = read_json(response).await;
     assert_eq!(
         body["package_ref"]["id"], "telegram",
-        "facade must echo the package id from the path",
+        "service must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "setup_needed");
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"
     );
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/telegram/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"setup-telegram","action":"begin"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let retry_body = read_json(retry_response).await;
+    assert_eq!(retry_body["package_ref"]["id"], "telegram");
+    assert_eq!(retry_body["package_ref"]["kind"], "extension");
+    // The stub setup view reports SetupNeeded on every read; the retry echoes
+    // the same read-back phase (main's stub used InstallationState::Unsupported,
+    // retired by the #6520 lifecycle model).
+    assert_eq!(retry_body["phase"], "setup_needed");
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 2);
+    let expected_capability =
+        CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id");
+    let expected_input = serde_json::json!({
+            "extension_id": "telegram",
+            "action": "begin"
+    });
+    assert_eq!(invoke_calls[0].0, expected_capability);
+    assert_eq!(invoke_calls[1].0, expected_capability);
+    assert_eq!(invoke_calls[0].1, expected_input);
+    assert_eq!(invoke_calls[1].1, expected_input);
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "the setup client action id must survive response-lost retries as the ProductSurface activity id"
+    );
+    let queries = services.view_queries.lock().expect("lock");
+    assert!(
+        queries
+            .iter()
+            .any(|query| query.view_id == EXTENSION_SETUP_VIEW.id
+                && query.params == serde_json::json!({ "package_id": "telegram" })),
+        "POST setup must read back through the ProductSurface extension_setup view: {queries:?}",
+    );
 }
 
 // Companion to the typed-internals fix: a malformed identifier in
-// the route path must be rejected at the handler/facade boundary
-// before the facade is called, with the same `invalid_request` wire
+// the route path must be rejected at the handler/service boundary
+// before the service is called, with the same `invalid_request` wire
 // shape any other inbound validation failure produces. Without
 // boundary validation, a path like `../etc` would silently flow
-// into the facade as a raw `String` and the typed-internals rule in
+// into the service as a raw `String` and the typed-internals rule in
 // `.claude/rules/types.md` would be broken in practice.
 #[tokio::test]
 async fn setup_extension_rejects_malformed_package_id_with_400() {
@@ -4746,7 +5774,7 @@ async fn get_extension_setup_rejects_malformed_package_id_with_400() {
 }
 
 #[tokio::test]
-async fn llm_provider_routes_dispatch_to_facade_methods() {
+async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
         services.clone(),
@@ -4770,6 +5798,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
     let get_body = read_json(get_response).await;
     assert_eq!(get_body["providers"][0]["accepts_api_key"], true);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let upsert_response = router
         .clone()
         .oneshot(
@@ -4778,7 +5807,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
                 .uri("/api/webchat/v2/llm/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1"}"#,
+                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1","client_action_id":"llm-upsert-acme-1"}"#,
                 ))
                 .expect("request"),
         )
@@ -4786,6 +5815,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .expect("oneshot");
     assert_eq!(upsert_response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let delete_response = router
         .clone()
         .oneshot(
@@ -4799,6 +5829,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .expect("oneshot");
     assert_eq!(delete_response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let active_response = router
         .clone()
         .oneshot(
@@ -4841,14 +5872,22 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .expect("oneshot");
     assert_eq!(models_response.status(), StatusCode::OK);
 
-    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 1);
+    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 4);
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&LLM_CONFIG_VIEW.id.to_string()));
     assert_eq!(
         services
             .upsert_llm_provider_calls
             .lock()
             .expect("lock")
             .as_slice(),
-        ["acme"]
+        [("acme".to_string(), true)]
     );
     assert_eq!(
         services
@@ -4865,6 +5904,21 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
             .expect("lock")
             .as_slice(),
         [("openai".to_string(), Some("gpt-5".to_string()))]
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        LLM_PROVIDER_DELETE_CAPABILITY_ID
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "provider_id": "acme" })
+    );
+    assert_eq!(invoke_calls[1].0.as_str(), LLM_ACTIVE_SET_CAPABILITY_ID);
+    assert_eq!(
+        invoke_calls[1].1,
+        serde_json::json!({ "provider_id": "openai", "model": "gpt-5" })
     );
     assert_eq!(
         services
@@ -4932,25 +5986,8 @@ async fn llm_provider_routes_require_operator_capability() {
 
     assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 0);
     assert!(
-        services
-            .upsert_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
-    );
-    assert!(
-        services
-            .delete_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
-    );
-    assert!(
-        services
-            .set_active_llm_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "operator-gated LLM config routes must not reach ProductSurface invoke"
     );
     assert!(
         services
@@ -4984,6 +6021,153 @@ fn url_encode(value: &str) -> String {
     out
 }
 
+// A browser tab reuses one connection_id while navigating between threads.
+// The replacement must cancel the prior response even when a proxy has not
+// propagated the browser's close yet; otherwise stale streams consume the
+// per-caller cap and the new thread remains disconnected until refresh.
+#[tokio::test]
+async fn stream_events_same_connection_id_supersedes_stale_stream() {
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut first = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("first tcp");
+    first
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("first request");
+    let mut first_headers = [0_u8; 512];
+    let first_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        first.read(&mut first_headers),
+    )
+    .await
+    .expect("first headers within timeout")
+    .expect("first headers");
+    assert!(
+        std::str::from_utf8(&first_headers[..first_read])
+            .expect("first headers utf8")
+            .starts_with("HTTP/1.1 200"),
+        "first stream must be admitted"
+    );
+
+    let mut replacement = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("replacement tcp");
+    replacement
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-b/events?connection_id=browser-tab&connection_generation=2 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("replacement request");
+    let mut replacement_headers = [0_u8; 512];
+    let replacement_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        replacement.read(&mut replacement_headers),
+    )
+    .await
+    .expect("replacement headers within timeout")
+    .expect("replacement headers");
+    assert!(
+        std::str::from_utf8(&replacement_headers[..replacement_read])
+            .expect("replacement headers utf8")
+            .starts_with("HTTP/1.1 200"),
+        "same-tab replacement must bypass its own stale slot"
+    );
+
+    let first_closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut buffer = [0_u8; 512];
+        loop {
+            if first.read(&mut buffer).await.expect("read first stream") == 0 {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        first_closed.is_ok(),
+        "superseded stream must close promptly instead of retaining a slot"
+    );
+
+    let mut late_stale = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("late stale tcp");
+    late_stale
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("late stale request");
+    let mut stale_headers = [0_u8; 512];
+    let stale_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        late_stale.read(&mut stale_headers),
+    )
+    .await
+    .expect("stale response within timeout")
+    .expect("stale response");
+    assert!(
+        std::str::from_utf8(&stale_headers[..stale_read])
+            .expect("stale response utf8")
+            .starts_with("HTTP/1.1 204"),
+        "a delayed older route request must stop without replacing the current stream"
+    );
+
+    let mut different_tab = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("different-tab tcp");
+    different_tab
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-c/events?connection_id=other-tab HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("different-tab request");
+    let mut rejected_headers = [0_u8; 512];
+    let rejected_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        different_tab.read(&mut rejected_headers),
+    )
+    .await
+    .expect("rejection headers within timeout")
+    .expect("rejection headers");
+    assert!(
+        std::str::from_utf8(&rejected_headers[..rejected_read])
+            .expect("rejection headers utf8")
+            .starts_with("HTTP/1.1 429"),
+        "a distinct tab must still respect the per-caller cap"
+    );
+
+    drop(replacement);
+    serve_handle.abort();
+}
+
 // Regression for the WS-shares-SSE-pool review (Medium): the WS
 // transport must draw from the same `SseCapacity` pool as the SSE
 // transport for the same `(tenant, user)`. If they kept independent
@@ -4997,7 +6181,7 @@ fn url_encode(value: &str) -> String {
 // upgrade attempt returns 429 until the SSE body is dropped.
 #[tokio::test]
 async fn stream_events_ws_shares_capacity_with_sse_streams() {
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     // Pool size 1: any one open stream (SSE or WS) must exhaust the
     // budget for the caller.
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
@@ -5106,7 +6290,7 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
 // backend `stream_events` drains at `connections × poll-interval`.
 #[tokio::test]
 async fn stream_events_caps_concurrent_streams_per_caller() {
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     // Use a low custom cap so the test runs without burning resources.
     let router = webui_v2_router(WebUiV2State::new(services, 2)).layer(axum::Extension(caller()));
 
@@ -5156,7 +6340,7 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
     drop(recovered);
 }
 
-// Regression for the "stalled facade drain" review point: SSE_MAX_LIFETIME
+// Regression for the "stalled service drain" review point: SSE_MAX_LIFETIME
 // must bound the await on `services.stream_events`, not just the top-of-loop
 // check. If a projection drain stalls (e.g. an upstream wedge), an unbounded
 // `.await` would keep the `SseSlot` held even after the configured lifetime
@@ -5166,200 +6350,12 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
 // advances Tokio's virtual time past `SSE_MAX_LIFETIME`, and asserts the
 // stream actually terminates and the slot is reusable for a new connection.
 #[tokio::test(start_paused = true)]
-async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime() {
-    /// Facade whose `stream_events` never returns; all other methods are
-    /// unreachable for this regression.
-    #[derive(Default)]
-    struct StallingServices;
-
-    #[async_trait]
-    impl RebornServicesApi for StallingServices {
-        async fn create_thread(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiCreateThreadRequest,
-        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn submit_turn(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiSendMessageRequest,
-        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn delete_thread(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornDeleteThreadRequest,
-        ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn get_timeline(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornTimelineRequest,
-        ) -> Result<RebornTimelineResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn stream_events(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornStreamEventsRequest,
-        ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-            // Never resolves — simulates a wedged projection stream.
-            std::future::pending().await
-        }
-        async fn cancel_run(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiCancelRunRequest,
-        ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn resolve_gate(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiResolveGateRequest,
-        ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn retry_run(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiRetryRunRequest,
-        ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn get_run_state(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornGetRunStateRequest,
-        ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_threads(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiListThreadsRequest,
-        ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_automations(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiListAutomationsRequest,
-        ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn get_outbound_preferences(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn set_outbound_preferences(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornSetOutboundPreferencesRequest,
-        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_outbound_delivery_targets(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_extensions(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_skills(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornSkillListResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn search_skills(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _query: String,
-        ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn install_skill(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-            _content: Option<String>,
-        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn read_skill_content(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-        ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn update_skill(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-            _content: String,
-        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn remove_skill(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_extension_registry(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn install_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn activate_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn remove_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn setup_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-            _request: WebUiSetupExtensionRequest,
-        ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-    }
-
+async fn stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime() {
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StallingServices);
+    let services = Arc::new(ProgrammableProductSurface::default());
+    services.stall_stream_events();
+    let services: Arc<dyn ProductSurface> = services;
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let open_stream = || {
@@ -5418,8 +6414,8 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
 
 /// Build a minimal `ProductOutboundEnvelope` with a caller-supplied
 /// projection cursor and reply text. The exact payload shape is not the
-/// contract under test (it lives in `ironclaw_product_adapters`); these
-/// tests only care that whatever the facade hands back becomes a
+/// contract under test (it lives in `ironclaw_product`); these
+/// tests only care that whatever the service hands back becomes a
 /// well-formed SSE event.
 fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
     make_outbound_envelope(
@@ -5575,7 +6571,6 @@ where
 #[tokio::test]
 async fn stream_events_sets_unbuffered_sse_headers() {
     let services = Arc::new(StubServices::default());
-    services.enable_stream_events_subscription(Vec::new());
 
     let router = router_with(services);
     let response = router
@@ -5665,59 +6660,6 @@ async fn stream_events_continues_immediately_after_non_empty_batch() {
         Some(&expected_cursor),
         "follow-up call must still preserve cursor ordering"
     );
-}
-
-#[tokio::test]
-async fn stream_events_uses_subscription_when_facade_supports_it() {
-    let services = Arc::new(StubServices::default());
-    let envelope_a = make_projection_update_envelope("cursor:sub-a");
-    let envelope_b = make_projection_update_envelope("cursor:sub-b");
-    services.enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b)]);
-
-    let router = router_with(services.clone());
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/threads/thread-x/events")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut body = response.into_body();
-    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
-        parse_sse_events(buf).len() >= 2
-    })
-    .await;
-    drop(body);
-
-    let events = parse_sse_events(&bytes);
-    assert!(
-        events.len() >= 2,
-        "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
-        String::from_utf8_lossy(&bytes)
-    );
-    let cursor_a_json =
-        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
-    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
-    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
-
-    assert_eq!(
-        services.stream_events_calls.lock().expect("lock").len(),
-        0,
-        "subscription-enabled SSE route must not call the polling drain facade"
-    );
-    let subscribe_calls = services
-        .subscribe_events_calls
-        .lock()
-        .expect("lock")
-        .clone();
-    assert_eq!(subscribe_calls.len(), 1);
-    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
-    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being
@@ -5882,19 +6824,19 @@ fn assert_no_adapter_metadata(json: &Value) {
     );
 }
 
-// Regression for the "SSE facade error event path is untested" review
-// (Medium). When `RebornServicesApi::stream_events` returns Err, the
+// Regression for the "SSE service error event path is untested" review
+// (Medium). When `ProductSurface::stream_events` returns Err, the
 // handler must emit one SSE `error` frame carrying only the redacted
 // `error` code + `retryable` flag (no `field`, no internal `detail`),
 // then close the stream — never propagate an HTTP error on a long-lived
 // SSE connection because the browser would replay it as a hard
 // reconnect failure.
 #[tokio::test]
-async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
+async fn stream_events_service_error_emits_redacted_error_event_and_closes() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         // The handler must NOT echo these into the SSE payload — the
@@ -5915,12 +6857,12 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
         .await
         .expect("oneshot");
 
-    // The handler must surface the facade error as an SSE event, not as a
+    // The handler must surface the service error as an SSE event, not as a
     // failed HTTP open. EventSource cannot recover from a non-OK status.
     assert_eq!(
         response.status(),
         StatusCode::OK,
-        "SSE open must succeed even when the facade drain errors; the error path is an in-stream event"
+        "SSE open must succeed even when the service drain errors; the error path is an in-stream event"
     );
 
     let mut body = response.into_body();
@@ -5971,7 +6913,7 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let closed = matches!(final_frame, Ok(None) | Err(_));
     assert!(
         closed,
-        "facade error must close the SSE stream, but body.frame() yielded another chunk"
+        "service error must close the SSE stream, but body.frame() yielded another chunk"
     );
 }
 
@@ -5979,7 +6921,7 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
 async fn missing_caller_extension_returns_500() {
     // No `Extension(caller)` layer — exercises the failure mode if host
     // composition forgets to run the bearer middleware.
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(
         services,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
@@ -6004,7 +6946,7 @@ async fn missing_caller_extension_returns_500() {
         "missing caller extension must fail closed, not bypass auth"
     );
 
-    // Drain the body to make sure no facade method was hit before the
+    // Drain the body to make sure no service method was hit before the
     // extractor failed.
     let _ = response.into_body().collect().await.expect("drain body");
 }
@@ -6015,7 +6957,7 @@ async fn missing_caller_extension_returns_500() {
 // WS connection that pumps frames can catch breakage in the
 // per-envelope JSON serialization, cursor advancement on the
 // `after_cursor` field, or the redacted error frame the handler emits
-// on facade failure.
+// on service failure.
 #[tokio::test]
 async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
     use futures::StreamExt;
@@ -6029,11 +6971,11 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         events: vec![envelope_a.clone(), envelope_b.clone()],
     }));
     // After draining the two real events, the next drain produces a
-    // facade error so the handler exercises the redacted-error-frame +
+    // service error so the handler exercises the redacted-error-frame +
     // close path before lifetime expiry.
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -6124,94 +7066,13 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
 }
 
 #[tokio::test]
-async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
-    use futures::StreamExt;
-    use tokio_tungstenite::tungstenite::Message as WsMessage;
-
-    let services = Arc::new(StubServices::default());
-    let envelope_a = make_projection_update_envelope("cursor:ws-sub-a");
-    let envelope_b = make_projection_update_envelope("cursor:ws-sub-b");
-    services
-        .enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b.clone())]);
-
-    let router = router_with(services.clone());
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let serve_handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
-    let (mut ws, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url),
-    )
-    .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
-
-    let mut text_frames: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, ws.next()).await {
-            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
-            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
-            Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(_))) => break,
-            Err(_) => break,
-        }
-    }
-    let _ = ws.close(None).await;
-    serve_handle.abort();
-
-    assert!(
-        text_frames.len() >= 2,
-        "expected subscription projection frames; got {} text frame(s): {:?}",
-        text_frames.len(),
-        text_frames,
-    );
-
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
-    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
-    assert_eq!(
-        envelope_a_json, expected_a,
-        "first WS frame must carry the first subscription envelope",
-    );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
-    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
-    assert_eq!(
-        envelope_b_json, expected_b,
-        "second WS frame must carry the second subscription envelope",
-    );
-
-    assert_eq!(
-        services.stream_events_calls.lock().expect("lock").len(),
-        0,
-        "subscription-enabled WS route must not call the polling drain facade",
-    );
-    let subscribe_calls = services
-        .subscribe_events_calls
-        .lock()
-        .expect("lock")
-        .clone();
-    assert_eq!(subscribe_calls.len(), 1);
-    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
-    assert!(subscribe_calls[0].after_cursor.is_none());
-}
-
-#[tokio::test]
 async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -6283,7 +7144,7 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
 // Regression for the WS-idle-close review (Medium): the WS drain
 // loop must observe socket close immediately. Without this, an
 // idle peer (closed tab, dropped network) leaves the loop polling
-// the facade at the 1Hz cadence — its per-caller `SseSlot` stays
+// the service at the 1Hz cadence — its per-caller `SseSlot` stays
 // reserved until `SSE_MAX_LIFETIME` (5 min). With the recv-aware
 // select, a peer close releases the slot within one poll cycle.
 //
@@ -6296,7 +7157,7 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
 async fn stream_events_ws_releases_slot_on_peer_close() {
     use futures::SinkExt;
 
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6360,6 +7221,7 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
         },
     );
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .oneshot(
             Request::builder()
@@ -6382,25 +7244,28 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
     assert!(!rendered.contains("sk-secret-value"));
     assert!(!rendered.contains("webui-secret-value"));
 
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .run_operator_setup_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [(
-            Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
-            true,
-            true,
-        )]
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_SETUP_RUN_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "provider_id": "openai",
+            "adapter": "open_ai_completions",
+            "model": "gpt-5-mini",
+            "api_key": "sk-secret-value",
+            "webui_access_token": "webui-secret-value"
+        })
     );
 }
 
 #[tokio::test]
 async fn list_fs_mounts_returns_browsable_mounts() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -6431,12 +7296,15 @@ async fn list_fs_mounts_returns_browsable_mounts() {
         mounts.contains(&"workspace"),
         "workspace mount present: {mounts:?}"
     );
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), FS_MOUNTS_VIEW.id);
 }
 
 #[tokio::test]
 async fn browse_fs_dir_lists_mount_relative_entries() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -6454,6 +7322,8 @@ async fn browse_fs_dir_lists_mount_relative_entries() {
     assert_eq!(body["mount"], "memory");
     assert_eq!(body["entries"][0]["name"], "today.md");
     assert_eq!(body["entries"][0]["path"], "daily/today.md");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries[0].view_id.as_str(), FS_LIST_VIEW.id);
 }
 
 #[tokio::test]
@@ -6479,6 +7349,54 @@ async fn browse_fs_dir_forwards_optional_project_selector() {
         calls[0].project_id.as_ref().map(ProjectId::as_str),
         Some("project-beta")
     );
+}
+
+#[tokio::test]
+async fn list_project_files_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-alpha/files?path=/workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["entries"][0]["path"], "/workspace/report.md");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_FS_LIST_VIEW.id);
+}
+
+#[tokio::test]
+async fn stat_project_file_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-alpha/files/stat?path=/workspace/report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["stat"]["path"], "/workspace/report.md");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_FS_STAT_VIEW.id);
 }
 
 #[tokio::test]
@@ -6541,7 +7459,7 @@ async fn read_fs_file_rejects_blank_path() {
 #[tokio::test]
 async fn stat_fs_path_returns_metadata() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -6559,6 +7477,8 @@ async fn stat_fs_path_returns_metadata() {
     assert_eq!(body["stat"]["path"], "daily/today.md");
     assert_eq!(body["stat"]["kind"], "file");
     assert_eq!(body["stat"]["mime_type"], "text/markdown");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries[0].view_id.as_str(), FS_STAT_VIEW.id);
 }
 
 #[tokio::test]
@@ -6581,6 +7501,21 @@ async fn stat_fs_path_rejects_blank_path() {
 }
 
 // --- Project route handler tests (path-param override + status codes) --------
+
+fn sample_admin_user(user_id: &str) -> AdminUserRecord {
+    AdminUserRecord {
+        user_id: UserId::new(user_id).expect("user id"),
+        email: Some(format!("{user_id}@example.test")),
+        display_name: Some("Admin User".to_string()),
+        status: AdminUserStatus::Active,
+        role: AdminUserRole::Admin,
+        created_at: "2026-06-17T00:00:00Z".to_string(),
+        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_by: Some(UserId::new("user-alpha").expect("user id")),
+        last_login_at: None,
+        metadata: Default::default(),
+    }
+}
 
 fn sample_project_info(project_id: &str) -> RebornProjectInfo {
     RebornProjectInfo {
@@ -6614,6 +7549,7 @@ fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
 async fn update_project_path_id_overrides_body() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6629,12 +7565,46 @@ async fn update_project_path_id_overrides_body() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let calls = services.update_project_calls.lock().expect("lock");
+    let body = read_json(response).await;
+    assert_eq!(body["project"]["project_id"], "path-project");
+    let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].project_id, "path-project",
+        calls[0].0,
+        CapabilityId::new(PROJECT_UPDATE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1["project_id"], "path-project",
         "path project_id must override the body value"
     );
+    assert_eq!(calls[0].1["name"], "x");
+    drop(calls);
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_VIEW.id);
+}
+
+#[tokio::test]
+async fn get_project_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/projects/project-alpha")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["project"]["project_id"], "project-alpha");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_VIEW.id);
 }
 
 /// Both path ids (project + user) must override the body on member role update.
@@ -6642,6 +7612,7 @@ async fn update_project_path_id_overrides_body() {
 async fn update_member_path_ids_override_body() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6661,10 +7632,17 @@ async fn update_member_path_ids_override_body() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let calls = services.update_project_member_calls.lock().expect("lock");
+    let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].project_id, "path-project");
-    assert_eq!(calls[0].user_id, "path-user");
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(PROJECT_MEMBER_UPDATE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(calls[0].1["project_id"], "path-project");
+    assert_eq!(calls[0].1["user_id"], "path-user");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_MEMBERS_VIEW.id);
 }
 
 /// `add_project_member` takes user_id from the BODY (the path has no user
@@ -6673,6 +7651,7 @@ async fn update_member_path_ids_override_body() {
 async fn add_member_takes_user_from_body_project_from_path() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6692,16 +7671,50 @@ async fn add_member_takes_user_from_body_project_from_path() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let calls = services.add_project_member_calls.lock().expect("lock");
+    let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].project_id, "path-project", "project from path");
-    assert_eq!(calls[0].user_id, "body-user", "user from body");
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(PROJECT_MEMBER_ADD_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1["project_id"], "path-project",
+        "project from path"
+    );
+    assert_eq!(calls[0].1["user_id"], "body-user", "user from body");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_MEMBERS_VIEW.id);
+}
+
+#[tokio::test]
+async fn list_project_members_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/projects/project-alpha/members")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["members"][0]["user_id"], "user-beta");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_MEMBERS_VIEW.id);
 }
 
 #[tokio::test]
 async fn delete_project_returns_204() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6713,16 +7726,20 @@ async fn delete_project_returns_204() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
     assert_eq!(
-        services.delete_project_calls.lock().expect("lock")[0].project_id,
-        "p1"
+        calls[0].0,
+        CapabilityId::new(PROJECT_DELETE_CAPABILITY_ID).expect("capability id")
     );
+    assert_eq!(calls[0].1, serde_json::json!({ "project_id": "p1" }));
 }
 
 #[tokio::test]
 async fn remove_member_returns_204() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6734,16 +7751,23 @@ async fn remove_member_returns_204() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let calls = services.remove_project_member_calls.lock().expect("lock");
-    assert_eq!(calls[0].project_id, "p1");
-    assert_eq!(calls[0].user_id, "u1");
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(PROJECT_MEMBER_REMOVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({ "project_id": "p1", "user_id": "u1" })
+    );
 }
 
-/// An unwired project service (the default trait body) surfaces 503, not 500.
+/// Project listing is routed through the ProductSurface view boundary.
 #[tokio::test]
-async fn list_projects_unwired_returns_503() {
+async fn list_projects_queries_product_surface_view() {
     let services = Arc::new(StubServices::default());
-    let app = router_with(services);
+    let app = router_with(services.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -6754,5 +7778,54 @@ async fn list_projects_unwired_returns_503() {
         )
         .await
         .expect("response");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["projects"][0]["project_id"], "project-alpha");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECTS_VIEW.id);
+}
+
+#[tokio::test]
+async fn remove_extension_uses_client_gesture_idempotency_not_permanent_input_deduplication() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    // Two distinct client gestures, then a response-lost retry of the second.
+    // The live-repro defect: an input-derived activity id permanently
+    // deduplicated every remove of one extension, replaying the first
+    // remove's recorded success (reinstall → remove silently no-ops).
+    for client_action_id in [
+        "remove-gesture-one",
+        "remove-gesture-two",
+        "remove-gesture-two",
+    ] {
+        services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/google-calendar/remove")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"client_action_id":"{client_action_id}"}}"#,
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 3);
+    assert_ne!(
+        calls[0].2, calls[1].2,
+        "separate remove gestures must never replay one permanent cached lifecycle outcome"
+    );
+    assert_eq!(
+        calls[1].2, calls[2].2,
+        "the remove client action id must survive response-lost retries as the ProductSurface activity id"
+    );
 }

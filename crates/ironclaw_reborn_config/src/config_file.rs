@@ -36,11 +36,13 @@ use std::borrow::Cow;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::RebornProfile;
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
 
 /// API version stamp this crate understands. Mirrors
@@ -83,19 +85,12 @@ pub struct RebornConfigFile {
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
-    /// Slack Events API host-beta route settings. Consumed by
-    /// `ironclaw-reborn serve` only when the binary is built with the
-    /// Slack host-beta feature. Secrets are env-only; this section stores
-    /// IDs and environment variable names.
+    /// Legacy-compatible Slack host enablement and rejected setup fields.
     pub slack: Option<SlackSection>,
-    /// Telegram channel host enablement. Consumed by `ironclaw-reborn serve`
-    /// only when the binary is built with the Telegram host feature. Bot
-    /// identity and secrets are configured through the WebUI setup surface,
-    /// never in this file.
+    /// Telegram host enablement. Runtime setup remains extension-owned.
     pub telegram: Option<TelegramSection>,
-    /// Google OAuth client identity for the Gmail/Calendar/Drive
-    /// first-party extension. Public identifiers only — `client_secret`
-    /// is never stored here (see [`GoogleSection`]'s doc).
+    /// Google OAuth client identity for Gmail/Calendar/Drive extensions.
+    /// Public identifiers only; the client secret stays in the secret store.
     pub google: Option<GoogleSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
@@ -105,6 +100,53 @@ pub struct RebornConfigFile {
     /// Trigger poller lifecycle settings. All fields optional; absent section
     /// leaves the worker at the compiled defaults in the composition root.
     pub trigger_poller: Option<TriggerPollerConfigSection>,
+    /// Memory profile binding (issue #3537). Maps memory capability profiles to
+    /// the extensions that serve them; absent section means every required
+    /// memory profile defaults to the host-bundled native provider. The
+    /// `profile_id` semantics (valid profile ids, fail-closed resolution,
+    /// production rejection of disabled/unverified bindings) are enforced by the
+    /// host-runtime binding resolver, which owns the profile catalog; this
+    /// config layer only does deployment-agnostic structural validation.
+    pub memory: Option<MemorySection>,
+}
+
+/// `[memory]` config section (issue #3537).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySection {
+    /// The memory provider extension id backing the always-on memory adapter:
+    /// `ironclaw.memory` (native, the default), `memory.disabled`, or a
+    /// third-party id (e.g. `mem0`). Omitted binds native. The provider is
+    /// chosen at compose time and is immutable at runtime (no runtime swap).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Admin overrides authorizing an otherwise-rejected production binding,
+    /// scoped to `(extension_id, deployment_profile)`. Production composition
+    /// still applies the resolver's fail-closed policy.
+    #[serde(default)]
+    pub admin_overrides: Vec<MemoryAdminOverride>,
+    /// Connection base URL for a third-party memory provider that needs one,
+    /// used only when a binding selects that provider (issue #5264). For mem0 this
+    /// is the self-hosted mem0 OSS server URL (never the hosted cloud). There is
+    /// no default: mem0 stays off unless explicitly bound AND given a base URL
+    /// here or via the `MEMORY_MEM0_BASE_URL` env override; a bound-but-unset mem0
+    /// fails closed. An API key is OPTIONAL (a self-hosted server with
+    /// `AUTH_DISABLED=true` needs none); when required it is supplied via
+    /// `MEMORY_MEM0_API_KEY` (a secret — never the config file). Inert when no
+    /// third-party binding needs it.
+    #[serde(default)]
+    pub mem0_base_url: Option<String>,
+}
+
+/// One admin override authorizing a production memory binding, scoped to
+/// `(extension_id, deployment_profile)`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryAdminOverride {
+    /// Extension id the override authorizes.
+    pub extension_id: String,
+    /// Deployment-profile wire name (e.g. `production`) or `*` for all.
+    pub deployment_profile: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -342,43 +384,32 @@ pub struct WebuiSection {
     pub canonical_host: Option<String>,
 }
 
-/// Slack Events API host-beta enablement.
-///
-/// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
-/// route. The env var overrides only this enablement gate. Installation
-/// identifiers, channel routing, and Slack secrets are configured through the
-/// WebUI channel setup surface. The deprecated fields below are **boot-rejected**,
-/// not bridged: `ironclaw serve` fails closed at startup
-/// (`reject_legacy_slack_setup_fields`, `commands/serve_slack.rs`) if any of
-/// them are set in `config.toml`, with an error pointing the operator at the
-/// WebUI Slack OAuth setup flow instead. They remain on this struct only so a
-/// legacy file produces that specific rejection message rather than an
-/// `unknown field` parse error.
+/// Public Google OAuth client configuration. Secret material deliberately has
+/// no representation in `config.toml`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleSection {
+    pub client_id: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub hosted_domain_hint: Option<String>,
+}
+
+/// Slack listener enablement. The additional fields remain parseable so old
+/// files receive a precise startup migration error rather than an unknown-key
+/// parse failure; new setup belongs to the extension lifecycle.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
-    /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve` unless
-    /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
-    /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
-    /// Deprecated: Slack team id for legacy config-backed setup.
     pub team_id: Option<String>,
-    /// Deprecated: Slack app id for legacy config-backed setup.
     pub api_app_id: Option<String>,
-    /// Deprecated: optional Slack user id for legacy static personal binding.
     pub slack_user_id: Option<String>,
-    /// Deprecated: Reborn user id for legacy Slack setup.
     pub user_id: Option<String>,
-    /// Deprecated: Reborn user id whose scope owns shared Slack channel turns.
     pub shared_subject_user_id: Option<String>,
-    /// Deprecated: channel-specific shared subjects for Slack app mentions.
     #[serde(default)]
     pub channel_routes: Vec<SlackChannelRouteSection>,
-    /// Deprecated: environment variable name containing the Slack signing secret.
     pub signing_secret_env: Option<String>,
-    /// Deprecated: environment variable name containing the Slack bot token.
     pub bot_token_env: Option<String>,
 }
 
@@ -388,51 +419,8 @@ impl SlackSection {
         self
     }
 
-    pub fn set_installation_id(mut self, installation_id: impl Into<String>) -> Self {
-        self.installation_id = Some(installation_id.into());
-        self
-    }
-
-    pub fn set_team_id(mut self, team_id: impl Into<String>) -> Self {
-        self.team_id = Some(team_id.into());
-        self
-    }
-
-    pub fn set_api_app_id(mut self, api_app_id: impl Into<String>) -> Self {
-        self.api_app_id = Some(api_app_id.into());
-        self
-    }
-
-    pub fn set_slack_user_id(mut self, slack_user_id: impl Into<String>) -> Self {
-        self.slack_user_id = Some(slack_user_id.into());
-        self
-    }
-
-    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
-        self.user_id = Some(user_id.into());
-        self
-    }
-
-    pub fn set_shared_subject_user_id(mut self, shared_subject_user_id: impl Into<String>) -> Self {
-        self.shared_subject_user_id = Some(shared_subject_user_id.into());
-        self
-    }
-
-    pub fn set_channel_routes(
-        mut self,
-        channel_routes: impl IntoIterator<Item = SlackChannelRouteSection>,
-    ) -> Self {
-        self.channel_routes = channel_routes.into_iter().collect();
-        self
-    }
-
-    pub fn set_signing_secret_env(mut self, signing_secret_env: impl Into<String>) -> Self {
-        self.signing_secret_env = Some(signing_secret_env.into());
-        self
-    }
-
-    pub fn set_bot_token_env(mut self, bot_token_env: impl Into<String>) -> Self {
-        self.bot_token_env = Some(bot_token_env.into());
+    pub fn set_user_id(mut self, value: impl Into<String>) -> Self {
+        self.user_id = Some(value.into());
         self
     }
 }
@@ -444,19 +432,9 @@ pub struct SlackChannelRouteSection {
     pub subject_user_id: Option<String>,
 }
 
-/// Telegram channel host enablement.
-///
-/// `enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true` mounts the
-/// Telegram updates route and the WebUI setup/pairing surface. The env var
-/// overrides only this enablement gate. The bot token, webhook registration,
-/// and pairing are configured at runtime through the WebUI channel setup
-/// surface; no Telegram identifiers or secrets live in this file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramSection {
-    /// Explicit enablement gate. Omitted/false means the Telegram routes are
-    /// not mounted by `ironclaw-reborn serve` unless
-    /// `IRONCLAW_REBORN_TELEGRAM_ENABLED` overrides it.
     pub enabled: Option<bool>,
 }
 
@@ -465,29 +443,6 @@ impl TelegramSection {
         self.enabled = Some(enabled);
         self
     }
-}
-
-/// `[google]` section. Google OAuth client identity for Gmail/Calendar/
-/// Drive first-party extension setup. Unlike Slack's `SlackSection`,
-/// values are stored **literally** (not as env-var name pointers) —
-/// `client_id`/`redirect_uri`/`hosted_domain_hint` are public, non-secret
-/// identifiers safe to round-trip through a declarative file.
-/// `client_secret` deliberately has NO field here: it is secret material
-/// and always routes to the encrypted secret store
-/// (`ironclaw_reborn_composition::GoogleOauthSecretStore`), never
-/// `config.toml` — the same law `reject_inline_secret` enforces for every
-/// other section in this file.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GoogleSection {
-    /// OAuth client id, e.g. `<id>.apps.googleusercontent.com`. Public —
-    /// safe to store literally.
-    pub client_id: Option<String>,
-    /// OAuth redirect URI registered with the Google Cloud Console
-    /// project (e.g. `http://127.0.0.1:3000/oauth/google/callback`).
-    pub redirect_uri: Option<String>,
-    /// Optional Google Workspace hosted-domain hint (`hd` parameter).
-    pub hosted_domain_hint: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -1279,6 +1234,43 @@ impl RebornConfigFile {
                 });
             }
         }
+        // Memory binding (issue #3537). Structural + deployment-agnostic checks
+        // only: fail-closed production policy is owned by the host-runtime
+        // binding resolver (it knows the active deployment profile).
+        if let Some(memory) = &self.memory {
+            if let Some(provider) = &memory.provider {
+                check_non_empty_trimmed(Cow::Borrowed("memory.provider"), provider)?;
+            }
+            for (idx, over) in memory.admin_overrides.iter().enumerate() {
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].extension_id")),
+                    &over.extension_id,
+                )?;
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].deployment_profile")),
+                    &over.deployment_profile,
+                )?;
+                if !is_valid_memory_deployment_profile(&over.deployment_profile) {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: format!("memory.admin_overrides[{idx}].deployment_profile"),
+                        reason: "must be a deployment profile name (local-dev, \
+                                 local-dev-yolo, hosted-single-tenant, production, \
+                                 migration-dry-run) or '*'"
+                            .to_string(),
+                    });
+                }
+            }
+            // The mem0 base URL is operator-pasteable; run the same inline-secret
+            // guard as the sibling fields (a credentialed URL is rejected at
+            // transport construction, but a pasted secret must be caught here too),
+            // plus non-empty + trimmed: a blank (`"   "`) or whitespace-padded
+            // (`" https://h "`) value otherwise parses here and only fails later,
+            // opaquely, at transport construction during startup.
+            if let Some(base_url) = memory.mem0_base_url.as_deref() {
+                check_non_empty_trimmed(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
+            }
+        }
         Ok(())
     }
 
@@ -1433,6 +1425,14 @@ fn write_edit_document(
     Ok(())
 }
 
+/// Valid `deployment_profile` values for a memory admin override: a
+/// `RebornProfile` wire name, or `*` (all deployments). Delegates to
+/// [`RebornProfile`]'s `FromStr` so the accepted set stays the single
+/// source of truth in `profile.rs` rather than a duplicated literal list.
+fn is_valid_memory_deployment_profile(value: &str) -> bool {
+    value == "*" || RebornProfile::from_str(value).is_ok()
+}
+
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
     // Expected shape: `ironclaw.runtime/vMAJOR.MINOR` (minor optional).
     let Some(rest) = found.strip_prefix("ironclaw.runtime/v") else {
@@ -1532,7 +1532,6 @@ mod tests {
         assert!(cfg.skills.is_none());
         assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
-        assert!(cfg.slack.is_none());
     }
 
     #[test]
@@ -1629,11 +1628,6 @@ provider_id = "anthropic"
 model = "claude-3-5-sonnet-latest"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[slack]
-enabled = true
-
-[telegram]
-enabled = true
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1670,28 +1664,6 @@ enabled = true
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
-        let slack = cfg.slack.as_ref().expect("slack section present");
-        assert_eq!(slack.enabled, Some(true));
-        let telegram = cfg.telegram.as_ref().expect("telegram section present");
-        assert_eq!(telegram.enabled, Some(true));
-    }
-
-    #[test]
-    fn telegram_section_rejects_unknown_fields() {
-        // The Telegram section deliberately carries only the enablement gate:
-        // bot identity and secrets are WebUI-managed. A config file trying to
-        // smuggle them in must fail parse closed, not be silently ignored.
-        let toml = r#"
-[telegram]
-enabled = true
-bot_token = "123:abc"
-"#;
-        let error = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("unknown [telegram] fields must be rejected");
-        assert!(
-            error.to_string().contains("bot_token"),
-            "error should name the rejected field: {error}"
-        );
     }
 
     #[test]
@@ -2017,49 +1989,6 @@ api_key_env = "sk-proj-1234567890abcdef1234567890"
     }
 
     #[test]
-    fn parses_legacy_slack_setup_fields() {
-        let toml = r#"
-[slack]
-enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-slack_user_id = "U123"
-user_id = "user:operator"
-shared_subject_user_id = "user:slack-shared"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
-
-[[slack.channel_routes]]
-channel_id = "CENG"
-subject_user_id = "user:eng-team-agent"
-"#;
-        let cfg = RebornConfigFile::parse_text(toml, &attributed())
-            .expect("legacy Slack setup fields should remain parse-compatible");
-        let slack = cfg.slack.expect("slack section");
-        assert_eq!(slack.enabled, Some(true));
-        assert_eq!(slack.installation_id.as_deref(), Some("install-alpha"));
-        assert_eq!(slack.team_id.as_deref(), Some("T123"));
-        assert_eq!(slack.api_app_id.as_deref(), Some("A123"));
-        assert_eq!(slack.slack_user_id.as_deref(), Some("U123"));
-        assert_eq!(slack.user_id.as_deref(), Some("user:operator"));
-        assert_eq!(
-            slack.shared_subject_user_id.as_deref(),
-            Some("user:slack-shared")
-        );
-        assert_eq!(
-            slack.signing_secret_env.as_deref(),
-            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
-        );
-        assert_eq!(slack.channel_routes.len(), 1);
-        assert_eq!(slack.channel_routes[0].channel_id.as_deref(), Some("CENG"));
-        assert_eq!(
-            slack.channel_routes[0].subject_user_id.as_deref(),
-            Some("user:eng-team-agent")
-        );
-    }
-
-    #[test]
     fn parses_storage_postgres_env_reference() {
         let toml = r#"
 [storage]
@@ -2202,36 +2131,6 @@ secret_master_key_env = "postgres://user:password.example.com/ironclaw"
         assert!(
             !err.to_string().contains("password"),
             "error must not echo credential-bearing value: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_inline_secret_in_legacy_slack_secret_env_name() {
-        let toml = r#"
-[slack]
-enabled = true
-signing_secret_env = "sk-proj-1234567890abcdef1234567890"
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("legacy Slack env name must not accept raw secrets");
-        assert!(
-            err.to_string().contains("slack.signing_secret_env"),
-            "error should identify legacy Slack field: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_inline_secret_in_legacy_slack_bot_token_env_name() {
-        let toml = r#"
-[slack]
-enabled = true
-bot_token_env = "sk-proj-1234567890abcdef1234567890"
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("legacy Slack bot token env name must not accept raw secrets");
-        assert!(
-            err.to_string().contains("slack.bot_token_env"),
-            "error should identify legacy Slack field: {err}"
         );
     }
 
@@ -2463,6 +2362,144 @@ tick_jitter_max_secs = 5
     }
 
     #[test]
+    fn memory_section_parses_provider_and_overrides() {
+        let toml = r#"
+[memory]
+provider = "mem0"
+
+[[memory.admin_overrides]]
+extension_id = "mem0"
+deployment_profile = "production"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("memory section parses");
+        let memory = cfg.memory.as_ref().expect("memory section present");
+        assert_eq!(memory.provider.as_deref(), Some("mem0"));
+        assert_eq!(memory.admin_overrides.len(), 1);
+        assert_eq!(memory.admin_overrides[0].extension_id, "mem0");
+        assert_eq!(memory.admin_overrides[0].deployment_profile, "production");
+    }
+
+    #[test]
+    fn memory_absent_section_is_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty config parses");
+        assert!(cfg.memory.is_none());
+    }
+
+    #[test]
+    fn memory_rejects_empty_provider() {
+        // `provider` is the extension id backing the always-on adapter
+        // (the v2 `profile_bindings[].extension_id` collapsed into it).
+        let toml = r#"
+[memory]
+provider = ""
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty provider must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_empty_override_extension_id() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = ""
+deployment_profile = "production"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty override extension_id must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_invalid_override_deployment_profile() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = "acme.honcho"
+deployment_profile = "prod"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("invalid deployment_profile must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(err.to_string().contains("deployment_profile"));
+    }
+
+    #[test]
+    fn memory_accepts_wildcard_override_deployment_profile() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = "acme.honcho"
+deployment_profile = "*"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("wildcard deployment_profile accepted");
+        assert_eq!(
+            cfg.memory.unwrap().admin_overrides[0].deployment_profile,
+            "*"
+        );
+    }
+
+    #[test]
+    fn memory_rejects_inline_secret_in_mem0_base_url() {
+        // The mem0 base URL runs the same inline-secret guard as the sibling
+        // memory fields: a pasted API key (here an `sk-` token embedded in the
+        // URL) must be rejected rather than round-tripped through config/git.
+        let toml = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com/?key=sk-proj-1234567890abcdef12345678"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("an inline secret in mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_blank_or_untrimmed_mem0_base_url() {
+        // A whitespace-only base URL must be rejected as empty at parse time, not
+        // round-tripped and deferred to an opaque transport-construction failure.
+        let blank = r#"
+[memory]
+mem0_base_url = "   "
+"#;
+        let err = RebornConfigFile::parse_text(blank, &attributed())
+            .expect_err("a whitespace-only mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A URL padded with leading/trailing whitespace is rejected too: the pad
+        // would silently break URL parsing later.
+        let padded = r#"
+[memory]
+mem0_base_url = " https://mem0.example.com "
+"#;
+        let err = RebornConfigFile::parse_text(padded, &attributed())
+            .expect_err("an untrimmed mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A clean, trimmed, secret-free URL still parses.
+        let ok = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com"
+"#;
+        let cfg = RebornConfigFile::parse_text(ok, &attributed())
+            .expect("a clean mem0_base_url must parse");
+        assert_eq!(
+            cfg.memory.and_then(|m| m.mem0_base_url).as_deref(),
+            Some("https://mem0.example.com")
+        );
+    }
+
+    #[test]
+    fn memory_rejects_unknown_section_key() {
+        let toml = r#"
+[memory]
+provider = "ironclaw.memory"
+typo = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [memory]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
     fn trigger_poller_absent_section_yields_none() {
         let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML must parse");
         assert!(cfg.trigger_poller.is_none());
@@ -2499,3 +2536,4 @@ not_a_field = true
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }
+// arch-exempt: large_file, versioned config migration remains centralized, plan #6175

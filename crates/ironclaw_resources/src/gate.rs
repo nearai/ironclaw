@@ -193,14 +193,14 @@ impl crate::cas_snapshot::StorageError for BudgetGateError {
 /// Every operation takes the caller's [`ResourceScope`] so a single
 /// shared store instance can naturally route work to the right tenant
 /// path under a multi-tenant deployment. The sole implementation,
-/// [`FilesystemBudgetGateStore`](crate::FilesystemBudgetGateStore), uses
+/// [`BudgetGateStore`](crate::BudgetGateStore), uses
 /// that scope to write under the correct tenant's mount view (review
 /// feedback Thermo-Nuclear #2: scope at the store-operation boundary, not
 /// at construction). Over an [`InMemoryBackend`](ironclaw_filesystem::InMemoryBackend)
 /// it is the volatile store tests and local-dev composition use — the
 /// hand-written `InMemoryBudgetGateStore` was deleted in favor of this one
 /// production store per arch-simplification §4.3.
-pub trait BudgetGateStore: Send + Sync + std::fmt::Debug {
+pub trait BudgetGateStorePort: Send + Sync + std::fmt::Debug {
     fn open(&self, scope: &ResourceScope, gate: BudgetApprovalGate) -> Result<(), BudgetGateError>;
     fn resolve(
         &self,

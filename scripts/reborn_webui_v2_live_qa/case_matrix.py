@@ -29,6 +29,7 @@ class CaseSpec:
         requires_google_runtime_access: bool = False,
         requires_telegram: bool = False,
         requires_github_auth: bool = False,
+        expects_llm_trace: bool = True,
         default_enabled: bool = True,
         implemented: bool = True,
     ) -> None:
@@ -46,6 +47,7 @@ class CaseSpec:
         self.requires_google_runtime_access = requires_google_runtime_access
         self.requires_telegram = requires_telegram
         self.requires_github_auth = requires_github_auth
+        self.expects_llm_trace = expects_llm_trace
         self.default_enabled = default_enabled
         self.implemented = implemented
 
@@ -62,19 +64,22 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         "rows": ["1A"],
         "feature": "Telegram connection flow",
         "gate": (
-            "requires a live Telegram bot token (admin setup: PUT "
-            "/api/webchat/v2/channels/telegram/setup, bot_token only), a "
+            "requires a live Telegram bot token (admin setup: POST "
+            "/api/webchat/v2/extensions/telegram/setup, bot_token only), a "
             "public HTTPS base for the /webhooks/extensions/telegram/updates "
-            "webhook, and pairing automation via "
-            "/api/webchat/v2/channels/telegram/pairing (deep-link consume)"
+            "webhook, and pairing automation via POST "
+            "/api/webchat/v2/extensions/telegram/pairing/mint plus GET "
+            "/api/webchat/v2/extensions/telegram/pairing/status (the deep-link "
+            "code is consumed through the extension webhook)"
         ),
     },
     "qa_1b_telegram_near_news_chat": {
         "rows": ["1B"],
         "feature": "Telegram NEAR AI news summary delivery",
         "gate": (
-            "requires a paired Telegram account (admin setup + "
-            "/api/webchat/v2/channels/telegram/pairing) and live Twitter/X "
+            "requires a paired Telegram account (admin setup + POST "
+            "/api/webchat/v2/extensions/telegram/pairing/mint + GET "
+            "/api/webchat/v2/extensions/telegram/pairing/status) and live Twitter/X "
             "or web search access"
         ),
     },
@@ -82,8 +87,9 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         "rows": ["1C"],
         "feature": "Scheduled Telegram NEAR AI news digest routine",
         "gate": (
-            "requires a paired Telegram account (admin setup + "
-            "/api/webchat/v2/channels/telegram/pairing) and routine delivery "
+            "requires a paired Telegram account (admin setup + POST "
+            "/api/webchat/v2/extensions/telegram/pairing/mint + GET "
+            "/api/webchat/v2/extensions/telegram/pairing/status) and routine delivery "
             "verification into the paired DM"
         ),
     },

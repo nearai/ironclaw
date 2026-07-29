@@ -1,7 +1,7 @@
-//! Product-layer Trace Commons client facade.
+//! Product-layer Trace Commons client service.
 //!
 //! Reborn keeps product/userland surfaces away from raw kernel substrates. This
-//! facade gives agent/web/CLI callers a narrow client-side Trace Commons host:
+//! service gives agent/web/CLI callers a narrow client-side Trace Commons host:
 //! local capture, local queueing, remote upload/status sync, and local credit
 //! notice state. Hosted corpus storage and reviewer/admin control-plane state
 //! live in the TraceDAO server repo.
@@ -282,10 +282,10 @@ pub fn trace_channel_from_host_channel(channel: &str) -> trace::TraceChannel {
     match channel {
         "gateway" | "web" => trace::TraceChannel::Web,
         "cli" | "repl" | "tui" => trace::TraceChannel::Cli,
-        "telegram" => trace::TraceChannel::Telegram,
-        "slack" => trace::TraceChannel::Slack,
         "routine" | "heartbeat" => trace::TraceChannel::Routine,
-        _ => trace::TraceChannel::Other,
+        // Everything else is an extension-served channel; the concrete
+        // identity rides `channel_origin` as data.
+        _ => trace::TraceChannel::Extension,
     }
 }
 

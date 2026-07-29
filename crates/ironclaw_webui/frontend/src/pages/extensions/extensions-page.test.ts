@@ -46,6 +46,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
   let hookCursor = 0;
   const removeCalls = [];
   function ConfirmDialog() {}
+  function ConfigureModal() {}
   function RegistryTab() {}
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
@@ -60,11 +61,23 @@ function renderExtensionsPage(tab, extensionState = {}) {
     ActionToast() {},
     ChannelsTab() {},
     ConfirmDialog,
-    ConfigureModal() {},
-    McpTab() {},
+    ConfigureModal,
+    document: {
+      activeElement: null,
+      querySelectorAll: () => [],
+    },
+    ToolsTab() {},
     Navigate() {},
     React: {
       useCallback: (fn) => fn,
+      useRef: (initial) => {
+        const index = hookCursor;
+        hookCursor += 1;
+        if (!(index in hookValues)) {
+          hookValues[index] = { current: initial };
+        }
+        return hookValues[index];
+      },
       useState: (initial) => {
         const index = hookCursor;
         hookCursor += 1;
@@ -84,11 +97,10 @@ function renderExtensionsPage(tab, extensionState = {}) {
     useExtensions: () => ({
       status: {},
       channels: [],
-      mcpServers: [],
+      tools: [],
       channelRegistry: [],
-      mcpRegistry: [],
+      toolRegistry: [],
       catalogEntries: [],
-      connectableChannels: [],
       isExtensionsLoading: false,
       isRegistryLoading: false,
       isLoading: false,
@@ -101,7 +113,6 @@ function renderExtensionsPage(tab, extensionState = {}) {
       actionResult: null,
       clearResult: () => {},
       install: () => {},
-      activate: () => {},
       remove: (...args) => removeCalls.push(args),
       isRemoving: false,
       invalidate: () => {},
@@ -120,6 +131,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
     removeCalls,
     render,
     CatalogErrorBanner: context.globalThis.__testExports.CatalogErrorBanner,
+    ConfigureModal,
     rendered: render(),
   };
 }
@@ -185,6 +197,26 @@ for (const tab of ["installed", "unknown"]) {
   });
 }
 
+test("ExtensionsPage redirects the legacy mcp tab to the tools view", () => {
+  const { Navigate, rendered } = renderExtensionsPage("mcp", {
+    isExtensionsLoading: true,
+    isRegistryLoading: true,
+  });
+
+  assert.equal(rendered.values[0], Navigate);
+  assert.match(rendered.strings.join(""), /to="\/extensions\/tools"/);
+});
+
+test("ExtensionsPage renders the tools view for the tools tab", () => {
+  const { ToolsTab, rendered } = renderExtensionsPage("tools", {
+    isExtensionsLoading: false,
+    isRegistryLoading: false,
+  });
+
+  const toolsTab = findComponent(rendered, ToolsTab) || componentProps(rendered, ToolsTab)[0];
+  assert.ok(toolsTab, "the tools tab content must be rendered");
+});
+
 test("ExtensionsPage removes an extension only after confirming the shared dialog", () => {
   const harness = renderExtensionsPage("registry", { isBusy: true, isRemoving: false });
   const [registry] = componentProps(harness.rendered, harness.RegistryTab);
@@ -206,6 +238,98 @@ test("ExtensionsPage removes an extension only after confirming the shared dialo
   assert.equal(harness.removeCalls.length, 1);
   assert.equal(harness.removeCalls[0][0], extension);
   assert.equal(typeof harness.removeCalls[0][1].onSettled, "function");
+});
+
+test("ExtensionsPage restores install-triggered setup focus to the installed card", () => {
+  let installPayload = null;
+  const harness = renderExtensionsPage("registry", {
+    install: (payload) => {
+      installPayload = payload;
+    },
+  });
+  const [registry] = componentProps(harness.rendered, harness.RegistryTab);
+  const installTrigger = { isConnected: true };
+  const stableSuccessor = { isConnected: true };
+  const configureSuccessor = { isConnected: true };
+  const installedCard = {
+    getAttribute: (name) =>
+      name === "data-extension-id" ? "github" : null,
+    querySelector: (selector) =>
+      ({
+        "[data-extension-return-focus]": stableSuccessor,
+        "[data-extension-primary-action]": configureSuccessor,
+      })[selector] || null,
+    matches: () => false,
+  };
+  Object.assign(harness.document, {
+    activeElement: null,
+    querySelectorAll: () => [installedCard],
+  });
+
+  registry.onInstall(
+    {
+      packageRef: { kind: "extension", id: "github" },
+      displayName: "GitHub",
+    },
+    installTrigger,
+  );
+  assert.equal(typeof installPayload?.onNeedsSetup, "function");
+
+  installTrigger.isConnected = false;
+  installPayload.onNeedsSetup({
+    packageRef: { kind: "extension", id: "github" },
+    displayName: "GitHub",
+  });
+
+  const rendered = harness.render();
+  const [modal] = componentProps(rendered, harness.ConfigureModal);
+  assert.equal(typeof modal.returnFocusTo, "function");
+  assert.equal(
+    modal.returnFocusTo(),
+    stableSuccessor,
+    "the deferred target prefers a control that survives activation",
+  );
+});
+
+test("ExtensionsPage restores install focus to a registry-only installed card", () => {
+  let installPayload = null;
+  const harness = renderExtensionsPage("registry", {
+    install: (payload) => {
+      installPayload = payload;
+    },
+  });
+  const [registry] = componentProps(harness.rendered, harness.RegistryTab);
+  const installTrigger = { isConnected: true };
+  const registryOnlyCard = {
+    getAttribute: (name) =>
+      name === "data-extension-id" ? "github" : null,
+    querySelector: () => null,
+    matches: (selector) => selector === "[data-extension-return-focus]",
+  };
+  Object.assign(harness.document, {
+    activeElement: null,
+    querySelectorAll: () => [registryOnlyCard],
+  });
+
+  registry.onInstall(
+    {
+      packageRef: { kind: "extension", id: "github" },
+      displayName: "GitHub",
+    },
+    installTrigger,
+  );
+  installTrigger.isConnected = false;
+  installPayload.onNeedsSetup({
+    packageRef: { kind: "extension", id: "github" },
+    displayName: "GitHub",
+  });
+
+  const [modal] = componentProps(harness.render(), harness.ConfigureModal);
+  assert.equal(
+    modal.returnFocusTo(),
+    registryOnlyCard,
+    "the installed registry card remains a programmatic focus fallback",
+  );
 });
 
 test("templateText includes text nested inside arrays", () => {

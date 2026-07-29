@@ -1,7 +1,6 @@
 use clap::{Args, Subcommand};
-use ironclaw_reborn_composition::{
-    RebornSkillSummary, list_reborn_local_skills, reborn_skill_summary_json,
-};
+use ironclaw_extension_host::skill_listing::list_reborn_local_skills;
+use ironclaw_reborn_composition::{RebornSkillSummary, reborn_skill_summary_json};
 use ironclaw_reborn_config::{RebornBootConfig, RebornProfile};
 use std::path::PathBuf;
 

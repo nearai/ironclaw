@@ -6,10 +6,10 @@ use ironclaw_host_runtime::{
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityDescriptorView, CapabilityInvocation, LoopCapabilityPort, ProviderToolCall,
-    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 
 pub(super) fn wrap_surface_disclosure(
@@ -72,14 +72,14 @@ impl LoopCapabilityPort for HostSurfaceDisclosurePort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.inner.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.inner.invoke_capability_batch(request).await
     }

@@ -20,7 +20,7 @@ use ironclaw_host_api::{
     ThreadId, UserId,
 };
 use ironclaw_loop_host::{
-    FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
+    CheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_event_store::{
@@ -40,18 +40,18 @@ use ironclaw_threads::{
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
-    FilesystemTurnStateRowStore, GetRunStateRequest, InMemoryRunProfileResolver,
-    LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
-    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    GetRunStateRequest, InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId,
+    LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStateRowStore, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
-        HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
-        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, HookDecisionSummary,
+        InstructionSafetyContext, LoopCheckpointKind, LoopDriverId, LoopGateKind,
+        LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -680,9 +680,9 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    checkpoint_state_store: Arc<CheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    loop_checkpoint_store: Arc<TurnStateRowStore<InMemoryBackend>>,
     gateway: Arc<ControlledGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -1029,7 +1029,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
             capability_id: second_capability_id.clone(),
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),
-            reason_kind: CapabilityFailureKind::OperationFailed,
+            reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
             safe_summary: None,
         },
     ] {

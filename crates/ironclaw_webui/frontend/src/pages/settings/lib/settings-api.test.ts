@@ -5,6 +5,7 @@ import {
   settingsFromOperatorConfig,
   toolFromConfigEntry,
   updateToolPermission,
+  upsertLlmProvider,
 } from "./settings-api";
 
 function toolPermissionResponse({
@@ -121,6 +122,43 @@ test("updateToolPermission aborts a lost request after the bounded save timeout"
     assert.equal(JSON.parse(requestOptions.body).state, "disabled");
   } finally {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+test("upsertLlmProvider carries an opaque client action id", async () => {
+  let requestOptions;
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async (_path, options) => {
+      requestOptions = options;
+      return new Response(JSON.stringify({ providers: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  );
+
+  try {
+    await upsertLlmProvider({
+      id: "nearai",
+      adapter: "near_ai",
+      clientActionId: "provider-save-action",
+      api_key: "sk-test",
+    });
+
+    assert.deepEqual(JSON.parse(requestOptions.body), {
+      id: "nearai",
+      adapter: "near_ai",
+      api_key: "sk-test",
+      client_action_id: "provider-save-action",
+    });
+  } finally {
     vi.unstubAllGlobals();
   }
 });

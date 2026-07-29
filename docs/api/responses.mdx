@@ -35,37 +35,57 @@ Authorization: Bearer <token>
 You have two options:
 
 <Tabs>
-  <Tab title="Gateway token (single-user)">
-    For single-user deployments, set `GATEWAY_AUTH_TOKEN` in the environment. The same token authenticates the web UI, the Telegram bridge, and the Responses API.
-
-    If `GATEWAY_AUTH_TOKEN` is not set, IronClaw generates 32 random bytes and prints the hex-encoded value (64 characters) to the console on boot.
+  <Tab title="Instance token (single-user)">
+    The bearer token provisioned during [onboarding](/onboard) authenticates both the web interface and this API. It is written to `webui-token` in your IronClaw home:
 
     ```bash
-    export GATEWAY_AUTH_TOKEN="your-secure-token"
+    cat ~/.ironclaw/reborn/webui-token
     ```
+
+    Supply your own instead by setting `IRONCLAW_REBORN_WEBUI_TOKEN` before starting `serve`.
+
+    ```bash
+    export IRONCLAW_REBORN_WEBUI_TOKEN="your-secure-token"
+    ```
+
+    <Warning>
+    This token carries operator privileges, including configuration changes. For anything beyond a single-user instance, use per-user tokens instead.
+    </Warning>
   </Tab>
 
-  <Tab title="API tokens (per-user)">
-    For multi-user deployments, create a per-user API token through the self-service `/api/tokens` endpoint. Each token is scoped to one user, can carry an expiry, and is revocable.
+  <Tab title="Per-user tokens (multi-user)">
+    In a multi-user deployment, an admin creates each user through the admin surface, which mints that user's API bearer exactly once:
 
     ```bash
-    # Create
-    curl -X POST https://your-host/api/tokens \
-      -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" \
+    curl -X POST https://your-host/api/webchat/v2/admin/users \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{"name":"my-integration","expires_in_days":90}'
-    # → {"id":"...","token":"<plaintext shown ONCE>","token_prefix":"...","name":"...","expires_at":"..."}
-
-    # List
-    curl https://your-host/api/tokens \
-      -H "Authorization: Bearer $TOKEN"
-
-    # Revoke
-    curl -X DELETE https://your-host/api/tokens/<id> \
-      -H "Authorization: Bearer $TOKEN"
+      -d '{"email":"alice@example.com","display_name":"Alice","role":"member"}'
     ```
 
-    The plaintext token is shown exactly once. Store it; you cannot retrieve it again. Admin users may pass `"user_id"` in the create body to mint a token on behalf of another user.
+    `role` is required — one of `owner`, `admin`, or `member`. `owner` and `admin` clear
+    the admin authorization boundary; `member` does not. `email` and `display_name` are
+    optional.
+
+    The token is top-level; the user's identity is nested under `user`:
+
+    ```json
+    {
+      "user": {
+        "user_id": "...",
+        "email": "alice@example.com",
+        "status": "active",
+        "role": "member",
+        "created_at": "2026-07-27T18:00:00Z",
+        "updated_at": "2026-07-27T18:00:00Z"
+      },
+      "api_token": "<shown ONCE>"
+    }
+    ```
+
+    Store the `api_token` when it is returned; it cannot be retrieved again. These tokens are scoped to one user and carry user identity only — they do not inherit operator configuration privileges.
+
+    Users signed in through Google or GitHub SSO receive an equivalent session bearer. See [Web Interface](/using/webui#single-sign-on).
   </Tab>
 </Tabs>
 
@@ -214,10 +234,6 @@ You can register your own function tools per request. The agent treats them as f
 
 This is a function-calling round-trip, not a prompt-level convention. The wire shape matches the OpenAI Responses API spec.
 
-<Note>
-External tools require **engine v2** to be enabled on the server (`ENGINE_V2=true`). Requests with `tools[]` against an engine v1 server return `400`.
-</Note>
-
 ### Define tools
 
 ```json
@@ -244,7 +260,7 @@ Constraints (validated up-front, `400` on violation):
 
 - Only `type: "function"` is accepted. `web_search`, `file_search`, `code_interpreter`, etc. are rejected. IronClaw routes those through its own registry, not caller-provided definitions.
 - Names: `^[A-Za-z0-9_-]{1,64}$`, unique within the request.
-- Names must not shadow a registered IronClaw action (built-in tool, extension tool, or engine v2 capability like `mission_*`, `skill_*`, `memory_*`). Shadowing is rejected to prevent confused-deputy behavior.
+- Names must not shadow a registered IronClaw action (built-in tool, extension tool, or an agent capability like `mission_*`, `skill_*`, `memory_*`). Shadowing is rejected to prevent confused-deputy behavior.
 - The entire `tools[]` payload caps at 16 KiB of canonical JSON.
 
 ### The round trip
@@ -519,6 +535,6 @@ if (call) {
 ## Related
 
 - [Inference Providers](/capabilities/llm-providers) — configure the model that backs `"default"`.
-- [Configuration](/capabilities/configuration) — `GATEWAY_AUTH_TOKEN`, engine v2, body and rate limits.
+- [Configuration](/capabilities/configuration) — configuration file layout, profiles, and environment overrides.
 - [Sandboxed Tools](/capabilities/sandboxed-tools) — how IronClaw's built-in tools execute when the agent calls them.
-- [MCP](/capabilities/mcp) — connect Model Context Protocol servers to extend the agent's tool surface server-side instead of supplying caller tools per-request.
+- [MCP](/extensions/mcp) — connect Model Context Protocol servers to extend the agent's tool surface server-side instead of supplying caller tools per-request.

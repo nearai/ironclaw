@@ -1,6 +1,6 @@
 //! End-to-end coverage for the WebChat v2 admin user-management surface.
 //!
-//! Unlike the crate-tier facade tests (which drive `RebornServicesApi` against
+//! Unlike the crate-tier service tests (which drive `ProductSurface` against
 //! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
 //! service wired (identity user-directory + admin secret provisioner + a signed
 //! session-store token minter), composes the full `webui_v2_app` with a real
@@ -10,7 +10,7 @@
 //! The flagship proof: an admin (operator bearer) creates a user, receives the
 //! one-time `api_token`, and that token then authenticates a follow-up request
 //! AS the new user — exercising the entire mint → return → validate chain
-//! (facade → composition adapter → identity store → minter → the session
+//! (service → composition adapter → identity store → minter → the session
 //! authenticator that validates the bearer). Nothing above the token crypto is
 //! stubbed.
 
@@ -32,11 +32,11 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, build_reborn_runtime,
 };
 use ironclaw_webui::{
-    EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,
+    EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use secrecy::{ExposeSecret, SecretString};
@@ -70,7 +70,7 @@ impl HostManagedModelGateway for NoOpGateway {
 // ─── token minter (mirrors production's serve-layer minter) ───────────────
 
 struct SessionTokenMinter {
-    store: Arc<dyn SessionStore>,
+    store: Arc<SignedTokenSessionStore>,
 }
 
 #[async_trait]
@@ -138,20 +138,21 @@ struct AdminHarness {
 async fn build_admin_harness() -> AdminHarness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root: PathBuf = root.path().join("local-dev");
-    let build_input = RebornBuildInput::local_dev(OPERATOR_USER, storage_root)
-        .with_runtime_policy(local_dev_effective_policy());
+    let build_input =
+        ironclaw_reborn_composition::local_dev_build_input(OPERATOR_USER, storage_root)
+            .with_runtime_policy(local_dev_effective_policy());
     build_admin_harness_from(root, build_input).await
 }
 
 /// Assemble the full admin HTTP harness over a caller-supplied
-/// `RebornBuildInput` (already carrying its profile, policy, trust, and process
+/// `RebornHostBindings` (already carrying its profile, policy, trust, and process
 /// binding). Everything above the substrate — the shared signed session store /
-/// minter / authenticator, the WebUI bundle, and the composed router — is
+/// minter / authenticator, the product surface, and the composed router — is
 /// profile-agnostic, so the local-dev and production-shaped runs share it and
 /// only differ in the build input.
 async fn build_admin_harness_from(
     root: tempfile::TempDir,
-    build_input: RebornBuildInput,
+    build_input: RebornHostBindings,
 ) -> AdminHarness {
     let tenant = TenantId::new(TENANT).expect("tenant");
 
@@ -164,7 +165,7 @@ async fn build_admin_harness_from(
         store: session_store.clone(),
     });
 
-    let input = RebornRuntimeInput::from_services(build_input)
+    let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -179,7 +180,7 @@ async fn build_admin_harness_from(
         .with_admin_api_token_minter(minter);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
 
     let env =
         EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
@@ -193,7 +194,7 @@ async fn build_admin_harness_from(
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
     AdminHarness {
         router,
@@ -524,7 +525,7 @@ async fn admin_last_admin_protection_over_http() {
 /// bearers that validate under the harness's own authenticator (the exact
 /// property `signed_session_store`'s doc-comment guarantees); a store built with
 /// a *different* secret derives a different HMAC key, so its tokens fail closed.
-fn session_store_with_secret(secret: &str) -> Arc<dyn SessionStore> {
+fn session_store_with_secret(secret: &str) -> Arc<SignedTokenSessionStore> {
     signed_session_store(
         &SecretString::from(secret.to_string()),
         &TenantId::new(TENANT).expect("tenant"),
@@ -652,7 +653,7 @@ async fn admin_session_bearer_cannot_reach_operator_routes() {
 }
 
 /// 4. Forged / tampered / expired tokens are rejected at the auth boundary with
-///    a 401 — they never reach the admin facade.
+///    a 401 — they never reach the admin service.
 #[tokio::test]
 async fn forged_and_expired_tokens_are_rejected() {
     let harness = build_admin_harness().await;
@@ -761,7 +762,7 @@ async fn forged_and_expired_tokens_are_rejected() {
 }
 
 /// 5. An oversized create-user body is rejected with 413 by the descriptor
-///    body-limit middleware BEFORE the facade runs. The `admin_create_user`
+///    body-limit middleware BEFORE the service runs. The `admin_create_user`
 ///    route declares a 16 KiB per-route cap.
 #[tokio::test]
 async fn oversized_create_body_is_rejected_with_413() {
@@ -839,7 +840,7 @@ async fn malformed_inputs_are_4xx_not_500() {
     let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
 
     // A malformed `{user_id}` path segment (whitespace/control) → 400 from the
-    // handler's `parse_admin_user_id` before the facade is touched.
+    // handler's `parse_admin_user_id` before the service is touched.
     let (status, _) = operator
         .send(
             Method::GET,
@@ -890,11 +891,9 @@ async fn malformed_inputs_are_4xx_not_500() {
 // the admin secret provisioner are sourced from that graph. Gated on `libsql`
 // because the production-runtime path requires the libSQL substrate.
 
-#[cfg(feature = "libsql")]
 #[derive(Debug)]
 struct RecordingSandboxTransport;
 
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
@@ -914,7 +913,6 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
     }
 }
 
-#[cfg(feature = "libsql")]
 fn production_effective_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
@@ -929,11 +927,11 @@ fn production_effective_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-#[cfg(feature = "libsql")]
+#[path = "support/first_party.rs"]
+mod first_party_support;
+
 async fn build_admin_harness_production() -> AdminHarness {
-    use ironclaw_reborn_composition::{
-        RebornCompositionProfile, RebornRuntimeProcessBinding, builtin_first_party_trust_policy,
-    };
+    use ironclaw_reborn_composition::{RebornCompositionProfile, RebornRuntimeProcessBinding};
 
     let root = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
@@ -943,7 +941,7 @@ async fn build_admin_harness_production() -> AdminHarness {
             .expect("libsql db"),
     );
     let events = root.path().join("events.db").to_string_lossy().to_string();
-    let build_input = RebornBuildInput::libsql(
+    let build_input = RebornHostBindings::libsql(
         RebornCompositionProfile::Production,
         OPERATOR_USER,
         db,
@@ -951,9 +949,7 @@ async fn build_admin_harness_production() -> AdminHarness {
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )
-    .with_production_trust_policy(Arc::new(
-        builtin_first_party_trust_policy().expect("trust policy"),
-    ))
+    .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
     .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
         ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
@@ -969,7 +965,6 @@ async fn build_admin_harness_production() -> AdminHarness {
 /// every admin op — including these — returned service-unavailable. Drives the
 /// full HTTP admin surface and asserts create-user + per-user secret
 /// provisioning work and are isolated across users.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_admin_surface_provisions_and_isolates_per_user_secrets() {
     let harness = build_admin_harness_production().await;

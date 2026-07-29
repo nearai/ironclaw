@@ -47,7 +47,7 @@ pub const TRACE_REMOTE_REQUEST_TIMEOUT_ENV: &str = "IRONCLAW_TRACE_REMOTE_REQUES
 pub const TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Default page size for an account-traces fetch when the caller passes no
-/// explicit limit. Bounds the initial WebUI/facade slice so `None` never
+/// explicit limit. Bounds the initial WebUI/service slice so `None` never
 /// requests unbounded history; full history is a future paginated flow.
 const ACCOUNT_TRACES_DEFAULT_LIMIT: usize = 200;
 /// Hard ceiling on the account-traces page size; larger requests are clamped so
@@ -102,6 +102,11 @@ pub struct IronclawTraceMetadata {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_flags: BTreeMap<String, String>,
     pub channel: TraceChannel,
+    /// The originating extension/surface id when `channel` is
+    /// [`TraceChannel::Extension`] (generic origin data replacing the retired
+    /// concrete variants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
 }
@@ -111,10 +116,15 @@ pub struct IronclawTraceMetadata {
 pub enum TraceChannel {
     Web,
     Cli,
-    Telegram,
-    Slack,
     Routine,
     Other,
+    /// An extension-served channel. The concrete identity lives in
+    /// `IronclawTraceMetadata::channel_origin` (data, never an enum variant).
+    /// `#[serde(other)]` also absorbs historical concrete tags and any
+    /// future unknown tag — persisted envelopes always deserialize (LLM data
+    /// is never dropped to a parse quarantine over a channel name).
+    #[serde(other)]
+    Extension,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1598,6 +1608,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: Some(trace.model_name.clone()),
             },
             consent: ConsentMetadata {
@@ -1726,6 +1739,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: None,
             },
             consent: ConsentMetadata {
@@ -2907,10 +2923,9 @@ fn channel_label(channel: TraceChannel) -> &'static str {
     match channel {
         TraceChannel::Web => "web",
         TraceChannel::Cli => "cli",
-        TraceChannel::Telegram => "telegram",
-        TraceChannel::Slack => "slack",
         TraceChannel::Routine => "routine",
         TraceChannel::Other => "other",
+        TraceChannel::Extension => "extension",
     }
 }
 
@@ -2927,7 +2942,9 @@ fn tool_category_for(tool_name: &str) -> String {
         "workspace".to_string()
     } else if lower.contains("memory") || lower.contains("search") {
         "retrieval".to_string()
-    } else if lower.contains("calendar") || lower.contains("email") || lower.contains("slack") {
+    } else if lower.contains("calendar") || lower.contains("email") || lower.contains('.') {
+        // Namespaced capability ids (`<extension>.<tool>`) are external-app
+        // tools by construction.
         "external_app".to_string()
     } else {
         "other".to_string()
@@ -5824,7 +5841,7 @@ impl std::fmt::Display for ContributionHttpError {
 impl std::error::Error for ContributionHttpError {}
 
 /// Direct-transport [`ContributionHttpSink`] for trusted non-agent surfaces
-/// (WebUI facades, CLI). Applies the same hardening as the other direct
+/// (WebUI services, CLI). Applies the same hardening as the other direct
 /// clients in this module: per-request pinned DNS resolution with
 /// private/internal-IP rejection (`resolve_trace_upload_claim_issuer_host`),
 /// no redirects, the request's own timeout, and a body read bounded DURING
@@ -6995,7 +7012,7 @@ pub async fn mint_account_login_link_via_sink(
 }
 
 /// Direct (non-agent) counterpart to [`mint_account_login_link_via_sink`]
-/// for WebUI facades and other trusted product surfaces: mints the one-time
+/// for WebUI services and other trusted product surfaces: mints the one-time
 /// login link through the [`DirectPinnedContributionSink`] (pinned DNS,
 /// private-IP filtering) instead of a host-egress sink.
 ///
@@ -7212,12 +7229,12 @@ pub async fn fetch_account_traces_via_sink(
 /// the crate-local hardened reqwest client (the direct/CLI path, no host-egress
 /// sink required).
 ///
-/// This is the facade-safe counterpart to [`fetch_account_traces_via_sink`]: it
+/// This is the service-safe counterpart to [`fetch_account_traces_via_sink`]: it
 /// uses the [`pinned_trace_commons_http_client`] (private-IP-filtered, pinned
 /// DNS resolution — the same hardening as the upload-claim issuer request), so
 /// a rebinding host cannot redirect this bearer-authenticated GET to an
 /// internal address, without coupling the caller to a host-egress
-/// `ContributionHttpSink`. Use this from WebUI facades and any non-agent
+/// `ContributionHttpSink`. Use this from WebUI services and any non-agent
 /// surface. Use [`fetch_account_traces_via_sink`] from the agent runtime where
 /// all egress must flow through `RuntimeHttpEgress`.
 ///
@@ -10319,6 +10336,84 @@ mod tests {
                 TraceContributionAcceptance::ManualSubmit
             ),
             Ok(())
+        );
+    }
+
+    /// Lane-2 safety pin (extension-runtime DEL-8). The trace redaction
+    /// classifier keys the payload-redaction profile (and the external-write
+    /// side-effect level) off tool-name keywords; the vendor keywords are a
+    /// genuine safety DENYLIST, not extension routing. It is deliberately a
+    /// SUPERSET of the bundled package inventory — it must also cover
+    /// non-package messaging/issue-tracker tools such as signal, discord, and
+    /// gitlab — so it cannot be sourced from the inventory without weakening
+    /// redaction. This locks the mapping so a future "de-hardcode the vendor
+    /// names" cleanup cannot silently drop a keyword and stop redacting a
+    /// tool's sensitive payload. The `contribution.rs` PATH_TERM_COLLISIONS
+    /// carve-out in
+    /// `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`
+    /// documents why the names stay here.
+    #[test]
+    fn tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing() {
+        // Package-vendor keywords select the profile whose rules redact that
+        // payload shape.
+        assert!(matches!(
+            tool_payload_profile("slack.send_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gmail.send_email"),
+            Some(ToolPayloadProfile::Email)
+        ));
+        assert!(matches!(
+            tool_payload_profile("github.create_issue"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+        // Non-inventory keywords must ALSO classify — dropping them (as
+        // sourcing the set from the package inventory would) silently stops
+        // redacting those tools' payloads.
+        assert!(matches!(
+            tool_payload_profile("signal.send"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("discord.post_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gitlab.open_merge_request"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+
+        // A `slack`-named send is an external write (the safety signal),
+        // distinct from a local write.
+        assert!(matches!(
+            classify_tool_side_effect("slack.send_message"),
+            SideEffectLevel::ExternalWrite
+        ));
+        assert!(matches!(
+            classify_tool_side_effect("file.write"),
+            SideEffectLevel::LocalWrite
+        ));
+
+        // Drive the production caller: a messaging tool's content field is
+        // redacted; a tool the classifier does not recognize passes through
+        // untouched (the control proving the keyword gates the redaction).
+        let payload = serde_json::json!({ "message": "meet me at 5", "channel": "C42" });
+        let mut report = RedactionReport::default();
+        let redacted =
+            redact_tool_specific_payload(Some("slack.send_message"), &payload, &mut report);
+        assert_ne!(
+            redacted.get("message"),
+            payload.get("message"),
+            "a messaging tool's message content must be redacted"
+        );
+
+        let mut report = RedactionReport::default();
+        let untouched =
+            redact_tool_specific_payload(Some("weather.forecast"), &payload, &mut report);
+        assert_eq!(
+            untouched, payload,
+            "a tool with no payload profile must pass through unredacted"
         );
     }
 
@@ -16651,7 +16746,7 @@ mod tests {
             );
         }
 
-        // ── direct (WebUI facade) variant ────────────────────────────────────
+        // ── direct (WebUI service) variant ────────────────────────────────────
         // Same enrollment, no sink: the hosted-WebUI path mints through the
         // pinned direct client. The link is delivered ONLY in the return value
         // (the authenticated HTTP response) — it must never be persisted to a

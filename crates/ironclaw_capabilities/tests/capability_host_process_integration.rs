@@ -294,6 +294,9 @@ fn execution_context_with_mounts_and_parent(
         mounts,
     )
     .unwrap();
+    context.origin = Some(InvocationOrigin::Product(
+        ProductKind::new("tests").unwrap(),
+    ));
     context.process_id = parent_process_id;
     context.validate().unwrap();
     context

@@ -41,16 +41,22 @@ setup wizard — a real result the user didn't ask for yet.
 Trust runs on two clocks, and we design for both.
 
 - **Instant credibility.** Plain language, visible security posture
-  (encrypted enclaves, the vault, network allowlisting), calm status
-  colors, no dark patterns. A first-time visitor should be able to see
-  *why* it's safe, not just be told.
+  (the secrets vault — `crates/ironclaw_secrets`; sandboxed execution —
+  `crates/ironclaw_process_sandbox`; policy-gated egress —
+  `crates/ironclaw_runtime_policy` and `crates/ironclaw_network`), calm
+  status colors, no dark patterns. A first-time visitor should be able
+  to see *why* it's safe, not just be told.
 - **Compounding trust.** Every action leaves a receipt: an activity
   feed, run logs, previews of anything that leaves the system, one-click
   undo. The agent narrates what it did and why. Failures are stated
-  plainly, with the fix — never hidden, never dramatized.
+  plainly, with the fix — never hidden, never dramatized. (The receipt
+  surfaces are the design target the workspace builds toward; approval
+  flows live in `crates/ironclaw_approvals`.)
 - **The trust envelope grows.** As receipts accumulate, users grant the
   agent more autonomy. Trust isn't asked for; it's earned and then
-  spent carefully.
+  spent carefully. This is design intent for how autonomy scales, not a
+  claim that a single enforcing mechanism ships today; the pieces that
+  exist are cited above.
 
 ## 3. Automate — do the AI thing
 
@@ -82,9 +88,10 @@ not been granted yet, it suggests instead of acting.
   front of every step.
 - **The boundary that remains.** Irreversible external actions — money
   leaving, sending as the user to someone new, sharing data with a new
-  party — still get explicit consent. Autonomy applies inside the trust
-  envelope the user has granted (see #2); the envelope grows, the
-  consent moments shrink.
+  party — still get explicit consent (the approval pipeline in
+  `crates/ironclaw_approvals` is where these gates are enforced).
+  Autonomy applies inside the trust envelope the user has granted
+  (see #2); the envelope grows, the consent moments shrink.
 
 ## 4. Channel-first — meet the user where they already are
 
@@ -102,7 +109,12 @@ the destination.
   activity feed and run detail, not through information held hostage.
 - **Every surface stands alone.** A message in Slack or email carries the
   finding, the action taken, and the escape hatch by itself. No "open the
-  app to see more" as a default.
+  app to see more" as a default. Standing alone is about completeness,
+  not volume: payloads go only to channels the user connected and
+  authorized, carry the minimum data the finding needs (external
+  channels are untrusted transport — summarize, don't dump), and any
+  privileged action linked from the message still authenticates on our
+  side.
 
 ## 5. Private and secure — enterprise-grade, by construction
 

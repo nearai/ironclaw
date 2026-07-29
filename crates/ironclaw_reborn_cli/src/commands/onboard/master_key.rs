@@ -51,7 +51,6 @@ impl MasterKeyProvisionOutcome {
 /// `serve`, which only reads keys, never writes the keychain), so the
 /// realistic worst case is a wrongly-regenerated key from running `onboard`
 /// twice at once by hand — recoverable by re-entering one API key.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn provision_master_key(
     boot: &RebornBootConfig,
 ) -> anyhow::Result<MasterKeyProvisionOutcome> {
@@ -80,13 +79,4 @@ pub(crate) fn provision_master_key(
             }
         })
     })
-}
-
-/// No storage backend, no secret store: the resolver lives behind the same
-/// `libsql`/`postgres` feature gate in `ironclaw_reborn_composition`.
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) fn provision_master_key(
-    _boot: &RebornBootConfig,
-) -> anyhow::Result<MasterKeyProvisionOutcome> {
-    Ok(MasterKeyProvisionOutcome::Suppressed)
 }

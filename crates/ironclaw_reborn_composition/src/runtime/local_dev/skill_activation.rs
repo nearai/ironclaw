@@ -1,10 +1,11 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, Resolution};
+use ironclaw_first_party_extension_ports::DEFAULT_MAX_ACTIVE_SKILLS;
+use ironclaw_host_api::{FailureKind, InvocationId, Resolution};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, ConcurrencyHint, resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, ConcurrencyHint, resolution,
 };
 
 use crate::runtime::{
@@ -17,9 +18,7 @@ use crate::runtime::{
 
 pub(crate) const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
-const SKILL_ACTIVATE_DESCRIPTION: &str =
-    "Activate one or more listed Reborn skills for the current loop run";
-const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
+const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use only exact listed names. Choose the smallest relevant set, with at most four active skills total per run; large skills may reduce that number. Ambiguous names fail without loading a skill.";
 
 pub(super) fn skill_activation_capability(
     skill_activation_source: Arc<ComposedSelectableSkillContextSource>,
@@ -126,8 +125,8 @@ fn skill_activate_input_schema() -> serde_json::Value {
                 "type": "array",
                 "items": { "type": "string" },
                 "minItems": 1,
-                "maxItems": MAX_SKILL_ACTIVATE_NAMES,
-                "description": "Skill names from skill_list to activate for this run"
+                "maxItems": DEFAULT_MAX_ACTIVE_SKILLS,
+                "description": "Exact skill names copied from the available-skills list; at most four total per run"
             }
         },
         "required": ["names"],
@@ -168,10 +167,12 @@ fn parse_skill_activate_names(
             "skill_activate requires at least one skill name",
         ));
     }
-    if parsed.len() > MAX_SKILL_ACTIVATE_NAMES {
+    if parsed.len() > DEFAULT_MAX_ACTIVE_SKILLS {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
-            "skill_activate accepts at most 16 skill names",
+            format!(
+                "skill_activate accepts at most {DEFAULT_MAX_ACTIVE_SKILLS} skill names per call"
+            ),
         ));
     }
     Ok(parsed)
@@ -228,13 +229,16 @@ fn skill_activation_selection_outcome(
 ) -> Result<Resolution, AgentLoopHostError> {
     use ironclaw_first_party_extension_ports::SkillActivationSelectionError as SelectionError;
     match error {
+        // A resource limit, not an encoding fault — `Resource` keeps the
+        // precise kind for downstream fate/wire/UI projections (both kinds
+        // are ModelVisible, so recoverability is unchanged).
         SelectionError::ContextBudgetExceeded => Ok(resolution::failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::Resource,
             "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
             None,
         )),
         SelectionError::AmbiguousSkill { .. } => Ok(resolution::failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "ambiguous skill name; specify a single unique skill to activate".to_string(),
             None,
         )),
@@ -273,7 +277,7 @@ mod tests {
     #[test]
     fn parse_skill_activate_names_rejects_too_many_names() {
         let error = parse_skill_activate_names(&serde_json::json!({
-            "names": vec!["skill"; MAX_SKILL_ACTIVATE_NAMES + 1]
+            "names": vec!["skill"; DEFAULT_MAX_ACTIVE_SKILLS + 1]
         }))
         .expect_err("oversized names list should fail");
 
@@ -287,7 +291,8 @@ mod tests {
         )
         .expect("budget-exceeded must be a model-visible failure, not a terminal host error");
 
-        assert_recoverable_invalid_input(&outcome);
+        // A budget limit is a resource failure, not an input-encoding fault.
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Resource);
     }
 
     #[test]
@@ -300,19 +305,20 @@ mod tests {
         )
         .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
 
-        assert_recoverable_invalid_input(&outcome);
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
     }
 
     /// A recoverable model-visible failure is `Resolution::Done` carrying a
-    /// `RecoverableFailure(InvalidInput)` verdict (the §5.3 collapse of the old
-    /// `CapabilityOutcome::Failed { InvalidInput }`).
-    fn assert_recoverable_invalid_input(resolution: &ironclaw_host_api::Resolution) {
+    /// `RecoverableFailure` verdict with the per-case precise kind (the §5.3
+    /// collapse of the old `CapabilityOutcome::Failed { .. }`).
+    fn assert_recoverable_failure(
+        resolution: &ironclaw_host_api::Resolution,
+        expected_kind: ironclaw_host_api::FailureKind,
+    ) {
         match resolution {
             ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
                 outcome.verdict,
-                ironclaw_host_api::ToolVerdict::recoverable_failure(
-                    ironclaw_host_api::FailureKind::InvalidInput
-                )
+                ironclaw_host_api::ToolVerdict::recoverable_failure(expected_kind)
             ),
             other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }

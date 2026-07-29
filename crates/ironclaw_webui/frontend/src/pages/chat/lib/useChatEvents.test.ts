@@ -10,8 +10,9 @@ import {
   toolCardFromPreview,
 } from "./history-messages";
 import {
-  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  CONNECTION_LOST_RUN_FAILURE_KEY,
   failureMessageForRunStatus,
+  failureMessageForStreamError,
 } from "./failureMessages";
 import { CONNECTION_STATUS } from "./connection-status";
 import { gateFromProjectionGate } from "./gates";
@@ -33,6 +34,27 @@ import {
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
 import { groupMessages } from "./message-groups";
+
+const ENGLISH_FAILURE_COPY = {
+  "chat.failure.connectionLost":
+    "Connection to the server was lost. Please reconnect and try again.",
+  "chat.failure.run": "The run failed before producing a reply.",
+  "chat.failure.runCategory": "The run failed: {detail}.",
+  "chat.failure.recoveryRequired":
+    "The run is awaiting recovery — backend reported `recovery_required`.",
+  "chat.failure.stream": "The chat stream failed: {detail}.",
+  "chat.failure.streamRetryable":
+    "The chat stream hit a retryable error: {detail}.",
+};
+
+function testTranslator(copy = ENGLISH_FAILURE_COPY) {
+  return (key, params = {}) =>
+    (copy[key] || key).replace(/\{(\w+)\}/g, (match, name) =>
+      Object.hasOwn(params, name) ? String(params[name]) : match,
+    );
+}
+
+const t = testTranslator();
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -67,6 +89,7 @@ function createUseChatEventsHarness({
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
   onStreamError = () => {},
+  t: selectedTranslator = t,
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -129,6 +152,7 @@ function createUseChatEventsHarness({
     connectionContextForRunFailure,
     onStreamError,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
+    t: selectedTranslator,
   });
 
   return {
@@ -162,6 +186,13 @@ function createUseChatEventsHarness({
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
+
+test("useChatEvents: rejects an invalid translator at the injection boundary", () => {
+  assert.throws(
+    () => createUseChatEventsHarness({ t: null }),
+    /useChatEvents requires a translation function/,
+  );
+});
 
 test("useChatEvents: projection activity preserves reasoning/tool chronology", () => {
   const harness = createUseChatEventsHarness();
@@ -1168,27 +1199,27 @@ test("useChatEvents: approval gate creates activity from stable invocation id be
   assert.equal(harness.messages[0].gateActivity, false);
 });
 
-test("useChatEvents: an extension activation preview becomes a tool card (pairing rides the gate rail)", () => {
+test("useChatEvents: an extension install preview becomes a tool card (pairing rides the gate rail)", () => {
   const harness = createUseChatEventsHarness();
 
   harness.handleEvent({
     type: "capability_display_preview",
     frame: {
       preview: {
-        invocation_id: "invocation-extension-activate",
+        invocation_id: "invocation-extension-install",
         turn_run_id: "run-1",
         thread_id: "thread-1",
-        capability_id: "builtin.extension_activate",
+        capability_id: "builtin.extension_install",
         status: "completed",
-        title: "extension_activate",
+        title: "extension_install",
         output_preview: JSON.stringify({
           package_ref: { kind: "extension", id: "telegram" },
           phase: "active",
           message:
             "Telegram is installed as an external channel, but the user's account still needs channel-specific connection or pairing. Tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat.",
           payload: {
-            kind: "extension_activate",
-            activated: true,
+            kind: "extension_install",
+            installed: true,
             visible_capability_ids: [],
           },
         }),
@@ -1196,12 +1227,12 @@ test("useChatEvents: an extension activation preview becomes a tool card (pairin
     },
   });
 
-  // The event stream only materializes the activation tool card. A connectable
+  // The event stream only materializes the install tool card. A connectable
   // channel that needs pairing now blocks the turn as a standard auth gate
   // (manual_token + connection), so the pairing card is driven by pendingGate —
   // there is no timeline-derived panel for this preview to open.
   assert.equal(harness.messages.length, 1);
-  assert.equal(harness.messages[0].toolName, "extension_activate");
+  assert.equal(harness.messages[0].toolName, "extension_install");
 });
 
 test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {
@@ -1510,6 +1541,45 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   );
 });
 
+test("useChatEvents: restored run and stream failures use the selected language", () => {
+  const zh = testTranslator({
+    "chat.failure.run": "运行在生成回复前失败。",
+    "chat.failure.stream": "聊天流失败：{detail}。",
+  });
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus,
+    failureMessageForStreamError,
+    t: zh,
+  });
+
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-restored-failure",
+              status: "failed",
+            },
+          },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: false,
+    },
+  });
+
+  assert.equal(harness.messages[0].content, "运行在生成回复前失败。");
+  assert.equal(harness.messages[1].content, "聊天流失败：Service unavailable。");
+});
+
 test("useChatEvents: interrupted driver_unavailable projection shows connection error", () => {
   const runId = "run-disconnected-driver";
   const contextRunIds = [];
@@ -1552,7 +1622,10 @@ test("useChatEvents: interrupted driver_unavailable projection shows connection 
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, `err-${runId}`);
   assert.equal(harness.messages[0].role, "error");
-  assert.equal(harness.messages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    harness.messages[0].content,
+    t(CONNECTION_LOST_RUN_FAILURE_KEY),
+  );
   assert.deepEqual(contextRunIds, [runId]);
 });
 

@@ -11,7 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
-mod profile_set;
+mod outbound_delivery;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -34,9 +34,9 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling, ResourceEstimate,
-    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
-    RuntimeHttpEgressResponse, TrustClass, VirtualPath,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ProcessBackendKind, RequestedTrustClass,
+    ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -44,19 +44,28 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
+pub(crate) use self::schemas::{
+    resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+};
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
+pub use ironclaw_memory::{
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+};
 pub use json::JSON_CAPABILITY_ID;
 pub use memory::{
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID,
+    MemoryToolProfile, NativeMemoryToolHandler, ensure_memory_mount, finish_memory_tool_result,
+    invocation_for_request as memory_invocation_for_request, map_memory_service_error,
+    memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
+    register_native_memory_tools,
 };
-pub use profile_set::PROFILE_SET_CAPABILITY_ID;
+pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
@@ -73,6 +82,40 @@ pub use trigger_management::{
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
+
+/// Provider id of the always-on native memory extension. It rides the same
+/// host-bundled, always-on first-party lane as `builtin` (not the
+/// catalog/lifecycle extension lane), so its model-facing memory tools are
+/// unconditionally available — preserving the former `builtin.memory_*`
+/// behavior. Provider-swapping stays on the compose-time memory binding.
+///
+/// Aliases the canonical id owned by [`crate::memory_native_extension`] (which
+/// also owns the bundled manifests + the registrable package builders), so the
+/// surface/trust seams here and the binding layer share one identity string.
+pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str =
+    crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;
+
+/// The registry-lane provider allowlist once activated extension dispatch
+/// resolves from the extension host's active snapshot: only the always-on
+/// registry-lane packages — the synthetic built-in package and the BOUND
+/// memory provider's package — keep resolving through the registry. None of
+/// them is ever published in the extension host's active snapshot, so
+/// omitting one here makes its capabilities unresolvable
+/// (`UnknownCapability`) in every composition that installs an extension
+/// host. Every bundled memory provider id is listed (only the bound one has
+/// a registered package, so the others stay inert).
+pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
+    let mut allowlist = std::collections::BTreeSet::new();
+    if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(builtin);
+    }
+    for provider in crate::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS {
+        if let Ok(memory) = ExtensionId::new(*provider) {
+            allowlist.insert(memory);
+        }
+    }
+    allowlist
+}
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
 pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
@@ -167,6 +210,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 service: "builtin".to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             capabilities: {
                 let mut capabilities = vec![
                     echo::manifest()?,
@@ -182,9 +226,8 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
-                    profile_set::manifest()?,
+                    outbound_delivery::manifest()?,
                 ];
-                capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities.extend(trigger_management::manifests()?);
@@ -320,6 +363,15 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
+/// Replace the fail-closed default for the current-run outbound route with the
+/// product-owned routing service selected by composition.
+pub fn register_outbound_delivery_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    router: Arc<dyn ironclaw_outbound::RouteCurrentRunFinalReply>,
+) -> Result<(), HostApiError> {
+    outbound_delivery::insert_handler(registry, router)
+}
+
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -385,22 +437,6 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
-        .with_handler(
-            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(
-            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(
-            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(
-            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
-            handler.clone(),
-        )
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
@@ -431,11 +467,23 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
     );
     registry.insert_handler(
         CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
-        handler.clone(),
+        handler,
     );
-    registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
+    outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
+}
+
+struct UnavailableRunFinalReplyRouter;
+
+#[async_trait]
+impl ironclaw_outbound::RouteCurrentRunFinalReply for UnavailableRunFinalReplyRouter {
+    async fn route_current_run_final_reply(
+        &self,
+        _request: ironclaw_outbound::RouteCurrentRunFinalReplyRequest,
+    ) -> Result<(), ironclaw_outbound::RouteCurrentRunFinalReplyError> {
+        Err(ironclaw_outbound::RouteCurrentRunFinalReplyError::Unavailable)
+    }
 }
 
 fn first_party_capability_manifest(
@@ -448,7 +496,6 @@ fn first_party_capability_manifest(
     let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
-        implements: Vec::new(),
         description: description.to_string(),
         effects,
         default_permission,
@@ -456,21 +503,36 @@ fn first_party_capability_manifest(
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
-        ))?,
+        ))?),
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile,
+        origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
     })
+}
+
+fn first_party_origin_gate_matrix(id: &str) -> OriginGateMatrix {
+    let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+    if matches!(
+        id,
+        SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID
+    ) {
+        matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    matrix
 }
 
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
-    memory_state: memory::MemoryCapabilityState,
     post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
 }
 
@@ -545,23 +607,6 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
                 (result.output, None)
-            }
-            MEMORY_SEARCH_CAPABILITY_ID
-            | MEMORY_WRITE_CAPABILITY_ID
-            | MEMORY_READ_CAPABILITY_ID
-            | MEMORY_TREE_CAPABILITY_ID => {
-                let mut result = memory::dispatch(&self.memory_state, &request).await?;
-                result.usage.output_bytes =
-                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
-                return Ok(result);
-            }
-            PROFILE_SET_CAPABILITY_ID => {
-                let mut result = profile_set::dispatch(&self.memory_state, &request).await?;
-                result.usage.output_bytes =
-                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
-                result.usage.wall_clock_ms =
-                    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-                return Ok(result);
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
@@ -712,9 +757,19 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
         .strip_prefix("builtin.")
         .unwrap_or(request.capability_id.as_str())
         .replace('.', "-");
-    let Some(schema) =
-        resolve_builtin_input_schema_ref(&format!("schemas/builtin/{schema_name}.input.v1.json"))
-    else {
+    let schema =
+        resolve_builtin_input_schema_ref(&format!("schemas/builtin/{schema_name}.input.v1.json"));
+    normalize_optional_null_sentinels_against_schema(&mut request.input, schema.as_ref());
+}
+
+/// Schema-driven core of the null-sentinel normalization, shared with the
+/// memory tool handlers (whose schemas come from the bound package's
+/// manifest): drop declared-optional fields whose value is `null`/"null".
+pub(super) fn normalize_optional_null_sentinels_against_schema(
+    input: &mut serde_json::Value,
+    schema: Option<&serde_json::Value>,
+) {
+    let Some(schema) = schema else {
         return;
     };
     let mut required: std::collections::HashSet<String> = schema
@@ -743,7 +798,7 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
         .and_then(|value| value.as_object())
         .map(|properties| properties.keys().map(String::as_str).collect())
         .unwrap_or_default();
-    let Some(object) = request.input.as_object_mut() else {
+    let Some(object) = input.as_object_mut() else {
         return;
     };
     object.retain(|key, value| {

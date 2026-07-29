@@ -86,7 +86,7 @@ Three parts, each currently assuming "standard OAuth" that Slack violates:
   `IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID/SECRET/OAUTH_REDIRECT_URI`; wire via
   a `with_slack_personal_oauth_backend(client)` builder → provider backend config.
 - Single-app note: operator points these at the same Slack app as the bot token;
-  redirect `http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback`.
+  redirect `http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback`.
 
 ### 7. Manifest `crates/ironclaw_first_party_extensions/assets/slack_user/manifest.toml`
 - Each capability credential `source`: keep `provider = "slack_personal"`, add
@@ -100,7 +100,7 @@ Three parts, each currently assuming "standard OAuth" that Slack violates:
 
 ## Live-test checklist (operator)
 1. In the Slack app: add the User Token Scopes above; add redirect
-   `.../product-auth/oauth/slack_personal/callback`.
+   `.../product-auth/oauth/slack/callback`.
 2. Export `IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID/SECRET/OAUTH_REDIRECT_URI`.
 3. Rebuild with `--features webui-v2-beta,slack-v2-host-beta`; open Extensions →
    "Slack (personal)" → Connect → authorize → confirm `search_messages` works.
@@ -119,8 +119,7 @@ for Slack.
   direct-handler tests (scope enforcement, callback claim/PKCE, identity
   binding), the `slack_user` per-user runtime dispatch proof, and the JS
   behavioral suites now running in CI.
-- **Generic proof-code redeem route.** The WebUI keeps a generic proof-code
-  panel + `PAIRING_REDEEM_PATH` client as scaffolding, but no Reborn backend
-  mounts that route after the Slack-only redeem was removed. The first
-  non-Slack inbound channel must mount a generic redeem route (and emit its
-  connect requirement) in one change.
+- **Generic proof-code redeem route (retired).** The unmounted WebUI scaffolding
+  was removed. Shipped channel connection strategies must now be fully
+  implemented and manifest-driven; host-generated pairing uses the supported
+  code/deep-link/QR flow.

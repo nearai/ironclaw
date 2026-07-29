@@ -15,9 +15,9 @@
 //! - **libSQL** legs run unconditionally under `integration` — the backend uses
 //!   an embedded temp-file db with a shared `Database` handle across "hosts",
 //!   so real concurrent multi-host behaviour is exercised with no server.
-//! - **Postgres** legs additionally require `--features postgres` AND a
-//!   reachable server via `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`;
-//!   skipped (passing) otherwise.
+//! - **Postgres** legs additionally require a reachable server via
+//!   `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`; skipped (passing)
+//!   otherwise.
 //!
 //! Scenarios (all asserted identical-in-spirit across both durable backends):
 //! 1. N concurrent writers across 2 hosts — no count desync, exactly-once.
@@ -612,7 +612,6 @@ async fn libsql_clock_skew_follows_caller_clock() {
 // Postgres drivers (compiled under `postgres`, run with a DB URL)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "postgres")]
 mod postgres_cluster {
     use super::*;
     use deadpool_postgres::Pool;

@@ -741,10 +741,9 @@ fn provider_refresh_request_debug_redacts_secret_handle() {
 /// A14 · InMemory fake fidelity. The production `invalid_grant` coverage drives
 /// `ProviderBackedCredentialAccountService`; the fake's OWN `refresh_account`
 /// impl (used wherever `InMemoryAuthProductServices` stands in as the whole
-/// `CredentialAccountService`) historically left the account status unchanged
-/// on `InvalidGrant`, propagating the raw error and diverging from production.
-/// This pins the corrected behavior: the fake marks the account `Revoked`
-/// (reauthorize-required), exactly like
+/// `CredentialAccountService`) previously left the account status unchanged on
+/// `InvalidGrant` — propagating the raw error and diverging from production. It
+/// must now mark the account `Revoked` (reauthorize-required), exactly like
 /// `ProviderBackedCredentialAccountService::refresh_account`.
 #[tokio::test]
 async fn fake_refresh_account_marks_account_revoked_on_invalid_grant() {

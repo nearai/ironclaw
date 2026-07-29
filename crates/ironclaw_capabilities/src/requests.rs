@@ -1,49 +1,13 @@
-use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatchResult, CapabilityId, ExecutionContext, ResourceEstimate,
-};
+use ironclaw_host_api::CapabilityDispatchResult;
 use ironclaw_processes::ProcessRecord;
-use serde_json::Value;
-
-pub struct CapabilityInvocationRequest {
-    pub context: ExecutionContext,
-    pub capability_id: CapabilityId,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-}
-
-/// Caller-facing approved capability resume request.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapabilityResumeRequest {
-    pub context: ExecutionContext,
-    pub approval_request_id: ApprovalRequestId,
-    pub capability_id: CapabilityId,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-}
-
-/// Caller-facing auth-resume capability request.
-///
-/// Used when an invocation was previously blocked at an auth gate and the
-/// credential has now been supplied.  When `approval_request_id` is `Some`
-/// the invocation also passed an earlier approval gate whose fingerprinted
-/// lease must be claimed before dispatch.  When `None` no lease step is
-/// needed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapabilityAuthResumeRequest {
-    pub context: ExecutionContext,
-    pub capability_id: CapabilityId,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-    pub approval_request_id: Option<ApprovalRequestId>,
-}
 
 /// Caller-facing capability spawn request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilitySpawnRequest {
-    pub context: ExecutionContext,
-    pub capability_id: CapabilityId,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
+    pub context: ironclaw_host_api::ExecutionContext,
+    pub capability_id: ironclaw_host_api::CapabilityId,
+    pub estimate: ironclaw_host_api::ResourceEstimate,
+    pub input: serde_json::Value,
 }
 
 /// Caller-facing capability invocation result.

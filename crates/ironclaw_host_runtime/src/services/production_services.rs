@@ -2,20 +2,20 @@ use std::sync::Arc;
 
 use super::{
     DefaultHostRuntime, DefaultTurnCoordinator, HostRuntimeServices, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionEventStoreWiringError,
-    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
-    RebornEventStoreConfig, RebornProfile, ResourceGovernor, RootFilesystem, RuntimeKind,
-    TurnRunTransitionPort, TurnStateStore, component_name, local_only_runtime_policy_reason,
-    production_wiring_report, runtime_http_egress_is_configured,
+    ProcessResultStorePort, ProcessStorePort, ProductionComponentType,
+    ProductionEventStoreWiringError, ProductionImplementationReadiness, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, RebornEventStoreConfig, RebornProfile, ResourceGovernor,
+    RootFilesystem, RuntimeKind, TurnRunTransitionPort, TurnStateStore, component_name,
+    local_only_runtime_policy_reason, production_wiring_report, runtime_http_egress_is_configured,
 };
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     /// Validates that this service graph is explicitly wired for production
     /// instead of relying on local/test defaults. This is a guardrail for
@@ -93,7 +93,7 @@ where
         );
         self.push_missing(
             &mut issues,
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             self.secret_store.is_some(),
         );
         if config.require_credential_broker {
@@ -162,7 +162,7 @@ where
                 | RuntimeKind::Mcp
                 | RuntimeKind::Wasm
                 | RuntimeKind::FirstParty => {}
-                RuntimeKind::System => self.push_issue(
+                RuntimeKind::System | RuntimeKind::Sandbox => self.push_issue(
                     &mut issues,
                     ProductionWiringComponent::RuntimeBackend,
                     ProductionWiringIssueKind::UnsupportedRequirement,
@@ -248,12 +248,12 @@ where
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::ProcessStore,
+            ProductionWiringComponent::ProcessStorePort,
             Some(self.component_types.process_store),
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::ProcessResultStore,
+            ProductionWiringComponent::ProcessResultStorePort,
             Some(self.component_types.process_result_store),
         );
         self.push_local_only(
@@ -298,7 +298,7 @@ where
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             self.component_types.secret_store,
         );
         self.push_local_only(
@@ -390,7 +390,7 @@ where
         });
     }
 
-    /// Validates this graph and then builds the upper facade for production
+    /// Validates this graph and then builds the upper service for production
     /// callers. This consumes the service graph so callers cannot mutate shared
     /// runtime-adapter handoff slots after validation.
     pub fn host_runtime_for_production(
@@ -524,7 +524,7 @@ where
     }
 
     /// Builds and attaches the configured Reborn durable event/audit stores,
-    /// validates production wiring, and returns the host runtime facade.
+    /// validates production wiring, and returns the host runtime service.
     pub async fn host_runtime_for_production_with_event_store_config(
         self,
         event_store_config: RebornEventStoreConfig,

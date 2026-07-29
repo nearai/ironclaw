@@ -1,0 +1,10 @@
+{
+    "update_id": 200,
+    "message": {
+        "message_id": 12,
+        "date": 1700000000,
+        "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+        "chat": {"id": -42, "type": "supergroup"},
+        "text": "casual chatter not directed at the bot"
+    }
+}

@@ -14,9 +14,9 @@ This slice proves the first Reborn host path is runnable:
 DiskFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
--> RuntimeDispatcher receives already-authorized dispatch requests
--> RuntimeDispatcher routes dispatch by RuntimeKind through registered adapters
--> dispatcher example adapters execute JSON echo capabilities
+-> RuntimeDispatcher receives sealed `Authorized` witnesses
+-> RuntimeDispatcher resolves prebound adapters and validates the sealed `RuntimeLane`
+-> dispatcher test bindings execute JSON echo capabilities
 -> HostRuntimeServices examples wrap real ScriptRuntime backends for end-to-end capability/process demos
 -> InMemoryResourceGovernor reserves and reconciles all invocations
 -> JsonlEventSink records requested/selected/succeeded events under tenant/user/agent-scoped /engine event paths
@@ -30,41 +30,39 @@ It is intentionally not a product agent loop, gateway, TUI, secret flow, or full
 ## 2. Run it
 
 ```bash
-cargo run -p ironclaw_dispatcher --example reborn_echo
+cargo test -p ironclaw_dispatcher --test dispatch_contract --test event_dispatch_contract
 ```
 
 Expected output shape:
 
 ```text
-reborn_dispatcher_adapter_slice=ok
-discovered_extensions=3
-dispatch=echo-wasm.say runtime=wasm output={"message":"hello wasm"} reservation_status=Reconciled
-dispatch=echo-script.say runtime=script output={"message":"hello script"} reservation_status=Reconciled
-dispatch=echo-mcp.say runtime=mcp output={"message":"hello mcp"} reservation_status=Reconciled
-durable_event_path=VirtualPath("/engine/tenants/tenant1/users/user1/agents/_none/events/runtime/reborn-demo.jsonl")
-events=9
-event[0]=dispatch_requested capability=echo-wasm.say runtime=none error=none
-event[1]=runtime_selected capability=echo-wasm.say runtime=wasm error=none
-event[2]=dispatch_succeeded capability=echo-wasm.say runtime=wasm error=none
-event[3]=dispatch_requested capability=echo-script.say runtime=none error=none
-event[4]=runtime_selected capability=echo-script.say runtime=script error=none
-event[5]=dispatch_succeeded capability=echo-script.say runtime=script error=none
-event[6]=dispatch_requested capability=echo-mcp.say runtime=none error=none
-event[7]=runtime_selected capability=echo-mcp.say runtime=mcp error=none
-event[8]=dispatch_succeeded capability=echo-mcp.say runtime=mcp error=none
+dispatcher contract tests pass, including dispatch_requested ->
+runtime_selected -> dispatch_succeeded event ordering for resolved bindings.
 ```
 
-The default dispatcher example uses in-crate echo adapters so `ironclaw_dispatcher` can demonstrate routing, resource lifecycle, and event emission without depending on concrete WASM, Script, or MCP runtime crates. Real runtime wiring now lives in `ironclaw_host_runtime`, whose examples use `HostRuntimeServices` to adapt configured runtimes into dispatcher adapters and then drive capability/process workflows without Docker by default.
+The dispatcher contract tests use in-crate echo bindings so `ironclaw_dispatcher`
+can demonstrate routing, resource lifecycle, and event emission without
+depending on concrete WASM, Script, or MCP runtime crates. Real runtime wiring
+now lives in `ironclaw_host_runtime`, which adapts configured runtimes into
+dispatcher bindings and then drives capability/process workflows without Docker
+by default.
 
 ---
 
 ## 3. What this validates
 
-The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
+Implementation evidence: `crates/ironclaw_dispatcher/src/lib.rs` implements the
+sealed `RuntimeDispatcher::dispatch_json(Authorized)` path, and
+`crates/ironclaw_dispatcher/tests/dispatch_contract.rs` plus
+`crates/ironclaw_dispatcher/tests/event_dispatch_contract.rs` validate the
+dispatcher contracts that replaced the retired vertical-slice test.
+
+The dispatcher contract tests validate:
 
 - extension manifests are read from `DiskFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages
-- dispatcher crate tests exercise already-authorized `CapabilityDispatchRequest` values directly
+- dispatcher receives already-authorized sealed `Authorized` witnesses, resolves
+  prebound adapters, and validates their sealed `RuntimeLane`
 - higher-level caller workflow stays out of dispatcher crate dev surfaces
 - WASM dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
 - Script dispatch goes through `RuntimeDispatcher` and a registered runtime adapter

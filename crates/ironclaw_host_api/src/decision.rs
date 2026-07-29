@@ -13,8 +13,7 @@ use std::collections::HashSet;
 use crate::ApprovalRequest;
 use crate::{
     CapabilityId, ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling,
-    ResourceReservationId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    SecretHandle,
+    ResourceReservationId, RuntimeCredentialAccountSetup, SecretHandle, VendorId,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,7 +57,7 @@ pub enum Obligation {
     },
     InjectCredentialAccountOnce {
         handle: SecretHandle,
-        provider: RuntimeCredentialAccountProviderId,
+        provider: VendorId,
         #[serde(default)]
         setup: RuntimeCredentialAccountSetup,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -104,7 +103,7 @@ impl Obligation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialAuthRequirement {
-    pub provider: RuntimeCredentialAccountProviderId,
+    pub provider: VendorId,
     #[serde(default)]
     pub setup: RuntimeCredentialAccountSetup,
     pub requester_extension: ExtensionId,
@@ -280,7 +279,7 @@ mod tests {
     fn github_credential_obligation() -> Obligation {
         Obligation::InjectCredentialAccountOnce {
             handle: SecretHandle::new("github_pat").unwrap(),
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: vec!["repo".to_string()],
             requester_extension: ExtensionId::new("github").unwrap(),
@@ -294,10 +293,7 @@ mod tests {
             .credential_auth_requirement()
             .expect("InjectCredentialAccountOnce must produce Some");
 
-        assert_eq!(
-            req.provider,
-            RuntimeCredentialAccountProviderId::new("github").unwrap()
-        );
+        assert_eq!(req.provider, VendorId::new("github").unwrap());
         assert_eq!(req.setup, RuntimeCredentialAccountSetup::ManualToken);
         assert_eq!(req.requester_extension, ExtensionId::new("github").unwrap());
         assert_eq!(req.provider_scopes, vec!["repo".to_string()]);

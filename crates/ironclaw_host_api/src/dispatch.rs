@@ -12,12 +12,13 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
-    ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, SecretHandle, UserId,
+    Authorized, CapabilityId, ExtensionId, HostRemediation, InvocationOrigin, MountView,
+    ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle, UserId,
 };
 
-/// Request for one already-authorized declared capability dispatch.
+/// Internal adapter request produced after a sealed [`Authorized`] witness is
+/// consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
@@ -26,6 +27,9 @@ pub struct CapabilityDispatchRequest {
     /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
     /// `None` for non-loop callers.
     pub run_id: Option<RunId>,
+    /// Authoritative invocation origin preserved from the sealed
+    /// [`Authorized`] witness for capability-boundary policy.
+    pub origin: InvocationOrigin,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -181,6 +185,10 @@ pub enum RuntimeDispatchErrorKind {
     Manifest,
     Memory,
     MethodMissing,
+    /// Transport-level network failure (unreachable, reset, timeout) —
+    /// distinct from [`NetworkDenied`](Self::NetworkDenied), which is an egress
+    /// policy denial. Transport faults retry; policy denials never do.
+    Network,
     NetworkDenied,
     OperationFailed,
     OutputDecode,
@@ -199,6 +207,63 @@ pub enum RuntimeDispatchErrorKind {
 /// they reject arbitrary summaries mentioning raw tool input.
 pub const INPUT_ENCODE_HUMAN_SUMMARY: &str = "the tool input could not be encoded";
 
+/// Lossless injection into the unified [`FailureKind`](crate::FailureKind):
+/// every precise mechanism name survives 1:1 — this replaces the retired
+/// 22→12 coarsening fold that destroyed 17 names (and with them, every
+/// remediation hint) on the way to the loop. The single non-identity edge is
+/// `Unknown` → `Unclassified`: `Unknown` is the dispatch lane's redaction
+/// bucket for failures it cannot classify, and the unified vocabulary's
+/// explicit `Unclassified` sink surfaces those model-visibly without retry —
+/// an unclassifiable failure may be permanent, so routing it to the retryable
+/// `Internal` bucket (the retired fold's mapping) burned retry budget on
+/// calls that could never succeed.
+impl From<RuntimeDispatchErrorKind> for crate::FailureKind {
+    fn from(kind: RuntimeDispatchErrorKind) -> Self {
+        match kind {
+            RuntimeDispatchErrorKind::Backend => Self::Backend,
+            RuntimeDispatchErrorKind::Client => Self::Client,
+            RuntimeDispatchErrorKind::Executor => Self::Executor,
+            RuntimeDispatchErrorKind::ExitFailure => Self::ExitFailure,
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch => Self::ExtensionRuntimeMismatch,
+            RuntimeDispatchErrorKind::FilesystemDenied => Self::FilesystemDenied,
+            RuntimeDispatchErrorKind::Guest => Self::Guest,
+            RuntimeDispatchErrorKind::InputEncode => Self::InputEncode,
+            RuntimeDispatchErrorKind::InvalidResult => Self::InvalidResult,
+            RuntimeDispatchErrorKind::Manifest => Self::Manifest,
+            RuntimeDispatchErrorKind::Memory => Self::Memory,
+            RuntimeDispatchErrorKind::MethodMissing => Self::MethodMissing,
+            RuntimeDispatchErrorKind::Network => Self::Network,
+            RuntimeDispatchErrorKind::NetworkDenied => Self::NetworkDenied,
+            RuntimeDispatchErrorKind::OperationFailed => Self::OperationFailed,
+            RuntimeDispatchErrorKind::OutputDecode => Self::OutputDecode,
+            RuntimeDispatchErrorKind::OutputTooLarge => Self::OutputTooLarge,
+            RuntimeDispatchErrorKind::PolicyDenied => Self::PolicyDenied,
+            RuntimeDispatchErrorKind::Resource => Self::Resource,
+            RuntimeDispatchErrorKind::SecretDenied => Self::SecretDenied,
+            RuntimeDispatchErrorKind::UndeclaredCapability => Self::UndeclaredCapability,
+            RuntimeDispatchErrorKind::UnsupportedRunner => Self::UnsupportedRunner,
+            RuntimeDispatchErrorKind::Unknown => Self::Unclassified,
+        }
+    }
+}
+
+/// Lossless injection for the dispatch-control-plane siblings — each has its
+/// own named variant in the unified vocabulary (they were previously coarsened
+/// into `InvalidOutput`/`MissingRuntime`/`Authorization`/`Backend`).
+impl From<DispatchFailureKind> for crate::FailureKind {
+    fn from(kind: DispatchFailureKind) -> Self {
+        match kind {
+            DispatchFailureKind::UnknownCapability => Self::UnknownCapability,
+            DispatchFailureKind::UnknownProvider => Self::UnknownProvider,
+            DispatchFailureKind::RuntimeMismatch => Self::RuntimeMismatch,
+            DispatchFailureKind::MissingRuntimeBackend => Self::MissingRuntimeBackend,
+            DispatchFailureKind::UnsupportedRuntime => Self::UnsupportedRunner,
+            DispatchFailureKind::AuthRequired => Self::AuthRequired,
+            DispatchFailureKind::Runtime(kind) => kind.into(),
+        }
+    }
+}
+
 impl RuntimeDispatchErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -214,6 +279,7 @@ impl RuntimeDispatchErrorKind {
             Self::Manifest => "Manifest",
             Self::Memory => "Memory",
             Self::MethodMissing => "MethodMissing",
+            Self::Network => "Network",
             Self::NetworkDenied => "NetworkDenied",
             Self::OperationFailed => "OperationFailed",
             Self::OutputDecode => "OutputDecode",
@@ -246,6 +312,7 @@ impl RuntimeDispatchErrorKind {
             Self::Manifest => "the tool manifest is invalid",
             Self::Memory => "the tool exceeded its memory limit",
             Self::MethodMissing => "the tool method is not available",
+            Self::Network => "a network error interrupted the tool",
             Self::NetworkDenied => "the tool was denied network access",
             Self::OperationFailed => "the tool operation failed",
             Self::OutputDecode => "the tool output could not be decoded",
@@ -274,6 +341,7 @@ impl RuntimeDispatchErrorKind {
             Self::Manifest => "manifest",
             Self::Memory => "memory",
             Self::MethodMissing => "method_missing",
+            Self::Network => "network",
             Self::NetworkDenied => "network_denied",
             Self::OperationFailed => "operation_failed",
             Self::OutputDecode => "output_decode",
@@ -367,6 +435,12 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    #[error("capability {capability} has no sealed dispatch authorization")]
+    MissingAuthorization { capability: CapabilityId },
+    #[error("authorized dispatch witness for capability {capability} has expired")]
+    AuthorizationExpired { capability: CapabilityId },
+    #[error("process dispatch is missing durable authorization for capability {capability}")]
+    MissingProcessAuthorization { capability: CapabilityId },
     /// Authentication is required to dispatch this capability.
     ///
     /// `required_secrets` names the credentials the caller must stage.  The
@@ -451,6 +525,18 @@ impl fmt::Debug for DispatchError {
                 .field("capability", capability)
                 .field("runtime", runtime)
                 .finish(),
+            Self::MissingAuthorization { capability } => f
+                .debug_struct("MissingAuthorization")
+                .field("capability", capability)
+                .finish(),
+            Self::AuthorizationExpired { capability } => f
+                .debug_struct("AuthorizationExpired")
+                .field("capability", capability)
+                .finish(),
+            Self::MissingProcessAuthorization { capability } => f
+                .debug_struct("MissingProcessAuthorization")
+                .field("capability", capability)
+                .finish(),
             // `required_secrets` handle names are omitted from Debug output to
             // prevent leaking secret identifiers into logs and error chains.
             Self::AuthRequired {
@@ -503,6 +589,11 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::MissingAuthorization { .. }
+            | Self::AuthorizationExpired { .. }
+            | Self::MissingProcessAuthorization { .. } => {
+                DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
+            }
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
@@ -522,6 +613,9 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => "runtime_mismatch",
             Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
+            Self::MissingAuthorization { .. } => "missing_authorization",
+            Self::AuthorizationExpired { .. } => "authorization_expired",
+            Self::MissingProcessAuthorization { .. } => "missing_process_authorization",
             Self::AuthRequired { .. } => "auth_required",
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
@@ -537,7 +631,7 @@ pub trait CapabilityDispatcher: Send + Sync {
     /// Dispatches one already-authorized JSON capability request and must not perform caller-facing authorization or approval resolution.
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError>;
 }
 

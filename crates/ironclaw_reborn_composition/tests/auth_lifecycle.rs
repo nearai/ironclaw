@@ -14,9 +14,9 @@ use ironclaw_auth::{
     OAuthProviderRefreshRequest, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
     SecretCleanupRequest, TurnRunRef, opaque_state_hash,
 };
+use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, ThreadId, UserId};
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_reborn_composition::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
@@ -31,6 +31,12 @@ struct NoopContinuationDispatcher;
 #[async_trait]
 impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
     async fn dispatch_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
         &self,
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
@@ -342,11 +348,11 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
 }
 
 #[tokio::test]
-async fn refresh_credential_account_uses_product_auth_facade_and_redacts_response() {
+async fn refresh_credential_account_uses_product_auth_service_and_redacts_response() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let owner = scope("alice");
-    let old_access = SecretHandle::new("github-facade-old-access").unwrap();
-    let old_refresh = SecretHandle::new("github-facade-old-refresh").unwrap();
+    let old_access = SecretHandle::new("github-service-old-access").unwrap();
+    let old_refresh = SecretHandle::new("github-service-old-refresh").unwrap();
     let account = auth
         .create_account(NewCredentialAccount {
             scope: owner.clone(),
@@ -389,13 +395,13 @@ async fn refresh_credential_account_uses_product_auth_facade_and_redacts_respons
     assert_ne!(stored.refresh_secret, Some(old_refresh));
 
     let serialized = serde_json::to_string(&report).unwrap();
-    assert!(!serialized.contains("github-facade-old-access"));
-    assert!(!serialized.contains("github-facade-old-refresh"));
+    assert!(!serialized.contains("github-service-old-access"));
+    assert!(!serialized.contains("github-service-old-refresh"));
     assert!(!serialized.contains("oauth-refreshed"));
 }
 
 #[tokio::test]
-async fn refresh_credential_account_maps_facade_errors_to_stable_codes() {
+async fn refresh_credential_account_maps_service_errors_to_stable_codes() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let owner = scope("alice");
     let account = auth
@@ -511,7 +517,7 @@ async fn refresh_credential_account_with_provider_keeps_existing_refresh_handle_
 }
 
 #[tokio::test]
-async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
+async fn cleanup_credentials_for_lifecycle_uses_service_and_quarantine_report() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let owner = scope("alice");
     let extension = ExtensionId::new("github").unwrap();
@@ -524,7 +530,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
             ownership: CredentialOwnership::ExtensionOwned,
             owner_extension: Some(extension.clone()),
             granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-owned-facade").unwrap()),
+            access_secret: Some(SecretHandle::new("github-owned-service").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
         })
@@ -539,7 +545,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
             ownership: CredentialOwnership::ExtensionOwned,
             owner_extension: Some(extension.clone()),
             granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-quarantined-facade").unwrap()),
+            access_secret: Some(SecretHandle::new("github-quarantined-service").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
         })
@@ -592,6 +598,154 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
     );
 
     let serialized = serde_json::to_string(&report).unwrap();
-    assert!(!serialized.contains("github-owned-facade"));
-    assert!(!serialized.contains("github-quarantined-facade"));
+    assert!(!serialized.contains("github-owned-service"));
+    assert!(!serialized.contains("github-quarantined-service"));
+}
+
+#[derive(Debug, Default)]
+struct RecordingCanceledContinuationDispatcher {
+    canceled: Mutex<Vec<AuthContinuationEvent>>,
+}
+
+impl RecordingCanceledContinuationDispatcher {
+    fn canceled(&self) -> Vec<AuthContinuationEvent> {
+        self.canceled.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for RecordingCanceledContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.canceled.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+/// F2 · `cleanup_credentials_for_lifecycle` must hand EVERY canceled turn-gate
+/// continuation the cleanup reports to the continuation dispatcher (the
+/// gate-denial seam) and then acknowledge it via `mark_continuation_dispatched`,
+/// making the handoff emit-once: a cleanup retry reports nothing and dispatches
+/// nothing further. `SetupOnly` flows are canceled but never dispatched.
+#[tokio::test]
+async fn lifecycle_cleanup_dispatches_each_canceled_turn_gate_continuation_once() {
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    let flow_scope = scope("alice");
+    let expires_at = Utc::now() + Duration::minutes(10);
+
+    let make_flow = |name: &'static str, continuation: AuthContinuationRef| {
+        let auth = auth.clone();
+        let flow_scope = flow_scope.clone();
+        async move {
+            auth.create_flow(NewAuthFlow {
+                id: None,
+                scope: flow_scope,
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: provider(),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://example.com/oauth/authorize",
+                    )
+                    .unwrap(),
+                    expires_at,
+                },
+                continuation,
+                update_binding: None,
+                opaque_state_hash: Some(opaque_state_hash(name).unwrap()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let gate_continuation = |gate: &str| AuthContinuationRef::TurnGateResume {
+        turn_run_ref: TurnRunRef::new(TurnRunId::new().to_string()).unwrap(),
+        gate_ref: AuthGateRef::new(format!("gate:{gate}")).unwrap(),
+    };
+
+    // Two unacknowledged turn-gate flows — one still pending, one already
+    // failed terminally — plus a `SetupOnly` connect flow that must be
+    // canceled without ever reaching the dispatcher.
+    let turn_flow = make_flow("turn", gate_continuation("turn")).await;
+    let failed_turn_flow = make_flow("failed-turn", gate_continuation("failed-turn")).await;
+    auth.fail_oauth_callback(
+        &flow_scope,
+        OAuthCallbackFailureInput {
+            flow_id: failed_turn_flow.id,
+            opaque_state_hash: opaque_state_hash("failed-turn").unwrap(),
+            error: AuthErrorCode::TokenExchangeFailed,
+        },
+    )
+    .await
+    .expect("terminal callback failure persists");
+    let setup_flow = make_flow("setup", AuthContinuationRef::SetupOnly).await;
+
+    let dispatcher = Arc::new(RecordingCanceledContinuationDispatcher::default());
+    let services = RebornProductAuthServices::from_shared(auth.clone(), dispatcher.clone());
+
+    let cleanup_request = SecretCleanupRequest {
+        scope: flow_scope.clone(),
+        extension_id: ExtensionId::new("github").unwrap(),
+        provider: Some(provider()),
+        lifecycle_package: None,
+        action: SecretCleanupAction::Uninstall,
+    };
+    let report = services
+        .cleanup_credentials_for_lifecycle(cleanup_request.clone())
+        .await
+        .expect("lifecycle cleanup");
+
+    // Each reported canceled turn-gate continuation was dispatched, in report
+    // order, and nothing else was.
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 2);
+    assert_eq!(
+        dispatcher.canceled(),
+        report.canceled_turn_gate_continuations
+    );
+    let dispatched_flow_ids = dispatcher
+        .canceled()
+        .iter()
+        .map(|event| event.flow_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        dispatched_flow_ids,
+        [turn_flow.id, failed_turn_flow.id].into_iter().collect()
+    );
+
+    // Each dispatched event was acknowledged with ITS emitted_at stamp.
+    for event in &report.canceled_turn_gate_continuations {
+        let flow = auth
+            .get_flow(&flow_scope, event.flow_id)
+            .await
+            .unwrap()
+            .expect("dispatched flow remains durable");
+        assert_eq!(flow.continuation_emitted_at, Some(event.emitted_at));
+    }
+    // The connect flow was canceled but never handed to the dispatcher.
+    let setup_after = auth
+        .get_flow(&flow_scope, setup_flow.id)
+        .await
+        .unwrap()
+        .expect("setup flow remains durable");
+    assert_eq!(setup_after.status, AuthFlowStatus::Canceled);
+    assert!(setup_after.continuation_emitted_at.is_none());
+    assert!(!dispatched_flow_ids.contains(&setup_flow.id));
+
+    // Emit-once: the acknowledgement makes a cleanup retry converge.
+    let retry = services
+        .cleanup_credentials_for_lifecycle(cleanup_request)
+        .await
+        .expect("lifecycle cleanup retry");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
+    assert_eq!(dispatcher.canceled().len(), 2);
 }

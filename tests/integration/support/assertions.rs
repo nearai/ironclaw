@@ -208,6 +208,28 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// A tool with this model-facing wire name (e.g. `ironclaw__memory__search`)
+    /// was offered to the model on at least one captured request.
+    pub fn assert_model_tool_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Ok(());
+        }
+        Err(format!("tool {tool_name:?} was not offered to the model; offered: {names:?}").into())
+    }
+
+    /// No captured request offered a tool with this model-facing wire name.
+    pub fn assert_model_tool_not_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Err(format!(
+                "tool {tool_name:?} must NOT be offered to the model; offered: {names:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
@@ -251,6 +273,134 @@ impl RebornIntegrationHarness {
             requests.len()
         )
         .into())
+    }
+
+    /// Assert that the textual `content` of some message sent to the model
+    /// contains `needle`. Unlike [`assert_model_request_contains`], this does
+    /// not serialize the request a second time, so JSON embedded in a tool
+    /// result is matched exactly as the model receives it rather than through
+    /// an additional layer of escape characters.
+    pub async fn assert_model_message_content_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        if requests
+            .iter()
+            .flatten()
+            .any(|message| message.content.contains(needle))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no model message content contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert that one model-visible message contains every `needle` in the
+    /// supplied order. Other content may appear between needles.
+    pub async fn assert_model_message_content_in_order(
+        &self,
+        needles: &[&str],
+    ) -> HarnessResult<()> {
+        if needles.is_empty() {
+            return Err("ordered model-message assertion needs at least one needle".into());
+        }
+        let requests = self.scripted_llm.captured_requests();
+        'message: for message in requests.iter().flatten() {
+            let mut remaining = message.content.as_str();
+            for needle in needles {
+                let Some(position) = remaining.find(needle) else {
+                    continue 'message;
+                };
+                remaining = &remaining[position + needle.len()..];
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "no model message content contained {needles:?} in order; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert the exact number of interactive, tool-capable calls observed by
+    /// the recoverable-failure provider wrapper. Text-only system-inference
+    /// calls used for compaction are intentionally excluded.
+    pub async fn assert_interactive_model_provider_call_count(
+        &self,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.interactive_calls();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected {expected} interactive model provider call(s), observed {actual}")
+                .into(),
+        )
+    }
+
+    /// Assert the exact number of times `needle` occurs across every request
+    /// seen by the recoverable-failure provider, including injected failures
+    /// that never reach the delegated `TraceLlm`.
+    pub async fn assert_model_message_content_occurrences(
+        &self,
+        needle: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.message_content_occurrences(needle);
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected model message content to contain {needle:?} {expected} time(s), observed {actual}"
+        )
+        .into())
+    }
+
+    /// Assert that at least `minimum` text-only provider calls occurred. These
+    /// are system-inference calls in the recovery scenarios, including context
+    /// compaction.
+    pub async fn assert_text_model_provider_call_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.text_calls();
+        if actual >= minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "expected at least {minimum} text-only model provider call(s), observed {actual}"
+        )
+        .into())
+    }
+
+    /// Assert no request seen by the recoverable-failure provider contains
+    /// `needle`, including requests rejected before `TraceLlm` delegation.
+    pub async fn assert_model_message_content_not_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        if !probe.message_content_contains(needle) {
+            return Ok(());
+        }
+        Err(format!("model message content unexpectedly contained {needle:?}").into())
     }
 
     /// Assert some SINGLE model request contains EVERY needle in `needles`
@@ -633,6 +783,52 @@ impl RebornIntegrationHarness {
             format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
                 .into(),
         )
+    }
+
+    /// Assert the most recent persisted denial tells the model what would
+    /// unlock the call.
+    ///
+    /// Reads the recovery hint off the persisted `ToolResultReference`
+    /// envelope — the same bytes the model is handed on the next turn — so it
+    /// pins the whole path: denial -> `DenyReason` -> recovery observation ->
+    /// persistence. Denials carried `model_observation: None` before #6792,
+    /// so this asserted nothing that existed.
+    pub async fn assert_denial_recovery_hint(&self, expected: &str) -> HarnessResult<()> {
+        let hints = self.persisted_tool_recovery_hints().await?;
+        if hints.iter().any(|hint| hint.as_deref() == Some(expected)) {
+            return Ok(());
+        }
+        Err(
+            format!("no persisted tool result carried recovery hint {expected:?}; saw {hints:?}")
+                .into(),
+        )
+    }
+
+    /// Every persisted `ToolResultReference`'s `model_observation.recovery
+    /// .recovery_hint`, in thread order. `None` where an observation or its
+    /// recovery block is absent.
+    async fn persisted_tool_recovery_hints(&self) -> HarnessResult<Vec<Option<String>>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        Ok(history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| {
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content).ok()
+            })
+            .map(|envelope| {
+                envelope
+                    .model_observation
+                    .as_ref()
+                    .and_then(|observation| observation.get("recovery"))
+                    .and_then(|recovery| recovery.get("recovery_hint"))
+                    .and_then(|hint| hint.as_str())
+                    .map(str::to_string)
+            })
+            .collect())
     }
 
     /// Every persisted `ToolResultReference`'s `(safe_summary,

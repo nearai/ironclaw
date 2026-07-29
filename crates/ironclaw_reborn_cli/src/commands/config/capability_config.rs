@@ -18,7 +18,7 @@ pub(super) enum ConfigDestination {
     /// A literal value written into `config.toml`.
     ConfigToml,
     /// A secret value written into the encrypted secret store.
-    SecretStore,
+    SecretStorePort,
     /// The WebChat v2 bearer token file (`<reborn_home>/webui-token`) —
     /// rotate-only, no arbitrary value accepted.
     TokenFile,
@@ -70,7 +70,7 @@ impl ConfigKey {
 
     pub(super) fn destination(&self) -> ConfigDestination {
         match self {
-            Self::LlmApiKey { .. } | Self::GoogleClientSecret => ConfigDestination::SecretStore,
+            Self::LlmApiKey { .. } | Self::GoogleClientSecret => ConfigDestination::SecretStorePort,
             Self::GoogleClientId | Self::GoogleRedirectUri | Self::SlackEnabled => {
                 ConfigDestination::ConfigToml
             }
@@ -81,7 +81,7 @@ impl ConfigKey {
     /// `true` when input should be prompted for with terminal echo
     /// suppressed rather than taken as a plain CLI argument default.
     pub(super) fn is_secret_prompted(&self) -> bool {
-        matches!(self.destination(), ConfigDestination::SecretStore)
+        matches!(self.destination(), ConfigDestination::SecretStorePort)
     }
 }
 
@@ -173,13 +173,11 @@ pub(super) fn google_remediation_text() -> String {
 /// the restart apply-step sentence is appended once by the caller (see
 /// `set.rs::print_apply_step`), not embedded here — see the module doc.
 ///
-/// Delegates to `ironclaw_reborn_config::slack_remediation_text_with_base_url`
-/// — the single shared source of this wording — so this crate's re-export
-/// point stays a stable call site for `set.rs` even though the wording itself
-/// lives lower in the dependency graph, mirroring `google_remediation_text`
-/// above.
 pub(super) fn slack_remediation_text(base_url: &str) -> String {
-    ironclaw_reborn_config::slack_remediation_text_with_base_url(base_url)
+    format!(
+        "After restarting, connect your Slack workspace at {base_url}/extensions (workspace \
+         OAuth happens there; config set cannot supply Slack app identity or credentials)"
+    )
 }
 
 #[cfg(test)]
@@ -249,11 +247,11 @@ mod tests {
                 provider_id: "openai".to_string()
             }
             .destination(),
-            ConfigDestination::SecretStore
+            ConfigDestination::SecretStorePort
         );
         assert_eq!(
             ConfigKey::GoogleClientSecret.destination(),
-            ConfigDestination::SecretStore
+            ConfigDestination::SecretStorePort
         );
         assert_eq!(
             ConfigKey::GoogleClientId.destination(),
@@ -410,12 +408,11 @@ mod tests {
         let slack = slack_remediation_text("http://127.0.0.1:3000");
         assert!(slack.contains("http://127.0.0.1:3000/extensions"));
         assert!(!slack.contains("config set slack.bot_token"));
-        // `config set slack.enabled` alone leaves the personal-OAuth slot
-        // empty, so the CLI must also name the redirect URI or the user walks
-        // straight into the 503 this remediation exists to prevent.
+        // The redirect-URI env var the host-beta lane read is gone on the
+        // unified extension model — the guidance must not teach a dead step.
         assert!(
-            slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
-            "the CLI variant must name the remaining redirect-URI step: {slack}"
+            !slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            "the retired redirect-URI env var must not be advertised: {slack}"
         );
         assert_eq!(
             slack.matches("service restart").count(),

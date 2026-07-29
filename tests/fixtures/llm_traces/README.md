@@ -226,6 +226,26 @@ Returns a `ToolCompletionResponse` with `FinishReason::ToolUse`. The agent loop 
 | `name` | string | Must match a registered tool name (e.g. `echo`, `write_file`, `read_file`, `memory_write`, `shell`). |
 | `arguments` | object | Tool parameters as JSON. Must conform to the tool's `parameters_schema()`. |
 
+#### Binding a later call to an earlier tool result
+
+When a provider creates a fresh resource, later calls must use the ID returned
+by the current replay—not the stale ID captured during recording. Reference
+the exact tool call and an RFC 6901 JSON Pointer into its result:
+
+```json
+{
+  "file_id": {
+    "$trace_result": {
+      "tool_call_id": "call_upload_1",
+      "pointer": "/file/id"
+    }
+  }
+}
+```
+
+Missing call IDs or pointers fail loudly. Replay never searches by tool name
+or guesses among similarly named fields.
+
 #### `user_input` -- user message marker (recording only)
 
 ```json

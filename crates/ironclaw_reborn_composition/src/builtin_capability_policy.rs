@@ -492,6 +492,8 @@ mod tests {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ModifyApproval,
                 EffectKind::ExternalWrite,
             ]
         );
@@ -506,13 +508,45 @@ mod tests {
         // before the network POST); trace_commons.profile_set is deliberately NOT
         // exempt — publishing a public community profile must hit the runtime
         // approval gate, with its model-controlled confirmed=true only as
-        // defense-in-depth. builtin.profile_set IS exempt: private local write
+        // defense-in-depth. ironclaw.memory.profile_set IS exempt: private local write
         // only (no network/external_write), analogous to memory_write on a fixed path.
         assert!(
             policy
                 .approval_gate_exempt_capabilities()
                 .iter()
                 .any(|capability| capability.as_str() == "builtin.trace_commons.onboard")
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| { capability.as_str() == "builtin.admin_configuration_replace" }),
+            "the API-only operator save gesture must not open a second approval gate"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.operator_config_set_auto_approve"
+                }),
+            "the API-only operator auto-approve toggle must not open a second approval gate"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.operator_config_set_tool_permission"
+                }),
+            "the API-only operator tool-permission save must not open a second approval gate"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.outbound_preferences_set"),
+            "the API-only outbound preferences save gesture must not open a second approval gate"
         );
         assert!(
             !policy
@@ -524,9 +558,18 @@ mod tests {
             policy
                 .approval_gate_exempt_capabilities()
                 .iter()
-                .any(|capability| capability.as_str() == "builtin.profile_set"),
-            "builtin.profile_set must be in the exempt list (private local write, no \
+                .any(|capability| capability.as_str() == "ironclaw.memory.profile_set"),
+            "ironclaw.memory.profile_set must be in the exempt list (private local write, no \
              network/external_write — analogous to memory_write on a fixed path)"
+        );
+        assert!(
+            !policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.outbound_delivery_target_route_current"
+                }),
+            "natural-language destination intent is model interpretation, not host-verifiable consent; current-run external routing must stay approval-gated"
         );
         assert!(
             policy
@@ -583,6 +626,11 @@ mod tests {
             "builtin.trigger_remove",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
+        assert_trigger_grant(
+            &policy,
+            "builtin.outbound_delivery_target_route_current",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
 
         // Trace Commons capabilities must be granted here or they vanish from
         // the model-visible tool surface in local-dev (REPL/serve) runs.
@@ -619,23 +667,23 @@ mod tests {
             assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
             assert_eq!(grant.network, CapabilityNetworkProfile::Default);
         }
-        // builtin.profile_set writes context/profile.json under the memory mount.
+        // ironclaw.memory.profile_set writes context/profile.json under the memory mount.
         // It mirrors memory_write's effect set (read+write filesystem, memory mount,
         // default network) and must be present here or it is denied as MissingGrant.
-        let builtin_profile_set = policy
-            .grant(&CapabilityId::new("builtin.profile_set").expect("capability id"))
-            .expect("builtin.profile_set grant must be present");
+        let memory_profile_set = policy
+            .grant(&CapabilityId::new("ironclaw.memory.profile_set").expect("capability id"))
+            .expect("ironclaw.memory.profile_set grant must be present");
         assert_eq!(
-            builtin_profile_set.effects,
+            memory_profile_set.effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
             ]
         );
-        assert_eq!(builtin_profile_set.mounts, CapabilityMountProfile::Memory);
+        assert_eq!(memory_profile_set.mounts, CapabilityMountProfile::Memory);
         assert_eq!(
-            builtin_profile_set.network,
+            memory_profile_set.network,
             CapabilityNetworkProfile::Default
         );
 

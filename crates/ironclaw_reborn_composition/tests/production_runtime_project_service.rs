@@ -1,11 +1,11 @@
 //! Integration test: a production-shaped `RebornRuntime` wires the first-class
-//! projects (ACL) facade over its production store graph, and that facade is
+//! projects (ACL) service over its production store graph, and that service is
 //! tenant/user scoped.
 //!
 //! Regression for the bucket-2 production-parity gap (#5013 / audit #6389).
-//! Production profiles have `local_runtime: None`; `build_webui_services` only
+//! Production profiles have `local_runtime: None`; `runtime.product_surface` only
 //! called `with_project_service` for the local substrate, so on production the
-//! WebUI project surface fell through to the `RebornServicesApi` default, which
+//! WebUI project surface fell through to the `ProductSurface` default, which
 //! returns `service_unavailable` for `create_project` / `list_projects`. The
 //! provisioner-style production fallback now sources the project service from
 //! the production store graph (`RebornProjectService` over
@@ -15,12 +15,12 @@
 //! `production_runtime_automations.rs`) so the CPU-heavy production build does
 //! not starve the lib unit tests' hard `RunTimeout` budgets, and is gated on
 //! `libsql` because the production-runtime path requires the libSQL substrate.
-#![cfg(feature = "libsql")]
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
     AgentId, TenantId, UserId,
     runtime_policy::{
@@ -32,14 +32,16 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort,
 };
-use ironclaw_product_workflow::{
-    RebornCreateProjectRequest, RebornListProjectsRequest, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    PROJECT_CREATE_COMMAND, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
-    builtin_first_party_trust_policy,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProcessBinding, build_reborn_runtime,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 
 const RUNTIME_TENANT: &str = "prod-projects-tenant";
 const RUNTIME_AGENT: &str = "prod-projects-agent";
@@ -76,7 +78,7 @@ fn create_request(name: &str) -> RebornCreateProjectRequest {
     }
 }
 
-/// Regression guard: on a production runtime the project facade is reachable
+/// Regression guard: on a production runtime the project service is reachable
 /// (not `service_unavailable`), persists round-trip over the production
 /// substrate, and is scoped so a different tenant cannot see the project.
 #[tokio::test]
@@ -89,8 +91,8 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             OWNER,
             db,
@@ -98,9 +100,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,
@@ -126,32 +126,41 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     let runtime = build_reborn_runtime(input)
         .await
         .expect("production runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface builds");
 
-    let owner = WebUiAuthenticatedCaller::new(
+    let owner = ProductSurfaceCaller::new(
         TenantId::new(RUNTIME_TENANT).unwrap(),
         UserId::new(OWNER).unwrap(),
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
 
-    // (1) THE WIRING. Before the production fallback, the facade fell through to
-    // the `RebornServicesApi` default and this returned
+    // (1) THE WIRING. Before the production fallback, the service fell through to
+    // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let created = bundle
-        .api
-        .create_project(owner.clone(), create_request("Prod Project"))
+    let owner_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), owner.clone());
+    let created = PROJECT_CREATE_COMMAND
+        .invoke_on(
+            &owner_surface,
+            create_request("Prod Project"),
+            ironclaw_host_api::ActivityId::new(),
+        )
         .await
-        .expect("production project facade must be reachable (not service_unavailable)");
+        .expect("production project service must be reachable (not service_unavailable)");
     assert_eq!(created.project.name, "Prod Project");
     let project_id = created.project.project_id.clone();
 
     // (2) ROUND-TRIP over the production scoped filesystem: the created project
     // lists back for its owner.
-    let listed = bundle
-        .api
-        .list_projects(owner.clone(), RebornListProjectsRequest { limit: None })
+    let listed = PROJECTS_VIEW
+        .query_on(
+            &owner_surface,
+            RebornListProjectsRequest { limit: None },
+            None,
+        )
         .await
         .expect("owner may list projects");
     assert!(
@@ -161,15 +170,19 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
 
     // (3) TENANT SCOPING. A caller in a different tenant must not observe the
     // owner's project — the repository partitions by the per-call tenant.
-    let other_tenant = WebUiAuthenticatedCaller::new(
+    let other_tenant = ProductSurfaceCaller::new(
         TenantId::new("prod-projects-other-tenant").unwrap(),
         UserId::new("prod-projects-other-user").unwrap(),
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
-    let other_listed = bundle
-        .api
-        .list_projects(other_tenant, RebornListProjectsRequest { limit: None })
+    let other_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), other_tenant);
+    let other_listed = PROJECTS_VIEW
+        .query_on(
+            &other_surface,
+            RebornListProjectsRequest { limit: None },
+            None,
+        )
         .await
         .expect("a foreign-tenant list is still reachable");
     assert!(

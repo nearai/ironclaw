@@ -73,6 +73,31 @@ export function removeThreadList(data, threadId) {
   return { ...data, threads };
 }
 
+export function appendThreadListPage(data, page, expectedCursor) {
+  if (!data || !expectedCursor || data.next_cursor !== expectedCursor) {
+    return data;
+  }
+
+  const current = threadListData(data);
+  const currentThreads = Array.isArray(current.threads) ? current.threads : [];
+  const pageThreads = Array.isArray(page?.threads) ? page.threads : [];
+  const seen = new Set(currentThreads.map(threadIdFor).filter(Boolean));
+  const appended = [...currentThreads];
+
+  for (const thread of pageThreads) {
+    const threadId = threadIdFor(thread);
+    if (!threadId || seen.has(threadId)) continue;
+    seen.add(threadId);
+    appended.push(thread);
+  }
+
+  return {
+    ...current,
+    threads: appended,
+    next_cursor: page?.next_cursor ?? null,
+  };
+}
+
 export function touchThreadList(data, { threadId, messageContent, updatedAt }) {
   if (!threadId) return data;
 

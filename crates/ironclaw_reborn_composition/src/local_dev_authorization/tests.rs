@@ -5,12 +5,11 @@ use std::sync::{
 
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStore, CapabilityPermissionOverrideInput, CapabilityPermissionOverrideKey,
-    CapabilityPermissionOverrideRecord, CapabilityPermissionOverrideStore,
-    CapabilityPermissionStoreError, FilesystemAutoApproveSettingStore,
-    FilesystemPersistentApprovalPolicyStore, FilesystemToolPermissionOverrideStore,
+    AutoApproveSettingStore, AutoApproveSettingStorePort as _, CapabilityPermissionOverrideInput,
+    CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStorePort as _, CapabilityPermissionStoreError,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
     test_support::{
         in_memory_backed_auto_approve_setting_store,
         in_memory_backed_capability_permission_override_store,
@@ -41,14 +40,14 @@ struct CountingAutoApproveSettingStore {
 }
 
 struct CountingToolPermissionOverrideStore {
-    inner: FilesystemToolPermissionOverrideStore<InMemoryBackend>,
+    inner: ToolPermissionOverrideStore<InMemoryBackend>,
     gets: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
 }
 
 struct CountingPersistentApprovalPolicyStore {
-    inner: FilesystemPersistentApprovalPolicyStore<InMemoryBackend>,
+    inner: PersistentApprovalPolicyStore<InMemoryBackend>,
     lookups: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
@@ -115,7 +114,7 @@ impl CountingPersistentApprovalPolicyStore {
 }
 
 #[async_trait::async_trait]
-impl AutoApproveSettingStore for CountingAutoApproveSettingStore {
+impl ironclaw_approvals::AutoApproveSettingStorePort for CountingAutoApproveSettingStore {
     async fn set(
         &self,
         input: AutoApproveSettingInput,
@@ -151,7 +150,9 @@ impl AutoApproveSettingStore for CountingAutoApproveSettingStore {
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for CountingToolPermissionOverrideStore
+{
     async fn set(
         &self,
         input: CapabilityPermissionOverrideInput,
@@ -191,7 +192,9 @@ impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
 }
 
 #[async_trait::async_trait]
-impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApprovalPolicyStore {
+impl ironclaw_approvals::PersistentApprovalPolicyStorePort
+    for CountingPersistentApprovalPolicyStore
+{
     async fn allow(
         &self,
         input: PersistentApprovalPolicyInput,
@@ -242,7 +245,9 @@ impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApp
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStore for ErroringToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for ErroringToolPermissionOverrideStore
+{
     async fn set(
         &self,
         _input: CapabilityPermissionOverrideInput,
@@ -300,7 +305,7 @@ fn local_dev_shell_authorization_inputs_with_permission(
 }
 
 async fn enable_global_auto_approve(
-    store: &FilesystemAutoApproveSettingStore<InMemoryBackend>,
+    store: &AutoApproveSettingStore<InMemoryBackend>,
     user_id: &UserId,
 ) {
     let scope = ironclaw_host_api::ResourceScope::local_default(
@@ -319,7 +324,7 @@ async fn enable_global_auto_approve(
 }
 
 async fn seed_shell_tool_override(
-    store: &FilesystemToolPermissionOverrideStore<InMemoryBackend>,
+    store: &ToolPermissionOverrideStore<InMemoryBackend>,
     user_id: &UserId,
     state: ToolPermissionOverride,
 ) {
@@ -359,7 +364,9 @@ fn local_dev_shell_authorization_inputs(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     };
     let policy = builtin_capability_policy().expect("capability policy");
     let grants = policy.builtin_grants(
@@ -410,7 +417,9 @@ async fn trace_commons_authorize_decision(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     };
     let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let provider_id = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id");
@@ -485,26 +494,94 @@ async fn local_dev_trace_commons_profile_set_requires_approval_gate() {
     );
 }
 
-/// Surface-visibility regression test: `builtin.profile_set` must be
-/// Available (Allow) in the local-dev authorizer, not RequireApproval.
+/// Like [`trace_commons_authorize_decision`], but the descriptor is the REAL
+/// manifest-projected one from the bound native memory package (id, provider,
+/// effects, origin matrix — exactly what composition registers), and grants
+/// resolve for THAT provider id — no synthetic descriptor. Guards the
+/// approval-gate exemption against drift between the manifest's declared
+/// effects and a hand-built test descriptor, and re-covers the MissingGrant
+/// regression through the memory provider's own grant entries.
+async fn native_memory_manifest_authorize_decision(
+    capability_id: &str,
+) -> ironclaw_host_api::Decision {
+    let package =
+        ironclaw_host_runtime::native_memory_first_party_package().expect("native memory package");
+    // The registry's descriptor projection is the production path from
+    // manifest declaration to dispatchable `CapabilityDescriptor`.
+    let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+    registry
+        .insert(package)
+        .expect("register the native memory package");
+    let descriptor = registry
+        .get_capability(&CapabilityId::new(capability_id).expect("capability id"))
+        .expect("capability declared by the native memory manifest")
+        .clone();
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
+    let provider_id = descriptor.provider.clone();
+    let grants = policy.builtin_grants(
+        &provider_id,
+        &MountView::default(),
+        &MountView::default(),
+        &MountView::default(),
+        &MountView::default(),
+    );
+    let context = ironclaw_host_api::ExecutionContext::local_default(
+        ironclaw_host_api::UserId::new("test-user").expect("user id"),
+        provider_id,
+        RuntimeKind::FirstParty,
+        TrustClass::UserTrusted,
+        grants,
+        MountView::default(),
+    )
+    .expect("execution context");
+    // The manifest's declared effects must be gate-worthy without an
+    // exemption, so Allow can only come from the exemption list.
+    assert!(
+        local_dev_effects_require_approval(None, policy.as_ref(), &descriptor.effects),
+        "manifest effects must require approval without the capability exemption"
+    );
+    let trust_decision = TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: descriptor.effects.clone(),
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::AdminConfig,
+        evaluated_at: chrono::Utc::now(),
+    };
+    let authorizer = local_dev_authorizer(
+        None,
+        policy,
+        Arc::new(crate::profile_approval_authorization::EmptyApprovalSettingsProvider),
+    );
+    authorizer
+        .authorize_dispatch_with_trust(
+            &context,
+            &descriptor,
+            &ResourceEstimate::default(),
+            &trust_decision,
+        )
+        .await
+}
+
+/// Surface-visibility regression test: `ironclaw.memory.profile_set` (the
+/// bound memory provider's profile tool, formerly builtin-declared) must
+/// be Available (Allow) in the local-dev authorizer, not RequireApproval.
 ///
 /// This exercises the FULL authorizer path (grant lookup + effect-set
-/// check + exemption list) to guard against the MissingGrant regression
+/// check + exemption list) against the MANIFEST-projected descriptor and
+/// the memory provider's own grants, guarding the MissingGrant regression
 /// that caused the capability to vanish from the model-visible surface.
-/// The effects used (ReadFilesystem + WriteFilesystem) are gate-worthy
-/// without an exemption (write_filesystem is in ask_writes), so the Allow
-/// decision can only come from the exemption list, not from a non-gating
-/// default policy.
+/// The manifest's effects (read_filesystem + write_filesystem) are
+/// gate-worthy without an exemption (asserted inside the helper), so the
+/// Allow decision can only come from the exemption list, not from a
+/// non-gating default policy.
 #[tokio::test]
-async fn local_dev_builtin_profile_set_skips_approval_gate() {
-    let decision = trace_commons_authorize_decision(
-        PROFILE_SET_CAPABILITY_ID,
-        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-    )
-    .await;
+async fn local_dev_memory_profile_set_skips_approval_gate() {
+    let decision = native_memory_manifest_authorize_decision(PROFILE_SET_CAPABILITY_ID).await;
     assert!(
         matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
-        "builtin.profile_set is a private local write (no network/external_write) and is \
+        "ironclaw.memory.profile_set is a private local write (no network/external_write) and is \
              exempt from the approval gate; got {decision:?}"
     );
 }

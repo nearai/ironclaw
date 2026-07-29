@@ -56,4 +56,4 @@ require_command cargo-deny "install with: cargo install cargo-deny"
 cargo deny check
 
 echo "==> tests"
-cargo test --locked
+cargo test --locked --workspace

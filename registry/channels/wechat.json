@@ -11,11 +11,6 @@
     "wechat",
     "qr"
   ],
-  "source": {
-    "dir": "channels-src/wechat",
-    "capabilities": "wechat.capabilities.json",
-    "crate_name": "wechat-channel"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.28.0/channel-wechat-0.1.0-wasm32-wasip2.tar.gz",

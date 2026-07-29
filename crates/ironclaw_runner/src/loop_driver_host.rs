@@ -108,27 +108,28 @@ fn trace_host_factory_latency_error<E: ?Sized>(
 }
 
 use ironclaw_turns::{
-    CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
+    CheckpointStateStorePort, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
     TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
+        CommunicationContextProvider, EphemeralInstructionMaterializationStore,
         FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        HostManagedLoopPromptPort, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -251,7 +252,7 @@ impl SurfaceTrackingLoopCapabilityPort {
 fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
     matches!(
         capability_id.as_str(),
-        "builtin.extension_activate" | "builtin.extension_remove"
+        "builtin.extension_install" | "builtin.extension_remove"
     )
 }
 
@@ -300,7 +301,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
         let resolution = self.inner.invoke_capability(request).await?;
@@ -312,7 +313,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let may_change_surface = request
             .invocations
@@ -394,7 +395,7 @@ impl HookCapabilityInputResolverAdapter {
 impl HookCapabilityInputResolver for HookCapabilityInputResolverAdapter {
     async fn resolve(
         &self,
-        invocation: &ironclaw_turns::run_profile::CapabilityInvocation,
+        invocation: &ironclaw_turns::run_profile::LoopRequest,
     ) -> Option<serde_json::Value> {
         let value = match self
             .inner
@@ -989,7 +990,7 @@ where
     thread_scope: ThreadScope,
     model_gateway: Arc<G>,
     model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
-    checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
@@ -1052,6 +1053,14 @@ where
     /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
     /// profile source degrade gracefully rather than failing.
     user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// Per-run proactive-memory source. Resolved once at the first prompt build
+    /// of the run; its admitted snippets are surfaced into the prompt's "memory"
+    /// section every turn. Optional; production wires `None` pending #5013, so a
+    /// composition without a memory backend degrades gracefully. (Unlike
+    /// `user_profile_source` — a non-optional null-object defaulting to
+    /// `EmptyUserProfileSource` — this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
+    memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -1084,7 +1093,7 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -1118,6 +1127,7 @@ where
             safety_context,
             identity_context_source: None,
             user_profile_source: Arc::new(EmptyUserProfileSource),
+            memory_context_service: None,
             communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -1141,7 +1151,7 @@ where
     /// surface multi-user — each caller's thread reads and writes land
     /// in their own `owners/<user>` subtree (via
     /// [`ThreadScope::to_resource_scope`]), matching the owner the
-    /// product facade already creates threads under
+    /// product service already creates threads under
     /// (`reborn_services::create_thread` scopes to `caller.user_id`).
     ///
     /// The re-scoping applies only when the factory is owner-scoped (it
@@ -1406,6 +1416,18 @@ where
         self
     }
 
+    /// Installs the proactive-memory source. When wired, the loop context port
+    /// fetches both memory lanes ONCE at the first prompt build of the run and
+    /// surfaces the admitted snippets into the prompt's "memory" section every
+    /// turn. When not called the loop carries no memory (graceful default).
+    pub fn with_memory_context_service(
+        mut self,
+        service: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_service = Some(service);
+        self
+    }
+
     pub fn with_communication_context_provider(
         mut self,
         provider: Arc<dyn CommunicationContextProvider>,
@@ -1556,6 +1578,9 @@ where
         if let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
+        if let Some(service) = self.memory_context_service.as_ref() {
+            context_adapter = context_adapter.with_memory_context_service(service.clone());
+        }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This
@@ -1633,7 +1658,7 @@ where
             event_subscription_started_at,
         );
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
-            Arc::new(InMemoryInstructionMaterializationStore::default());
+            Arc::new(EphemeralInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
         let mut capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
             SurfaceTrackingLoopCapabilityPort::new(capabilities, Arc::clone(&surface_state)),
@@ -2149,14 +2174,14 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.capabilities.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.capabilities.invoke_capability_batch(request).await
     }
@@ -2632,8 +2657,8 @@ mod hook_resolver_adapter_tests {
     use super::*;
     use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion,
+        LoopRequest,
     };
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver, TurnId,
@@ -2658,8 +2683,8 @@ mod hook_resolver_adapter_tests {
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
     }
 
-    fn invocation(input_ref: &str) -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn invocation(input_ref: &str) -> LoopRequest {
+        LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1")
                 .expect("surface version literal valid"),
@@ -2785,11 +2810,11 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_loop_host::FilesystemCheckpointStateStore;
+    use ironclaw_loop_host::CheckpointStateStore;
     use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        FilesystemTurnStateRowStore, InMemoryRunProfileResolver, PutLoopCheckpointRequest,
-        RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+        InMemoryRunProfileResolver, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
+        TurnCheckpointId, TurnId, TurnRunId, TurnScope, TurnStateRowStore,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2867,8 +2892,8 @@ mod tests {
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
-        Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+        Arc<CheckpointStateStore<InMemoryBackend>>,
+        Arc<TurnStateRowStore<InMemoryBackend>>,
     ) {
         let state_store = in_memory_checkpoint_state_store();
         let checkpoint_store = Arc::new(in_memory_turn_state_store());

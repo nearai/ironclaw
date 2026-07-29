@@ -34,9 +34,12 @@ const INPUT_BASE =
 
 /* Compact control-density scale — same --v2-control-* tokens as
    Button so mixed control rows align (see DESIGN_SYSTEM.md §4). */
+/* Font sizes use the semantic control scale: `text-ui-sm`/`text-ui`
+   resolve to --v2-font-size-caption / --v2-font-size-body-sm via the
+   @theme block in tokens.css, viewport-independent (#6702). */
 const INPUT_SIZES = {
-  sm: "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] px-[var(--v2-control-px-sm)] text-[length:var(--v2-font-size-caption)]",
-  md: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] text-[length:var(--v2-font-size-body-sm)]",
+  sm: "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] px-[var(--v2-control-px-sm)] text-ui-sm",
+  md: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] text-ui",
   lg: "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-lg)] text-[length:var(--v2-font-size-body)]",
 };
 
@@ -74,7 +77,7 @@ export function Textarea({
       rows={rows}
       className={cn(
         INPUT_BASE,
-        "rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] py-2 text-[length:var(--v2-font-size-body-sm)]",
+        "rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] py-2 text-ui",
         "resize-y min-h-[72px]",
         error && "border-[var(--v2-danger-text)] focus:ring-[color-mix(in_srgb,var(--v2-danger-text)_28%,transparent)]",
         className
@@ -127,7 +130,7 @@ export function Label({ children, className = "", required = false, ...rest }) {
   return (
     <label
       className={cn(
-        "block text-[13px] font-medium text-[var(--v2-text-strong)] md:text-sm",
+        "block text-ui font-medium text-[var(--v2-text-strong)]",
         className
       )}
       {...rest}

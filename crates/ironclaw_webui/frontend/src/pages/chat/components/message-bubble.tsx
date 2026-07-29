@@ -11,6 +11,7 @@ import { fetchRunArtifact } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import {
   CHAT_MESSAGE_ROLES,
+  messageBelongsToActiveRun,
   type ChatAttachment,
   type ChatMessage,
 } from "../lib/message-types";
@@ -35,6 +36,7 @@ type MessageBubbleProps = {
   message: ChatMessage;
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
+  activeRunId?: string | null;
 };
 
 function formatTimestamp(value?: string) {
@@ -47,12 +49,21 @@ function formatTimestamp(value?: string) {
 /* Collapsible provider-reasoning summary. Collapsed by default so the
    thread stays clean; expands to the full reasoning markdown. Data comes
    from the `thinking` projection item (PR #4230). */
-function ThinkingDisclosure({ content }: { content?: string }) {
+function ThinkingDisclosure({
+  content,
+  streaming = false,
+}: {
+  content?: string;
+  streaming?: boolean;
+}) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   if (!content) return null;
   return (
-    <div className="flex flex-col items-start">
+    <div
+      className="flex flex-col items-start"
+      data-streaming={String(streaming)}
+    >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -69,14 +80,23 @@ function ThinkingDisclosure({ content }: { content?: string }) {
       {open &&
       (
         <div className="mt-1 border-l-2 border-[var(--v2-panel-border)] pl-3 text-[var(--v2-text-muted)]">
-          <MarkdownRenderer content={content} className="text-[13px]" />
+          <MarkdownRenderer
+            content={content}
+            className="text-[13px]"
+            streaming={streaming}
+          />
         </div>
       )}
     </div>
   );
 }
 
-function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
+function MessageBubbleImpl({
+  message,
+  onRetry,
+  threadId,
+  activeRunId,
+}: MessageBubbleProps) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
@@ -85,6 +105,13 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     typeof message.isFinalReply === "boolean"
       ? String(message.isFinalReply)
       : undefined;
+  const isStreamingAssistantReply =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === false &&
+    messageBelongsToActiveRun(message, activeRunId);
+  const isStreamingThinking =
+    role === CHAT_MESSAGE_ROLES.THINKING &&
+    messageBelongsToActiveRun(message, activeRunId);
   const failureCategory =
     role === CHAT_MESSAGE_ROLES.ERROR &&
     typeof message.failureCategory === "string"
@@ -156,7 +183,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   }
 
   if (role === CHAT_MESSAGE_ROLES.THINKING) {
-    return (<ThinkingDisclosure content={content} />);
+    return (
+      <ThinkingDisclosure
+        content={content}
+        streaming={isStreamingThinking}
+      />
+    );
   }
 
   if (role === CHAT_MESSAGE_ROLES.IMAGE) {
@@ -227,7 +259,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
           {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
           role === CHAT_MESSAGE_ROLES.SYSTEM ||
           role === CHAT_MESSAGE_ROLES.ERROR
-            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} /></div>)
+            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} streaming={isStreamingAssistantReply} /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (

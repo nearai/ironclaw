@@ -1,27 +1,12 @@
 import React from "react";
 import { Button } from "@ironclaw/design-system";
-import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
+import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 import { useT } from "../../../lib/i18n";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 
-// Strategies whose in-chat affordance is "paste a code". OAuth gets a direct
-// configure button; `web_generated_code` shows the web-minted code/QR pairing
-// panel (the code travels web -> channel, so a paste box is meaningless);
-// admin-managed channels render guidance instead of a code box they can't use.
-// An absent strategy defaults to the paste panel for backward compatibility.
-const PASTE_CODE_STRATEGIES = new Set(["inbound_proof_code"]);
-
-function acceptsPastedCode(strategy) {
-  return !strategy || PASTE_CODE_STRATEGIES.has(strategy);
-}
-
-export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCancel }) {
+export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
   const t = useT();
-  const [code, setCode] = React.useState("");
   const [error, setError] = React.useState("");
-  // "idle" -> "submitting" (redeem in flight) -> "resuming" (redeem succeeded;
-  // hold the spinner while the parked turn resumes and this gate clears).
-  const [status, setStatus] = React.useState("idle");
   const [isConfiguring, setIsConfiguring] = React.useState(false);
   // Derived-from-props during render (not an effect) so the minimal test
   // harness stays useState-only: when the onboarding hook stamps a failed or
@@ -37,29 +22,6 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
     }
   }
   const copy = pairingCardCopy(onboarding, t);
-  const busy = status !== "idle";
-
-  const submit = async () => {
-    const trimmed = code.trim();
-    if (!trimmed || busy) return;
-    setError("");
-    setStatus("submitting");
-    try {
-      await onSubmit(trimmed);
-      setCode("");
-      // Success: don't snap back to idle. The redeem resolved, but the backend
-      // resumes the parked turn asynchronously and the projection clears this
-      // gate (unmounting the card) a beat later over SSE. Holding the spinner
-      // keeps a successful submit from looking like it did nothing.
-      setStatus("resuming");
-    } catch (submitError) {
-      // A resume fault means the connection succeeded but this parked chat
-      // didn't continue; the gate won't clear, so exit the spinner with copy
-      // that says so rather than the generic invalid-code message.
-      setError(submitError?.resumeFailed ? copy.resumeFailedMessage : copy.errorMessage);
-      setStatus("idle");
-    }
-  };
 
   const configure = async () => {
     if (!onConfigure || isConfiguring) return;
@@ -75,11 +37,10 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
 
   // Web-minted code strategy: this side generates the code, so render the
   // pairing panel (code + deep link + QR + live connect detection) instead of
-  // an input asking the user to paste a code that doesn't exist yet. Gated by
-  // channel as well as strategy (mirroring channels-tab): the strategy string
-  // is generic, and a future non-Telegram web_generated_code channel must not
-  // inherit the Telegram-specific panel.
-  if (onboarding?.strategy === "web_generated_code" && onboarding?.extensionName === "telegram") {
+  // an input asking the user to paste a code that doesn't exist yet. The
+  // panel is vendor-blind: it drives the generic per-extension pairing
+  // endpoints and takes its copy from the backend connection requirement.
+  if (onboarding?.strategy === "web_generated_code" && onboarding?.extensionName) {
     const instructions = onboarding?.instructions || onboarding?.message || "";
     return (
       <div
@@ -89,7 +50,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
         <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
         {instructions &&
         (<p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{instructions}</p>)}
-        <TelegramPairingPanel compact />
+        <PairingWebCodePanel
+          compact
+          extensionId={onboarding.extensionName}
+          displayName={copy.displayName || onboarding.extensionName}
+        />
         {onCancel &&
         (
           <div className="mt-3">
@@ -106,94 +71,45 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
     );
   }
 
-  // Non-paste strategy: render the channel's configured connection action rather
-  // than a code box that would submit a meaningless value.
-  if (!acceptsPastedCode(onboarding?.strategy)) {
-    return (
-      <div
-        data-testid="onboarding-pairing-card"
-        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
-      >
-        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
-        <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {onConfigure &&
-          (
-            <Button
-              variant="secondary"
-              className="h-9 gap-2 px-3 text-xs"
-              onClick={configure}
-              loading={isConfiguring}
-            >
-              {isConfiguring ? copy.submittingLabel : copy.submitLabel}
-            </Button>
-          )}
-          {onCancel &&
-          (
-            <Button
-              variant="ghost"
-              className="h-9 px-3 text-xs"
-              onClick={onCancel}
-            >
-              {t("common.dismiss")}
-            </Button>
-          )}
-        </div>
-        {!onConfigure &&
-        (
-          <p className="mt-2 text-xs leading-5 text-[var(--v2-text-faint)]">
-            {t("pairing.connectFromExtensions", { name: copy.displayName })}
-          </p>
-        )}
-        {error &&
-        (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
-      </div>
-    );
-  }
-
+  // OAuth and administrator-managed strategies have no code that can safely be
+  // pasted into chat. Render manifest-authored guidance and the generic
+  // configure action when one is available.
   return (
     <div
       data-testid="onboarding-pairing-card"
       className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
     >
-      <div className="mb-3">
-        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
-        <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
-      </div>
-
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          type="text"
-          value={code}
-          onChange={(event) => setCode(event.currentTarget.value)}
-          onKeyDown={(event) => event.key === "Enter" && submit()}
-          placeholder={copy.placeholder}
-          aria-label={copy.placeholder}
-          disabled={busy}
-          className="h-9 min-w-0 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]/45 disabled:cursor-not-allowed disabled:opacity-60"
-        />
-        <Button
-          variant="secondary"
-          className="h-9 shrink-0 gap-2 px-3 text-xs"
-          onClick={submit}
-          loading={busy}
-          disabled={!code.trim()}
-        >
-          {busy ? copy.submittingLabel : copy.submitLabel}
-        </Button>
+      <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
+      <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {onConfigure &&
+        (
+          <Button
+            variant="secondary"
+            className="h-9 gap-2 px-3 text-xs"
+            onClick={configure}
+            loading={isConfiguring}
+          >
+            {isConfiguring ? copy.submittingLabel : copy.submitLabel}
+          </Button>
+        )}
         {onCancel &&
         (
           <Button
             variant="ghost"
-            className="h-9 shrink-0 px-3 text-xs"
+            className="h-9 px-3 text-xs"
             onClick={onCancel}
-            disabled={busy}
           >
-            {t("common.cancel")}
+            {t("common.dismiss")}
           </Button>
         )}
       </div>
-
+      {!onConfigure &&
+      (
+        <p className="mt-2 text-xs leading-5 text-[var(--v2-text-faint)]">
+          {t("pairing.connectFromExtensions", { name: copy.displayName })}
+        </p>
+      )}
       {error &&
       (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
@@ -208,13 +124,9 @@ function pairingCardCopy(onboarding, t) {
     instructions:
       onboarding?.instructions ||
       onboarding?.message ||
-      t("pairing.openAndPaste", { name: displayName }),
-    placeholder: onboarding?.inputPlaceholder || t("pairing.placeholder"),
+      t("pairing.connectInstructions", { name: displayName }),
     submitLabel: onboarding?.submitLabel || t("pairing.connect"),
     submittingLabel: onboarding?.submittingLabel || t("connection.connecting"),
-    errorMessage: onboarding?.errorMessage || t("pairing.checkCodeAndRetry"),
-    resumeFailedMessage:
-      onboarding?.resumeFailedMessage ||
-      t("pairing.resumeFailed", { name: displayName }),
+    errorMessage: onboarding?.errorMessage || t("pairing.connectFailedRetry"),
   };
 }

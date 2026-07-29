@@ -13,11 +13,11 @@ Ask first: **is this tool host-owned, sandboxed extension code, a process wrappe
 | v1 source | Examples | Reborn target |
 | --- | --- | --- |
 | Host-owned built-in tool | `echo`, `time`, `json`, coding/file tools, memory, secrets, jobs, settings | Host-bundled `RuntimeKind::FirstParty` extension with registered first-party handlers |
-| WASM API tool | `tools-src/web-search`, Gmail, Google Drive/Sheets/Docs/Slides, GitHub, Slack user tools | Installed or bundled `RuntimeKind::Wasm` extension using `wit/tool.wit` |
+| WASM API tool | Web search, Gmail, Google Drive/Sheets/Docs/Slides, GitHub, Slack user tools | Installed or bundled `RuntimeKind::Wasm` extension using `wit/tool.wit` |
 | Script or CLI wrapper | project-local helper, formatter/test runner, native CLI integration | `RuntimeKind::Script` extension with manifest-owned runner/command metadata |
 | MCP integration | existing MCP server, stdio/http/sse adapter | `RuntimeKind::Mcp` extension |
 | Simple REST integration | single HTTP API call with host-owned credential injection | Use WASM today; future candidate for `DeclarativeHttp` when that runtime lands |
-| Webhook/inbound protocol tool | GitHub webhook receiver, Slack event callback, Telegram update processor | Usually not a tool; use ProductAdapter/channel porting guidance if it creates product/user inbound turns |
+| Webhook/inbound protocol tool | GitHub webhook receiver, Slack event callback, Telegram update processor | Usually not a tool; use ChannelAdapter/channel porting guidance if it creates product/user inbound turns |
 
 Rule of thumb:
 
@@ -136,14 +136,14 @@ The handler is host-owned code keyed by `CapabilityId`. Bundled TOML declares th
 
 ## Path B: port a WASM API tool
 
-Use this path for most existing `tools-src/*` integrations.
+Use this path for retired legacy WASM API tool integrations and new sandboxed API integrations.
 
 ### Target shape
 
 ```text
-tools-src/<tool>/
+<tool-extension>/
   -> wasm32-wasip2 component implementing wit/tool.wit
-  -> Reborn extension manifest v2
+  -> Reborn extension manifest
   -> /system/extensions/<extension-id>/wasm/<module>.wasm
   -> RuntimeKind::Wasm
   -> host-mediated WASM imports
@@ -196,7 +196,7 @@ effects should include "network"; the porting report should list allowed targets
 | `workspace.allowed_prefixes` | `effects += ["read_filesystem"]`; map to scoped mounts/host ports |
 | `tool_invoke.aliases` | avoid for first port; nested invocation must remain host-mediated and explicitly wired |
 | `auth` / `setup` | onboarding metadata; keep as porting report until manifest v2 auth/install shape is finalized |
-| `webhook` | usually ProductAdapter/channel path, not WASM tool invocation path |
+| `webhook` | usually ChannelAdapter/channel path, not WASM tool invocation path |
 
 ### WASM checklist
 
@@ -320,7 +320,7 @@ Do not add a bespoke host HTTP client for one provider. HTTP must go through Reb
 
 A v1 tool sidecar may declare `webhook`, but webhooks often mean inbound product events rather than model-invoked tools.
 
-Use ProductAdapter/channel porting guidance when the webhook:
+Use ChannelAdapter/channel porting guidance when the webhook:
 
 - receives external actor messages/events;
 - must verify protocol auth before parsing;
@@ -420,4 +420,4 @@ This guide is useful for planning and initial ports, but several production path
 - `docs/reborn/contracts/network.md`
 - `src/tools/README.md`
 - `src/tools/wasm/capabilities_schema.rs`
-- `tools-src/web-search/` as the first recommended golden WASM tool port
+- `crates/ironclaw_first_party_extensions/assets/` for current packaged first-party extension examples

@@ -144,11 +144,11 @@ fi
 echo
 
 # --------------------------------------------------------------------------
-# Check 4: Test tier gating — integration tests must use feature flags
+# Check 4: Test tier gating — external-service tests must use integration flag
 # --------------------------------------------------------------------------
 # Files in tests/ that connect to PostgreSQL or use DATABASE_URL must be
-# gated behind #![cfg(all(feature = "postgres", feature = "integration"))].
-# This ensures `cargo test` (no flags) never requires external services.
+# gated behind #![cfg(feature = "integration")]. This ensures `cargo test`
+# (no flags) never requires external services.
 #
 # Heuristic: any test file referencing DATABASE_URL, connect(), PgPool,
 # or tokio_postgres should have the cfg gate on the first few lines.
@@ -171,7 +171,7 @@ for test_file in tests/*.rs; do
     if [ "$needs_gate" = true ]; then
         # Check first 5 lines for the cfg gate
         if ! head -5 "$test_file" | grep -q 'cfg.*feature.*integration' 2>/dev/null; then
-            tier_violations+=("  $test_file: needs '#![cfg(all(feature = \"postgres\", feature = \"integration\"))]'")
+            tier_violations+=("  $test_file: needs '#![cfg(feature = \"integration\")]'")
         fi
     fi
 done

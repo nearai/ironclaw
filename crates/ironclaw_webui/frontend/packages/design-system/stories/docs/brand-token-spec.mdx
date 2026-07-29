@@ -37,6 +37,14 @@ can build against so we all stay coherent. Everything below is a `--v2-*`
 custom property — the machine-readable catalog is `tokens.ts`, and live
 values render under Tokens/Reference.
 
+The swatches on this page deliberately restate canonical hex values
+instead of reading the live CSS variables: the spec documents both
+themes' values side by side (a live var can only show the active theme),
+and this page must stay legible as a written contract even outside a
+themed host. `tokens.test.ts` pins the same values, so these copies
+can't silently drift from `tokens.css`. Product code never gets this
+exception — see Docs → Contributing, rule 1.
+
 ## What "adopting the system" means
 
 A surface is on-brand when it:

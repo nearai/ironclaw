@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::ResourceScope;
-use sha2::{Digest, Sha256};
+
+use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornSandboxScopeKey {
@@ -30,8 +31,8 @@ impl RebornSandboxScopeKey {
             raw_parts.push(("invocation", scope.invocation_id.to_string()));
         }
 
-        let raw = encode_scope_parts(&raw_parts);
-        let digest = scope_digest(&raw);
+        let raw = encode_parts(&raw_parts);
+        let digest = digest_hex(&raw);
         Self { digest }
     }
 
@@ -42,25 +43,6 @@ impl RebornSandboxScopeKey {
     pub fn container_name_prefix(&self) -> String {
         format!("ironclaw-reborn-sandbox-{}", &self.digest[..24])
     }
-}
-
-fn encode_scope_parts(parts: &[(&str, String)]) -> String {
-    let mut encoded = String::new();
-    for (kind, value) in parts {
-        encoded.push_str(&kind.len().to_string());
-        encoded.push(':');
-        encoded.push_str(kind);
-        encoded.push('=');
-        encoded.push_str(&value.len().to_string());
-        encoded.push(':');
-        encoded.push_str(value);
-        encoded.push(';');
-    }
-    encoded
-}
-
-fn scope_digest(raw: &str) -> String {
-    hex::encode(Sha256::digest(raw.as_bytes()))
 }
 
 #[cfg(test)]

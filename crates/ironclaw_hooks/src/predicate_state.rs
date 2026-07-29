@@ -1,4 +1,5 @@
 //! Pluggable backend for predicate sliding-window state.
+// arch-exempt: large_file, shared backend contract remains colocated pending module split, plan #6175
 //!
 //! The [`PredicateEvaluator`] in [`crate::evaluator`] delegates its
 //! counter / value-sum bookkeeping to a [`PredicateStateBackend`]. The

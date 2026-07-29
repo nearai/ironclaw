@@ -28,10 +28,18 @@ use super::{
 /// `.with_run_owner_scoped_capability_dispatch()`, not a fixed `user_id`
 /// override) — those remain call-site-specific.
 async fn build_group_capability_with_base(
-    profile: ToolsProfile,
+    mut profile: ToolsProfile,
     base: &GroupBaseData,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let subject_user = base.canonical_subject_user()?;
+    let product_scope = &base.product_harness.scope;
+    let agent_id = product_scope
+        .agent_id
+        .clone()
+        .ok_or("group product scope is missing an agent id")?;
+    profile.options = profile
+        .options
+        .with_local_runtime_identity(product_scope.tenant_id.clone(), agent_id);
     let harness = profile.build().await?;
     Ok(harness.with_user_id(subject_user))
 }
@@ -52,11 +60,35 @@ impl RebornIntegrationGroup {
         Self::builder().builtin_tools().await
     }
 
+    /// Group with the core built-in tools but NO memory package registered —
+    /// the `Disabled` memory-binding shape: zero `ironclaw.memory.*` tools
+    /// reach the model's tool surface.
+    pub async fn builtin_tools_without_memory() -> HarnessResult<Self> {
+        Self::builder().builtin_tools_without_memory().await
+    }
+
     /// Group with extension-lifecycle tools
-    /// (extension_search/install/activate/remove). Auto-approve is enabled;
+    /// (extension_search/install/remove). Auto-approve is enabled;
     /// registry credentials are seeded.
     pub async fn extension_lifecycle() -> HarnessResult<Self> {
         Self::builder().extension_lifecycle().await
+    }
+
+    /// Extension-lifecycle group extended with the invented-vendor fixture
+    /// (native factory + on-disk assets): drives the full generic runtime
+    /// path — install → dispatch-from-snapshot → remove — with
+    /// no real product (extension-runtime P2).
+    pub async fn extension_runtime_acme() -> HarnessResult<Self> {
+        Self::builder().extension_runtime_acme().await
+    }
+
+    /// Acme runtime group extended for the §5.4 delivery proofs: the bundled
+    /// telegram package's native channel factory is assembled and the
+    /// recording network egress answers vendor-shaped Slack/Telegram bodies,
+    /// so outbound deliveries drive the REAL coordinator → adapter → wire
+    /// path (extension-runtime P5, DEL-10).
+    pub async fn extension_delivery() -> HarnessResult<Self> {
+        Self::builder().extension_delivery().await
     }
 
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
@@ -116,7 +148,7 @@ impl RebornIntegrationGroup {
         Self::builder().project_lifecycle_fault_injected().await
     }
 
-    /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+    /// Group whose ONLY capability is `ironclaw.memory.profile_set` (E-PROFILE seam).
     /// Auto-approve is enabled. Use `user_profile_source_for_test()` to read
     /// a written profile back through the same adapter the group's planned
     /// runtime resolves user profiles from.
@@ -175,7 +207,7 @@ impl RebornIntegrationGroup {
     }
 
     /// Group surfacing the two synthetic `outbound_delivery_*` capabilities over
-    /// an injected facade double (C-SYNTH outbound seam). `target_set` requires
+    /// an injected service double (C-SYNTH outbound seam). `target_set` requires
     /// approval; global auto-approve defaults ON so the happy/`NotFound` arms
     /// dispatch through `Allow`. The approval-gate arm disables auto-approve
     /// per-test with `disable_auto_approve`; the deny arm persists a `Disabled`
@@ -267,10 +299,23 @@ impl RebornIntegrationGroupBuilder {
         self.build_with_capability(capability).await
     }
 
+    /// Build a core built-in tools group whose runtime registry carries NO
+    /// memory package — the `Disabled` memory-binding shape. See
+    /// [`RebornIntegrationGroup::builtin_tools_without_memory`].
+    pub async fn builtin_tools_without_memory(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::core_builtin::core_builtin_tools(
+            super::super::harness::profiles::core_builtin::CoreBuiltinOptions::default()
+                .without_memory_package(),
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
-            super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
         )
         .await
     }
@@ -287,51 +332,114 @@ impl RebornIntegrationGroupBuilder {
         self,
     ) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
-            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured()?,
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user,
         )
         .await
     }
 
     /// Shared assembly for [`Self::extension_lifecycle`] and
     /// [`Self::extension_lifecycle_google_oauth_configured`] — identical
-    /// except for which `ToolsProfile` the caller already built (with or
-    /// without the Google OAuth backend option).
+    /// except for which user-scoped `ToolsProfile` factory the caller selects
+    /// (with or without the Google OAuth backend option).
     async fn extension_lifecycle_with_profile(
         mut self,
-        profile: ToolsProfile,
+        profile_for_user: fn(&str) -> HarnessResult<ToolsProfile>,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Lifecycle ownership is caller-derived. Align the shared capability
-        // harness with the group's canonical binding subject so install and
-        // remove execute under the same user scope as the turn.
+        // Lifecycle ownership is caller-derived. Build the profile with the
+        // canonical binding subject before credentials are seeded, then align
+        // the shared capability harness to that same subject. Building first
+        // with the fixed fixture user and only calling `with_user_id` would
+        // leave the credential rows under the old user and incorrectly block
+        // otherwise credential-ready installs on auth.
+        let subject_user = base.canonical_subject_user()?;
+        let profile = profile_for_user(subject_user.as_str())?;
         let host_runtime = build_group_capability_with_base(profile, &base).await?;
-        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL Slack channel-connection
-        // facade over this harness's own `RebornServices`, mirroring the
-        // production `build_webui_services_with_slack_host_beta_mounts` slot
-        // fill — so `builtin.extension_remove("slack")` runs the real
-        // personal-connection cleanup instead of failing closed on an unset
-        // facade slot. Identities come from the group's single-source dispatch
-        // scope so the facade's tenant check matches dispatch-time callers.
+        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
+        // channel-connection service over this harness's own `RebornServices`,
+        // mirroring the production `build_reborn_runtime` slot fill — so
+        // `builtin.extension_remove` of a channel extension runs the real
+        // per-caller disconnect instead of skipping it on an empty service
+        // slot. Identities come from the group's single-source dispatch scope
+        // so the service's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
-        let slack =
-            ironclaw_reborn_composition::test_support::build_slack_channel_connection_for_test(
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::SlackChannelConnectionTestConfig {
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
-                    host_user_id: scope.user_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
-                    installation_id: "itest-slack-install".to_string(),
-                    team_id: "T-ITEST".to_string(),
-                    api_app_id: "A-ITEST".to_string(),
                 },
             )?;
-        self.slack_channel_connection = Some(Arc::new(slack));
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build the invented-vendor fixture group. See
+    /// [`RebornIntegrationGroup::extension_runtime_acme`].
+    pub async fn extension_runtime_acme(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime =
+            super::super::harness::profiles::extension::extension_runtime_acme_tools().await?;
+        // Same slot fill as `extension_lifecycle` above: acme-messenger
+        // declares a channel surface backed by an auth vendor, so
+        // `builtin.extension_remove` fail-closes on an empty channel
+        // disconnect slot once removal runs under an authenticated actor.
+        // Wire the real generic service over this harness's own
+        // `RebornServices`, keyed to the group's dispatch scope.
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a delivery-proof group. See
+    /// [`RebornIntegrationGroup::extension_delivery`].
+    pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::extension::extension_delivery_tools_profile()?,
+            &base,
+        )
+        .await?
+        .with_run_owner_scoped_capability_dispatch();
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
@@ -411,7 +519,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Align `builtin.profile_set`'s executor to the canonical subject user
+        // Align `ironclaw.memory.profile_set`'s executor to the canonical subject user
         // (mirrors `live_approvals`) — otherwise a write and its read-back
         // resolve under different users. Needs `base` first, so can't go
         // through `build_with_capability`.
@@ -442,11 +550,9 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a skill-activation group. See
-    /// [`RebornIntegrationGroup::skill_activation_tools`]. Seeds a `greet` system
-    /// skill BEFORE `into_group` so the runtime's `skill_context_source` (and the
-    /// `skill_activate` capability's `activate_skills_for_run`) resolve it at
-    /// activation time. A system skill is used so resolution is independent of the
-    /// run's scope owner — the seam only needs the skill to exist.
+    /// [`RebornIntegrationGroup::skill_activation_tools`]. The skill profile
+    /// pre-seeds the system fixtures before runtime construction so the warmed
+    /// system-skill descriptor cache sees them.
     pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
@@ -457,11 +563,6 @@ impl RebornIntegrationGroupBuilder {
             &base.canonical_binding.tenant_id,
         )
         .await?;
-        host_runtime.seed_system_skill_for_test(
-            "greet",
-            "greets the user warmly",
-            "GREET_SKILL_PROMPT_SENTINEL",
-        )?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }

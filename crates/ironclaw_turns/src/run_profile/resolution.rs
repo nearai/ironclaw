@@ -29,14 +29,14 @@
 //! `CapabilityOutcome` variants held, via the vocabulary in
 //! [`ironclaw_host_api::result_meta`]:
 //!
-//! - the failure recovery class ([`CapabilityFailureKind`]) → [`FailureKind`] on
+//! - the failure recovery class ([`FailureKind`]) carried unchanged onto
 //!   [`ToolVerdict::RecoverableFailure`], plus its structured `detail`
 //!   ([`CapabilityFailureDetail`]) as a redacted [`ModelFailureDiagnostic`] on
 //!   the same verdict (the model-visible correction hint): `InvalidInput` schema
 //!   issues carry their [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode)
 //!   plus redacted [`SafeSummary`] fields, and a free-text `Diagnostic` is
-//!   redacted to a [`SafeSummary`] (path-shaped text degrades to the placeholder
-//!   — the raw path never crosses the charter).
+//!   carried as a bounded [`ModelDiagnostic`] after producer-side secret
+//!   scrubbing (paths and payload delimiters remain available for recovery).
 //! - `progress`/`terminate_hint`/`output_digest` →
 //!   [`Outcome::progress`]/[`Outcome::terminate_hint`]/[`OutcomeRefs::output_digest`].
 //! - the `resume_token` inside `approval_resume`/`auth_resume` → the
@@ -64,16 +64,16 @@
 
 use ironclaw_host_api::{
     Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult, FailureKind, GateRecord,
-    GateRef, GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues,
-    ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint,
-    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId,
+    GateRef, GateWaypoint, LoopRef, ModelDiagnostic, ModelFailureDiagnostic, ModelInputIssue,
+    ModelInputIssues, ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef,
+    ProcessWaypoint, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId,
     RuntimeCredentialAuthRequirement, SafeSummary, Suspension, TerminateHint, ToolVerdict,
 };
 
 use super::content_digest::ContentDigest;
 use super::host::{
-    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDeniedReasonKind,
-    CapabilityFailureKind, CapabilityProgress, CapabilityResumeToken, LoopProcessRef,
+    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDeniedReasonKind, CapabilityProgress,
+    CapabilityResumeToken, LoopProcessRef,
 };
 use super::model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, ModelVisibleToolObservation,
@@ -163,7 +163,7 @@ pub fn completed(
 /// AND the redacted structured diagnostic ride the verdict, so the model-visible
 /// correction hint crosses without the loop reading host storage.
 pub fn failed(
-    error_kind: CapabilityFailureKind,
+    error_kind: FailureKind,
     safe_summary: String,
     detail: Option<CapabilityFailureDetail>,
 ) -> Resolution {
@@ -180,11 +180,10 @@ pub fn failed(
             output_digest: None,
         },
         verdict: match model_failure_diagnostic(detail) {
-            Some(diagnostic) => ToolVerdict::recoverable_failure_with_diagnostic(
-                failure_kind_of(error_kind),
-                diagnostic,
-            ),
-            None => ToolVerdict::recoverable_failure(failure_kind_of(error_kind)),
+            Some(diagnostic) => {
+                ToolVerdict::recoverable_failure_with_diagnostic(error_kind, diagnostic)
+            }
+            None => ToolVerdict::recoverable_failure(error_kind),
         },
         summary: safe_summary_or_placeholder(safe_summary),
         progress: ResultProgress::default(),
@@ -369,9 +368,8 @@ pub fn denied(reason_kind: CapabilityDeniedReasonKind, safe_summary: String) -> 
 /// [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode) and
 /// every free-text field re-validated through the [`SafeSummary`] redaction
 /// contract (a field that fails is dropped; an issue whose required `path` fails
-/// is dropped whole). The loop's lenient free-text `Diagnostic` (which permits
-/// paths) is redacted to a [`SafeSummary`]: a path-shaped diagnostic degrades to
-/// the placeholder rather than carry a raw host path across the charter.
+/// is dropped whole). The loop's producer-scrubbed free-text `Diagnostic` keeps
+/// paths and payload delimiters in a bounded [`ModelDiagnostic`].
 fn model_failure_diagnostic(
     detail: Option<CapabilityFailureDetail>,
 ) -> Option<ModelFailureDiagnostic> {
@@ -381,11 +379,26 @@ fn model_failure_diagnostic(
                 ModelInputIssues::truncating(issues.into_iter().filter_map(model_input_issue));
             Some(ModelFailureDiagnostic::InvalidInput { issues })
         }
-        CapabilityFailureDetail::Diagnostic { text } => Some(ModelFailureDiagnostic::Diagnostic {
-            // The loop channel allows paths; the host_api boundary does not — a
-            // path-shaped diagnostic redacts to the placeholder (never raw).
-            text: SafeSummary::new(text).unwrap_or_else(|_| SafeSummary::placeholder()),
-        }),
+        CapabilityFailureDetail::Diagnostic { text } => {
+            let text = match ModelDiagnostic::truncating(text) {
+                Ok(text) => text,
+                // silent-ok: the model-visible diagnostic boundary fails closed
+                // to a fixed sentence rather than failing the turn — the
+                // producer is responsible for scrubbing before text reaches
+                // here. Reaching this arm means it did not, which an operator
+                // wants to see; `debug!` because `info!`/`warn!` corrupt the
+                // REPL/TUI (repo CLAUDE.md).
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "model-visible diagnostic rejected at the sanitized \
+                         resolution boundary; substituting the fixed fallback"
+                    );
+                    ModelDiagnostic::unavailable()
+                }
+            };
+            Some(ModelFailureDiagnostic::Diagnostic { text })
+        }
         // The TRUSTED channel: the payload is already a validated
         // `HostRemediation`, so it crosses the charter as-is. Deliberately NOT
         // squeezed through `SafeSummary` — doing so is the #6299 regression
@@ -487,7 +500,7 @@ fn approval_resume_token(resume: Option<CapabilityApprovalResume>) -> Option<Res
 
 /// The opaque auth resume token, when the producer carried one.
 fn auth_resume_token(resume: Option<CapabilityAuthResume>) -> Option<ResumeToken> {
-    resume.and_then(|resume| resume_token_of(&resume.resume_token))
+    resume.and_then(|resume| resume.resume_token.as_ref().and_then(resume_token_of))
 }
 
 /// Convert a loop-facing [`CapabilityResumeToken`] to a host_api [`ResumeToken`].
@@ -513,13 +526,6 @@ fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
         CapabilityProgress::NoChange => ResultProgress::NoChange,
         CapabilityProgress::Blocked => ResultProgress::Blocked,
     }
-}
-
-/// Map the loop's [`CapabilityFailureKind`] onto host_api's [`FailureKind`] by its
-/// stable tag — the two vocabularies share the same closed set plus an open
-/// `Unknown`, so every value crosses losslessly.
-fn failure_kind_of(kind: CapabilityFailureKind) -> FailureKind {
-    FailureKind::from_tag(kind.as_str())
 }
 
 /// The #5838 first-look inline CONTENT preview and its continuation metadata from
@@ -619,19 +625,261 @@ fn safe_summary_or_placeholder(raw: String) -> SafeSummary {
 /// `model_view_denied`); host_api's [`DenyReason`] is a fixed closed enum whose
 /// variants originate on the host authorize path, not the loop. There is no
 /// faithful 1:1, so this is a best-effort match: a reason string that already
-/// spells a `DenyReason` snake_case tag is honored, and everything else — every
-/// loop-originated denial — buckets into the model-visible catch-all
-/// [`DenyReason::PolicyDenied`].
+/// Every denial reason string a producer in this workspace can mint.
+///
+/// Verified by enumerating the mint sites — `CapabilityDeniedReasonKind::unknown`,
+/// `capability_denied_reason_kind`, the named `EmptySurface` variant, and
+/// `denied_reason_kind_for` (guarded to `Authorization | PolicyDenied`, so it
+/// yields exactly `auth_denied` and `policy_denied`). `PRODUCTION_DENY_REASONS`
+/// pins that list; [`classify_deny_reason`] must have an answer for each, so a
+/// newly minted reason cannot silently inherit the conservative fallback.
+///
+/// Deliberately excluded: `expected_approval` and `host_policy_denied`, which
+/// [`classify_deny_reason`] handles but which appear only in contract-test
+/// fixtures. Listing them here would claim producer coverage this crate does
+/// not have.
+#[cfg(test)]
+const PRODUCTION_DENY_REASONS: [&str; 12] = [
+    "auth_denied",
+    "policy_denied",
+    "empty_surface",
+    "hook_denied",
+    "hook_gate_ref_unavailable",
+    "invalid_spawn_input",
+    "missing_provider_trust",
+    "model_view_denied",
+    "network_denied",
+    "outbound_delivery_approval_required",
+    "outside_visible_surface",
+    "surface_profile_denied",
+];
+
+/// Classify a denial's producer-side reason, or `None` if nobody has classified
+/// it yet.
+///
+/// Split out from [`deny_reason_from_kind`] so the "unclassified" case stays
+/// *visible*. Folded into the function, an unclassified reason is
+/// indistinguishable from a deliberate `PolicyDenied`, which is precisely how
+/// the original collapse hid: every reason looked like a decision.
+fn classify_deny_reason(tag: &str) -> Option<DenyReason> {
+    Some(match tag {
+        // Named a capability that is not in this caller's view: nothing to
+        // unlock, and retrying the same call cannot succeed.
+        //
+        // `empty_surface` deliberately stays `PolicyDenied` below rather than
+        // joining these. An empty surface is normally a profile/policy outcome
+        // ("this loop is configured without tools"), and four sites pin that
+        // reading — `deny_record_reason_maps_best_effort_with_policy_fallback`
+        // names it outright. Reclassifying it is arguable but unproven, so the
+        // pinned decision stands.
+        "model_view_denied" | "outside_visible_surface" => DenyReason::UnknownCapability,
+        // A credential is missing or refused: an auth flow is the unlock.
+        "auth_denied" => DenyReason::UnknownSecret,
+        // A human approval is pending or was refused — re-asking can succeed.
+        // `expected_approval` is a contract-test tag, not a producer tag.
+        "outbound_delivery_approval_required" | "expected_approval" => DenyReason::ApprovalDenied,
+        // Egress refused by network policy.
+        "network_denied" => DenyReason::NetworkDenied,
+        // Host-side invariant broke; not the caller's doing and not unlockable
+        // by them.
+        "hook_gate_ref_unavailable" => DenyReason::InternalInvariantViolation,
+        // Model-supplied input the model itself can correct.
+        "invalid_spawn_input" => DenyReason::MissingGrant,
+        // The provider has no trust decision on record — a grant is what is
+        // missing, not a permission the caller already lacks.
+        "missing_provider_trust" => DenyReason::MissingGrant,
+        // Genuine policy refusals: nothing the caller does unlocks these.
+        // `host_policy_denied` is a contract-test tag, not a producer tag.
+        "policy_denied"
+        | "host_policy_denied"
+        | "hook_denied"
+        | "surface_profile_denied"
+        | "empty_surface" => DenyReason::PolicyDenied,
+        _ => return None,
+    })
+}
+
+/// Map a denial's producer-side reason onto the model-visible [`DenyReason`].
+///
+/// This was a serde parse over `DenyReason`'s snake_case tags, which silently
+/// fell back to `PolicyDenied`. Of the twelve reason strings production
+/// actually mints, only `network_denied` and `policy_denied` coincide with a
+/// tag; the other ten fell through, so nearly every denial reached the model as
+/// a flat "policy denied" — *no capabilities are available to you*, *a hook
+/// blocked this*, *you need to authenticate*, and *an approval is waiting for a
+/// human* were all indistinguishable.
+///
+/// The distinction the model needs is **what would unlock the call** (#6284
+/// item 4): a permanent block, a missing credential, and a pending approval
+/// call for three different next actions, and collapsing them leaves the model
+/// guessing.
+///
+/// An unclassified reason still resolves to `PolicyDenied` — the honest
+/// conservative answer — but that path is now reachable only by a reason nobody
+/// has classified, and `every_production_deny_reason_is_classified` fails if a
+/// producer adds one without choosing.
 fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
-    use serde::{
-        Deserialize,
-        de::{IntoDeserializer, value::StrDeserializer},
-    };
-    // Deserialize straight from the &str (no JSON Value/String allocation);
-    // DenyReason's snake_case serde tags are the match vocabulary.
-    let deserializer: StrDeserializer<'_, serde::de::value::Error> =
-        kind.as_str().into_deserializer();
-    DenyReason::deserialize(deserializer).unwrap_or(DenyReason::PolicyDenied)
+    classify_deny_reason(kind.as_str()).unwrap_or(DenyReason::PolicyDenied)
+}
+
+#[cfg(test)]
+mod deny_reason_tests {
+    use super::*;
+
+    fn reason(tag: &str) -> CapabilityDeniedReasonKind {
+        CapabilityDeniedReasonKind::unknown(tag).expect("valid reason tag")
+    }
+
+    /// Denials must tell the model *what would unlock the call*.
+    ///
+    /// The previous serde parse matched `DenyReason`'s own tags, and ten of the
+    /// twelve reasons production mints are not among them — so a missing
+    /// credential, a pending human approval, an absent grant and a genuine
+    /// policy block all arrived as `PolicyDenied`. Each of those wants a
+    /// different next action from the model, and it had no way to tell them
+    /// apart. This pins that they stay distinguishable.
+    #[test]
+    fn denials_distinguish_what_would_unlock_the_call() {
+        // Not your capability — nothing to unlock, but not a policy refusal.
+        for tag in ["model_view_denied", "outside_visible_surface"] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::UnknownCapability,
+                "{tag} should read as an absent capability"
+            );
+        }
+        // A credential unlocks this one.
+        assert_eq!(
+            deny_reason_from_kind(&reason("auth_denied")),
+            DenyReason::UnknownSecret,
+            "auth_denied should point at an auth flow"
+        );
+        // A human unlocks these.
+        for tag in ["outbound_delivery_approval_required", "expected_approval"] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::ApprovalDenied,
+                "{tag} should read as approvable, not forbidden"
+            );
+        }
+        // Nothing the caller does unlocks these. `empty_surface` is here
+        // deliberately: existing tests pin it as a policy outcome, and
+        // reclassifying it is arguable but unproven.
+        for tag in [
+            "host_policy_denied",
+            "hook_denied",
+            "surface_profile_denied",
+            "empty_surface",
+        ] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::PolicyDenied,
+                "{tag} is a genuine policy refusal"
+            );
+        }
+        assert_eq!(
+            deny_reason_from_kind(&reason("network_denied")),
+            DenyReason::NetworkDenied
+        );
+        assert_eq!(
+            deny_reason_from_kind(&reason("hook_gate_ref_unavailable")),
+            DenyReason::InternalInvariantViolation
+        );
+        // A grant is what is missing here, not a permission already refused.
+        for tag in ["invalid_spawn_input", "missing_provider_trust"] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::MissingGrant,
+                "{tag} should read as a missing grant"
+            );
+        }
+    }
+
+    /// Every reason a producer in this workspace can mint must be classified
+    /// deliberately. Without this, a new producer tag silently inherits the
+    /// conservative `PolicyDenied` fallback and is indistinguishable from a
+    /// real policy refusal — which is exactly how the original collapse hid.
+    ///
+    /// If this fails after adding a denial site, classify the new tag in
+    /// `classify_deny_reason` and add it to `PRODUCTION_DENY_REASONS`.
+    #[test]
+    fn every_production_deny_reason_is_classified() {
+        for tag in PRODUCTION_DENY_REASONS {
+            assert!(
+                classify_deny_reason(tag).is_some(),
+                "{tag} is minted by a producer but nobody classified it; it \
+                 would reach the model as an undifferentiated policy refusal"
+            );
+        }
+    }
+
+    /// Drive the real `denied()` constructor, not the mapper in isolation.
+    ///
+    /// `denied()` writes the reason to two places the model and the audit trail
+    /// read separately — `Resolution::Denied`'s `reason_kind` and the
+    /// `DenyRecord` — and a mapper-only test cannot catch either channel losing
+    /// the distinction or the two disagreeing. (`.claude/rules/testing.md`:
+    /// test through the caller.)
+    #[test]
+    fn denied_surfaces_the_distinction_on_both_channels() {
+        let matrix = [
+            ("model_view_denied", DenyReason::UnknownCapability),
+            ("auth_denied", DenyReason::UnknownSecret),
+            (
+                "outbound_delivery_approval_required",
+                DenyReason::ApprovalDenied,
+            ),
+            ("network_denied", DenyReason::NetworkDenied),
+            (
+                "hook_gate_ref_unavailable",
+                DenyReason::InternalInvariantViolation,
+            ),
+            ("missing_provider_trust", DenyReason::MissingGrant),
+            ("hook_denied", DenyReason::PolicyDenied),
+            ("some_future_reason", DenyReason::PolicyDenied),
+        ];
+        for (tag, expected) in matrix {
+            let result = denied(reason(tag), format!("denied: {tag}"));
+            match &result.resolution {
+                Resolution::Denied(denial) => assert_eq!(
+                    denial.reason_kind,
+                    Some(expected),
+                    "{tag}: the model-facing channel lost the distinction"
+                ),
+                other => panic!("{tag}: expected Denied, got {other:?}"),
+            }
+            assert_eq!(
+                result.deny_record.reason, expected,
+                "{tag}: the audit record lost the distinction"
+            );
+        }
+    }
+
+    /// The conservative fallback must remain reachable only by a reason nobody
+    /// has classified — not by the whole product, as before.
+    #[test]
+    fn an_unclassified_reason_still_falls_back_conservatively() {
+        assert_eq!(
+            deny_reason_from_kind(&reason("some_future_reason")),
+            DenyReason::PolicyDenied
+        );
+    }
+
+    /// Guard against the collapse returning: if every distinct production
+    /// reason maps to one value again, this fails.
+    #[test]
+    fn production_denial_reasons_do_not_collapse_to_one_value() {
+        let distinct: std::collections::HashSet<DenyReason> = PRODUCTION_DENY_REASONS
+            .iter()
+            .map(|tag| deny_reason_from_kind(&reason(tag)))
+            .collect();
+        assert!(
+            distinct.len() >= 6,
+            "denial reasons collapsed to {} distinct values; the model cannot \
+             tell an auth prompt from a permanent block",
+            distinct.len()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -642,7 +890,7 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ExtensionId, GateRecord,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAccountSetup, VendorId,
     };
 
     fn result_ref() -> LoopResultRef {
@@ -659,7 +907,7 @@ mod tests {
 
     fn credential_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: vec!["repo".to_string()],
@@ -750,7 +998,7 @@ mod tests {
             Row {
                 label: "failed",
                 resolution: failed(
-                    CapabilityFailureKind::InvalidInput,
+                    FailureKind::InputEncode,
                     "tool input rejected".to_string(),
                     None,
                 ),
@@ -946,34 +1194,6 @@ mod tests {
         }
     }
 
-    /// A `failed` result's recovery classification rides
-    /// `ToolVerdict::RecoverableFailure`.
-    #[test]
-    fn failed_carries_its_error_kind_on_the_verdict() {
-        for (loop_kind, expected) in [
-            (CapabilityFailureKind::Network, FailureKind::Network),
-            (
-                CapabilityFailureKind::InvalidInput,
-                FailureKind::InvalidInput,
-            ),
-            (
-                CapabilityFailureKind::unknown("quota_exceeded").unwrap(),
-                FailureKind::unknown("quota_exceeded").unwrap(),
-            ),
-        ] {
-            match failed(loop_kind, "tool failed".to_string(), None) {
-                Resolution::Done(done) => {
-                    assert_eq!(
-                        done.verdict,
-                        ToolVerdict::recoverable_failure(expected.clone()),
-                        "the recovery class must ride the verdict"
-                    );
-                }
-                other => panic!("expected Done, got {other:?}"),
-            }
-        }
-    }
-
     /// A `failed` result's structured `InvalidInput` diagnostic round-trips its
     /// schema issues (path, code, expected/received) onto the verdict.
     #[test]
@@ -988,7 +1208,7 @@ mod tests {
             }],
         });
         match failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "tool input rejected".to_string(),
             detail,
         ) {
@@ -1012,12 +1232,12 @@ mod tests {
         }
     }
 
-    /// A `failed` result's free-text `Diagnostic` rides the verdict as a redacted
-    /// `SafeSummary`, and a path/secret-shaped diagnostic is redacted (never raw).
+    /// A `failed` result's producer-scrubbed free-text `Diagnostic` rides the
+    /// verdict without losing path-shaped recovery context.
     #[test]
-    fn failed_free_text_diagnostic_round_trips_and_redacts() {
+    fn failed_free_text_diagnostic_round_trips_and_preserves_paths() {
         match failed(
-            CapabilityFailureKind::Backend,
+            FailureKind::Backend,
             "tool failed".to_string(),
             Some(CapabilityFailureDetail::Diagnostic {
                 text: "backend returned an error".to_string(),
@@ -1032,10 +1252,10 @@ mod tests {
             other => panic!("expected Done, got {other:?}"),
         }
 
-        // A free-text diagnostic carrying a host path is redacted to the
-        // placeholder — the raw path never crosses the boundary.
+        // Path-shaped recovery context survives the sanitized resolution
+        // boundary instead of becoming an opaque placeholder.
         match failed(
-            CapabilityFailureKind::Backend,
+            FailureKind::Backend,
             "tool failed".to_string(),
             Some(CapabilityFailureDetail::Diagnostic {
                 text: "failed reading /etc/passwd".to_string(),
@@ -1043,8 +1263,25 @@ mod tests {
         ) {
             Resolution::Done(done) => match done.verdict.diagnostic() {
                 Some(ModelFailureDiagnostic::Diagnostic { text }) => {
-                    assert_eq!(text, &SafeSummary::placeholder());
-                    assert!(!text.as_str().contains("/etc/passwd"));
+                    assert_eq!(text.as_str(), "failed reading /etc/passwd");
+                }
+                other => panic!("expected Diagnostic, got {other:?}"),
+            },
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // A known credential-shaped value that reaches this defense-in-depth
+        // boundary is replaced with the fixed diagnostic fallback.
+        match failed(
+            FailureKind::Backend,
+            "tool failed".to_string(),
+            Some(CapabilityFailureDetail::Diagnostic {
+                text: "provider returned ghp_0123456789abcdef".to_string(),
+            }),
+        ) {
+            Resolution::Done(done) => match done.verdict.diagnostic() {
+                Some(ModelFailureDiagnostic::Diagnostic { text }) => {
+                    assert_eq!(text, &ModelDiagnostic::unavailable());
                 }
                 other => panic!("expected Diagnostic, got {other:?}"),
             },
@@ -1053,7 +1290,7 @@ mod tests {
 
         // A secret-shaped `received` value is dropped (not carried raw).
         match failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "tool input rejected".to_string(),
             Some(CapabilityFailureDetail::InvalidInput {
                 issues: vec![CapabilityInputIssue {
@@ -1176,7 +1413,8 @@ mod tests {
         }
 
         let auth_resume = CapabilityAuthResume {
-            resume_token: CapabilityResumeToken::new("auth-resume-1").unwrap(),
+            resume_token: Some(CapabilityResumeToken::new("auth-resume-1").unwrap()),
+            disposition: None,
             prior_approval: None,
         };
         let gated = auth_required(

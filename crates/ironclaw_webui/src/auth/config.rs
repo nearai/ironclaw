@@ -3,7 +3,7 @@
 //! Host composition builds a [`GoogleOAuthConfig`] from operator
 //! input (env vars, TOML config) and hands it to
 //! [`webui_v2_auth_router`](super::webui_v2_auth_router) along with a
-//! `SessionStore` and a `UserDirectory`. The composition layer is
+//! `SignedTokenSessionStore` and a `UserDirectory`. The composition layer is
 //! responsible for picking which providers are enabled; this crate
 //! never reads env vars directly so a binary that uses a different
 //! config source can still wire it.

@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import httpx
+import pytest
 from playwright.async_api import expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
@@ -102,6 +103,78 @@ async def _assert_readable(locator, label: str) -> dict[str, list[float]]:
     ratio = _contrast_ratio(colors["foreground"], colors["background"])
     assert ratio >= 4.5, f"{label} contrast was {ratio:.2f}:1 with colors {colors}"
     return colors
+
+
+async def _typography_metrics(page, selectors: dict[str, str]) -> dict:
+    return await page.evaluate(
+        """selectors => {
+          const semanticSize = getComputedStyle(document.documentElement)
+            .getPropertyValue("--text-ui").trim();
+          if (!semanticSize) {
+            throw new Error("Semantic typography token --text-ui is not defined");
+          }
+          const probe = document.createElement("span");
+          probe.style.cssText =
+            "position:absolute;visibility:hidden;font-size:var(--text-ui)";
+          document.body.append(probe);
+          const expectedFontSize = getComputedStyle(probe).fontSize;
+          probe.remove();
+
+          const controls = Object.fromEntries(
+            Object.entries(selectors).map(([name, selector]) => {
+              const element = document.querySelector(selector);
+              if (!element) {
+                throw new Error(`Typography target not found: ${name} (${selector})`);
+              }
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return [name, {
+                className: element.className,
+                clientHeight: element.clientHeight,
+                clientWidth: element.clientWidth,
+                expectedFontSize,
+                fontFamily: style.fontFamily,
+                fontSize: style.fontSize,
+                height: rect.height,
+                semanticSize,
+                scrollHeight: element.scrollHeight,
+                scrollWidth: element.scrollWidth,
+              }];
+            })
+          );
+          return {
+            controls,
+            rootFontSize: getComputedStyle(document.documentElement).fontSize,
+            viewport: {
+              documentWidth: document.documentElement.scrollWidth,
+              viewportWidth: window.innerWidth,
+            },
+          };
+        }""",
+        selectors,
+    )
+
+
+def _assert_control_typography(
+    metrics: dict,
+    label: str,
+    *,
+    expected_height: float | None = None,
+) -> None:
+    assert metrics["fontSize"] == metrics["expectedFontSize"], (
+        f"{label} font size was {metrics['fontSize']}, "
+        f"expected semantic --text-ui size {metrics['expectedFontSize']}: {metrics}"
+    )
+    assert metrics["scrollWidth"] <= metrics["clientWidth"] + 1, (
+        f"{label} clipped horizontally: {metrics}"
+    )
+    assert metrics["scrollHeight"] <= metrics["clientHeight"] + 1, (
+        f"{label} clipped vertically: {metrics}"
+    )
+    if expected_height is not None:
+        assert abs(metrics["height"] - expected_height) <= 1, (
+            f"{label} height was {metrics['height']}px, expected {expected_height}px"
+        )
 
 
 async def _wait_for_automation_named(
@@ -210,6 +283,339 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         await anon_ctx.close()
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected_lang", "connect_label"),
+    [
+        pytest.param("en-US", "en", "Connect", id="english"),
+        pytest.param("zh-CN", "zh-CN", "连接", id="simplified-chinese"),
+    ],
+)
+@pytest.mark.parametrize("width", [375, 768, 1024, 1440])
+async def test_reborn_v2_shared_control_typography_is_stable(
+    reborn_v2_server,
+    reborn_v2_browser,
+    locale,
+    expected_lang,
+    connect_label,
+    width,
+):
+    """Shared controls keep one size without viewport or locale clipping."""
+    context = await reborn_v2_browser.new_context(
+        locale=locale,
+        viewport={"width": width, "height": 900},
+    )
+    page = await context.new_page()
+
+    async def handle_tools(route) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "entries": [
+                        {
+                            "key": "agent.auto_approve_tools",
+                            "value": False,
+                            "mutable": True,
+                            "source": "default",
+                        },
+                        {
+                            "key": "tool.typography_check",
+                            "value": {
+                                "name": "typography_check",
+                                "description": "Shared control typography.",
+                                "state": "ask_each_time",
+                                "default_state": "ask_each_time",
+                                "locked": False,
+                                "effective_source": "default",
+                            },
+                            "mutable": True,
+                            "source": "default",
+                        },
+                    ]
+                }
+            ),
+        )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/")
+        token_input = page.locator(SEL_V2["login_token"])
+        connect_button = page.locator("form button[type='submit']")
+        token_label = page.locator("label[for='v2-token']")
+        await expect(token_input).to_be_visible(timeout=15000)
+        await expect(connect_button).to_have_text(connect_label, timeout=15000)
+        await expect(page.locator("html")).to_have_attribute(
+            "lang", expected_lang
+        )
+
+        expected_height = 44 if width < 768 else 50
+        login_page_metrics = await _typography_metrics(
+            page,
+            {
+                "tokenInput": SEL_V2["login_token"],
+                "connectButton": "form button[type='submit']",
+                "tokenLabel": "label[for='v2-token']",
+            },
+        )
+        login_metrics = login_page_metrics["controls"]
+        _assert_control_typography(
+            login_metrics["tokenInput"],
+            f"{locale} token input at {width}px",
+            expected_height=expected_height,
+        )
+        _assert_control_typography(
+            login_metrics["connectButton"],
+            f"{locale} connect button at {width}px",
+            expected_height=expected_height,
+        )
+        _assert_control_typography(
+            login_metrics["tokenLabel"],
+            f"{locale} token label at {width}px",
+        )
+        assert login_page_metrics["rootFontSize"] == "16px"
+
+        tools_route = "**/api/webchat/v2/settings/tools"
+        await page.route(tools_route, handle_tools)
+        try:
+            await page.goto(
+                f"{reborn_v2_server}/settings/tools"
+                f"?token={REBORN_V2_AUTH_TOKEN}"
+            )
+            tool_row_selector = SEL_V2["settings_tool_row_for"].format(
+                name="typography_check"
+            )
+            permission = page.locator(tool_row_selector).locator(
+                SEL_V2["settings_tool_permission"]
+            )
+            await expect(permission).to_be_visible(timeout=15000)
+            permission_metrics = (
+                await _typography_metrics(
+                    page,
+                    {
+                        "permission": (
+                            f"{tool_row_selector} "
+                            f"{SEL_V2['settings_tool_permission']}"
+                        )
+                    },
+                )
+            )["controls"]["permission"]
+        finally:
+            await page.unroute(tools_route, handle_tools)
+
+        _assert_control_typography(
+            permission_metrics,
+            f"{locale} SelectMenu at {width}px",
+        )
+        assert "Mono" not in permission_metrics["fontFamily"], (
+            f"SelectMenu defaulted to monospace: {permission_metrics['fontFamily']}"
+        )
+
+        await page.goto(
+            f"{reborn_v2_server}/settings/skills"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        skill_content = page.locator("textarea").first
+        await expect(skill_content).to_be_visible(timeout=15000)
+        skills_metrics = await _typography_metrics(
+            page,
+            {"skillContent": "textarea"},
+        )
+        _assert_control_typography(
+            skills_metrics["controls"]["skillContent"],
+            f"{locale} textarea at {width}px",
+        )
+
+        viewport_metrics = skills_metrics["viewport"]
+        assert viewport_metrics["documentWidth"] <= viewport_metrics["viewportWidth"], (
+            f"{locale} layout overflowed at {width}px: {viewport_metrics}"
+        )
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_lazy_routes_preserve_direct_navigation(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A deep route loads only its page chunks, then SPA navigation loads Chat."""
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    javascript_assets: list[str] = []
+
+    def record_javascript(response) -> None:
+        path = urlparse(response.url).path
+        if path.endswith(".js"):
+            javascript_assets.append(path)
+
+    page.on("response", record_javascript)
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/settings/appearance"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(
+            page.locator(SEL_V2["appearance_theme_light"])
+        ).to_be_visible(timeout=15000)
+        await page.wait_for_url(
+            re.compile(r".*/settings/appearance(?:[?#].*)?$"), timeout=15000
+        )
+
+        assert any("/settings-page-" in path for path in javascript_assets)
+        assert any("/appearance-tab-" in path for path in javascript_assets)
+        for inactive_chunk in (
+            "/chat-page-",
+            "/admin-page-",
+            "/automations-page-",
+            "/extensions-page-",
+        ):
+            assert not any(inactive_chunk in path for path in javascript_assets), (
+                f"inactive route chunk loaded during Settings startup: {inactive_chunk}"
+            )
+
+        javascript_assets.clear()
+        await page.locator(SEL_V2["nav_chat"]).first.click()
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        await page.wait_for_url(re.compile(r".*/chat(?:[?#].*)?$"), timeout=15000)
+        assert any("/chat-page-" in path for path in javascript_assets)
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_chunk_failure_can_reload_and_recover(reborn_v2_page):
+    """A failed route import offers a reload that retries from the same URL."""
+    settings_chunk_requests = 0
+
+    async def fail_first_settings_chunk(route) -> None:
+        nonlocal settings_chunk_requests
+        settings_chunk_requests += 1
+        if settings_chunk_requests == 1:
+            await route.abort()
+            return
+        await route.continue_()
+
+    await reborn_v2_page.route(
+        "**/assets/settings-page-*.js", fail_first_settings_chunk
+    )
+    await reborn_v2_page.locator(SEL_V2["nav_settings_inference"]).first.click()
+
+    load_error = reborn_v2_page.get_by_role("alert").filter(
+        has_text="This page couldn't be loaded"
+    )
+    await expect(load_error).to_be_visible(timeout=15000)
+    await expect(load_error).to_contain_text(
+        "A new version may be available or the connection was interrupted"
+    )
+    assert urlparse(reborn_v2_page.url).path == "/settings/inference"
+
+    await load_error.get_by_role("button", name="Reload page").click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["settings_search_input"])
+    ).to_be_visible(timeout=15000)
+    await expect(load_error).to_have_count(0)
+    assert settings_chunk_requests == 2
+    assert urlparse(reborn_v2_page.url).path == "/settings/inference"
+
+
+async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
+    reborn_v2_page,
+):
+    """A transient session failure keeps the bearer but never renders anonymous-scoped UI."""
+    session_requests = 0
+
+    async def handle_session(route) -> None:
+        nonlocal session_requests
+        session_requests += 1
+        if session_requests == 1:
+            await route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"error": "temporarily_unavailable"}),
+            )
+            return
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tenant_id": "reborn-v2-e2e",
+                    "user_id": USER_ID,
+                    "capabilities": {},
+                    "features": {"reborn_projects": False},
+                    "attachments": {
+                        "accept": ["text/plain"],
+                        "max_files_per_message": 4,
+                        "max_bytes_per_file": 1048576,
+                        "max_bytes_per_message": 4194304,
+                    },
+                }
+            ),
+        )
+
+    await reborn_v2_page.route("**/api/webchat/v2/session", handle_session)
+    await reborn_v2_page.reload()
+
+    error = reborn_v2_page.locator(SEL_V2["session_check_error"])
+    await expect(error).to_be_visible(timeout=15000)
+    await expect(error).to_contain_text("Couldn't verify your session")
+    await expect(error).to_contain_text("Your sign-in is still saved")
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_have_count(0)
+    await expect(reborn_v2_page.locator(SEL_V2["login_token"])).to_have_count(0)
+    assert await reborn_v2_page.evaluate(
+        "() => sessionStorage.getItem('ironclaw_token')"
+    ) == REBORN_V2_AUTH_TOKEN
+    assert session_requests == 1
+
+    await reborn_v2_page.locator(SEL_V2["session_check_retry"]).click()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    await expect(error).to_have_count(0)
+    assert session_requests >= 2
+
+
+async def test_reborn_v2_session_check_failure_allows_sign_out(
+    reborn_v2_page,
+):
+    """A user can clear a saved bearer when session verification stays unavailable."""
+    async def fail_session_check(route) -> None:
+        await route.fulfill(
+            status=503,
+            content_type="application/json",
+            body=json.dumps({"error": "temporarily_unavailable"}),
+        )
+
+    async def handle_logout(route) -> None:
+        # Keep this module's shared test bearer valid for later scenarios while
+        # still exercising the SPA's local sign-out path end to end.
+        await route.fulfill(status=204)
+
+    await reborn_v2_page.route("**/api/webchat/v2/session", fail_session_check)
+    await reborn_v2_page.route("**/auth/logout", handle_logout)
+    await reborn_v2_page.reload()
+
+    await expect(
+        reborn_v2_page.locator(SEL_V2["session_check_error"])
+    ).to_be_visible(timeout=15000)
+
+    await reborn_v2_page.locator(SEL_V2["session_check_sign_out"]).click()
+
+    await expect(reborn_v2_page.locator(SEL_V2["login_token"])).to_be_visible(
+        timeout=15000
+    )
+    await reborn_v2_page.wait_for_url(
+        re.compile(r".*/login(?:[?#].*)?$"), timeout=15000
+    )
+    assert await reborn_v2_page.evaluate(
+        "() => sessionStorage.getItem('ironclaw_token')"
+    ) is None
+    await expect(
+        reborn_v2_page.locator(SEL_V2["session_check_error"])
+    ).to_have_count(0)
+
+
 async def test_reborn_v2_legacy_paths_redirect_to_root(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -273,7 +679,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
     await composer.press("Enter")
     user_message = reborn_v2_page.locator(SEL_V2["msg_user"]).last
     await expect(user_message).to_contain_text("editable composer slow response", timeout=15000)
-    cancel_button = reborn_v2_page.get_by_role("button", name="Cancel").first
+    cancel_button = reborn_v2_page.locator(SEL_V2["chat_cancel_run"]).first
     await expect(cancel_button).to_be_visible(timeout=10000)
     await _assert_readable(cancel_button, "light-theme danger button")
 
@@ -349,7 +755,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
 
 
 async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
-    """Appearance controls update the live theme and preserve it across reloads."""
+    """Appearance controls preserve the live theme across SPA navigation and reloads."""
     origin = await reborn_v2_page.evaluate("location.origin")
     await reborn_v2_page.goto(
         f"{origin}/v2/settings/appearance?token={REBORN_V2_AUTH_TOKEN}"
@@ -362,6 +768,34 @@ async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
 
     await dark_option.click()
     await expect(dark_option).to_be_checked()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.locator(SEL_V2["nav_chat"]).first.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["chat_composer"])
+    ).to_be_visible(timeout=15000)
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.locator(SEL_V2["nav_settings_inference"]).first.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["settings_search_input"])
+    ).to_be_visible(timeout=15000)
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+    await reborn_v2_page.locator(SEL_V2["nav_settings_appearance"]).first.click()
+    dark_option = reborn_v2_page.locator(SEL_V2["appearance_theme_dark"])
+    await expect(dark_option).to_be_checked(timeout=15000)
     await expect(reborn_v2_page.locator("html")).to_have_attribute(
         "data-theme", "dark"
     )
@@ -392,6 +826,64 @@ async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
     await expect(light_option).to_be_checked(timeout=15000)
     await expect(reborn_v2_page.locator("html")).to_have_attribute(
         "data-theme", "light"
+    )
+
+
+async def test_reborn_v2_chat_request_failure_uses_selected_language(
+    reborn_v2_page,
+):
+    """The Settings locale reaches Chat's browser-generated request errors."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(
+        f"{origin}/settings/language?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    chinese_option = reborn_v2_page.get_by_role(
+        "button", name=re.compile(r"简体中文")
+    )
+    await expect(chinese_option).to_be_visible(timeout=15000)
+    await chinese_option.click()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "lang", "zh-CN"
+    )
+
+    thread_id = "thread-localized-request-failure"
+
+    async def handle_create_thread(route) -> None:
+        await route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps({"thread": {"thread_id": thread_id}}),
+        )
+
+    async def fail_send(route) -> None:
+        await route.abort("connectionfailed")
+
+    await reborn_v2_page.route(
+        "**/api/webchat/v2/threads", handle_create_thread
+    )
+    await reborn_v2_page.route(
+        f"**/api/webchat/v2/threads/{thread_id}/messages", fail_send
+    )
+
+    await reborn_v2_page.goto(
+        f"{origin}/chat?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await expect(composer).to_be_visible(timeout=15000)
+    await expect(composer).to_have_attribute(
+        "placeholder", "向 IronClaw 提问。"
+    )
+
+    await composer.fill("触发网络错误")
+    await composer.press("Enter")
+
+    error_message = reborn_v2_page.locator(SEL_V2["msg_error"]).last
+    await expect(error_message).to_contain_text(
+        "请求在发送前失败。", timeout=5000
+    )
+    await expect(error_message).not_to_contain_text(
+        "The request failed before it could be sent."
     )
 
 
@@ -576,6 +1068,91 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
     async with httpx.AsyncClient(headers=headers) as client:
         renamed = await _wait_for_automation_named(client, reborn_v2_server, renamed_name)
         assert renamed["automation_id"] == automation_id
+
+
+async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
+    reborn_v2_server, reborn_v2_page
+):
+    """Filtering automations retains the current rows until the response arrives."""
+    active_id = "11111111-2222-3333-4444-555555555555"
+    completed_id = "66666666-7777-8888-9999-000000000000"
+    completed_request_started = asyncio.Event()
+    release_completed_request = asyncio.Event()
+    include_completed_queries: list[bool] = []
+
+    def automation(automation_id: str, name: str, state: str) -> dict:
+        return {
+            "automation_id": automation_id,
+            "name": name,
+            "source": {
+                "type": "schedule",
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+            },
+            "state": state,
+            "next_run_at": "2026-07-25T09:00:00Z",
+            "recent_runs": [],
+        }
+
+    active = automation(active_id, "Visible while filtering", "active")
+    completed = automation(completed_id, "Completed result", "completed")
+
+    async def handle_automations(route) -> None:
+        query = parse_qs(urlparse(route.request.url).query)
+        include_completed = query.get("include_completed") == ["true"]
+        include_completed_queries.append(include_completed)
+        if include_completed:
+            completed_request_started.set()
+            await release_completed_request.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "scheduler_enabled": True,
+                    "automations": [active, completed] if include_completed else [active],
+                }
+            ),
+        )
+
+    page = reborn_v2_page
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    active_row = page.locator(SEL_V2["automation_row_for"].format(id=active_id))
+    completed_row = page.locator(
+        SEL_V2["automation_row_for"].format(id=completed_id)
+    )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(active_row).to_be_visible(timeout=15000)
+        await active_row.locator(
+            SEL_V2["automation_name_button_for"].format(id=active_id)
+        ).click()
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            "Visible while filtering"
+        )
+
+        completed_filter = page.locator(
+            SEL_V2["automation_filter_for"].format(filter="completed")
+        )
+        await completed_filter.click()
+        await asyncio.wait_for(completed_request_started.wait(), timeout=10)
+
+        await expect(completed_filter).to_have_attribute("aria-pressed", "true")
+        await expect(active_row).to_be_visible()
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            "Visible while filtering"
+        )
+
+        release_completed_request.set()
+        await expect(completed_row).to_be_visible(timeout=10000)
+        await expect(active_row).to_have_count(0)
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            "Completed result"
+        )
+        assert include_completed_queries[:2] == [False, True]
+    finally:
+        release_completed_request.set()
 
 
 async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry(
@@ -882,6 +1459,50 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
 
     await composer.press("Enter")
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+
+async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
+    """A failed cancel request preserves the active-run UI and shows a safe error."""
+    cancel_requests = 0
+
+    async def fail_cancel(route) -> None:
+        nonlocal cancel_requests
+        cancel_requests += 1
+        await route.fulfill(
+            status=503,
+            content_type="application/json",
+            body=json.dumps({"error": "internal cancellation detail"}),
+        )
+
+    await reborn_v2_page.route(
+        "**/api/webchat/v2/threads/*/runs/*/cancel",
+        fail_cancel,
+    )
+
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("editable composer slow response")
+    await composer.press("Enter")
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "editable composer slow response",
+        timeout=15000,
+    )
+    cancel_button = reborn_v2_page.locator(SEL_V2["chat_cancel_run"]).first
+    await expect(cancel_button).to_be_visible(timeout=10000)
+    await cancel_button.click()
+
+    await expect(cancel_button).to_be_visible(timeout=10000)
+    await expect(cancel_button).to_be_enabled(timeout=10000)
+    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
+        has_text="Couldn't stop this run"
+    )
+    await expect(error_toast).to_have_text(
+        "Couldn't stop this run. It may still be running. Try again.",
+        timeout=10000,
+    )
+    await expect(error_toast).not_to_contain_text("internal cancellation detail")
+    assert cancel_requests == 1
 
 
 async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
@@ -1599,6 +2220,80 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
         remaining = {thread["thread_id"] for thread in relisted.json().get("threads", [])}
         assert drop_id not in remaining, "deleted thread must not reappear in the list"
         assert keep_id in remaining, "untouched thread must remain in the list"
+
+
+async def test_reborn_v2_sidebar_loads_older_thread_pages(reborn_v2_page):
+    """The sidebar consumes next_cursor and keeps incomplete search honest."""
+    page = reborn_v2_page
+    requested_cursors: list[str | None] = []
+
+    async def handle_threads(route) -> None:
+        parsed = urlparse(route.request.url)
+        if parsed.path != "/api/webchat/v2/threads" or route.request.method != "GET":
+            await route.continue_()
+            return
+
+        query = parse_qs(parsed.query)
+        if query.get("needs_approval") == ["true"]:
+            body = {"threads": [], "next_cursor": None}
+        else:
+            cursor = query.get("cursor", [None])[0]
+            requested_cursors.append(cursor)
+            if cursor == "cursor-page-2":
+                body = {
+                    "threads": [
+                        {
+                            "thread_id": "thread-older-topic",
+                            "title": "Older searchable topic",
+                            "created_at": "2026-06-01T00:00:00Z",
+                            "updated_at": "2026-06-01T00:00:00Z",
+                        }
+                    ],
+                    "next_cursor": None,
+                }
+            else:
+                body = {
+                    "threads": [
+                        {
+                            "thread_id": "thread-recent-topic",
+                            "title": "Recent topic",
+                            "created_at": "2026-07-01T00:00:00Z",
+                            "updated_at": "2026-07-01T00:00:00Z",
+                        }
+                    ],
+                    "next_cursor": "cursor-page-2",
+                }
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    await page.route("**/api/webchat/v2/threads**", handle_threads)
+    await page.reload()
+
+    sidebar = page.locator(SEL_V2["sidebar"])
+    load_more = sidebar.locator(SEL_V2["thread_load_more"])
+    await expect(sidebar.get_by_text("Recent topic", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(load_more).to_be_visible()
+
+    await sidebar.locator(SEL_V2["thread_search"]).fill("Older searchable")
+    await expect(
+        sidebar.get_by_text(
+            "More conversations are available. Load older conversations to continue searching.",
+            exact=True,
+        )
+    ).to_be_visible()
+    await expect(sidebar.get_by_text('No chats match "Older searchable"')).to_have_count(0)
+
+    await load_more.evaluate("button => { button.click(); button.click(); }")
+    await expect(
+        sidebar.get_by_text("Older searchable topic", exact=True)
+    ).to_be_visible(timeout=5000)
+    await expect(load_more).to_have_count(0)
+    assert requested_cursors == [None, "cursor-page-2"], requested_cursors
 
 
 async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(

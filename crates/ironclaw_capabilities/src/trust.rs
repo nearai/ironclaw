@@ -31,8 +31,8 @@ pub(crate) enum TrustEvaluationError {
 
 impl TrustEvaluationError {
     /// Whether this failure is the "capability not in the registry" case, which
-    /// the host maps to `RuntimeFailureKind::MissingRuntime`; every other variant
-    /// maps to `RuntimeFailureKind::Authorization` (behavior-preserving).
+    /// the host maps to `FailureKind::MissingRuntime`; every other variant
+    /// maps to `FailureKind::Authorization` (behavior-preserving).
     pub(crate) fn is_unknown_capability(self) -> bool {
         matches!(self, Self::UnknownCapability)
     }
@@ -123,6 +123,17 @@ mod tests {
     // policy input must carry the manifest path as `PackageSource::LocalManifest`
     // and the manifest digest, so the host trust policy classifies the package
     // from its on-disk identity.
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
     #[test]
     fn local_manifest_trust_input_includes_manifest_digest() {
         const MANIFEST: &str = r#"
@@ -138,7 +149,13 @@ kind = "script"
 runner = "sandboxed_process"
 command = "echo"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test.cap"
 description = "Test capability"
 effects = ["network"]
@@ -151,6 +168,7 @@ output_schema_ref = "schemas/test.output.json"
             MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .unwrap();
         let package = ExtensionPackage::from_manifest_toml(

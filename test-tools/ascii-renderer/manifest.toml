@@ -29,6 +29,7 @@ id = "ascii-renderer.draw"
 description = "Render a small piece of ASCII art. Optional `subject` selects the drawing (cat, dog, robot); defaults to robot. Takes no network access."
 effects = ["dispatch_capability"]
 default_permission = "allow"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 visibility = "model"
 input_schema_ref = "schemas/ascii-renderer/draw.input.v1.json"
 output_schema_ref = "schemas/ascii-renderer/draw.output.v1.json"

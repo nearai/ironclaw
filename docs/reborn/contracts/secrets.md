@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, contact networks, emit audit events, or execute product workflows. It only provides the metadata and lease/consume primitive; host-runtime composition owns any concrete injection into runtime requests.
+The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, contact networks, emit audit events, or own product-surface orchestration. It only provides the metadata and lease/consume primitive; host-runtime composition owns any concrete injection into runtime requests.
 
 ---
 
@@ -37,13 +37,13 @@ SecretLeaseStatus
 SecretLease
 SecretStoreError
 SecretStore
-FilesystemSecretStore      // durable when backed by libSQL/Postgres RootFilesystem;
-                           // FilesystemSecretStore::ephemeral() is the volatile
+SecretStore      // durable when backed by libSQL/Postgres RootFilesystem;
+                           // SecretStore::ephemeral() is the volatile
                            // InMemoryBackend construction (§4.3 — replaced InMemorySecretStore)
 CredentialAccountStore
 CredentialSessionStore
 InMemoryCredentialBroker
-FilesystemCredentialBroker // durable when backed by libSQL/Postgres RootFilesystem
+CredentialBroker // durable when backed by libSQL/Postgres RootFilesystem
 ```
 
 `SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, and errors never contain raw values.
@@ -93,8 +93,8 @@ let material = secrets.consume(&scope, lease.id).await?;
 
 `SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.
 
-Durable libSQL/PostgreSQL storage is provided by `FilesystemSecretStore` and
-`FilesystemCredentialBroker` over the database-backed `RootFilesystem`
+Durable libSQL/PostgreSQL storage is provided by `SecretStore` and
+`CredentialBroker` over the database-backed `RootFilesystem`
 implementations. Backend selection is now a property of the filesystem layer;
 `ironclaw_secrets` stores encrypted payloads and per-record salts under scoped
 filesystem paths, with tenant id projected as a defense-in-depth index. Store
@@ -179,7 +179,7 @@ This slice does not implement:
 - OAuth/token refresh flows
 - network policy enforcement
 
-Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate.
+Those should be added as separate service/composition slices without moving runtime or product-surface orchestration semantics into this crate.
 
 ---
 
@@ -213,7 +213,7 @@ This contract is the current status source for the secrets side of
 Closed in the current Reborn slice:
 
 - durable encrypted secret storage over libSQL/PostgreSQL-backed RootFilesystem
-- durable credential account/session storage through `FilesystemCredentialBroker`
+- durable credential account/session storage through `CredentialBroker`
 - production wiring guardrails for credential account/session stores
 - staged-obligation production egress as the canonical direct-secret-injection boundary
 - V1 HTTP credential target coverage for headers, query params, and path placeholders

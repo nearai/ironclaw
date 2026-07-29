@@ -8,9 +8,9 @@
 /// string.
 #[cfg(feature = "test-support")]
 pub const OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID: &str =
-    crate::outbound::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID;
+    crate::outbound::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID;
 /// Capability id of the local-dev synthetic `outbound_delivery_target_set`
 /// capability. See [`OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID`].
 #[cfg(feature = "test-support")]
 pub const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
-    crate::outbound::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
+    crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;

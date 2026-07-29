@@ -15,9 +15,9 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::ExtensionId;
-use ironclaw_turns::run_profile::CapabilityInvocation;
+use ironclaw_turns::run_profile::LoopRequest;
 
-/// Resolves a [`CapabilityInvocation`]'s input ref to a sanitized JSON view.
+/// Resolves a [`LoopRequest`]'s input ref to a sanitized JSON view.
 ///
 /// Implementations should return:
 ///
@@ -30,7 +30,7 @@ use ironclaw_turns::run_profile::CapabilityInvocation;
 ///   contents must fail closed in this case.
 #[async_trait]
 pub trait CapabilityInputResolver: Send + Sync {
-    async fn resolve(&self, invocation: &CapabilityInvocation) -> Option<serde_json::Value>;
+    async fn resolve(&self, invocation: &LoopRequest) -> Option<serde_json::Value>;
 
     /// Cheap streaming size probe consulted by the middleware before
     /// [`Self::resolve`] when a hook would actually read the input.
@@ -49,7 +49,7 @@ pub trait CapabilityInputResolver: Send + Sync {
     /// Default returns `None` (unknown). The middleware applies a
     /// post-materialization byte check as a defense-in-depth backstop
     /// when the size hint is unavailable.
-    async fn size_hint(&self, _invocation: &CapabilityInvocation) -> Option<u64> {
+    async fn size_hint(&self, _invocation: &LoopRequest) -> Option<u64> {
         None
     }
 }
@@ -60,7 +60,7 @@ pub struct NullCapabilityInputResolver;
 
 #[async_trait]
 impl CapabilityInputResolver for NullCapabilityInputResolver {
-    async fn resolve(&self, _invocation: &CapabilityInvocation) -> Option<serde_json::Value> {
+    async fn resolve(&self, _invocation: &LoopRequest) -> Option<serde_json::Value> {
         None
     }
 }
@@ -109,7 +109,7 @@ mod tests {
     #[tokio::test]
     async fn null_resolver_returns_none() {
         let resolver = NullCapabilityInputResolver;
-        let invocation = CapabilityInvocation {
+        let invocation = LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new("cap.x").expect("ok"),

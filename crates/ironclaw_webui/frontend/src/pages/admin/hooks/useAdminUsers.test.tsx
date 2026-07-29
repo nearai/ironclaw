@@ -149,6 +149,35 @@ test("create and delete mutations leave active admin user details untouched", as
   }
 });
 
+test("partial mutation responses preserve fields in an inactive cached user detail", async () => {
+  const queryClient = createQueryClient();
+  const queryKey = ["admin", "user", "partial-user"];
+  queryClient.setQueryData(queryKey, {
+    id: "partial-user",
+    display_name: "Existing User",
+    email: "existing@example.com",
+    role: "member",
+    status: "active",
+  });
+  adminApi.updateAdminUser.mockResolvedValueOnce({
+    id: "partial-user",
+    role: "admin",
+  });
+
+  const adminUsers = renderUseAdminUsers(queryClient);
+  await adminUsers.updateUser("partial-user", { role: "admin" });
+
+  assert.deepEqual(queryClient.getQueryData(queryKey), {
+    id: "partial-user",
+    display_name: "Existing User",
+    email: "existing@example.com",
+    role: "admin",
+    status: "active",
+  });
+  assert.equal(queryClient.getQueryState(queryKey)?.isInvalidated, true);
+  queryClient.clear();
+});
+
 test("a missing user id never creates or invalidates an admin user detail query", async () => {
   const queryClient = createQueryClient();
   const adminUsers = renderUseAdminUsers(queryClient);

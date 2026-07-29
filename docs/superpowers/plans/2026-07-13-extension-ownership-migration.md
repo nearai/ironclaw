@@ -51,7 +51,7 @@ Expected: compilation/test failure because the migration module and command do n
 - [ ] **Step 3: Add the tenant-qualified migration store seam**
 
 Add a `migration-support`-gated composition function that opens
-`/tenants/<tenant>/system/extensions/.installations/state.json` over a supplied
+`/tenants/<tenant>/system/extensions/.installations/` over a supplied
 `RootFilesystem`. Re-export only that function; do not expose the concrete
 filesystem store.
 

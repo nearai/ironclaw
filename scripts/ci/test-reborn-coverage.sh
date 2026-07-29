@@ -189,7 +189,7 @@ DA:3,0
 LF:3
 LH:1
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs
+SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
 DA:1,1
 DA:2,1
 LF:2
@@ -203,7 +203,7 @@ assert_exit_code "M1: merge exits 0" 0 "${CAP_RC}"
 m1_merged_body="$(cat "${tmp_root}/m1_merged.lcov")"
 assert_contains "M1: merged output keeps crates/ironclaw_runner" "${m1_merged_body}" "SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs"
 assert_not_contains "M1: merged output drops non-crates/ src/main.rs" "${m1_merged_body}" "src/main.rs"
-assert_contains "M1: merged output keeps crates/ironclaw_product_workflow" "${m1_merged_body}" "ironclaw_product_workflow"
+assert_contains "M1: merged output keeps crates/ironclaw_product" "${m1_merged_body}" "ironclaw_product"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line1: 1+0=1)" "${m1_merged_body}" "DA:1,1"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line2: 0+1=1)" "${m1_merged_body}" "DA:2,1"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line3: 1+0=1)" "${m1_merged_body}" "DA:3,1"
@@ -237,7 +237,7 @@ DA:1,1
 LF:100
 LH:80
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs
+SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
 LF:50
 LH:50
 end_of_record
@@ -248,8 +248,8 @@ assert_exit_code "A1: summary exits 0 for a mixed-crate fixture" 0 "${CAP_RC}"
 assert_contains "A1: aggregate matches hand-computed 86.67% (130/150)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 86.67%** — 130 / 150 lines'
 assert_contains "A1: table includes ironclaw_runner row" "${CAP_OUT}" "| \`ironclaw_runner\` | 80% | 80 / 100 |"
-assert_contains "A1: table includes ironclaw_product_workflow row" "${CAP_OUT}" \
-  "| \`ironclaw_product_workflow\` | 100% | 50 / 50 |"
+assert_contains "A1: table includes ironclaw_product row" "${CAP_OUT}" \
+  "| \`ironclaw_product\` | 100% | 50 / 50 |"
 
 # A2: no data at all -> exit 0, "no data" message.
 : > "${fixtures_dir}/a2_empty.lcov"
@@ -828,11 +828,13 @@ fi
 #
 # The script derives its repo root from its own path and `cd`s there, so
 # each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/integration/ subtree alongside it, then invokes the copy. It also
-# filters candidates against a `[[test]] name = "..."` entry in Cargo.toml
-# (see that script's header comment), so every case seeds a fake Cargo.toml
-# with one `[[test]]` block per fixture suite the case constructs — mirrors
-# the real repo root always having a `[[test]]` entry per suite.
+# tests/integration/ subtree alongside it, then invokes the copy. Discovery
+# is registration-driven (see that script's header comment): every `[[test]]`
+# entry in Cargo.toml whose `path` sits under tests/integration/ is selected,
+# so each case seeds a fake Cargo.toml with one `[[test]]` block per fixture
+# suite it constructs — mirrors the real repo root always having a `[[test]]`
+# entry per suite. The on-disk fixture files are kept for tree realism; an
+# unregistered file must never be selected (D6).
 
 setup_int_tier_case() {
   local case_dir="$1"
@@ -916,6 +918,43 @@ capture "${d5}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D5: support/ dir alongside flat suites exits 0" 0 "${CAP_RC}"
 assert_eq "D5: support/ dir is not discovered as a suite" \
   "$(printf -- '--test\nreborn_integration_only')" "${CAP_OUT}"
+
+# D6: domain-folder bins (tests/integration/auth/oauth_connect.rs) are
+# selected via their [[test]] registration, while a #[path]-mounted sibling
+# with no [[test]] entry (auth/common.rs) is not. Pins the #6520-audit blind
+# spot: the retired `find -maxdepth 1` walk could not see domain-folder bins,
+# so the six tests/integration/auth/ suites ran in no PR coverage lane.
+# The third stanza writes `path` BEFORE `name` and the fourth uses compact
+# `key="value"` spacing with a trailing comment: Cargo accepts all of these,
+# so the selector must too — a line-regex parser keyed to one formatting
+# style would silently skip such stanzas and recreate the blind spot this
+# case pins.
+d6="${tmp_root}/d6"
+setup_int_tier_case "${d6}" reborn_integration_flat
+: > "${d6}/tests/integration/flat.rs"
+mkdir -p "${d6}/tests/integration/auth"
+: > "${d6}/tests/integration/auth/oauth_connect.rs"
+: > "${d6}/tests/integration/auth/common.rs"
+: > "${d6}/tests/integration/auth/pathfirst_probe.rs"
+: > "${d6}/tests/integration/auth/compact_probe.rs"
+cat >>"${d6}/Cargo.toml" <<'EOF'
+[[test]]
+name = "reborn_integration_oauth_connect"
+path = "tests/integration/auth/oauth_connect.rs"
+
+[[test]]
+path = "tests/integration/auth/pathfirst_probe.rs"
+name = "reborn_integration_pathfirst_probe"
+
+[[test]]
+name="reborn_integration_compact_probe" # compact TOML: no spaces, trailing comment
+path="tests/integration/auth/compact_probe.rs"
+EOF
+capture "${d6}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+assert_exit_code "D6: domain-folder bin exits 0" 0 "${CAP_RC}"
+assert_eq "D6: registered domain-folder bins (any key order or spacing) are selected; unregistered sibling is not" \
+  "$(printf -- '--test\nreborn_integration_compact_probe\n--test\nreborn_integration_flat\n--test\nreborn_integration_oauth_connect\n--test\nreborn_integration_pathfirst_probe')" \
+  "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)

@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the "render from record" result contract.
 //!
 //! Part of the capability-path result collapse
-//! (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
+//! (`docs/reborn/contracts/capability-access.md`
 //! §5.2.9). [`Resolution`](crate::Resolution)'s control-plane arms carry only
 //! *opaque* refs — [`GateRef`](crate::GateRef), [`DenyRef`](crate::DenyRef),
 //! [`ResultRef`](crate::ResultRef) — never inline content. The records in this
@@ -27,7 +27,7 @@
 //! every one carries a [`SafeSummary`](crate::SafeSummary), never raw text. The
 //! loop renders credential requirements FROM the [`GateRecord::Auth`] record —
 //! it never reconstructs a credential demand from model-visible data
-//! (`tool-evidence.md`, `safety-and-sandbox.md`). Keeping the requirement on the
+//! (`capability-access.md`, `safety-and-sandbox.md`). Keeping the requirement on the
 //! host-owned record, not on any model-derived value, is what makes an auth gate
 //! forge-proof.
 //!
@@ -124,7 +124,7 @@ impl GateRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup};
+    use crate::{ExtensionId, RuntimeCredentialAccountSetup, VendorId};
 
     fn summary() -> SafeSummary {
         SafeSummary::new("awaiting decision").unwrap()
@@ -132,7 +132,7 @@ mod tests {
 
     fn credential_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: vec!["repo".to_string()],

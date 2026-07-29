@@ -3,17 +3,33 @@
 # (optionally `--model <id>` and/or `--framework <ironclaw|ironclaw-reborn>`)
 # on a PR; this workflow validates auth,
 # parses the command, resolves the PR head SHA, reacts with 🚀, then
-# delegates to nearai/benchmarks's reusable workflow which builds the
-# harness against the PR's ironclaw SHA, runs the suite, compares against
-# a baseline, and posts a markdown comment back here.
+# triggers nearai/benchmarks's bench-pr-reusable.yml workflow (which builds
+# the harness against the PR's ironclaw SHA, runs the suite, compares
+# against a baseline, and posts a markdown comment back here).
 #
 # Setup / usage docs:
 # https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
 #
-# Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret, plus
-# `NEARAI_API_KEY` for ironclaw-reborn runs (agent routes to NEAR AI cloud).
-# Only those secrets are forwarded — `secrets: inherit` is intentionally
-# NOT used (supply-chain hardening).
+# nearai/benchmarks is a PRIVATE repo (since 2026-07-22, PR #291). A
+# cross-repo reusable-workflow `uses:` call (the previous approach here) is
+# structurally incapable of working for a public caller -> private callee:
+# a private repo's Actions "Access" setting can only ever grant access to
+# OTHER PRIVATE repos in the org ("Access is allowed only from private
+# repositories" per GitHub's own docs) — nearai/ironclaw is public, so no
+# access-level setting on the benchmarks side can fix this while ironclaw
+# stays public. (Confirmed: every `/benchmark` run failed pre-flight with
+# 0 jobs / `referenced_workflows: []` from ~2026-07-21 onward.)
+#
+# Cross-repo `workflow_dispatch` triggering (this workflow's `bench` job)
+# is a different, unrestricted GitHub mechanism — the same as a human
+# clicking "Run workflow" on that repo — gated only on the calling token
+# having `actions: write` there. bench-pr-reusable.yml already declares a
+# matching `workflow_dispatch:` trigger (same inputs) for exactly this.
+# The triggered run posts its own result comment back to this PR directly
+# (via pr-repo/pr-number) using nearai/benchmarks' own secrets — nothing
+# needs forwarding from here, so `BENCHMARKS_DISPATCH_TOKEN` (a
+# fine-grained PAT, `actions: write` scoped to nearai/benchmarks only) is
+# the only new credential this side needs.
 
 name: nearai-bench
 
@@ -21,11 +37,10 @@ on:
   issue_comment:
     types: [created]
 
-# Minimum surface for what this workflow actually does. The called
-# reusable workflow (in nearai/benchmarks) declares its own ceiling
-# (pull-requests:write + issues:write); the effective permissions in the
-# called job are the intersection of these two, so a hostile change in
-# the benchmarks repo can't acquire writes we didn't grant here.
+# Minimum surface for the `parse` job's own steps (gh pr view/comment,
+# reactions). The `bench` job below overrides this down to `contents: read`
+# — it only dispatches a workflow_dispatch call with an explicit PAT, it
+# doesn't need any of this workflow's own GITHUB_TOKEN writes.
 #
 # `pull-requests: write` (not just `issues: write`) is required because
 # GitHub's reactions endpoint for PR-issue-comments rejects an
@@ -98,10 +113,21 @@ jobs:
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # nearai/benchmarks is private, so reading its suites/ contents
+          # below (an ironclaw-repo-scoped GITHUB_TOKEN can't see another
+          # private repo) needs the same PAT the `bench` job uses to
+          # dispatch — it must also carry Contents: Read-only on
+          # nearai/benchmarks (in addition to Actions: Read and write) for
+          # this specific lookup. Scoped to just those two `gh api` calls
+          # below via a per-command GH_TOKEN override — everything else in
+          # this step (gh pr view/comment on THIS repo) still uses the
+          # ambient GITHUB_TOKEN above, since this PAT has no access to
+          # nearai/ironclaw at all.
+          BENCH_GH_TOKEN: ${{ secrets.BENCHMARKS_DISPATCH_TOKEN }}
           # Ref on nearai/benchmarks used to validate the requested suite
-          # exists. Must match the ref the `bench` job actually runs against
-          # (its `uses:` below) so the pre-dispatch check gives the same
-          # answer as the dispatched workflow. That `uses:` is `@main`, so a
+          # exists. Must match the ref the `bench` job actually dispatches
+          # against so the pre-dispatch check gives the same answer as the
+          # dispatched workflow. That dispatch targets `--ref main`, so a
           # pinned SHA here drifts stale and rejects suites that already exist
           # on main (e.g. pinchbench26, officeqa, terminal-bench-2). Track
           # `main` so the two stay in lock-step.
@@ -142,9 +168,10 @@ jobs:
           # Pre-dispatch suite check: refuse unknown suite names before
           # we acknowledge with 🚀 or spend any LLM credit. Cheap GitHub
           # API lookup against the pinned benchmarks SHA so the user gets
-          # the same answer the dispatched workflow would.
-          if ! gh api "repos/nearai/benchmarks/contents/suites/${suite}.toml?ref=${BENCH_PIN}" --silent >/dev/null 2>&1; then
-            available=$(gh api "repos/nearai/benchmarks/contents/suites?ref=${BENCH_PIN}" \
+          # the same answer the dispatched workflow would. Uses
+          # BENCH_GH_TOKEN (not the step's ambient GH_TOKEN) — see env block.
+          if ! GH_TOKEN="$BENCH_GH_TOKEN" gh api "repos/nearai/benchmarks/contents/suites/${suite}.toml?ref=${BENCH_PIN}" --silent >/dev/null 2>&1; then
+            available=$(GH_TOKEN="$BENCH_GH_TOKEN" gh api "repos/nearai/benchmarks/contents/suites?ref=${BENCH_PIN}" \
               --jq '[.[] | select(.name | endswith(".toml")) | .name | rtrimstr(".toml")] | sort | join(", ")')
             gh pr comment "$PR" --repo "$REPO" --body "Unknown suite \`${suite}\`. Available: ${available}"
             exit 0
@@ -204,20 +231,16 @@ jobs:
   bench:
     needs: parse
     if: needs.parse.outputs.authorized == 'yes' && needs.parse.outputs.suite != ''
-    # Job-scoped writes so the called workflow can post the result
-    # comment + toggle the trigger-comment reaction. Called workflows
-    # can only DOWNGRADE the caller's GITHUB_TOKEN, so the workflow-level
-    # `pull-requests: read` (which the parse job uses for `gh pr view`)
-    # would otherwise leave the called workflow without write to publish
-    # results. The parse job stays on read; only this authorized,
-    # post-auth job grants writes.
+    runs-on: ubuntu-latest
+    # This job only *dispatches* the real run in nearai/benchmarks and
+    # returns — the benchmark itself (build/run/compare/PR comment) happens
+    # entirely inside that triggered run, on nearai/benchmarks' own compute
+    # and secrets. No id-token/pull-requests/issues writes needed here
+    # (those apply to the ambient GITHUB_TOKEN, which this step doesn't use
+    # for the privileged call — see BENCHMARKS_DISPATCH_TOKEN below).
+    timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: write
-      issues: write
-      id-token: write       # the called workflow uses OIDC to assume an
-                            # AWS role for S3 persistence; without this it
-                            # fails to start.
     # Concurrency lives on the authorized job, not the workflow root —
     # otherwise an unauthorized commenter typing `/benchmark whatever`
     # would acquire the per-PR group and cancel an in-flight maintainer
@@ -225,40 +248,44 @@ jobs:
     concurrency:
       group: nearai-bench-${{ github.event.issue.number }}
       cancel-in-progress: true
-    # Tracks nearai/benchmarks main. Renderer / workflow changes there
-    # take effect on the next /benchmark without needing a deliberate
-    # SHA bump here. Both repos are under the same org with the same
-    # write-access set, so the supply-chain delta vs. a pinned SHA is
-    # small enough to trade for not stalling out every renderer change.
-    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@main
-    with:
-      ironclaw-rev: ${{ needs.parse.outputs.head_sha }}
-      pr-repo: ${{ github.repository }}
-      pr-number: ${{ github.event.issue.number }}
-      suite-name: ${{ needs.parse.outputs.suite }}
-      model: ${{ needs.parse.outputs.model }}
-      # Empty when unspecified → the reusable workflow defaults to ironclaw.
-      framework: ${{ needs.parse.outputs.framework }}
-      # Bump from the reusable workflow's 240 default. The /benchmark path is
-      # used for the heavy container suites — claw-swe-bench-lite (80 tasks,
-      # ~3-4h at its TOML parallelism=3) and clawbench — where 240 is too low:
-      # the last full-suite run (run 29606955146) was cancelled by the 240-min
-      # job cap after only 7/350 tasks. 350 also sits above the run step's own
-      # internal `timeout --kill-after=120s 290m` guard, so an overrun is killed
-      # gracefully by that guard (which snapshots a partial run, uploads it, and
-      # posts the PR comment) instead of GitHub cancelling the job at the cap —
-      # under cancellation the compound-`if` upload/comment steps are skipped,
-      # which is why the cancelled run left no result comment. 350 < the 360-min
-      # hard cap on the ubuntu-16core runner. Lightweight suites (ironclaw-smoke,
-      # pinchbench) finish well before this — it is a ceiling, not a duration.
-      timeout-minutes: 350
-      trigger-comment-id: ${{ github.event.comment.id }}
-    # Scope inherited secrets to only what the reusable workflow needs.
-    # Replaces `secrets: inherit`, which gave the called workflow access
-    # to every secret available here.
-    secrets:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # ironclaw-reborn runs route the agent to NEAR AI cloud; the reusable
-      # workflow reads this for LLM_BACKEND=nearai. Optional there, so legacy
-      # ironclaw runs (OpenRouter) are unaffected if it's unset.
-      NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}
+    steps:
+      - name: Dispatch benchmark run in nearai/benchmarks
+        env:
+          # Fine-grained PAT, `actions: write` scoped to nearai/benchmarks
+          # only — needed because GITHUB_TOKEN here can't write to another
+          # repo's Actions API, and (per the header comment) a private
+          # repo's cross-repo *reusable-workflow* access can't be opened to
+          # a public caller at all, so `uses:` is not an option regardless.
+          GH_TOKEN: ${{ secrets.BENCHMARKS_DISPATCH_TOKEN }}
+          IRONCLAW_REV: ${{ needs.parse.outputs.head_sha }}
+          PR_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          SUITE: ${{ needs.parse.outputs.suite }}
+          MODEL: ${{ needs.parse.outputs.model }}
+          FRAMEWORK: ${{ needs.parse.outputs.framework }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          set -euo pipefail
+          # Bump from the reusable workflow's 240 default. The /benchmark
+          # path is used for the heavy container suites — claw-swe-bench-lite
+          # (80 tasks, ~3-4h at its TOML parallelism=3) and clawbench — where
+          # 240 is too low: the last full-suite run (run 29606955146) was
+          # cancelled by the 240-min job cap after only 7/350 tasks. 350 also
+          # sits above the run step's own internal
+          # `timeout --kill-after=120s 290m` guard, so an overrun is killed
+          # gracefully by that guard (which snapshots a partial run, uploads
+          # it, and posts the PR comment) instead of GitHub cancelling the
+          # job at the cap. 350 < the 360-min hard cap on the ubuntu-16core
+          # runner. Lightweight suites (ironclaw-smoke, pinchbench) finish
+          # well before this — it is a ceiling, not a duration.
+          gh workflow run bench-pr-reusable.yml \
+            --repo nearai/benchmarks --ref main \
+            -f "ironclaw-rev=${IRONCLAW_REV}" \
+            -f "pr-repo=${PR_REPO}" \
+            -f "pr-number=${PR_NUMBER}" \
+            -f "suite-name=${SUITE}" \
+            -f "model=${MODEL}" \
+            -f "framework=${FRAMEWORK}" \
+            -f "dry-run=false" \
+            -f "timeout-minutes=350" \
+            -f "trigger-comment-id=${COMMENT_ID}"

@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
-    Resolution, ResolutionBatch, RuntimeKind,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, FailureKind, HostApiError,
+    ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -289,7 +289,7 @@ impl RegisterProviderToolCallRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityInvocation {
+pub struct LoopRequest {
     /// Stable activity identity for this invocation. Runtime hosts derive
     /// their execution identity from it rather than minting a second id.
     pub activity_id: CapabilityActivityId,
@@ -353,8 +353,16 @@ pub struct AuthResumeApprovalIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
     /// Encodes the original activity identity so the host can reuse the
-    /// matching execution context after auth completes.
-    pub resume_token: CapabilityResumeToken,
+    /// matching execution context after auth completes. A denied gate does not
+    /// re-dispatch, so its activity identity is already carried by
+    /// [`LoopRequest::activity_id`] and no resume token is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<CapabilityResumeToken>,
+    /// A terminal user denial is carried through the same capability lifecycle
+    /// seam as a successful auth resume. The host terminalizes the blocked
+    /// invocation without dispatching the capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<crate::GateResumeDisposition>,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
     //
@@ -370,9 +378,30 @@ pub struct CapabilityAuthResume {
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
 }
 
+impl CapabilityAuthResume {
+    pub fn resolved(
+        resume_token: CapabilityResumeToken,
+        prior_approval: Option<AuthResumeApprovalIdentity>,
+    ) -> Self {
+        Self {
+            resume_token: Some(resume_token),
+            disposition: None,
+            prior_approval,
+        }
+    }
+
+    pub fn denied() -> Self {
+        Self {
+            resume_token: None,
+            disposition: Some(crate::GateResumeDisposition::Denied),
+            prior_approval: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityBatchInvocation {
-    pub invocations: Vec<CapabilityInvocation>,
+pub struct LoopRequestBatch {
+    pub invocations: Vec<LoopRequest>,
     pub stop_on_first_suspension: bool,
 }
 
@@ -421,7 +450,7 @@ pub struct CapabilityResultMessage {
 /// Loop-internal working vocabulary, no longer a wire/producer DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityFailure {
-    pub error_kind: CapabilityFailureKind,
+    pub error_kind: FailureKind,
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<CapabilityFailureDetail>,
@@ -488,128 +517,6 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
     }
 }
 
-// Deliberately NOT `#[non_exhaustive]`: the `Unknown(CapabilityFailureKindValue)`
-// variant is the forward-compat / open-set escape hatch (a newer producer's
-// unrecognized wire string deserializes into `Unknown`), and the manual
-// `Serialize`/`Deserialize` impls below route every value through `as_str()` /
-// that variant. Leaving the attribute on would force callers — notably the
-// recovery classifier `capability_error_class` — to keep a wildcard `_ =>` arm,
-// which silently buckets any newly-added *named* variant (e.g. a future
-// `QuotaExceeded`) into a run-aborting class. Without the attribute, those
-// classifiers match exhaustively, so a new named variant fails to compile until
-// it is deliberately classified. See
-// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CapabilityFailureKind {
-    Authorization,
-    Backend,
-    Cancelled,
-    Dispatcher,
-    GateDeclined,
-    InvalidInput,
-    InvalidOutput,
-    MissingRuntime,
-    Network,
-    OperationFailed,
-    OutputTooLarge,
-    PolicyDenied,
-    Process,
-    Resource,
-    Transient,
-    Unavailable,
-    Internal,
-    Permanent,
-    Unknown(CapabilityFailureKindValue),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CapabilityFailureKindValue(String);
-
-impl CapabilityFailureKindValue {
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        validate_loop_safe_identifier(value.into(), "capability failure kind", 128).map(Self)
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl CapabilityFailureKind {
-    pub fn unknown(value: impl Into<String>) -> Result<Self, String> {
-        CapabilityFailureKindValue::new(value).map(Self::Unknown)
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Authorization => "authorization",
-            Self::Backend => "backend",
-            Self::Cancelled => "cancelled",
-            Self::Dispatcher => "dispatcher",
-            Self::GateDeclined => "gate_declined",
-            Self::InvalidInput => "invalid_input",
-            Self::InvalidOutput => "invalid_output",
-            Self::MissingRuntime => "missing_runtime",
-            Self::Network => "network",
-            Self::OperationFailed => "operation_failed",
-            Self::OutputTooLarge => "output_too_large",
-            Self::PolicyDenied => "policy_denied",
-            Self::Process => "process",
-            Self::Resource => "resource",
-            Self::Transient => "transient",
-            Self::Unavailable => "unavailable",
-            Self::Internal => "internal",
-            Self::Permanent => "permanent",
-            Self::Unknown(value) => value.as_str(),
-        }
-    }
-}
-
-impl std::fmt::Display for CapabilityFailureKind {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl Serialize for CapabilityFailureKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for CapabilityFailureKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        match value.as_str() {
-            "authorization" => Ok(Self::Authorization),
-            "backend" => Ok(Self::Backend),
-            "cancelled" => Ok(Self::Cancelled),
-            "dispatcher" => Ok(Self::Dispatcher),
-            "gate_declined" => Ok(Self::GateDeclined),
-            "invalid_input" => Ok(Self::InvalidInput),
-            "invalid_output" => Ok(Self::InvalidOutput),
-            "missing_runtime" => Ok(Self::MissingRuntime),
-            "network" => Ok(Self::Network),
-            "operation_failed" => Ok(Self::OperationFailed),
-            "output_too_large" => Ok(Self::OutputTooLarge),
-            "policy_denied" => Ok(Self::PolicyDenied),
-            "process" => Ok(Self::Process),
-            "resource" => Ok(Self::Resource),
-            "transient" => Ok(Self::Transient),
-            "unavailable" => Ok(Self::Unavailable),
-            "internal" => Ok(Self::Internal),
-            "permanent" => Ok(Self::Permanent),
-            _ => Self::unknown(value).map_err(serde::de::Error::custom),
-        }
-    }
-}
-
 #[async_trait]
 pub trait LoopCapabilityPort: Send + Sync {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -662,12 +569,12 @@ pub trait LoopCapabilityPort: Send + Sync {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError>;
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError>;
 }
 
@@ -694,14 +601,14 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             unreachable!("not used by this test")
         }
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             unreachable!("not used by this test")
         }

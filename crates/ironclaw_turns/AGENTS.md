@@ -12,7 +12,7 @@
 
 ## What This Crate Owns
 
-- Host-layer turn coordination contracts (above the Reborn kernel facade), currently:
+- Host-layer turn coordination contracts (above the Reborn kernel service), currently:
 - Adapter-facing coordinator: `TurnCoordinator`/`DefaultTurnCoordinator`, `TurnAdmissionPolicy`, run-wake notifier ports (`coordinator`); request/response surface `SubmitTurnRequest`/`ResumeTurnRequest`/`CancelRunRequest`/`GetRunStateRequest` (`request`) and `SubmitTurnResponse`/`ResumeTurnResponse`/`CancelRunResponse`/`ThreadBusy` (`response`).
 - Trusted runner transition ports (`runner`, kept out of the adapter prelude).
 - Canonical typed IDs and references: `TurnId`, `TurnRunId`, `TurnRunnerId`, `RunProfileId`/`RunProfileVersion`, `IdempotencyKey`, `TurnLeaseToken`, gate/message/result/binding refs (`ids`); turn scope/actor (`scope`).
@@ -21,7 +21,7 @@
 - Loop-exit protocol: `LoopExit`/`LoopCompleted`/`LoopFailed`/`LoopBlocked`/`LoopCancelled`, evidence ports, applier, mapping, validation (`loop_exit`).
 - Lifecycle events + projection: `TurnLifecycleEvent`, `TurnEventKind`, `TurnEventSink`, projection service/cursor/source (`events`).
 - Status/error vocabulary: `TurnStatus`/`TurnRunState`/`TurnError`/`TurnErrorCategory`, admission rejections, sanitized failure/cancel reasons (`status`).
-- Turn/checkpoint state stores: `TurnStateStore` + records (turn/run/checkpoint/idempotency/active-lock, persistence snapshot) (`store`); checkpoint + loop-checkpoint state stores (`checkpoint_state`); in-memory (`memory`) and filesystem (`filesystem_store`) backends.
+- Turn/checkpoint state stores: `TurnStateStore` + records (turn/run/checkpoint/idempotency/active-lock, persistence snapshot) (`store`); checkpoint + loop-checkpoint state stores (`checkpoint_state`); in-memory (`memory`) and filesystem (`turn_state_row_store`) backends.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

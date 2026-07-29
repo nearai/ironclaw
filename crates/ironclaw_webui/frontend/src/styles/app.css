@@ -6,7 +6,6 @@
 @source "../";
 @source "../../packages/design-system/src";
 
-
 /* ════════════════════════════════════════════════════════════════════
    app.css — design tokens + global resets only.
    All component-level visual styling lives in JS design-system files.
@@ -51,12 +50,8 @@
 
 html {
   background: var(--v2-canvas);
+  font-size: 16px;
   scroll-behavior: auto;
-}
-
-/* Slightly tighter type scale on large screens */
-@media (min-width: 1024px) {
-  html { font-size: 15px; }
 }
 
 body {

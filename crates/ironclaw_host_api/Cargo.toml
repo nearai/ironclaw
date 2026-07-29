@@ -20,6 +20,7 @@ layer = "contracts"
 # downstream crates stop hand-rolling ~25 one-method dispatcher fakes. Never
 # enabled by a shipped artifact.
 test-support = []
+host-auth-mint = []
 
 [dependencies]
 async-trait = "0.1"
@@ -29,11 +30,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 zeroize = "1"
 
 [dev-dependencies]
 rust_decimal_macros = "1"
 static_assertions = "1"
+toml = "1.1"
 # `#[tokio::test]` for the async `dispatch_test_support::TestDispatcher` tests.
 tokio = { version = "1", features = ["macros", "rt"] }

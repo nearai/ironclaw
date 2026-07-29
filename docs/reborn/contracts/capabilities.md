@@ -53,11 +53,11 @@ The obligations phase uses `CapabilityObligationPhase::Resume` (same as `resume_
 
 **Host-runtime integration:**
 
-`HostRuntime::auth_resume_capability` is the composition-facing entry point.  The default trait implementation returns an explicit `Failed` outcome so stubs that do not override it fail loudly. `DefaultHostRuntime` provides the production override: before input preparation, runtime-policy/trust evaluation, persistent-approval lookup, or any run transition, it validates the request context and compares its actor with the persisted run actor. Only then does it evaluate runtime policy and trust and route to `CapabilityHost::auth_resume_json` via `CapabilityAuthResumeRequest`. The same preflight actor guard applies to approval resume and resume-spawn; `CapabilityHost` repeats the exact actor comparison as defense in depth.
+`HostRuntime::auth_resume_capability` is the composition-facing entry point.  The default trait implementation returns an explicit `Failed` outcome so stubs that do not override it fail loudly. `DefaultHostRuntime` provides the production override: before input preparation, runtime-policy/trust evaluation, persistent-approval lookup, or any run transition, it validates the request context and compares its actor with the persisted run actor. Only then does it evaluate runtime policy and trust and route to `CapabilityHost::auth_resume_json` with direct parameters. The same preflight actor guard applies to approval resume and resume-spawn; `CapabilityHost` repeats the exact actor comparison as defense in depth.
 
 Fresh invoke/spawn paths persist `ExecutionContext.authenticated_actor_user_id` in `RunRecord`; dispatch and process-spawn handoffs carry the same optional actor unchanged. The subject remains `ExecutionContext.user_id`/`resource_scope.user_id`, and no capability layer may synthesize the actor from that subject.
 
-The agent-loop host constructs a `RuntimeCapabilityAuthResumeRequest` (carrying the original `invocation_id` encoded as a resume token and, when present, the prior `approval_request_id`) and calls `dispatch_runtime_capability_auth_resume`, which always uses `auth_resume_capability` — there is no spawn variant because sandbox spawns do not pass through auth gates.
+The agent-loop host passes runtime tuple parts carrying the original `invocation_id` encoded as a resume token and, when present, the prior `approval_request_id` into `dispatch_runtime_capability_auth_resume`, which always uses `auth_resume_capability` — there is no spawn variant because sandbox spawns do not pass through auth gates.
 
 ## Failure taxonomy
 

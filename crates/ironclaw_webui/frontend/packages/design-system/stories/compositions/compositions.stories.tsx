@@ -333,10 +333,14 @@ const AUTOMATION_ROWS = [
   { name: "Standup notes", schedule: "Weekdays · 9:30am", status: "danger", label: "Failed" },
 ] as const;
 
-function AutomationRows() {
+function AutomationRows({ status = "all" }: { status?: string }) {
+  const rows =
+    status === "all"
+      ? AUTOMATION_ROWS
+      : AUTOMATION_ROWS.filter((row) => row.label.toLowerCase() === status);
   return (
     <>
-      {AUTOMATION_ROWS.map((row) => (
+      {rows.map((row) => (
         <ListRow
           key={row.name}
           leading={<Checkbox aria-label={`Select ${row.name}`} />}
@@ -400,7 +404,7 @@ export const AutomationsPage: Story = {
 
           <div className="px-5 pb-5 pt-2">
             <Card variant="flat" padding="none">
-              <AutomationRows />
+              <AutomationRows status={status} />
             </Card>
           </div>
         </div>

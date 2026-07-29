@@ -9,8 +9,8 @@
 use ironclaw_host_api::{
     ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityId,
     CorrelationId, DenyRef, GateRef, GateWaypoint, Invocation, InvocationOrigin, MountView,
-    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
-    RuntimeLane, Timestamp, UserId,
+    ProcessAuthorizedContinuation, ProcessId, ProductKind, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, RuntimeLane, Timestamp, UserId,
 };
 
 /// A stand-in kernel authorizer. In production the sole impl lives in
@@ -49,14 +49,34 @@ fn seal_with_reservation(
     deadline: Timestamp,
     reservation: Option<ResourceReservation>,
 ) -> Authorized {
+    seal_with_mounts_and_reservation(deadline, Some(MountView::default()), reservation)
+}
+
+fn seal_with_mounts_and_reservation(
+    deadline: Timestamp,
+    mounts: Option<MountView>,
+    reservation: Option<ResourceReservation>,
+) -> Authorized {
     let grant = TestAuthorizer.authorization_grant();
     Authorized::seal(
         grant,
         invocation(),
         RuntimeLane::Process,
-        MountView::default(),
+        mounts,
         reservation,
         deadline,
+    )
+}
+
+fn seal_invocation(invocation: Invocation) -> Authorized {
+    let grant = TestAuthorizer.authorization_grant();
+    Authorized::seal(
+        grant,
+        invocation,
+        RuntimeLane::Process,
+        Some(MountView::default()),
+        Some(reservation()),
+        ts(1000),
     )
 }
 
@@ -102,6 +122,26 @@ fn reservation_is_some_when_a_resource_obligation_produced_one() {
 }
 
 #[test]
+fn process_authorized_continuation_preserves_direct_spawner_lineage() {
+    let spawner = ProcessId::new();
+    let grandparent = ProcessId::new();
+    let spawned = ProcessId::new();
+    let mut invocation = invocation();
+    invocation.process_id = Some(spawner);
+    invocation.parent_process_id = Some(grandparent);
+
+    let continuation = ProcessAuthorizedContinuation::from_authorized(
+        seal_invocation(invocation),
+        ts(999),
+        spawned,
+    )
+    .expect("unexpired process authorization converts");
+
+    assert_eq!(continuation.invocation.process_id, spawned);
+    assert_eq!(continuation.invocation.parent_process_id, Some(spawner));
+}
+
+#[test]
 fn reservation_is_none_when_the_capability_declares_no_resource_obligation() {
     // A capability WITHOUT a resource obligation seals no reservation — never a
     // synthesized placeholder. Consumption and abort surface `None`.
@@ -136,6 +176,26 @@ fn abort_returns_the_reservation_for_explicit_release() {
     let auth = seal_one(ts(1000));
     let reservation = auth.abort(); // consumed, not dropped implicitly
     assert!(reservation.is_some());
+}
+
+#[test]
+fn mounts_are_carried_and_consumed_as_an_option_not_a_collapsed_default() {
+    // The witness must preserve the fold's `Option<MountView>` verbatim so
+    // `dispatch()` routes the same `None`-vs-empty distinction today's dispatch
+    // input carries (a `None` mount fails a `ScopedVirtual` capability closed;
+    // an empty one does not). Collapsing `None` to a default would erase that.
+    let some = seal_with_mounts_and_reservation(ts(1000), Some(MountView::default()), None);
+    assert_eq!(some.mounts(), Some(&MountView::default()));
+    let (_inv, _lane, mounts, _res) = some.into_parts(ts(999)).expect("unexpired");
+    assert_eq!(mounts, Some(MountView::default()));
+
+    let none = seal_with_mounts_and_reservation(ts(1000), None, None);
+    assert!(none.mounts().is_none());
+    let (_inv, _lane, mounts, _res) = none.into_parts(ts(999)).expect("unexpired");
+    assert!(
+        mounts.is_none(),
+        "a `None` mount must not become an empty default"
+    );
 }
 
 #[test]

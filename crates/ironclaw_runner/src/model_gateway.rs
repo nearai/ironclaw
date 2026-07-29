@@ -39,13 +39,13 @@ use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, EphemeralInstructionMaterializationStore,
+        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InstructionMaterializationStore,
+        InstructionSafetyContext, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
+        PromptMode, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        sanitize_model_visible_text,
     },
 };
 use tracing::debug;
@@ -245,7 +245,7 @@ where
         progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
-            Arc::new(InMemoryInstructionMaterializationStore::default());
+            Arc::new(EphemeralInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         self.issue_host_prompt_bundle(
             &request.context,
@@ -334,7 +334,7 @@ where
         }
         if prompt_bundle.surface_version != request.surface_version {
             return Err(host_error_to_model_gateway_error(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+                AgentLoopHostErrorKind::StaleSurface,
                 "model request surface version does not match the host-built prompt bundle",
             )));
         }
@@ -1687,7 +1687,7 @@ async fn tool_response_to_host(
             "model response was truncated before completion",
         )),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::PolicyDenied,
+            HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
@@ -2015,7 +2015,7 @@ fn response_to_host_reply(
             "model response was truncated before completion",
         )),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::PolicyDenied,
+            HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
@@ -2044,11 +2044,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::BudgetAccountingFailed => {
             HostManagedModelErrorKind::BudgetAccountingFailed
         }
+        AgentLoopHostErrorKind::ContentFiltered => HostManagedModelErrorKind::ContentFiltered,
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
+        AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::StaleRequest,
         AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::InvalidInvocation
-        | AgentLoopHostErrorKind::ScopeMismatch
-        | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
+        | AgentLoopHostErrorKind::ScopeMismatch => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
         | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
@@ -2756,6 +2757,61 @@ mod tests {
             HostManagedModelErrorKind::BudgetAccountingFailed,
             "accounting infrastructure failure must cross the model gateway unchanged"
         );
+    }
+
+    /// Regression (#6684 review): a malformed model-supplied provider tool
+    /// call (e.g. bad `spawn_subagent` JSON) is rejected by the port at
+    /// validate/register time as `InvalidInvocation`. The gateway must route
+    /// that into the model-stage `InvalidOutput` lane (invalid-output repair
+    /// retries with a model-visible observation) — never a run-ending host
+    /// fault. `map_provider_tool_output_error` is the single mapping seam
+    /// both the validation and the registration loops call.
+    #[test]
+    fn malformed_provider_tool_call_registration_errors_stay_model_repairable() {
+        for kind in [
+            AgentLoopHostErrorKind::InvalidInvocation,
+            AgentLoopHostErrorKind::Invalid,
+            AgentLoopHostErrorKind::InvalidOutput,
+        ] {
+            let mapped = map_provider_tool_output_error(AgentLoopHostError::new(
+                kind,
+                "invalid spawn_subagent input: missing field mission",
+            ));
+            assert_eq!(
+                mapped.kind,
+                HostManagedModelErrorKind::InvalidOutput,
+                "mapping for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_model_request_errors_preserve_stale_distinction() {
+        for (host_kind, gateway_kind) in [
+            (
+                AgentLoopHostErrorKind::StaleSurface,
+                HostManagedModelErrorKind::StaleRequest,
+            ),
+            (
+                AgentLoopHostErrorKind::InvalidInvocation,
+                HostManagedModelErrorKind::InvalidRequest,
+            ),
+            (
+                AgentLoopHostErrorKind::Invalid,
+                HostManagedModelErrorKind::InvalidRequest,
+            ),
+            (
+                AgentLoopHostErrorKind::ScopeMismatch,
+                HostManagedModelErrorKind::InvalidRequest,
+            ),
+        ] {
+            let mapped = map_capability_host_error(AgentLoopHostError::new(
+                host_kind,
+                "model request classification test",
+            ));
+
+            assert_eq!(mapped.kind, gateway_kind, "mapping for {host_kind:?}");
+        }
     }
 
     #[test]

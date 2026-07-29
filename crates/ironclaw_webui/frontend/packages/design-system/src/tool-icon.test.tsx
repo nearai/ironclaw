@@ -16,8 +16,16 @@ test("ToolIcon resolves known tools to a system glyph", () => {
   const rendered = ToolIcon({ name: "GitHub" }) as ReactElement<ElementProps>;
   assert.equal(rendered.props.role, "img");
   assert.equal(rendered.props["aria-label"], "GitHub");
-  const child = rendered.props.children;
+  const child = rendered.props.children as ReactElement<{ name?: string }>;
   assert.ok(isValidElement(child) && child.type === Icon);
+  assert.equal(child.props.name, "github");
+});
+
+test("ToolIcon maps mail-family tools to the mail glyph", () => {
+  const rendered = ToolIcon({ name: "Gmail" }) as ReactElement<ElementProps>;
+  const child = rendered.props.children as ReactElement<{ name?: string }>;
+  assert.ok(isValidElement(child) && child.type === Icon);
+  assert.equal(child.props.name, "mail");
 });
 
 test("ToolIcon falls back to a monogram for unknown tools", () => {

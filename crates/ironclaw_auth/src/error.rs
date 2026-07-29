@@ -21,10 +21,10 @@ pub enum AuthErrorCode {
     AccountSelectionRequired,
     #[error("backend_unavailable")]
     BackendUnavailable,
+    #[error("lifecycle_activation_failed")]
+    LifecycleActivationFailed,
     #[error("provider_identity_already_connected")]
     ProviderIdentityAlreadyConnected,
-    #[error("connection_conflict")]
-    ConnectionConflict,
     #[error("malformed_config")]
     MalformedConfig,
     #[error("malformed_callback")]
@@ -63,6 +63,8 @@ pub enum AuthProductError {
     AccountSelectionRequired,
     #[error("backend unavailable")]
     BackendUnavailable,
+    #[error("extension authorization completed but lifecycle activation failed")]
+    LifecycleActivationFailed,
     #[error("provider identity is already connected")]
     ProviderIdentityAlreadyConnected,
     #[error("auth backend configuration is malformed")]
@@ -98,6 +100,7 @@ impl AuthProductError {
             Self::CredentialMissing => AuthErrorCode::CredentialMissing,
             Self::AccountSelectionRequired => AuthErrorCode::AccountSelectionRequired,
             Self::BackendUnavailable => AuthErrorCode::BackendUnavailable,
+            Self::LifecycleActivationFailed => AuthErrorCode::LifecycleActivationFailed,
             Self::ProviderIdentityAlreadyConnected => {
                 AuthErrorCode::ProviderIdentityAlreadyConnected
             }

@@ -197,13 +197,16 @@ Required when enabling Gmail or Calendar probes:
 - `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
 - `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
 - `AUTH_LIVE_GOOGLE_SCOPES`
-- `AUTH_LIVE_FORCE_GOOGLE_REFRESH`
 
 Notes:
 
 - `AUTH_LIVE_GOOGLE_ACCESS_TOKEN` is required if a refresh token is provided.
-- The runner seeds the token, then can deliberately expire the access token so
-  refresh is exercised on first use.
+- The runner refreshes the access token harness-side before the gateway
+  starts (`_preflight_refresh_google_token`) so a stale CI-stored token is
+  fresh when seeded; the canary never reaches into persistence to expire
+  tokens. (The former `AUTH_LIVE_FORCE_GOOGLE_REFRESH` deliberate-expiry
+  flow was removed with `expire_secret_in_db`; a product-side
+  refresh-under-expiry proof is a tracked follow-up.)
 - Gmail and Calendar share `google_oauth_token`.
 
 Recommended scopes:

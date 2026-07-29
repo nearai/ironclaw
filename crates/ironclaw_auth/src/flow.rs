@@ -133,10 +133,6 @@ pub struct AuthFlowRecord {
     pub continuation: AuthContinuationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_account_id: Option<CredentialAccountId>,
-    /// Redacted fingerprint of the secret handles committed by this OAuth
-    /// flow. It fences exact compensation without storing credential material.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_secret_fingerprint: Option<crate::CredentialSecretFingerprint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,41 +226,6 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
-/// Exclusive, restart-recoverable claim taken before a continuation side
-/// effect. `claimed_at` doubles as the CAS fence returned to settlement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContinuationDispatchClaimInput {
-    pub flow_id: AuthFlowId,
-    pub claimed_at: Timestamp,
-}
-
-/// Authoritative result of a claimed continuation side effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthContinuationDispatchOutcome {
-    Dispatched {
-        emitted_at: Timestamp,
-    },
-    /// Release a claim after its durable settlement could not be persisted.
-    /// The side effect may be retried; lifecycle activation is idempotent.
-    RetryableFailure,
-    TerminalFailure {
-        error: AuthErrorCode,
-    },
-}
-
-/// Fenced settlement for one continuation dispatch claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContinuationDispatchSettlementInput {
-    pub flow_id: AuthFlowId,
-    pub expected_claimed_at: Timestamp,
-    pub outcome: AuthContinuationDispatchOutcome,
-}
-
-/// A callback may reclaim a continuation left in `Completing` after this
-/// interval. Settlement is fenced by the claim timestamp, so the stale worker
-/// cannot overwrite the new owner's result.
-pub const AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS: i64 = 60;
-
 /// User-selected configured credential that completes an account-selection
 /// auth flow without exposing credential internals to product surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,18 +307,6 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
-    async fn claim_continuation_dispatch(
-        &self,
-        scope: &AuthProductScope,
-        input: AuthContinuationDispatchClaimInput,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    async fn settle_continuation_dispatch(
-        &self,
-        scope: &AuthProductScope,
-        input: AuthContinuationDispatchSettlementInput,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
     async fn mark_continuation_dispatched(
         &self,
         scope: &AuthProductScope,
@@ -369,6 +318,24 @@ pub trait AuthFlowManager: Send + Sync {
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    /// Terminalize a completed OAuth flow whose typed continuation dispatch
+    /// failed terminally.
+    ///
+    /// The honest extension state machine treats a failed lifecycle activation
+    /// as terminal: the completed flow must not remain re-dispatchable, so a
+    /// `Completed` flow whose continuation has not yet been acknowledged
+    /// (`continuation_emitted_at` is `None`) transitions to `Failed` carrying
+    /// `error`. A flow that already acknowledged its continuation, or that is
+    /// already terminal in another state, returns
+    /// [`AuthProductError::FlowAlreadyTerminal`] and is left untouched — the
+    /// call is safe to race against a concurrent completion.
+    async fn fail_completed_continuation(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        error: AuthErrorCode,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
@@ -417,15 +384,6 @@ pub trait AuthFlowRecordSource: Send + Sync {
         query: TurnGateAuthFlowQuery,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
 
-    /// Look up one opaque flow id at durable credential-owner granularity.
-    /// Thread, invocation, surface, session, and mission are provenance rather
-    /// than authority here; tenant/user/agent/project must still match.
-    async fn flow_for_owner_by_id(
-        &self,
-        owner_scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-    ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
-
     async fn flows_for_owner(
         &self,
         owner: AuthFlowOwnerScope,
@@ -446,15 +404,6 @@ pub fn flow_matches_turn_gate_query(flow: &AuthFlowRecord, query: &TurnGateAuthF
             gate_ref,
         } if turn_run_ref == &query.turn_run_ref && gate_ref == &query.gate_ref
     )
-}
-
-pub fn flow_matches_durable_owner(flow: &AuthFlowRecord, owner_scope: &AuthProductScope) -> bool {
-    let flow_resource = &flow.scope.resource;
-    let owner_resource = &owner_scope.resource;
-    flow_resource.tenant_id == owner_resource.tenant_id
-        && flow_resource.user_id == owner_resource.user_id
-        && flow_resource.agent_id == owner_resource.agent_id
-        && flow_resource.project_id == owner_resource.project_id
 }
 
 pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {

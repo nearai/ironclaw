@@ -12,19 +12,12 @@ fail() {
 packages='[
   "ironclaw_telegram_extension",
   "ironclaw_common",
-  "ironclaw_reborn_migration",
-  "ironclaw_channel_host",
-  "ironclaw_channel_delivery",
   "ironclaw_future_adapter"
 ]'
 
 actual="$("${bucket_script}" "${packages}")"
 expected='[
-  {"name":"channel-delivery","packages":["ironclaw_channel_delivery"]},
-  {"name":"channel-host","packages":["ironclaw_channel_host"]},
-  {"name":"reborn-migration","packages":["ironclaw_reborn_migration"]},
-  {"name":"telegram-extension","packages":["ironclaw_telegram_extension"]},
-  {"name":"adapters-misc","packages":["ironclaw_common","ironclaw_future_adapter"]}
+  {"name":"adapters-misc","packages":["ironclaw_telegram_extension","ironclaw_common","ironclaw_future_adapter"]}
 ]'
 
 if ! jq -e --argjson expected "${expected}" '. == $expected' <<< "${actual}" >/dev/null; then

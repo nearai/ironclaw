@@ -160,9 +160,9 @@ pub trait DeliveredGateRouteStore: Send + Sync {
 /// Reads return empty (miss → forward unchanged); best-effort cleanup
 /// (`remove`/`sweep`) is a no-op. `record` fails **loud** — a surface that
 /// actually records delivered routes must be wired with a real store
-/// (a [`FilesystemOutboundStateStore`](crate::FilesystemOutboundStateStore)),
+/// (a [`OutboundStateStore`](crate::OutboundStateStore)),
 /// never this null object. This is the filesystem-free default
-/// `ironclaw_product_workflow` uses when a caller supplies no routing store
+/// `ironclaw_product` uses when a caller supplies no routing store
 /// (arch-simplification §4.3: replaces the deleted
 /// `InMemoryDeliveredGateRouteStore`, a full HashMap store that was used merely
 /// as an empty default on the non-routing surface).

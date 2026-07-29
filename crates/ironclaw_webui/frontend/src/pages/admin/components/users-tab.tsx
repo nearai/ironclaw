@@ -5,7 +5,8 @@ import { Panel, StatusPill, EmptyPanel } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import { SelectMenu } from "@ironclaw/design-system";
-import { Input, FormField, ConfirmDialog } from "@ironclaw/design-system";
+import { Input, FormField } from "@ironclaw/design-system";
+import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -17,6 +18,7 @@ import {
   formatUserStatus,
   filterUsers,
   buildRoleOptions,
+  adminUserActionErrorMessage,
 } from "../lib/admin-presenters";
 
 function buildFilters(t) {
@@ -63,7 +65,7 @@ function TokenBanner({ token, onDismiss }) {
   );
 }
 
-function CreateUserForm({ onCreate, isCreating, error }) {
+function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [email, setEmail] = React.useState("");
@@ -74,10 +76,15 @@ function CreateUserForm({ onCreate, isCreating, error }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!name.trim()) return;
-    await onCreate({ display_name: name.trim(), email: email.trim() || undefined, role });
-    setName("");
-    setEmail("");
-    setIsOpen(false);
+    resetError?.();
+    try {
+      await onCreate({ display_name: name.trim(), email: email.trim() || undefined, role });
+      setName("");
+      setEmail("");
+      setIsOpen(false);
+    } catch (_) {
+      // Keep the form open; the mutation exposes its sanitized error below.
+    }
   };
 
   if (!isOpen) {
@@ -134,7 +141,53 @@ function CreateUserForm({ onCreate, isCreating, error }) {
   );
 }
 
-function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole }) {
+export function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel, isPending, error }) {
+  const t = useT();
+  return (
+    <Modal
+      open
+      size="sm"
+      data-testid="admin-user-confirm-dialog"
+      title={title}
+      closeLabel={t("admin.users.cancel")}
+      onClose={onCancel}
+    >
+      <ModalBody>
+        <p className="text-sm leading-6 text-[var(--v2-text-muted)]">{message}</p>
+        {error && (
+          <p className="mt-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-confirm-error">
+            {adminUserActionErrorMessage(error, t)}
+          </p>
+        )}
+      </ModalBody>
+      <ModalFooter>
+        <Button variant="ghost" size="sm" disabled={isPending} onClick={onCancel}>{t("admin.users.cancel")}</Button>
+        <Button
+          variant="danger"
+          size="sm"
+          loading={isPending}
+          disabled={isPending}
+          data-testid="admin-user-confirm-submit"
+          onClick={onConfirm}
+        >
+          {isPending ? t("common.loading") : confirmLabel}
+        </Button>
+      </ModalFooter>
+    </Modal>
+  );
+}
+
+export function UserRow({
+  user,
+  onSelect,
+  onSuspend,
+  onActivate,
+  onChangeRole,
+  isActionPending,
+  isSuspending,
+  isActivating,
+  isUpdating,
+}) {
   const t = useT();
   return (
     <div className="flex items-center justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3.5 first:border-0 first:pt-0">
@@ -162,13 +215,18 @@ function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole }) {
         <span className="hidden text-xs text-[var(--v2-text-faint)] lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button onClick={() => onSuspend(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)]">{t("admin.users.suspend")}</button>)
-            : (<button onClick={() => onActivate(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] hover:text-[var(--v2-accent-text)]">{t("admin.users.activate")}</button>)}
+            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
+            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
           <button
+            data-testid="admin-user-role"
+            disabled={isActionPending}
+            aria-busy={isUpdating || undefined}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
-            className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[var(--v2-panel-border)] hover:text-[var(--v2-text-strong)]"
+            className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[var(--v2-panel-border)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {user.role === "admin" ? t("admin.users.demote") : t("admin.users.promote")}
+            {isUpdating
+              ? t("common.saving")
+              : user.role === "admin" ? t("admin.users.demote") : t("admin.users.promote")}
           </button>
         </div>
       </div>
@@ -176,13 +234,28 @@ function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole }) {
   );
 }
 
-export function AdminUsersTab({ selectedUserId, onSelectUser }) {
+export function AdminUsersTab({ onSelectUser }) {
+  const adminState = useAdminUsers();
+  return (
+    <AdminUsersTabView
+      onSelectUser={onSelectUser}
+      adminState={adminState}
+    />
+  );
+}
+
+export function AdminUsersTabView({ onSelectUser, adminState }) {
   const t = useT();
   const {
     users, query, isForbidden, createUser, isCreating, createError,
-    updateUser, deleteUser, suspendUser, activateUser,
+    resetCreate,
+    updateUser, suspendUser, activateUser,
+    isUpdating, updateError, updatingUserId,
+    isSuspending, suspendError, suspendingUserId, resetSuspend,
+    isActivating, activateError, activatingUserId,
+    resetActionErrors,
     newToken, clearToken,
-  } = useAdminUsers();
+  } = adminState;
 
   const [search, setSearch] = React.useState("");
   const [filter, setFilter] = React.useState("all");
@@ -191,13 +264,54 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
   const filtered = filterUsers(users, { search, filter });
   const FILTERS = buildFilters(t);
 
+  const isActionPending = isUpdating || isSuspending || isActivating;
+  const actionError = activateError || updateError;
+
   const handleSuspend = (id) => {
+    resetSuspend?.();
     setConfirm({
+      userId: id,
       title: t("admin.users.suspendTitle"),
       message: t("admin.users.suspendDesc"),
       confirmLabel: t("admin.users.suspend"),
-      onConfirm: () => { suspendUser(id); setConfirm(null); },
     });
+  };
+
+  const confirmSuspend = async () => {
+    if (!confirm?.userId || isActionPending) return;
+    resetActionErrors?.();
+    try {
+      await suspendUser(confirm.userId);
+      setConfirm(null);
+    } catch (_) {
+      // Keep the confirmation open so the administrator can retry.
+    }
+  };
+
+  const handleActivate = async (id) => {
+    if (isActionPending) return;
+    resetActionErrors?.();
+    try {
+      await activateUser(id);
+    } catch (_) {
+      // The mutation exposes its sanitized error in the list panel.
+    }
+  };
+
+  const handleChangeRole = async (id, role) => {
+    if (isActionPending) return;
+    resetActionErrors?.();
+    try {
+      await updateUser(id, { role });
+    } catch (_) {
+      // The mutation exposes its sanitized error in the list panel.
+    }
+  };
+
+  const closeConfirm = () => {
+    if (isSuspending) return;
+    setConfirm(null);
+    resetSuspend?.();
   };
 
   if (query.isLoading) {
@@ -237,7 +351,12 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
         />
       )}
 
-      <CreateUserForm onCreate={createUser} isCreating={isCreating} error={createError} />
+      <CreateUserForm
+        onCreate={createUser}
+        isCreating={isCreating}
+        error={createError}
+        resetError={resetCreate}
+      />
 
       <Panel className="p-5 sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -275,6 +394,12 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
           </div>
         </div>
 
+        {actionError && (
+          <p className="mb-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-action-error">
+            {adminUserActionErrorMessage(actionError, t)}
+          </p>
+        )}
+
         {filtered.length === 0
           ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">{t("admin.users.noMatch")}</p>)
           : filtered.map(
@@ -284,22 +409,26 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
                   user={user}
                   onSelect={onSelectUser}
                   onSuspend={handleSuspend}
-                  onActivate={activateUser}
-                  onChangeRole={(id, role) => updateUser(id, { role })}
+                  onActivate={handleActivate}
+                  onChangeRole={handleChangeRole}
+                  isActionPending={isActionPending}
+                  isSuspending={isSuspending && suspendingUserId === user.id}
+                  isActivating={isActivating && activatingUserId === user.id}
+                  isUpdating={isUpdating && updatingUserId === user.id}
                 />
               )
             )}
       </Panel>
 
       {confirm && (
-        <ConfirmDialog
-          open
+        <ConfirmModal
           title={confirm.title}
-          description={confirm.message}
+          message={confirm.message}
           confirmLabel={confirm.confirmLabel}
-          cancelLabel={t("admin.users.cancel")}
-          onConfirm={confirm.onConfirm}
-          onCancel={() => setConfirm(null)}
+          onConfirm={confirmSuspend}
+          onCancel={closeConfirm}
+          isPending={isSuspending}
+          error={suspendError}
         />
       )}
     </div>

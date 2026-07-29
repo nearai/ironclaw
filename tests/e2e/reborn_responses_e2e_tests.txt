@@ -17,3 +17,12 @@ tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_reborn_le
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_reborn_legacy_responses_rejects_missing_auth
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_reborn_legacy_responses_rejects_empty_input_items
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_reborn_legacy_responses_rejects_empty_text_input
+# Mocked-client unit coverage for the shared `_create_response` retry helper
+# (no served binary needed; runs standalone in this lane). Pins the retry
+# contract the served tests above depend on: transient retry, non-transient
+# stop, attempt cap, single reused idempotency key, per-attempt budget bound.
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_create_response_retries_transient_then_succeeds
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_create_response_succeeds_without_retry_or_sleep
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_create_response_does_not_retry_non_transient_status
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_create_response_caps_attempts_without_trailing_sleep
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py::test_create_response_bounds_each_attempt_by_remaining_budget

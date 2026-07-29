@@ -215,7 +215,7 @@ async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() 
                 backend: "postgres"
             }
         ),
-        "postgres feature must enable the concrete adapter"
+        "postgres config must use the concrete adapter"
     );
     let displayed = error.to_string();
     assert!(!displayed.contains("RAW_PASSWORD_SENTINEL_3162"));

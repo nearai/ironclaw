@@ -29,15 +29,15 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeStatusRequest, VisibleCapability,
-    VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume,
+    RuntimeInvocation, RuntimeStatusRequest, VisibleCapability, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
@@ -50,8 +50,8 @@ use ironclaw_reborn_composition::test_support::{
     create_refreshing_capability_port_for_test,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
-    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRunContext, ProviderToolCall,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, LoopRequest, LoopRunContext, ProviderToolCall,
     RegisterProviderToolCallRequest, RunProfileResolutionRequest,
 };
 use ironclaw_turns::{RunProfileResolver, TurnId, TurnRunId, TurnScope};
@@ -96,15 +96,15 @@ impl StubHostRuntime {
 impl HostRuntime for StubHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.invocation_contexts
             .lock()
             .expect("invocation contexts lock")
-            .push(request.context.clone());
+            .push(request.0.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             ironclaw_host_runtime::RuntimeCapabilityCompleted {
-                capability_id: request.capability_id,
+                capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,
                 usage: ironclaw_host_api::ResourceUsage::default(),
@@ -114,7 +114,7 @@ impl HostRuntime for StubHostRuntime {
 
     async fn resume_capability(
         &self,
-        _request: RuntimeCapabilityResumeRequest,
+        _request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         Err(HostRuntimeError::unavailable(
             "stub host runtime does not resume capabilities",
@@ -146,7 +146,9 @@ impl HostRuntime for StubHostRuntime {
                     default_permission: PermissionMode::Allow,
                     runtime_credentials: Vec::new(),
                     network_targets: Vec::new(),
+                    max_egress_bytes: None,
                     resource_profile: None,
+                    origin_gate_matrix: None,
                 },
                 access: VisibleCapabilityAccess::Available,
                 estimated_resources: ResourceEstimate::default(),
@@ -398,19 +400,19 @@ fn test_parts(
         project_service: Arc::new(StubProjectService),
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
-        outbound_preferences_facade: None,
+        outbound_preferences_service: None,
         outbound_delivery_target_set_requires_approval: false,
         tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
         approval_requests: Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
         capability_leases: Arc::new(in_memory_backed_capability_lease_store()),
-        gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+        gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
             ironclaw_reborn_composition::wrap_scoped(Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),
         )),
-        replay_payload_store: Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+        replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
             ironclaw_reborn_composition::wrap_scoped(Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),
@@ -608,7 +610,7 @@ async fn input_and_result_refs_correlate_through_one_shared_io() {
     );
 
     let resolution = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,
@@ -689,7 +691,7 @@ async fn capability_execution_mount_overrides_reach_invocation_context() {
         .await
         .expect("registers the builtin.echo provider tool call");
 
-    port.invoke_capability(CapabilityInvocation {
+    port.invoke_capability(LoopRequest {
         activity_id: candidate.activity_id,
         surface_version: candidate.surface_version,
         capability_id: candidate.capability_id,
@@ -866,7 +868,7 @@ async fn multi_entry_collection_knobs_round_trip() {
             })
             .await
             .expect("registers the provider tool call");
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,

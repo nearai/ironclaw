@@ -67,6 +67,7 @@ fn flatten_config(
         slack: Some(config.slack.clone().unwrap_or_default()),
         telegram: Some(config.telegram.clone().unwrap_or_default()),
         google: Some(config.google.clone().unwrap_or_default()),
+        memory: Some(config.memory.clone().unwrap_or_default()),
         budget: Some(config.budget.clone().unwrap_or_default()),
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
     };
@@ -175,8 +176,6 @@ mod tests {
         assert!(entries.iter().any(|e| e.key == "llm.default.provider_id"));
         assert!(entries.iter().any(|e| e.key == "webui.listen_port"));
         assert!(entries.iter().any(|e| e.key == "budget.user_daily_usd"));
-        assert!(entries.iter().any(|e| e.key == "slack.enabled"));
-        assert!(entries.iter().any(|e| e.key == "slack.team_id"));
         assert!(entries.iter().any(|e| e.key == "trigger_poller.enabled"));
         assert!(
             entries

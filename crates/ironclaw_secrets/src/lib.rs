@@ -9,15 +9,20 @@
 #![warn(unreachable_pub)]
 
 mod crypto;
-mod filesystem_store;
 pub mod keychain;
 mod legacy_store;
+mod placeholder;
+mod secret_store;
 
-pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
+pub use placeholder::{
+    CREDENTIAL_PLACEHOLDER_PREFIX, CREDENTIAL_PLACEHOLDER_SUFFIX_LEN, CredentialPlaceholderOwner,
+    CredentialPlaceholderRegistry, CredentialPlaceholderToken, CredentialSessionLease,
+};
+pub use secret_store::{CredentialBroker, SecretStore};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 pub use crypto::{
@@ -37,6 +42,22 @@ use uuid::Uuid;
 
 const CREDENTIAL_ID_MAX_LEN: usize = 128;
 const DEFAULT_SECRET_LEASE_TTL_SECONDS: i64 = 300;
+
+/// Default lifetime handed to a [`CredentialSession`] whose
+/// [`CredentialSessionRequest::expires_at`] is `None`. A caller that asks for
+/// "no expiry" still gets a bounded session — see
+/// [`CREDENTIAL_SESSION_MAX_TTL_SECONDS`] for why unbounded is never actually
+/// granted.
+const CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS: i64 = 30 * 60;
+
+/// Hard cap on how far in the future any [`CredentialSession::expires_at`]
+/// may be set, regardless of what the caller requests. Explicit revocation
+/// (via [`CredentialSessionLease`]/[`InMemoryCredentialBroker::revoke_session`])
+/// is the primary way a session's life ends; this is only the backstop for a
+/// lease held or leaked past the caller's own error/timeout/panic handling —
+/// see `create_session`'s doc comment for why a background sweep task is not
+/// the fix here.
+const CREDENTIAL_SESSION_MAX_TTL_SECONDS: i64 = 30 * 60;
 
 /// Opaque identifier for a one-shot secret lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,7 +89,7 @@ pub struct SecretMetadata {
     pub handle: SecretHandle,
     /// When the secret material expires, if known.
     ///
-    /// Populated only for access tokens written through [`SecretStore::put`] with a
+    /// Populated only for access tokens written through [`SecretStorePort::put`] with a
     /// non-`None` `expires_at` argument (e.g. OAuth access tokens). Legacy records
     /// and secrets written without a TTL leave this `None`.
     pub expires_at: Option<Timestamp>,
@@ -251,17 +272,6 @@ impl CredentialSessionId {
         Uuid::parse_str(value).map(Self)
     }
 
-    /// Returns the underlying UUID as a storage-formatted string.
-    ///
-    /// This is the **only** way to obtain the bearer-like value of a
-    /// `CredentialSessionId`. It exists so durable backends can write the id
-    /// into their primary-key columns; callers must not log, audit, or echo
-    /// the result to runtime/plugin code. `Display` and `Debug` deliberately
-    /// redact, so `format!("{id}")` and `{id:?}` both refuse to leak.
-    ///
-    /// Kept feature-agnostic so private DTO conversion code does not depend on
-    /// backend feature gates. It may be unused in featureless builds.
-    #[allow(dead_code)]
     pub(crate) fn to_private_storage_string(self) -> String {
         self.0.to_string()
     }
@@ -391,7 +401,7 @@ pub struct CredentialSession {
 /// to avoid duplicating that constructor for every backend.
 // arch-exempt: too_many_args, needs CredentialSession reconstruction context, plan #4088
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn __internal_session_for_filesystem_store(
+pub(crate) fn __internal_session_for_secret_store(
     scope: ResourceScope,
     invocation_id: InvocationId,
     capability_id: CapabilityId,
@@ -476,6 +486,8 @@ pub enum CredentialBrokerError {
     CredentialExtensionMismatch { account_id: CredentialAccountId },
     #[error("credential account {account_id} is not allowed for requested target")]
     CredentialPolicyMismatch { account_id: CredentialAccountId },
+    #[error("credential placeholder token is invalid: {reason}")]
+    InvalidPlaceholderToken { reason: String },
 }
 
 impl CredentialBrokerError {
@@ -493,6 +505,7 @@ impl CredentialBrokerError {
             Self::CredentialRevoked { .. } => "CredentialRevoked",
             Self::CredentialExtensionMismatch { .. } => "CredentialPolicyMismatch",
             Self::CredentialPolicyMismatch { .. } => "CredentialPolicyMismatch",
+            Self::InvalidPlaceholderToken { .. } => "MissingCredential",
         }
     }
 
@@ -568,16 +581,90 @@ pub trait CredentialSessionStore: Send + Sync {
     ) -> Result<CredentialSession, CredentialBrokerError>;
 }
 
+/// All session-lifecycle bookkeeping `InMemoryCredentialBroker` keeps beyond
+/// account storage, collapsed under one lock.
+///
+/// `sessions`, `jit_minted`, and `sessions_by_placeholder` used to be three
+/// (really four, counting the outstanding-lease counter) separate `Mutex`es
+/// on the broker. They are not independent state — `jit_minted` and
+/// `sessions_by_placeholder` are both secondary indices over the same
+/// `sessions` entries — so five separately-lockable pieces of one logical
+/// session record was over-fragmentation: every mint/revoke sequence had to
+/// hand-synchronize removals across maps and reason about which lock was
+/// allowed to be held while acquiring which other one (see the
+/// `CredentialPlaceholderRegistry` / `RegistryState` pattern just above,
+/// which this mirrors). A single lock over all three makes every
+/// mint/reuse/revoke sequence atomic from an outside observer's perspective,
+/// and removes the need for lock-ordering rules or "ignoring" twin methods
+/// that used to exist purely to dodge self-deadlock across separate
+/// acquisitions of the same logical state.
+#[derive(Debug, Default)]
+struct SessionState {
+    sessions: HashMap<CredentialSessionId, CredentialSessionRecord>,
+    /// Secondary index for JIT minting: `(invocation, capability, account)` ->
+    /// the session already minted for it, so re-use within the same dispatch
+    /// does not mint a second session. See [`placeholder::JitMintKey`] and
+    /// [`InMemoryCredentialBroker::mint_on_first_use`]. Pruned (by session id)
+    /// on [`InMemoryCredentialBroker::revoke_session`] so a long-lived process
+    /// does not accumulate one entry per invocation forever.
+    jit_minted: HashMap<placeholder::JitMintKey, CredentialSessionId>,
+    /// Secondary index the egress proxy (W6-EGRESS-PROXY, not built yet) will
+    /// use: placeholder token -> the live session(s) currently bound to it.
+    /// Multi-valued because a placeholder is stable per `(tenant, user,
+    /// provider)` while sessions are minted per invocation/account, so more
+    /// than one live session can legitimately be bound to the same
+    /// placeholder at once (e.g. two overlapping invocations, or two
+    /// accounts under one provider) — a single-slot map would silently drop
+    /// one binding when the other was written. See
+    /// [`InMemoryCredentialBroker::find_session_by_placeholder`]. Choosing
+    /// among multiple scope-matching candidates by request target (e.g.
+    /// which of two same-provider accounts a specific outbound URL should
+    /// use) is the egress proxy's job, not this registry's — it is not built
+    /// yet, so `find_session_by_placeholder` returns the first scope-match it
+    /// finds. Pruned (by session id) on `revoke_session`.
+    sessions_by_placeholder: HashMap<CredentialPlaceholderToken, HashSet<CredentialSessionId>>,
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryCredentialBroker {
     accounts: Mutex<HashMap<CredentialAccountKey, CredentialAccount>>,
-    sessions: Mutex<HashMap<CredentialSessionId, CredentialSessionRecord>>,
+    /// See [`SessionState`] for why this is one lock rather than several.
+    /// `accounts` stays a separate `Mutex`: `create_session` (by way of
+    /// `build_session`) always drops the accounts guard before touching
+    /// session state, so it is cleanly separable and merging it would only
+    /// widen the critical section for no benefit.
+    session_state: Mutex<SessionState>,
 }
 
 #[derive(Debug, Clone)]
 struct CredentialSessionRecord {
     session: CredentialSession,
     uses: u64,
+    /// Outstanding-lease count for this session. `mint_on_first_use` can hand
+    /// out more than one [`crate::CredentialSessionLease`] for the *same*
+    /// session (its cache-hit path reuses a still-live session rather than
+    /// minting a second one), so revoking one lease must not revoke the
+    /// session out from under another lease still holding it — the session is
+    /// only actually revoked when the last outstanding lease releases it. See
+    /// [`InMemoryCredentialBroker::release_lease`]. Zero for sessions created
+    /// through [`InMemoryCredentialBroker::create_session`] /
+    /// [`CredentialSessionStore::issue_session`] directly (no lease tracking
+    /// applies outside the JIT-minting path).
+    lease_count: usize,
+}
+
+/// Locks `mutex`, recovering the inner guard on poison rather than silently
+/// no-op'ing. A poisoned lock here must never be treated as "nothing to
+/// clean up" — that would let a revoke path fail open and leave a standing
+/// grant, contradicting this crate's core invariant for session state.
+///
+/// Defined here (crate root) rather than in `placeholder.rs` so both that
+/// module's `session_state`-locking helpers and this module's own methods
+/// (`create_session`, `validate_session`, `consume_session_use`, the
+/// `CredentialSessionStore` impl) can use it: a private item defined in a
+/// child module is not visible to its parent, only to its own descendants.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn ensure_credential_session_record_usable(
@@ -620,7 +707,59 @@ impl InMemoryCredentialBroker {
         Ok(())
     }
 
+    /// Mints a [`CredentialSession`] for `request`, capping its expiry so a
+    /// session can never be genuinely unbounded.
+    ///
+    /// `request.expires_at` and `request.max_uses` are both `Option`, and a
+    /// caller (in practice, `mint_on_first_use`'s upstream capability
+    /// dispatch) can legitimately pass `expires_at: None` meaning "I have no
+    /// opinion" rather than "never expire". Combined with revocation that
+    /// depends on `Drop` running (see [`CredentialSessionLease`]), a lease
+    /// held or leaked forever — a caller that never awaits its future to
+    /// completion or cancellation, for instance — would otherwise be a
+    /// standing grant for the process lifetime. So `expires_at` is always
+    /// defaulted-and-capped here: `None` becomes
+    /// [`CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS`] out, and anything longer
+    /// than [`CREDENTIAL_SESSION_MAX_TTL_SECONDS`] (including an explicit
+    /// request for longer) is clamped down to it. Enforcement of the
+    /// resulting expiry is the existing lazy check in
+    /// `ensure_credential_session_record_usable` / `validate_session` — this
+    /// only ever narrows the stored value, it adds no new enforcement path.
+    ///
+    /// Deliberately **not** paired with a background sweep task: proactive
+    /// eviction of expired-but-unrevoked sessions would be standing
+    /// infrastructure (a spawn point, shutdown handling, interval tuning) for
+    /// a path with zero live callers today, and this crate owns no runtime to
+    /// host it on. Explicit revoke stays the primary mechanism; this cap is
+    /// only the backstop. Proactive eviction is deferred to whichever later
+    /// PR gives this store an owning runtime.
     pub fn create_session(
+        &self,
+        request: CredentialSessionRequest,
+    ) -> Result<CredentialSession, CredentialBrokerError> {
+        let session = self.build_session(request)?;
+        lock_or_recover(&self.session_state).sessions.insert(
+            session.correlation_id,
+            CredentialSessionRecord {
+                session: session.clone(),
+                uses: 0,
+                lease_count: 0,
+            },
+        );
+        Ok(session)
+    }
+
+    /// Validates `request` against its account and constructs the resulting
+    /// [`CredentialSession`], without publishing it anywhere.
+    ///
+    /// Split out of [`InMemoryCredentialBroker::create_session`] so
+    /// [`InMemoryCredentialBroker::mint_on_first_use`] (in `placeholder.rs`)
+    /// can hold `session_state` locked across the whole lookup-or-mint
+    /// sequence while still calling into this account-validation step: this
+    /// method only ever locks `accounts`, dropping that guard before
+    /// returning, so nesting it inside an already-held `session_state` lock
+    /// cannot deadlock and cannot widen `accounts`'s critical section.
+    fn build_session(
         &self,
         request: CredentialSessionRequest,
     ) -> Result<CredentialSession, CredentialBrokerError> {
@@ -677,7 +816,15 @@ impl InMemoryCredentialBroker {
                 account_id: request.account_id,
             });
         }
-        let session = CredentialSession {
+        let now = chrono::Utc::now();
+        let default_expires_at =
+            now + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS);
+        let max_expires_at = now + chrono::Duration::seconds(CREDENTIAL_SESSION_MAX_TTL_SECONDS);
+        let expires_at = request
+            .expires_at
+            .unwrap_or(default_expires_at)
+            .min(max_expires_at);
+        Ok(CredentialSession {
             scope: request.scope,
             invocation_id: request.invocation_id,
             capability_id: request.capability_id,
@@ -685,24 +832,10 @@ impl InMemoryCredentialBroker {
             account_id: account.id.clone(),
             secret_handles: account.secret_handles.clone(),
             allowed_targets: account.allowed_targets.clone(),
-            expires_at: request.expires_at,
+            expires_at: Some(expires_at),
             max_uses: request.max_uses,
             correlation_id: CredentialSessionId::new(),
-        };
-        drop(accounts);
-        self.sessions
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .insert(
-                session.correlation_id,
-                CredentialSessionRecord {
-                    session: session.clone(),
-                    uses: 0,
-                },
-            );
-        Ok(session)
+        })
     }
 
     pub fn validate_session(
@@ -710,13 +843,9 @@ impl InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let mut sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let mut state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get_mut(&session_id)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
         ensure_credential_session_record_usable(record, session_id, now)?;
@@ -728,13 +857,9 @@ impl InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let mut sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let mut state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get_mut(&session_id)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
         ensure_credential_session_record_usable(record, session_id, now)?;
@@ -793,18 +918,14 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         &self,
         session: CredentialSession,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        self.sessions
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .insert(
-                session.correlation_id,
-                CredentialSessionRecord {
-                    session: session.clone(),
-                    uses: 0,
-                },
-            );
+        lock_or_recover(&self.session_state).sessions.insert(
+            session.correlation_id,
+            CredentialSessionRecord {
+                session: session.clone(),
+                uses: 0,
+                lease_count: 0,
+            },
+        );
         Ok(session)
     }
 
@@ -813,13 +934,9 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         scope: &ResourceScope,
         session_id: CredentialSessionId,
     ) -> Result<Option<CredentialSession>, CredentialBrokerError> {
-        let sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        Ok(sessions
+        let state = lock_or_recover(&self.session_state);
+        Ok(state
+            .sessions
             .get(&session_id)
             .filter(|record| record.session.scope == *scope)
             .map(|record| record.session.clone()))
@@ -831,13 +948,9 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get(&session_id)
             .filter(|record| record.session.scope == *scope)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
@@ -851,13 +964,9 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let mut sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let mut state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get_mut(&session_id)
             .filter(|record| record.session.scope == *scope)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
@@ -987,7 +1096,7 @@ fn validate_credential_id(kind: &'static str, value: &str) -> Result<(), Credent
 
 /// Scoped secret store contract.
 #[async_trait]
-pub trait SecretStore: Send + Sync {
+pub trait SecretStorePort: Send + Sync {
     /// Stores or replaces a secret under the caller's tenant/user/project scope and returns redacted metadata.
     ///
     /// Intended for trusted setup, composition, migration, or storage-code paths that are already
@@ -1066,9 +1175,11 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        CREDENTIAL_ID_MAX_LEN, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
-        CredentialBrokerError, CredentialPathPolicy, CredentialSessionId, CredentialSessionRequest,
-        CredentialTargetPolicy, InMemoryCredentialBroker, RedactedJson, SecretStoreError,
+        CREDENTIAL_ID_MAX_LEN, CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS,
+        CREDENTIAL_SESSION_MAX_TTL_SECONDS, CredentialAccount, CredentialAccountId,
+        CredentialAccountStatus, CredentialBrokerError, CredentialPathPolicy, CredentialSessionId,
+        CredentialSessionRequest, CredentialTargetPolicy, InMemoryCredentialBroker, RedactedJson,
+        SecretStoreError,
     };
 
     #[test]
@@ -1215,6 +1326,13 @@ mod tests {
             .stable_reason(),
             "BackendMisconfigured"
         );
+        assert_eq!(
+            CredentialBrokerError::InvalidPlaceholderToken {
+                reason: "must start with 'icsbx_'".to_string(),
+            }
+            .stable_reason(),
+            "MissingCredential"
+        );
     }
 
     #[test]
@@ -1260,6 +1378,69 @@ mod tests {
             "CredentialSession Debug must not include the raw correlation UUID"
         );
         assert!(debug.contains("CredentialSessionId([REDACTED])"));
+    }
+
+    #[test]
+    fn create_session_defaults_and_caps_expires_at() {
+        // A request with no opinion on expiry (`None`) must not come back
+        // genuinely unbounded — it gets the default TTL. A request asking
+        // for longer than the hard cap must be clamped down to the cap
+        // rather than honored as requested. Both defend the same invariant:
+        // a leaked/held-forever lease can never be a standing grant for the
+        // process lifetime (see `create_session`'s doc comment).
+        let broker = InMemoryCredentialBroker::new();
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_prod").unwrap();
+        broker
+            .put_account(sample_account(
+                scope.clone(),
+                account_id.clone(),
+                SecretHandle::new("openai_key").unwrap(),
+            ))
+            .unwrap();
+
+        let before = Utc::now();
+        let defaulted = broker
+            .create_session(CredentialSessionRequest {
+                expires_at: None,
+                ..session_request(
+                    scope.clone(),
+                    account_id.clone(),
+                    "https://api.example.com/v1/models",
+                )
+            })
+            .unwrap();
+        let after = Utc::now();
+        let defaulted_expiry = defaulted
+            .expires_at()
+            .expect("None must be defaulted, not left unbounded");
+        assert!(
+            defaulted_expiry
+                >= before + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS)
+                && defaulted_expiry
+                    <= after + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS),
+            "expires_at: None must default to ~{CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS}s out, got {defaulted_expiry}"
+        );
+
+        let requested_far_future = Utc::now() + chrono::Duration::days(365);
+        let capped = broker
+            .create_session(CredentialSessionRequest {
+                expires_at: Some(requested_far_future),
+                ..session_request(scope, account_id, "https://api.example.com/v1/models")
+            })
+            .unwrap();
+        let capped_expiry = capped
+            .expires_at()
+            .expect("capped session must still carry an expiry");
+        assert!(
+            capped_expiry < requested_far_future,
+            "a request for a 1-year expiry must be clamped down to the cap, got {capped_expiry}"
+        );
+        assert!(
+            capped_expiry
+                <= Utc::now() + chrono::Duration::seconds(CREDENTIAL_SESSION_MAX_TTL_SECONDS),
+            "clamped expiry must not exceed the {CREDENTIAL_SESSION_MAX_TTL_SECONDS}s cap, got {capped_expiry}"
+        );
     }
 
     #[test]

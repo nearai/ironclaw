@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "description": "profile_set result: the profile document was updated.",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok"
+      ]
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "additionalProperties": false
+}

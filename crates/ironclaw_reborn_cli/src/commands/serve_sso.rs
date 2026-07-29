@@ -9,8 +9,8 @@
 //! and the route wiring — lives in
 //! `ironclaw_webui` (see
 //! [`ironclaw_webui::build_signed_session_login`]), which
-//! is where this crate's guardrails place `WebuiAuthenticator` /
-//! `SessionStore` implementations. `serve.rs` calls
+//! is where this crate's guardrails place the `WebuiAuthenticator`
+//! implementations and signed session store. `serve.rs` calls
 //! [`sso_startup_config_from_env`] and, when it returns `Some`, hands
 //! the result plus the operator identity/secret to that builder.
 

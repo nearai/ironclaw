@@ -26,13 +26,18 @@ function useThreadsSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useThreads };`;
 }
 
-function createReactStub({ initialStateByIndex = {}, onStateChange } = {}) {
+function createReactStub({
+  effectCleanups = [],
+  initialStateByIndex = {},
+  onStateChange,
+} = {}) {
   let stateIndex = 0;
   return {
     useCallback: (fn) => fn,
     useMemo: (fn) => fn(),
     useEffect: (fn) => {
-      fn();
+      const cleanup = fn();
+      if (typeof cleanup === "function") effectCleanups.push(cleanup);
     },
     useRef: (value) => ({ current: value }),
     useState: (initial) => {
@@ -71,6 +76,7 @@ function makeDeferredCreate() {
 
 function instantiate(createThreadRequest, overrides = {}) {
   const context = {
+    AbortController,
     console,
     useQuery: () => ({ data: { threads: [] }, isLoading: false }),
     React: createReactStub(),
@@ -85,6 +91,18 @@ function instantiate(createThreadRequest, overrides = {}) {
       ...data,
       threads: data.threads.filter((thread) => (thread.thread_id || thread.id) !== threadId),
     }),
+    appendThreadListPage: (data, page, expectedCursor) => {
+      if (!data || data.next_cursor !== expectedCursor) return data;
+      const ids = new Set(data.threads.map((thread) => thread.thread_id || thread.id));
+      return {
+        ...data,
+        threads: [
+          ...data.threads,
+          ...page.threads.filter((thread) => !ids.has(thread.thread_id || thread.id)),
+        ],
+        next_cursor: page.next_cursor || null,
+      };
+    },
     queryClient: { setQueryData: () => {}, invalidateQueries: () => {} },
     upsertThreadInCache: () => {},
     globalThis: {},
@@ -247,4 +265,94 @@ test("normalizes raw thread id titles out of sidebar records", () => {
       { id: "thread-real", title: "thread-safety" },
     ],
   );
+});
+
+test("loadMore consumes next_cursor, merges the page, and deduplicates clicks", async () => {
+  const listCalls = [];
+  let cachedData = {
+    threads: [{ thread_id: "thread-new" }],
+    next_cursor: "cursor-1",
+  };
+  let releasePage;
+  const hook = instantiate(async () => ({ thread: { thread_id: "unused" } }), {
+    useQuery: () => ({ data: cachedData, isLoading: false }),
+    listThreads: ({ cursor }) => {
+      listCalls.push(cursor);
+      return new Promise((resolve) => {
+        releasePage = () => resolve({
+          threads: [
+            { thread_id: "thread-new" },
+            { thread_id: "thread-old" },
+          ],
+          next_cursor: null,
+        });
+      });
+    },
+    queryClient: {
+      setQueryData: (_queryKey, update) => {
+        cachedData = update(cachedData);
+      },
+      invalidateQueries: () => {},
+    },
+  });
+
+  const first = hook.loadMore();
+  const second = hook.loadMore();
+  assert.equal(first, second, "concurrent clicks should share one page request");
+  assert.deepEqual(listCalls, ["cursor-1"]);
+
+  releasePage();
+  await first;
+  assert.deepEqual(cachedData, {
+    threads: [
+      { thread_id: "thread-new" },
+      { thread_id: "thread-old" },
+    ],
+    next_cursor: null,
+  });
+});
+
+test("loadMore aborts on unmount without writing cache or updating state afterward", async () => {
+  const effectCleanups = [];
+  const stateChanges = [];
+  let releasePage;
+  let requestSignal;
+  let cacheWrites = 0;
+  const hook = instantiate(async () => ({ thread: { thread_id: "unused" } }), {
+    React: createReactStub({
+      effectCleanups,
+      onStateChange: (index, value) => stateChanges.push({ index, value }),
+    }),
+    useQuery: () => ({
+      data: { threads: [], next_cursor: "cursor-1" },
+      isLoading: false,
+    }),
+    listThreads: ({ signal }) => {
+      requestSignal = signal;
+      return new Promise((resolve) => {
+        releasePage = () => resolve({
+          threads: [{ thread_id: "thread-old" }],
+          next_cursor: null,
+        });
+      });
+    },
+    queryClient: {
+      setQueryData: () => {
+        cacheWrites += 1;
+      },
+      invalidateQueries: () => {},
+    },
+  });
+
+  const request = hook.loadMore();
+  assert.equal(effectCleanups.length, 1);
+  const changesBeforeUnmount = stateChanges.length;
+
+  effectCleanups[0]();
+  releasePage();
+  await request;
+
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(cacheWrites, 0);
+  assert.equal(stateChanges.length, changesBeforeUnmount);
 });

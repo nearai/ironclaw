@@ -24,7 +24,7 @@ use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 /// This is a defense-in-depth bound for every provider, not just NEAR AI. Text
 /// progress resets the watchdog so a healthy long response is not cancelled.
 /// It MUST stay below the runner lease
-/// ([`crate::filesystem_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
+/// ([`crate::turn_state_row_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
 /// provider is surfaced as a retryable `Unavailable` error before the lease
 /// reclaims the runner mid-flight — the failure mode that wedged the Reborn
 /// runtime on 2026-06-24. The invariant is enforced by
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn primary_model_call_idle_timeout_is_below_runner_lease() {
         let lease_secs = u64::try_from(
-            crate::filesystem_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS,
+            crate::turn_state_row_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS,
         )
         .expect("runner lease TTL is non-negative");
         assert!(

@@ -13,11 +13,11 @@ use ironclaw_auth::{
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
     OAuthCallbackInput, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
-use ironclaw_reborn_composition::{
+use ironclaw_auth::{
     RebornAuthContinuationDispatcher, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornProductAuthServices,
 };
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use secrecy::SecretString;
 
 const RAW_TOKEN: &str = "super-secret-manual-token";
@@ -28,6 +28,12 @@ struct NoopContinuationDispatcher;
 #[async_trait]
 impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
     async fn dispatch_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
         &self,
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
@@ -53,6 +59,12 @@ impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -81,6 +93,12 @@ impl RebornAuthContinuationDispatcher for FailsFirstContinuationDispatcher {
             return Err(AuthProductError::BackendUnavailable);
         }
         self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -302,22 +320,6 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         unreachable!("manual-token cleanup tests do not fail OAuth callbacks")
     }
 
-    async fn claim_continuation_dispatch(
-        &self,
-        _scope: &AuthProductScope,
-        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        unreachable!("manual-token cleanup tests do not claim continuations")
-    }
-
-    async fn settle_continuation_dispatch(
-        &self,
-        _scope: &AuthProductScope,
-        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        unreachable!("manual-token cleanup tests do not settle continuations")
-    }
-
     async fn mark_continuation_dispatched(
         &self,
         _scope: &AuthProductScope,
@@ -333,6 +335,15 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         _flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("manual-token cleanup tests do not cancel generic flows")
+    }
+
+    async fn fail_completed_continuation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _error: AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not fail completed continuations")
     }
 }
 
@@ -468,7 +479,7 @@ fn assert_error_safe(error: &RebornManualTokenError) {
 }
 
 #[tokio::test]
-async fn manual_token_facade_updates_bound_account_without_exposing_token() {
+async fn manual_token_service_updates_bound_account_without_exposing_token() {
     let services = auth_services();
     let owner = scope("alice");
     let existing = services
@@ -524,7 +535,7 @@ fn assert_response_safe(response: &RebornManualTokenSubmitResponse) {
 }
 
 #[tokio::test]
-async fn manual_token_facade_submits_secret_without_exposing_token() {
+async fn manual_token_service_submits_secret_without_exposing_token() {
     let services = auth_services();
     let owner = scope("alice");
     let challenge = services
@@ -563,7 +574,7 @@ async fn manual_token_facade_submits_secret_without_exposing_token() {
 }
 
 #[tokio::test]
-async fn manual_token_facade_tracks_setup_and_submit_in_auth_flow() {
+async fn manual_token_service_tracks_setup_and_submit_in_auth_flow() {
     let shared = Arc::new(InMemoryAuthProductServices::new());
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
     let services = RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone());
@@ -607,7 +618,7 @@ async fn manual_token_facade_tracks_setup_and_submit_in_auth_flow() {
 }
 
 #[tokio::test]
-async fn manual_token_facade_retries_completed_flow_when_continuation_dispatch_fails() {
+async fn manual_token_service_retries_completed_flow_when_continuation_dispatch_fails() {
     let shared = Arc::new(InMemoryAuthProductServices::new());
     let dispatcher = Arc::new(FailsFirstContinuationDispatcher::default());
     let services = RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
@@ -651,7 +662,7 @@ async fn manual_token_facade_retries_completed_flow_when_continuation_dispatch_f
 }
 
 #[tokio::test]
-async fn manual_token_facade_denies_cross_scope_submit_without_consuming_interaction() {
+async fn manual_token_service_denies_cross_scope_submit_without_consuming_interaction() {
     let services = auth_services();
     let owner = scope("alice");
     let interaction_id = request_challenge(&services, owner.clone()).await;
@@ -680,7 +691,7 @@ async fn manual_token_facade_denies_cross_scope_submit_without_consuming_interac
 }
 
 #[tokio::test]
-async fn manual_token_facade_fails_closed_for_stale_duplicate_and_malformed_submit() {
+async fn manual_token_service_fails_closed_for_stale_duplicate_and_malformed_submit() {
     let services = auth_services();
     let owner = scope("alice");
 
@@ -742,7 +753,7 @@ async fn manual_token_facade_fails_closed_for_stale_duplicate_and_malformed_subm
 }
 
 #[tokio::test]
-async fn manual_token_facade_returns_sanitized_backend_and_canceled_failures() {
+async fn manual_token_service_returns_sanitized_backend_and_canceled_failures() {
     let backend = auth_services_with_interaction(Arc::new(FailingInteractionService {
         error: AuthProductError::BackendUnavailable,
     }));
@@ -771,7 +782,7 @@ async fn manual_token_facade_returns_sanitized_backend_and_canceled_failures() {
 }
 
 #[tokio::test]
-async fn manual_token_facade_abandons_interaction_when_flow_creation_fails() {
+async fn manual_token_service_abandons_interaction_when_flow_creation_fails() {
     let interaction_id = AuthInteractionId::new();
     let interaction = Arc::new(SuccessfulManualTokenInteractionService::new(interaction_id));
     let services = auth_services_with_flow_and_interaction(
@@ -791,7 +802,7 @@ async fn manual_token_facade_abandons_interaction_when_flow_creation_fails() {
 }
 
 #[tokio::test]
-async fn manual_token_facade_cancels_flow_when_completion_fails() {
+async fn manual_token_service_cancels_flow_when_completion_fails() {
     let interaction_id = AuthInteractionId::new();
     let flow_manager = Arc::new(FailingManualTokenFlowManager::complete_fails(
         AuthProductError::BackendUnavailable,

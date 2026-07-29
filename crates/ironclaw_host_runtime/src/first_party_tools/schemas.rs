@@ -2,6 +2,38 @@ use serde_json::{Value, json};
 
 use crate::first_party_tools::time::UNIX_MILLIS_THRESHOLD;
 
+/// Input schemas for the native memory extension (`ironclaw.memory`),
+/// served inline by `surface.rs` the way builtin schemas are.
+///
+/// The bundled v3 manifest's asset schema files are the single source of truth:
+/// they are compiled in here and parsed, rather than materialized to the
+/// filesystem, because native memory rides the always-on lane. `document-{read,
+/// write}`, `search`, and `tree` each reference their own bundled schema file.
+pub(crate) fn resolve_native_memory_input_schema_ref(reference: &str) -> Option<Value> {
+    let raw = match reference {
+        "schemas/memory/document-read.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/document-read.input.v1.json")
+        }
+        "schemas/memory/document-write.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/document-write.input.v1.json")
+        }
+        "schemas/memory/search.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/search.input.v1.json")
+        }
+        "schemas/memory/tree.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/tree.input.v1.json")
+        }
+        "schemas/memory/profile-set.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/profile-set.input.v1.json")
+        }
+        _ => return None,
+    };
+    // silent-ok: these are compile-embedded assets validated by the
+    // `memory_native_schema_validation` test; a malformed schema fails that test
+    // and the build, so `.ok()` here cannot silently mask a real fault.
+    serde_json::from_str(raw).ok()
+}
+
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
@@ -46,108 +78,26 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
+        "schemas/builtin/outbound_delivery_target_route_current.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "target_id": {
+                    "type": "string",
+                    "description": "Opaque target id returned by builtin__outbound_delivery_targets_list."
+                }
+            },
+            "required": ["target_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/outbound_delivery_target_route_current.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "routed": { "type": "boolean", "const": true }
+            },
+            "required": ["routed"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
-        "schemas/builtin/memory_search.input.v1.json" => json!({
-            "type": "object",
-            "description": "Searches only Reborn internal persistent memory. This does not search connected app or extension data.",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Preferred natural language search query for Reborn internal persistent memory"
-                },
-                "q": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 5,
-                    "description": "Maximum number of memory results to return"
-                }
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/memory_write.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Full content to write or append"
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
-                    "default": "daily_log"
-                },
-                "append": {
-                    "type": "boolean",
-                    "description": "Append to existing content when true; replace when false",
-                    "default": true
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional document metadata such as skip_indexing or skip_versioning"
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Exact text to replace; switches to patch mode"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Replacement text for patch mode"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace every old_string occurrence in patch mode",
-                    "default": false
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone used only for daily_log target date resolution"
-                }
-            },
-            "additionalProperties": false
-        }),
-        "schemas/builtin/memory_read.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Relative memory document path to read"
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/memory_tree.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Relative memory directory path to list; omit for the memory root",
-                    "default": ""
-                },
-                "depth": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "default": 1,
-                    "description": "Maximum directory depth to include"
-                }
-            },
-            "additionalProperties": false
-        }),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -255,26 +205,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 }
             },
             "required": ["display_handle"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/profile_set.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
-                },
-                "locale": {
-                    "type": "string",
-                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
-                    "maxLength": 35
-                },
-                "location": {
-                    "type": "string",
-                    "description": "Free-text location label, e.g. Tokyo, Japan"
-                }
-            },
-            "minProperties": 1,
             "additionalProperties": false
         }),
         "schemas/builtin/read_file.input.v1.json" => json!({
@@ -434,7 +364,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/extension_install.input.v1.json"
-        | "schemas/builtin/extension_activate.input.v1.json"
         | "schemas/builtin/extension_remove.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -443,9 +372,139 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["extension_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/admin_configuration_replace.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "group_id": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "description": "Manifest-declared administrator configuration group id"
+                },
+                "expected_revision": { "type": "integer", "minimum": 0 },
+                "values": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "handle": { "type": "string", "maxLength": 128 },
+                            "value": { "type": "string", "maxLength": 16384 }
+                        },
+                        "required": ["handle", "value"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["group_id", "expected_revision", "values"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/admin_configuration_replace.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "group_id": { "type": "string", "maxLength": 128 },
+                "revision": { "type": "integer", "minimum": 0 },
+                "complete": { "type": "boolean" },
+                "fields": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "handle": { "type": "string", "maxLength": 128 },
+                            "secret": { "type": "boolean" },
+                            "required": { "type": "boolean" },
+                            "provided": { "type": "boolean" },
+                            "value": { "type": ["string", "null"], "maxLength": 16384 }
+                        },
+                        "required": ["handle", "secret", "required", "provided", "value"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["group_id", "revision", "complete", "fields"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/operator_config_set_auto_approve.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean" }
+            },
+            "required": ["enabled"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/operator_config_set_auto_approve.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "key": { "const": "agent.auto_approve_tools" },
+                "enabled": { "type": "boolean" },
+                "tenant_id": { "type": "string", "maxLength": 128 },
+                "user_id": { "type": "string", "maxLength": 128 }
+            },
+            "required": ["key", "enabled", "tenant_id", "user_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/operator_config_set_tool_permission.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "capability_id": { "type": "string", "maxLength": 512 },
+                "state": {
+                    "type": "string",
+                    "enum": ["default", "always_allow", "ask_each_time", "disabled"]
+                }
+            },
+            "required": ["capability_id", "state"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/operator_config_set_tool_permission.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string", "maxLength": 517 },
+                "capability_id": { "type": "string", "maxLength": 512 },
+                "state": {
+                    "type": "string",
+                    "enum": ["default", "always_allow", "ask_each_time", "disabled"]
+                },
+                "tenant_id": { "type": "string", "maxLength": 128 },
+                "user_id": { "type": "string", "maxLength": 128 }
+            },
+            "required": ["key", "capability_id", "state", "tenant_id", "user_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/outbound_preferences_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "final_reply_target_id": {
+                    "type": ["string", "null"],
+                    "maxLength": 512,
+                    "description": "Outbound delivery target id to use for final replies. Omit or pass null to clear the preference."
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/outbound_preferences_set.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "final_reply_target": {
+                    "type": ["object", "null"]
+                },
+                "final_reply_target_status": { "type": "string" },
+                "default_modality": { "type": "string" }
+            },
+            "required": ["final_reply_target", "final_reply_target_status", "default_modality"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_list.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "skills": { "type": "array" },
+                "count": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["skills", "count"],
             "additionalProperties": false
         }),
         "schemas/builtin/skill_install.input.v1.json" => json!({
@@ -470,12 +529,102 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             ],
             "additionalProperties": false
         }),
+        "schemas/builtin/skill_install.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "installed": { "type": "boolean" },
+                "name": { "type": "string" },
+                "path": { "type": "string" },
+                "source": { "type": "string" },
+                "files_installed": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["installed", "name", "path", "source", "files_installed"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_update.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the installed skill to update"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Replacement SKILL.md content"
+                }
+            },
+            "required": ["name", "content"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_update.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "updated": { "type": "boolean" },
+                "name": { "type": "string" }
+            },
+            "required": ["updated", "name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the installed skill to update"
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether criteria-based activation is enabled for this skill"
+                }
+            },
+            "required": ["name", "enabled"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_set.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "updated": { "type": "boolean" },
+                "name": { "type": "string" },
+                "auto_activate": { "type": "boolean" }
+            },
+            "required": ["updated", "name", "auto_activate"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_remove.input.v1.json" => json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Name of the installed skill to remove" }
             },
             "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_remove.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "removed": { "type": "boolean" },
+                "name": { "type": "string" }
+            },
+            "required": ["removed", "name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_learned_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether criteria-based learned skill activation is enabled by default"
+                }
+            },
+            "required": ["enabled"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_learned_set.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" },
+                "message": { "type": "string" }
+            },
+            "required": ["success", "message"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
@@ -492,7 +641,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "delivery_target_id": {
                     "type": "string",
-                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the user's default outbound delivery target at fire time is used. Prefer setting this whenever the user names a destination for this trigger's results."
+                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the host inherits the current source run's authorized delivery route when one exists; otherwise the user's default outbound delivery target at fire time is used. This is resolved from trusted run state, never prompt parsing. Prefer setting this whenever the user names a destination for this trigger's results."
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
@@ -681,5 +830,82 @@ mod tests {
                 .contains("Do not describe creating, scheduling, or configuring the trigger"),
             "prompt description must warn against self-referential creation prompts: {description}"
         );
+    }
+
+    #[test]
+    fn operator_config_schemas_are_registered() {
+        let input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_auto_approve.input.v1.json",
+        )
+        .expect("operator config auto-approve input schema is registered");
+        let output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_auto_approve.output.v1.json",
+        )
+        .expect("operator config auto-approve output schema is registered");
+
+        assert_eq!(input["required"], serde_json::json!(["enabled"]));
+        assert_eq!(
+            output["properties"]["key"]["const"],
+            "agent.auto_approve_tools"
+        );
+        let tool_input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_tool_permission.input.v1.json",
+        )
+        .expect("operator config tool-permission input schema is registered");
+        let tool_output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_tool_permission.output.v1.json",
+        )
+        .expect("operator config tool-permission output schema is registered");
+
+        assert_eq!(
+            tool_input["properties"]["state"]["enum"],
+            serde_json::json!(["default", "always_allow", "ask_each_time", "disabled"])
+        );
+        assert_eq!(
+            tool_output["required"],
+            serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
+        );
+    }
+
+    #[test]
+    fn outbound_preferences_set_schemas_are_registered() {
+        let input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/outbound_preferences_set.input.v1.json",
+        )
+        .expect("outbound preferences set input schema is registered");
+        let output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/outbound_preferences_set.output.v1.json",
+        )
+        .expect("outbound preferences set output schema is registered");
+
+        assert_eq!(
+            input["properties"]["final_reply_target_id"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            output["required"],
+            serde_json::json!([
+                "final_reply_target",
+                "final_reply_target_status",
+                "default_modality"
+            ])
+        );
+    }
+
+    #[test]
+    fn skill_management_mutation_schemas_are_registered() {
+        for reference in [
+            "schemas/builtin/skill_update.input.v1.json",
+            "schemas/builtin/skill_update.output.v1.json",
+            "schemas/builtin/skill_auto_activate_set.input.v1.json",
+            "schemas/builtin/skill_auto_activate_set.output.v1.json",
+            "schemas/builtin/skill_auto_activate_learned_set.input.v1.json",
+            "schemas/builtin/skill_auto_activate_learned_set.output.v1.json",
+        ] {
+            assert!(
+                resolve_builtin_input_schema_ref(reference).is_some(),
+                "{reference} should be registered"
+            );
+        }
     }
 }

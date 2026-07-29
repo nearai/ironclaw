@@ -18,12 +18,12 @@ mod validate;
 
 pub use capability::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
-    CapabilityBatchInvocation, CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue,
-    CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue,
-    CapabilityInvocation, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
-    LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
+    CapabilityFailure, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
+    LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 pub use checkpoint::{
     LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCheckpointKind, LoopCheckpointPort,

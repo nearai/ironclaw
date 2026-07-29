@@ -14,7 +14,9 @@ CHECKSUM_NAME = f"{ARCHIVE_NAME}.sha256"
 MANIFEST_NAME = "manifest.json"
 
 
-def _feature_set(value: object, *, field: str) -> set[str]:
+def _feature_set(value: object, *, field: str, allow_empty: bool = False) -> set[str]:
+    if allow_empty and (value == "" or value == []):
+        return set()
     if isinstance(value, str):
         features = [feature.strip() for feature in value.split(",")]
     elif isinstance(value, list) and all(
@@ -24,7 +26,7 @@ def _feature_set(value: object, *, field: str) -> set[str]:
     else:
         raise ValueError(f"{field} must be a comma-separated string or string array")
 
-    if not features or any(not feature for feature in features):
+    if any(not feature for feature in features) or (not allow_empty and not features):
         raise ValueError(f"{field} contains an empty feature")
     if len(features) != len(set(features)):
         raise ValueError(f"{field} contains duplicate features")
@@ -53,9 +55,11 @@ def validate_artifact(
     if manifest.get("product_ref") != expected_ref:
         raise ValueError("artifact product_ref does not match the requested commit")
     artifact_features = _feature_set(
-        manifest.get("features"), field="artifact features"
+        manifest.get("features"), field="artifact features", allow_empty=True
     )
-    required_features = _feature_set(expected_features, field="required features")
+    required_features = _feature_set(
+        expected_features, field="required features", allow_empty=True
+    )
     missing_features = sorted(required_features - artifact_features)
     if missing_features:
         raise ValueError(

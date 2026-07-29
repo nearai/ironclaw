@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     RuntimeCredentialTarget, RuntimeKind, SecretHandle,
 };
 use ironclaw_network::{network_target_for_url, target_matches_pattern};
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use ironclaw_wasm::{WasmHostError, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest};
 use tokio::runtime::Handle;
 
@@ -84,7 +84,7 @@ impl SharedHostWasmRuntimeCredentials {
 
     pub(crate) fn with_product_auth_restaging(
         mut self,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
         account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
     ) -> Self {
@@ -116,7 +116,7 @@ struct SharedCredentialCache {
 
 #[derive(Clone)]
 struct RuntimeCredentialRestager {
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
 }
@@ -378,7 +378,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/test.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-wasm.fetch"
 description = "fetch"
 effects = ["network", "use_secret"]
@@ -521,7 +527,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/test.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-wasm.fetch"
 description = "fetch"
 effects = ["network", "use_secret"]
@@ -599,6 +611,7 @@ runtime_credentials = [
             manifest,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("test manifest should parse");
         ExtensionPackage::from_manifest(
@@ -651,5 +664,16 @@ runtime_credentials = [
         });
 
         assert_eq!(result, Err(CredentialStageError::Backend));
+    }
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
     }
 }

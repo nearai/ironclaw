@@ -148,6 +148,44 @@ pub struct ReplyTargetBinding {
     pub external_conversation_ref: ExternalConversationRef,
 }
 
+/// Authority required when resolving a previously sealed reply target from
+/// durable turn state.
+///
+/// Ordinary replies may use a shared route when the run actor is still a
+/// participant in the bound thread. Authority-bearing prompts (approval and
+/// authentication) require the exact external actor that originally owned the
+/// route to remain paired to the run actor; shared-route widening is never
+/// sufficient for those prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredReplyTargetAccess {
+    OrdinaryReply,
+    ExactOriginActor,
+}
+
+/// Resolves the opaque reply-target reference persisted on a run without
+/// accepting adapter-supplied route metadata a second time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveStoredReplyTargetRequest {
+    pub tenant_id: TenantId,
+    pub actor_user_id: UserId,
+    pub current_thread_id: ThreadId,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub access: StoredReplyTargetAccess,
+}
+
+/// Revalidated source route for event-driven delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredReplyTargetBinding {
+    pub tenant_id: TenantId,
+    pub actor_user_id: UserId,
+    pub thread_id: ThreadId,
+    pub adapter_kind: AdapterKind,
+    pub adapter_installation_id: AdapterInstallationId,
+    pub external_conversation_ref: ExternalConversationRef,
+    pub route_kind: ConversationRouteKind,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThreadAccessDecision {
     Allowed,

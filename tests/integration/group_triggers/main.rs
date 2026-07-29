@@ -24,6 +24,7 @@ mod reborn_support;
 mod support;
 
 mod scenario_delivery_target_fail_closed;
+mod scenario_external_source_trigger_captures_delivery;
 mod scenario_trigger_persists_after_reopen;
 mod scenario_trigger_self_create_denied;
 mod scenario_triggered_chained_gate;
@@ -53,7 +54,7 @@ async fn triggers_group_e2e() {
         scenario_trigger_persists_after_reopen::run(&g).await,
     );
     // W5-WEBUI-API-1: independent of `verbs_lifecycle` — mints its own
-    // trigger, then lists it back through the real WebUI automations facade
+    // trigger, then lists it back through the real WebUI automations service
     // over the group's shared trigger repository.
     report.record(
         "webui_automations_list",
@@ -72,12 +73,15 @@ async fn triggers_group_e2e() {
     //   - gate raise/approve/deny/resume: `triggered_gate_group` below
     //   - one-shot fire -> Completed: `trigger_poller_e2e.rs` + `repository_contract.rs`
     //   - reply persists in trigger's own thread: `reborn_integration_triggered_submit.rs`
-    //   - push leg (trigger -> Slack outbound delivery): `slack_host_beta.rs`
+    //   - push leg (trigger -> channel outbound delivery):
+    //     `trigger_poller_e2e.rs::scheduled_trigger_results_reach_exact_slack_targets_once_across_restart`
+    //     joins the production poller/run graph to the generic post-submit
+    //     hook and real Slack adapter; `channel_host/e2e_tests.rs` retains
+    //     the focused channel-host contracts.
     //
-    // Still BLOCKED at int tier: the PUSH half. `deliver_triggered_run` is a
-    // private fn reachable only via a detached `tokio::spawn` hook, not wired
-    // into any harness turn lifecycle — covered instead by `slack_delivery.rs`'s
-    // own `#[cfg(test)]` module + `outbound_delivery_contract.rs`.
+    // This grouped int-tier harness still does not expose the detached
+    // post-submit hook directly; the composition whole-runtime test above
+    // covers that asynchronous boundary through its durable outcome store.
 
     // C-DENYEDGE row 4: a scheduled-trigger fire must not be able to create
     // its own follow-up trigger. Uses THIS group's `triggers()` capability
@@ -95,6 +99,15 @@ async fn triggers_group_e2e() {
     report.record(
         "delivery_target_fail_closed",
         scenario_delivery_target_fail_closed::run(&g).await,
+    );
+
+    // A trigger created from an external product conversation must not be
+    // persisted with no route back to that conversation. The host owns the
+    // current sealed reply target; correctness cannot depend on the model
+    // remembering to list targets and copy an id into its arguments.
+    report.record(
+        "external_source_trigger_captures_delivery",
+        scenario_external_source_trigger_captures_delivery::run(&g).await,
     );
 
     report.assert_all_passed();

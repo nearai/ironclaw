@@ -1,0 +1,143 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_5c_strategy_doc_knowledge_base",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your knowledge base for answering strategy questions.\"\nExpected result: IronClaw references the doc and confirms it can answer from it"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your ",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_356790b5a3cd47ba9b074185",
+            "name": "nearai__web_search",
+            "arguments": {
+              "query": "NEAR AI strategy doc Google Drive"
+            }
+          },
+          {
+            "id": "call_cbdcad4a6e3046fe83aa6ab0",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "google drive"
+            }
+          }
+        ],
+        "input_tokens": 15606,
+        "output_tokens": 108
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your ",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0931035bb426477a96d3d0c0",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "google-drive"
+            }
+          },
+          {
+            "id": "call_944ab1bb9cde43eaa930e6f8",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "google-docs"
+            }
+          }
+        ],
+        "input_tokens": 16378,
+        "output_tokens": 110
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your ",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_7b6f77fca8c747acac6e2a0b",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "google-drive"
+            }
+          }
+        ],
+        "input_tokens": 16875,
+        "output_tokens": 69
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your ",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_73e9b19730b6417dbe590411",
+            "name": "google-drive__list_files",
+            "arguments": {
+              "query": "name contains 'NEAR AI Strategy' and trashed = false"
+            }
+          }
+        ],
+        "input_tokens": 19707,
+        "output_tokens": 80
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your ",
+        "min_message_count": 12
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_f556c9b56bb242eb91c08086",
+            "name": "google-docs__read_content",
+            "arguments": {
+              "document_id": "1sWvk3Brp6QTnNUKqXZOViJjCiCDJoEFOlUkeBvGaIIc"
+            }
+          }
+        ],
+        "input_tokens": 20138,
+        "output_tokens": 94
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"use the NEAR AI Strategy doc in my Google Drive as your ",
+        "min_message_count": 14
+      },
+      "response": {
+        "type": "text",
+        "content": "I found the **NEAR AI Strategy Doc** in your Google Drive and have read its full content. Here's a summary of what I'll work from:\n\n**NEAR AI Strategy — Core Pillars:**\n\n1. **User Sovereignty** — Users own their data, models, and agent interactions; no vendor lock-in; portable identities\n2. **Open Agent Ecosystem** — Interoperable agents, community-governed standards, marketplace for agent skills\n3. **Decentralized Infrastructure** — Distributed inference, on-chain verification, censorship-resistant deployment\n4. **Economic Alignment** — Token incentives for compute providers, developer reward loops, micropayments for AI services\n\n**Key H2 2026 Initiatives:**\n- Launch agent-to-agent communication protocol\n- Expand inference to 50+ nodes\n- Release SDK v2 with sovereign agent identities\n- Community grants for 10 strategic agent projects\n\n**Competitive Position:** Full-stack decentralized AI differentiator with a noted UX risk vs centralized alternatives, mitigated by developer experience focus and progressive onboarding.\n\nI've loaded this as my knowledge base for answering strategy questions. Go ahead and ask me anything about NEAR AI's strategy, and I'll answer from this document.",
+        "input_tokens": 20690,
+        "output_tokens": 248
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "google-docs.read_content"
+    ]
+  }
+}

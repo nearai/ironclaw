@@ -4,13 +4,12 @@
 Starts a fresh local IronClaw instance and verifies real provider-backed auth
 through either of two paths, selected by ``--mode``:
 
-- ``seeded`` — seeds real provider credentials into the DB and exercises both
-  ``/v1/responses`` and the browser UI. Proves credential persistence /
-  refresh reliability.
+- ``seeded`` — configures required tenant provider metadata, installs the
+  extension, and completes its manifest-declared setup recipe with live test
+  credentials before exercising ``/v1/responses`` and the browser UI.
 - ``browser`` — triggers OAuth in the browser, completes provider login/consent
-  in Playwright, then verifies the authenticated extension through both the
-  browser chat UI and ``/v1/responses``. Proves browser consent flow
-  correctness.
+  in Playwright, then verifies the derived-active extension through both the
+  browser chat UI and ``/v1/responses``.
 
 The LLM itself stays deterministic by reusing ``tests/e2e/mock_llm.py`` for
 tool selection. The external dependency under test is the real provider API
@@ -24,10 +23,10 @@ import asyncio
 import json
 import os
 import re
-import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +42,15 @@ from scripts.live_canary.auth_registry import (
     configured_seeded_cases,
 )
 from scripts.live_canary.auth_runtime import (
-    activate_extension,
+    complete_manual_token_setup,
     complete_oauth_flow,
+    configure_admin_group,
     create_responses_probe,
     install_extension,
-    put_secret,
-    wait_for_extension_state,
+    select_single_oauth_account,
+    start_oauth_setup,
+    wait_for_extension_lifecycle,
+    wait_for_oauth_flow_completed,
 )
 from scripts.live_canary.common import (
     DEFAULT_VENV,
@@ -56,19 +58,33 @@ from scripts.live_canary.common import (
     ProbeResult,
     api_request,
     bootstrap_python,
-    cargo_build,
+    cargo_build_reborn,
     env_secret,
     env_str,
     install_playwright,
     load_e2e_helpers,
-    start_gateway_stack,
+    start_reborn_gateway_stack,
     stop_gateway_stack,
     venv_python,
     write_results,
 )
 
 DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-live-canary"
-GOOGLE_SCOPE_DEFAULT = "gmail.modify gmail.compose calendar.events"
+GOOGLE_SCOPE_DEFAULT = " ".join(
+    (
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+    )
+)
+REQUIRED_LIFECYCLE_TOOLS = {
+    "gmail": "gmail.list_messages",
+    "google-calendar": "google-calendar.list_events",
+    "github": "github.get_repo",
+    "notion": "notion.notion-search",
+}
 
 # Per-mode constants. Keeping these in one table makes it obvious which mode
 # owns which identifiers; adding a third mode means adding one row, not
@@ -102,21 +118,6 @@ MODE_CONFIG = {
 
 
 # ── Seeded mode ──────────────────────────────────────────────────────────────
-
-
-def expire_secret_in_db(db_path: Path, user_id: str, secret_name: str) -> None:
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.execute(
-            """
-            UPDATE secrets
-            SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
-            WHERE user_id = ? AND name = ?
-            """,
-            (user_id, secret_name),
-        )
-        conn.commit()
-    if cursor.rowcount != 1:
-        raise CanaryError(f"Expected exactly one secret row for {user_id}/{secret_name}")
 
 
 async def seeded_response_probe(
@@ -207,33 +208,31 @@ async def seeded_browser_probe(
     probe: SeededProviderCase,
     output_dir: Path,
     *,
-    open_authed_page_fn: Any,
-    send_chat_and_wait_for_terminal_message_fn: Any,
+    selectors: dict[str, str],
 ) -> ProbeResult:
     started = time.perf_counter()
     context = None
     page = None
     try:
-        context, page = await open_authed_page_fn(browser, base_url, token=token)
-        result = await send_chat_and_wait_for_terminal_message_fn(
-            page,
-            probe.response_prompt,
-            timeout=120000,
-        )
-        thread_id = await page.evaluate("currentThreadId")
-        history = await api_request(
-            "GET",
+        thread_id = await create_reborn_thread(base_url, token)
+        context, page = await open_gateway_page(
+            browser,
             base_url,
-            f"/api/chat/history?thread_id={thread_id}",
-            token=token,
-            timeout=30,
+            token,
+            storage_state=None,
+            selectors=selectors,
+            thread_id=thread_id,
         )
-        history.raise_for_status()
-        tool_names = [
-            tool_call.get("name")
-            for turn in history.json().get("turns", [])
-            for tool_call in turn.get("tool_calls", [])
-        ]
+        result = await send_reborn_browser_message(
+            page,
+            base_url,
+            token,
+            thread_id,
+            probe.response_prompt,
+            selectors=selectors,
+            timeout=120.0,
+        )
+        tool_names = result["tool_names"]
         latency_ms = int((time.perf_counter() - started) * 1000)
         success = (
             result.get("role") == "assistant"
@@ -270,114 +269,82 @@ async def seeded_browser_probe(
             await context.close()
 
 
-async def seed_google_via_oauth(
-    base_url: str, token: str, db_path: Path, owner_user_id: str,
-) -> bool:
-    """Authenticate Google extensions via the OAuth callback flow.
-
-    Returns True if Google credentials were configured and the OAuth flow
-    completed, False if no Google credentials are available (skipped).
-    """
-    google_access = env_str("AUTH_LIVE_GOOGLE_ACCESS_TOKEN")
-    google_refresh = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
-    if google_refresh and not google_access:
+async def configure_google_admin(base_url: str, token: str) -> None:
+    """Configure the tenant once through the manifest-declared admin group."""
+    client_id = env_str("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = env_secret("GOOGLE_OAUTH_CLIENT_SECRET")
+    if not client_id or not client_secret:
         raise CanaryError(
-            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN is required when AUTH_LIVE_GOOGLE_REFRESH_TOKEN is set"
+            "Google canary cases require GOOGLE_OAUTH_CLIENT_ID and "
+            "GOOGLE_OAUTH_CLIENT_SECRET for vendor.google admin configuration"
         )
-    if not google_access:
-        return False
-
-    # Install Gmail and complete OAuth flow. The mock_llm exchange endpoint
-    # reads AUTH_LIVE_GOOGLE_* env vars and returns the real tokens.
-    await install_extension(
-        base_url, token,
-        name="gmail",
-        expected_display_name="Gmail",
-    )
-    await complete_oauth_flow(base_url, token, extension_name="gmail")
-
-    # Ensure combined scopes cover all Google extensions (Gmail + Calendar).
-    await put_secret(
-        base_url, token,
-        user_id=owner_user_id,
-        name="google_oauth_token_scopes",
-        value=env_str("AUTH_LIVE_GOOGLE_SCOPES") or GOOGLE_SCOPE_DEFAULT,
-        provider="google",
+    await configure_admin_group(
+        base_url,
+        token,
+        group_id="vendor.google",
+        values={
+            "google_oauth_client_id": client_id,
+            "google_oauth_client_secret": client_secret,
+        },
+        idempotency_key="auth-live-canary-google-admin",
     )
 
-    # Optionally expire the access token to exercise the refresh path.
-    if google_refresh and env_str("AUTH_LIVE_FORCE_GOOGLE_REFRESH", "1") != "0":
-        expire_secret_in_db(db_path, owner_user_id, "google_oauth_token")
 
-    return True
-
-
-async def seed_non_oauth_credentials(
-    base_url: str, token: str, owner_user_id: str,
+async def setup_seeded_extension(
+    base_url: str,
+    token: str,
+    probe: SeededProviderCase,
 ) -> None:
-    """Seed non-OAuth credentials (GitHub PAT, Notion tokens) directly."""
-    github_token = env_str("AUTH_LIVE_GITHUB_TOKEN")
-    if github_token:
-        await put_secret(
-            base_url, token,
-            user_id=owner_user_id,
-            name="github_token",
-            value=github_token,
-            provider="github",
+    """Drive setup solely from the package manifest's declared auth recipe."""
+    package_id = probe.extension_install_name
+    required_tool = REQUIRED_LIFECYCLE_TOOLS[package_id]
+    installed = await install_extension(
+        base_url,
+        token,
+        package_id=package_id,
+        idempotency_key=f"auth-live-canary-seeded-{package_id}",
+    )
+    if installed.get("installation_state") == "active":
+        await wait_for_extension_lifecycle(
+            base_url,
+            token,
+            package_id,
+            state="active",
+            required_tools=(required_tool,),
         )
-        # Companion scopes record — without it, needs_scope_expansion() in
-        # src/extensions/manager.rs treats the seeded PAT as a legacy token
-        # and forces re-auth, leaving the extension stuck at
-        # authenticated=False. Match the github tool's merged_scopes.
-        await put_secret(
-            base_url, token,
-            user_id=owner_user_id,
-            name="github_token_scopes",
-            value="read:org repo workflow",
-            provider="github",
-        )
+        return
 
-    notion_access = env_str("AUTH_LIVE_NOTION_ACCESS_TOKEN")
-    notion_refresh = env_str("AUTH_LIVE_NOTION_REFRESH_TOKEN")
-    if notion_refresh and not notion_access:
-        raise CanaryError(
-            "AUTH_LIVE_NOTION_ACCESS_TOKEN is required when AUTH_LIVE_NOTION_REFRESH_TOKEN is set"
+    if probe.shared_secret_name == "google_oauth_token":
+        await complete_oauth_flow(
+            base_url,
+            token,
+            package_id=package_id,
+            code=f"mock_auth_code_{package_id.replace('-', '_')}",
+            callback_params={
+                "scope": env_str("AUTH_LIVE_GOOGLE_SCOPES")
+                or GOOGLE_SCOPE_DEFAULT,
+            },
+            required_tools=(required_tool,),
         )
-    if notion_access:
-        await put_secret(
-            base_url, token,
-            user_id=owner_user_id,
-            name="mcp_notion_access_token",
-            value=notion_access,
-            provider="mcp:notion",
+        return
+
+    if probe.key == "github":
+        github_token = env_secret("AUTH_LIVE_GITHUB_TOKEN")
+        if not github_token:
+            raise CanaryError("AUTH_LIVE_GITHUB_TOKEN is required for github")
+        await complete_manual_token_setup(
+            base_url,
+            token,
+            package_id=package_id,
+            value=github_token,
+            required_tools=(required_tool,),
         )
-    if notion_refresh:
-        await put_secret(
-            base_url, token,
-            user_id=owner_user_id,
-            name="mcp_notion_access_token_refresh_token",
-            value=notion_refresh,
-            provider="mcp:notion",
-        )
-    # Notion MCP uses DCR — seed client_id/secret so ironclaw can refresh.
-    notion_client_id = env_str("AUTH_LIVE_NOTION_CLIENT_ID")
-    notion_client_secret = env_str("AUTH_LIVE_NOTION_CLIENT_SECRET")
-    if notion_client_id:
-        await put_secret(
-            base_url, token,
-            user_id=owner_user_id,
-            name="mcp_notion_client_id",
-            value=notion_client_id,
-            provider="mcp:notion",
-        )
-    if notion_client_secret:
-        await put_secret(
-            base_url, token,
-            user_id=owner_user_id,
-            name="mcp_notion_client_secret",
-            value=notion_client_secret,
-            provider="mcp:notion",
-        )
+        return
+
+    raise CanaryError(
+        f"Seeded setup for {package_id!r} is not a declared non-interactive "
+        "auth recipe. Run its browser OAuth case instead."
+    )
 
 
 async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeResult]:
@@ -387,62 +354,27 @@ async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRes
             "No live provider cases are configured. Set at least one AUTH_LIVE_* credential env var."
         )
 
-    owner_user_id = MODE_CONFIG["seeded"]["owner_user_id"]
+    if any(probe.shared_secret_name == "google_oauth_token" for probe in probes):
+        await configure_google_admin(stack.base_url, stack.gateway_token)
 
-    # Phase 1: Google extensions — authenticate via OAuth flow so ironclaw
-    # marks them as properly authenticated (direct DB seeding doesn't work).
-    google_oauth_done = await seed_google_via_oauth(
-        stack.base_url, stack.gateway_token, stack.db_path, owner_user_id,
-    )
-
-    # Phase 2: Non-OAuth credentials (GitHub PAT, Notion tokens) — seed directly.
-    await seed_non_oauth_credentials(stack.base_url, stack.gateway_token, owner_user_id)
-
-    # Phase 3: Install and activate all extensions.
-    # Lifecycle cases reuse the same extension as their read-only counterpart
-    # (e.g. gmail_roundtrip shares extension_install_name="gmail"),
-    # so we deduplicate by extension_install_name to avoid double-install.
+    # Lifecycle cases reuse the same extension as their read-only counterpart,
+    # so setup each package only once.
     installed_extensions: set[str] = set()
     for probe in probes:
         if probe.extension_install_name in installed_extensions:
             continue
-        is_google = probe.shared_secret_name == "google_oauth_token"
-        if is_google and google_oauth_done and probe.extension_install_name == "gmail":
-            # Already installed and authenticated via OAuth flow above.
-            installed_extensions.add(probe.extension_install_name)
-            continue
-        ext = await install_extension(
+        await setup_seeded_extension(
             stack.base_url,
             stack.gateway_token,
-            name=probe.extension_install_name,
-            expected_display_name=probe.expected_display_name,
-            install_kind=probe.install_kind,
-            install_url=probe.install_url,
+            probe,
         )
         installed_extensions.add(probe.extension_install_name)
-        if is_google and google_oauth_done:
-            # Google extensions share google_oauth_token but ironclaw tracks
-            # auth per-extension. Complete OAuth for each one individually.
-            await complete_oauth_flow(
-                stack.base_url, stack.gateway_token,
-                extension_name=ext["name"],
-            )
-        else:
-            await activate_extension(
-                stack.base_url,
-                stack.gateway_token,
-                extension_name=ext["name"],
-                expected_display_name=ext.get("display_name") or probe.expected_display_name,
-            )
 
     results: list[ProbeResult] = []
     for probe in probes:
         results.append(await seeded_response_probe(stack.base_url, stack.gateway_token, probe))
 
-    open_authed_page_fn, send_chat_and_wait_for_terminal_message_fn = load_e2e_helpers(
-        "open_authed_page",
-        "send_chat_and_wait_for_terminal_message",
-    )
+    (selectors,) = load_e2e_helpers("SEL_V2")
     from playwright.async_api import async_playwright
 
     async with async_playwright() as playwright:
@@ -457,8 +389,7 @@ async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRes
                             stack.gateway_token,
                             probe,
                             args.output_dir,
-                            open_authed_page_fn=open_authed_page_fn,
-                            send_chat_and_wait_for_terminal_message_fn=send_chat_and_wait_for_terminal_message_fn,
+                            selectors=selectors,
                         )
                     )
         finally:
@@ -487,71 +418,99 @@ async def open_gateway_page(
     base_url: str,
     token: str,
     storage_state: str | None,
+    selectors: dict[str, str],
+    thread_id: str,
 ) -> tuple[Any, Any]:
     kwargs: dict[str, Any] = {"viewport": {"width": 1280, "height": 720}}
     if storage_state:
         kwargs["storage_state"] = storage_state
     context = await browser.new_context(**kwargs)
     page = await context.new_page()
-    await page.goto(f"{base_url}/?token={token}", timeout=15000)
-    await page.locator("#auth-screen").wait_for(state="hidden", timeout=10000)
+    await page.goto(
+        f"{base_url}/chat/{thread_id}?token={token}",
+        timeout=15000,
+    )
+    await page.locator(selectors["chat_composer"]).wait_for(
+        state="visible",
+        timeout=15000,
+    )
     return context, page
 
 
-async def wait_for_auth_card(page: Any, selectors: dict[str, str], extension_name: str | None = None) -> Any:
-    selector = selectors["auth_card"]
-    if extension_name:
-        selector += f'[data-extension-name="{extension_name}"]'
-    card = page.locator(selector).first
-    await card.wait_for(state="visible", timeout=30000)
-    return card
+async def create_reborn_thread(base_url: str, token: str) -> str:
+    response = await api_request(
+        "POST",
+        base_url,
+        "/api/webchat/v2/threads",
+        token=token,
+        json_body={"client_action_id": str(uuid.uuid4())},
+        timeout=30,
+    )
+    if not 200 <= response.status_code < 300:
+        raise CanaryError(
+            f"Failed to create Reborn thread: {response.status_code} {response.text}"
+        )
+    thread_id = (response.json().get("thread") or {}).get("thread_id")
+    if not thread_id:
+        raise CanaryError(f"Thread create response omitted thread_id: {response.json()!r}")
+    return thread_id
 
 
-async def trigger_auth_card(
+async def send_reborn_browser_message(
     page: Any,
+    base_url: str,
+    token: str,
+    thread_id: str,
+    prompt: str,
+    *,
     selectors: dict[str, str],
-    case: BrowserProviderCase,
-    base_url: str | None = None,
-    token: str | None = None,
-) -> Any:
-    # Activate the extension via the API — this triggers the OAuth flow and
-    # broadcasts an auth card via SSE to the browser. Sending a chat message
-    # doesn't work because unactivated WASM tools aren't in the registry and
-    # ironclaw returns "tool not found" instead of an auth card.
-    if base_url and token:
+    timeout: float,
+) -> dict[str, Any]:
+    composer = page.locator(selectors["chat_composer"])
+    await composer.fill(prompt)
+    await composer.press("Enter")
+
+    deadline = time.monotonic() + timeout
+    last_timeline: dict[str, Any] = {}
+    while time.monotonic() < deadline:
         response = await api_request(
-            "POST",
+            "GET",
             base_url,
-            f"/api/extensions/{case.auth_extension_name}/activate",
+            f"/api/webchat/v2/threads/{thread_id}/timeline",
             token=token,
             timeout=30,
         )
-        if response.status_code != 200:
-            raise CanaryError(
-                f"Activate failed for {case.auth_extension_name}: "
-                f"{response.status_code} {response.text[:500]}"
-            )
-    else:
-        # Fallback: try via chat message (original approach)
-        chat_input = page.locator(selectors["chat_input"])
-        await chat_input.wait_for(state="visible", timeout=5000)
-        await chat_input.fill(case.trigger_prompt)
-        await chat_input.press("Enter")
-    return await wait_for_auth_card(page, selectors, case.auth_extension_name)
-
-
-async def click_auth_popup(page: Any, oauth_button: Any) -> Any:
-    try:
-        async with page.expect_popup(timeout=10000) as popup_info:
-            await oauth_button.click()
-        return await popup_info.value
-    except Exception:
-        href = await oauth_button.get_attribute("href")
-        if not href:
-            raise CanaryError("OAuth button had no popup and no href")
-        popup = await page.context.new_page()
-        await popup.goto(href, timeout=30000)
-        return popup
+        if 200 <= response.status_code < 300:
+            last_timeline = response.json()
+            finalized = [
+                item
+                for item in last_timeline.get("messages", [])
+                if item.get("kind") == "assistant"
+                and item.get("status") == "finalized"
+                and (item.get("content") or "").strip()
+            ]
+            if finalized:
+                tool_names: list[str] = []
+                for item in last_timeline.get("messages", []):
+                    if item.get("kind") != "capability_display_preview":
+                        continue
+                    try:
+                        preview = json.loads(item.get("content") or "{}")
+                    except json.JSONDecodeError:
+                        continue
+                    capability_id = preview.get("capability_id")
+                    if isinstance(capability_id, str):
+                        tool_names.append(capability_id)
+                return {
+                    "role": "assistant",
+                    "text": finalized[-1]["content"],
+                    "tool_names": tool_names,
+                }
+        await asyncio.sleep(0.5)
+    raise CanaryError(
+        f"Timed out waiting for Reborn browser reply in {thread_id}; "
+        f"last timeline={last_timeline!r}"
+    )
 
 
 async def click_first_button_with_text(page: Any, labels: list[str], timeout_ms: int = 4000) -> bool:
@@ -752,7 +711,10 @@ async def complete_provider_auth(
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         url = popup.url
-        if "/oauth/callback" in url or "connected" in url.lower():
+        if (
+            "/api/reborn/product-auth/oauth/" in url
+            and "/callback" in url
+        ) or "connected" in url.lower():
             return
         try:
             await popup.wait_for_load_state("networkidle", timeout=3000)
@@ -774,7 +736,6 @@ async def browser_oauth_probe(
     token: str,
     case: BrowserProviderCase,
     selectors: dict[str, str],
-    send_chat_and_wait_for_terminal_message_fn: Any,
     output_dir: Path,
 ) -> list[ProbeResult]:
     storage_state = storage_state_path(case.key)
@@ -784,61 +745,61 @@ async def browser_oauth_probe(
     results: list[ProbeResult] = []
     started = time.perf_counter()
     try:
-        context, page = await open_gateway_page(browser, base_url, token, storage_state)
-
-        # Get auth_url by activating the extension via the API.
-        # Direct activation returns the OAuth URL without needing the
-        # agent gate flow (which requires the tool to be registered first).
-        activate_resp = await api_request(
-            "POST", base_url,
-            f"/api/extensions/{case.auth_extension_name}/activate",
-            token=token, timeout=30,
+        package_id = case.auth_extension_name or case.extension_name
+        requirement, started_flow = await start_oauth_setup(
+            base_url,
+            token,
+            package_id=package_id,
         )
-        if activate_resp.status_code != 200:
-            raise CanaryError(
-                f"Activate failed for {case.auth_extension_name}: "
-                f"{activate_resp.status_code} {activate_resp.text[:500]}"
-            )
-        auth_url = activate_resp.json().get("auth_url")
-        if not auth_url:
-            raise CanaryError(
-                f"Activate returned no auth_url for {case.auth_extension_name}: "
-                f"{activate_resp.json()}"
-            )
+        thread_id = await create_reborn_thread(base_url, token)
+        context, page = await open_gateway_page(
+            browser,
+            base_url,
+            token,
+            storage_state,
+            selectors,
+            thread_id,
+        )
 
         # Open the OAuth URL directly in a popup and complete provider login.
         popup = await page.context.new_page()
-        await popup.goto(auth_url, timeout=30000)
+        await popup.goto(started_flow["authorization_url"], timeout=30000)
         await complete_provider_auth(popup, case, output_dir)
-
-        await wait_for_extension_state(
+        invocation_id = started_flow["callback_scope"]["invocation_id"]
+        await wait_for_oauth_flow_completed(
             base_url,
             token,
-            case.expected_extension_name,
-            authenticated=True,
-            active=True,
+            package_id=package_id,
+            flow_id=started_flow["flow_id"],
+            invocation_id=invocation_id,
+        )
+        await select_single_oauth_account(
+            base_url,
+            token,
+            package_id=package_id,
+            provider=requirement["provider"],
+            invocation_id=invocation_id,
+        )
+
+        await wait_for_extension_lifecycle(
+            base_url,
+            token,
+            package_id,
+            state="active",
+            required_tools=(REQUIRED_LIFECYCLE_TOOLS[package_id],),
             timeout=60.0,
         )
 
-        chat_result = await send_chat_and_wait_for_terminal_message_fn(
+        chat_result = await send_reborn_browser_message(
             page,
-            case.trigger_prompt,
-            timeout=120000,
-        )
-        history_thread_id = await page.evaluate("() => currentThreadId")
-        history = await api_request(
-            "GET",
             base_url,
-            f"/api/chat/history?thread_id={history_thread_id}",
-            token=token,
-            timeout=30,
+            token,
+            thread_id,
+            case.trigger_prompt,
+            selectors=selectors,
+            timeout=120.0,
         )
-        history.raise_for_status()
-        tool_names = [
-            tool_call.get("name")
-            for turn in history.json().get("turns", [])
-            for tool_call in turn.get("tool_calls", [])
-        ]
+        tool_names = chat_result["tool_names"]
         latency_ms = int((time.perf_counter() - started) * 1000)
         results.append(
             ProbeResult(
@@ -848,7 +809,7 @@ async def browser_oauth_probe(
                 latency_ms=latency_ms,
                 details={
                     "popup_url": popup.url if popup else None,
-                    "thread_id": history_thread_id,
+                    "thread_id": thread_id,
                     "tool_names": tool_names,
                     "assistant_text": chat_result.get("text", ""),
                 },
@@ -869,7 +830,7 @@ async def browser_oauth_probe(
                 ),
                 latency_ms=latency_ms,
                 details={
-                    "thread_id": history_thread_id,
+                    "thread_id": thread_id,
                     "tool_names": tool_names,
                     "assistant_text": chat_result.get("text", ""),
                 },
@@ -908,25 +869,23 @@ async def run_browser_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRe
             "No browser-consent cases are configured. Provide storage state or credentials for at least one provider."
         )
 
-    selectors, send_chat_and_wait_for_terminal_message_fn = load_e2e_helpers(
-        "SEL",
-        "send_chat_and_wait_for_terminal_message",
-    )
+    (selectors,) = load_e2e_helpers("SEL_V2")
     from playwright.async_api import async_playwright
 
     for case in cases:
         await install_extension(
             stack.base_url,
             stack.gateway_token,
-            name=case.extension_name,
-            expected_display_name=case.expected_extension_name,
-            install_kind=case.install_kind,
-            install_url=case.install_url,
+            package_id=case.extension_name,
+            idempotency_key=(
+                f"auth-live-canary-browser-{case.extension_name}"
+            ),
         )
-        await wait_for_extension_state(
+        await wait_for_extension_lifecycle(
             stack.base_url,
             stack.gateway_token,
             case.expected_extension_name,
+            state="setup_needed",
             timeout=30.0,
         )
 
@@ -942,7 +901,6 @@ async def run_browser_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRe
                         stack.gateway_token,
                         case,
                         selectors,
-                        send_chat_and_wait_for_terminal_message_fn,
                         args.output_dir,
                     )
                 )
@@ -1012,10 +970,11 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Limit the run to selected providers. Repeat for multiple values. "
             "For seeded mode, read-only cases (run by default when --case is "
-            "omitted): gmail, google_calendar, github, notion. "
+            "omitted): gmail, google_calendar, github. "
             "Mutating lifecycle cases — must be opted in explicitly, never "
             "run by default: gmail_roundtrip, google_calendar_lifecycle, "
-            "notion_search_lifecycle. "
+            "notion_search_lifecycle (currently rejected because Notion is "
+            "browser-OAuth only). "
             "For browser mode: google, notion. "
             "(github browser coverage is intentionally absent — the github "
             "WASM tool is PAT-only, not OAuth; see SEEDED_CASES instead.)"
@@ -1054,7 +1013,7 @@ def _validate_case_choices(args: argparse.Namespace) -> None:
 def _preflight_refresh_google_token() -> None:
     """Refresh the Google access token before the gateway starts.
 
-    GitHub secrets store a static access token that expires after 1 hour.
+    CI may store an access token that expires before the canary starts.
     The mock_llm exchange endpoint returns whatever is in
     AUTH_LIVE_GOOGLE_ACCESS_TOKEN, so we must refresh it here to ensure
     the token is valid when the test runs.
@@ -1088,48 +1047,6 @@ def _preflight_refresh_google_token() -> None:
         print(f"[preflight] Google token refresh failed: {exc}")
 
 
-def _preflight_refresh_notion_token() -> None:
-    """Refresh the Notion MCP access token before the gateway starts.
-
-    Notion DCR tokens expire after 1 hour. The seeded token in secrets
-    may be stale, so refresh it using the DCR client credentials and the
-    real Notion token endpoint.
-    """
-    import urllib.request
-    import urllib.parse
-
-    refresh_token = env_str("AUTH_LIVE_NOTION_REFRESH_TOKEN")
-    client_id = env_str("AUTH_LIVE_NOTION_CLIENT_ID")
-    client_secret = env_str("AUTH_LIVE_NOTION_CLIENT_SECRET")
-    if not all([refresh_token, client_id, client_secret]):
-        return
-
-    data = urllib.parse.urlencode({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }).encode()
-    try:
-        req = urllib.request.Request("https://mcp.notion.com/token", data=data, headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "ironclaw-canary/1.0",
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read())
-        fresh_token = body.get("access_token")
-        fresh_refresh = body.get("refresh_token")
-        if fresh_token:
-            os.environ["AUTH_LIVE_NOTION_ACCESS_TOKEN"] = fresh_token
-            print(f"[preflight] Refreshed Notion access token (expires_in={body.get('expires_in')}s)")
-        else:
-            print(f"[preflight] Notion token refresh returned no access_token: {body}")
-        if fresh_refresh:
-            os.environ["AUTH_LIVE_NOTION_REFRESH_TOKEN"] = fresh_refresh
-    except Exception as exc:
-        print(f"[preflight] Notion token refresh failed: {exc}")
-
-
 async def async_main(args: argparse.Namespace) -> int:
     mode_cfg = MODE_CONFIG[args.mode]
 
@@ -1144,12 +1061,11 @@ async def async_main(args: argparse.Namespace) -> int:
         return 0
 
     if not args.skip_build:
-        cargo_build()
+        cargo_build_reborn()
 
     # Pre-flight: refresh expired access tokens so seeded values are fresh.
     if args.mode == "seeded":
         _preflight_refresh_google_token()
-        _preflight_refresh_notion_token()
 
     extra_gateway_env: dict[str, str] = {}
     for env_name in mode_cfg["extra_gateway_env_names"]:
@@ -1157,13 +1073,13 @@ async def async_main(args: argparse.Namespace) -> int:
         if value:
             extra_gateway_env[env_name] = value
 
-    stack = await start_gateway_stack(
+    stack = await start_reborn_gateway_stack(
         venv_dir=args.venv,
         owner_user_id=mode_cfg["owner_user_id"],
         temp_prefix=mode_cfg["temp_prefix"],
         gateway_token_prefix=mode_cfg["gateway_token_prefix"],
         extra_gateway_env=extra_gateway_env,
-        oauth_proxy=(args.mode == "seeded"),
+        rewrite_google_oauth=(args.mode == "seeded"),
         log_dir=args.output_dir,
     )
     try:

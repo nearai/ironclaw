@@ -10,7 +10,9 @@ use crate::CapabilityActivityId;
 use crate::run_profile::compaction::{CompactionInitiator, LoopCompactionPort};
 use crate::run_profile::system_inference::SystemInferenceTaskId;
 
-use super::capability::{CapabilityFailureKind, LoopCapabilityPort};
+use ironclaw_host_api::FailureKind;
+
+use super::capability::LoopCapabilityPort;
 use super::checkpoint::{LoopCheckpointKind, LoopCheckpointPort};
 use super::context::LoopContextPort;
 use super::error::AgentLoopHostError;
@@ -55,7 +57,7 @@ pub enum LoopProgressEvent {
     CapabilityActivityFailed {
         activity_id: CapabilityActivityId,
         capability_id: CapabilityId,
-        reason_kind: CapabilityFailureKind,
+        reason_kind: FailureKind,
         /// Bounded, host-authored sanitized failure summary (e.g. a builtin's
         /// `"invalid JSON: ..."` message) so the live per-tool UI card can show
         /// the real reason, not just the kind. Additive; `None` when no

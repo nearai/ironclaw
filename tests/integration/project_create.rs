@@ -18,7 +18,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_product_workflow::{ProjectCaller, RebornListProjectsRequest};
+use ironclaw_product::{ProjectCaller, RebornListProjectsRequest};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::project_service_fault::FAULT_INJECT_DENIED_PROJECT_NAME;
@@ -135,9 +135,9 @@ async fn project_create_invalid_input_routes_to_recoverable_tool_error_impl() {
         .await
         .expect("project_create dispatched through the synthetic-capability port");
     harness
-        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .assert_tool_error(ToolErrorClass::Failed, "input_encode")
         .await
-        .expect("oversized name surfaces as a Failed(InvalidInput) capability outcome");
+        .expect("oversized name surfaces as a Failed(InputEncode) capability outcome");
 }
 
 /// C-SYNTH fault-injection arm — `project_create` against a genuine host-side

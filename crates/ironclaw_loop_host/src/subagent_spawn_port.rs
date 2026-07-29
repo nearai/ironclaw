@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, LoopRef, ProviderToolName, Resolution, ResolutionBatch,
-    RuntimeKind, Suspension, ThreadId,
+    CapabilityId, FailureKind, InvocationId, LoopRef, ProviderToolName, Resolution,
+    ResolutionBatch, RuntimeKind, Suspension, ThreadId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
@@ -24,13 +24,12 @@ use ironclaw_turns::{
     SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
     TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDeniedReasonKind, CapabilityDescriptorView,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, ConcurrencyHint,
-        LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary,
+        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -695,7 +694,7 @@ impl SubagentSpawnCapabilityPort {
 
     async fn handle_spawn_with_gate(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
     ) -> Result<Resolution, AgentLoopHostError> {
@@ -706,7 +705,7 @@ impl SubagentSpawnCapabilityPort {
 
     async fn handle_spawn_with_gate_recording(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
         compensation: &mut SpawnCompensationState,
@@ -801,7 +800,7 @@ impl SubagentSpawnCapabilityPort {
 
     async fn authorize_spawn(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
     ) -> Result<Option<Resolution>, AgentLoopHostError> {
         let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
             AgentLoopHostError::new(
@@ -860,7 +859,7 @@ impl SubagentSpawnCapabilityPort {
         args: SpawnSubagentArgs,
         ctx: SpawnContext,
         actor: TurnActor,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         compensation: &mut SpawnCompensationState,
     ) -> Result<Resolution, AgentLoopHostError> {
         let SpawnContext {
@@ -964,7 +963,7 @@ impl SubagentSpawnCapabilityPort {
             .await
         {
             return Ok(resolution::failed(
-                CapabilityFailureKind::Transient,
+                FailureKind::Transient,
                 format!("subagent spawn scope recovery in progress: {error}"),
                 None,
             ));
@@ -1163,14 +1162,18 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if self.is_spawn(&request.capability_id) {
-            let args = self
+            let args = match self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
-                .await?;
+                .await
+            {
+                Ok(args) => args,
+                Err(error) => return spawn_input_decode_outcome(error),
+            };
             if let Some(resolution) = self.authorize_spawn(&request).await? {
                 return Ok(resolution);
             }
@@ -1181,7 +1184,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions: Vec<Resolution> = Vec::with_capacity(request.invocations.len());
         let mut batch_compensations = Vec::new();
@@ -1190,18 +1193,28 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         // from gate coalescing; otherwise the gate would be created and never
         // registered, wasting a TurnRunId.
         let mut spawn_args: HashMap<usize, SpawnSubagentArgs> = HashMap::new();
+        let mut spawn_input_denials: HashMap<usize, Resolution> = HashMap::new();
         let mut blocking_count = 0_usize;
         for (idx, invocation) in request.invocations.iter().enumerate() {
             if !self.is_spawn(&invocation.capability_id) {
                 continue;
             }
-            let args = self
+            match self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &invocation.input_ref)
-                .await?;
-            blocking_count += 1;
-            spawn_args.insert(idx, args);
+                .await
+            {
+                Ok(args) => {
+                    blocking_count += 1;
+                    spawn_args.insert(idx, args);
+                }
+                // Model-supplied input problem: park the per-invocation denial
+                // for the main loop; genuine host faults still fail the batch.
+                Err(error) => {
+                    spawn_input_denials.insert(idx, spawn_input_decode_outcome(error)?);
+                }
+            }
         }
         let batch_blocking_gate = if blocking_count > 1 {
             Some(
@@ -1215,6 +1228,11 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         while index < request.invocations.len() {
             let invocation = &request.invocations[index];
             if self.is_spawn(&invocation.capability_id) {
+                if let Some(denial) = spawn_input_denials.remove(&index) {
+                    resolutions.push(denial);
+                    index += 1;
+                    continue;
+                }
                 let outcome = match self.authorize_spawn(invocation).await {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => {
@@ -1295,7 +1313,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             }
             let inner = self
                 .inner
-                .invoke_capability_batch(CapabilityBatchInvocation {
+                .invoke_capability_batch(LoopRequestBatch {
                     invocations: request.invocations[start..index].to_vec(),
                     stop_on_first_suspension: request.stop_on_first_suspension,
                 })
@@ -1374,7 +1392,7 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
 /// filesystem/CAS/roster semantics. For `loop_host`'s own unit tests that
 /// just need a legal writer, not a durability test; production and any test
 /// that exercises real await-edge behavior use `ironclaw_runner`'s
-/// `FilesystemAwaitEdgeStore`.
+/// `AwaitEdgeStore`.
 #[derive(Default)]
 pub struct InMemoryAwaitEdgeWriter {
     inner: parking_lot::Mutex<HashMap<(TurnRunId, TurnRunId), AwaitedChildSetRecord>>,
@@ -1415,6 +1433,29 @@ fn spawn_rejected(reason: &'static str) -> Resolution {
         format!("subagent spawn rejected: {reason}"),
     )
     .resolution
+}
+
+/// Classify a spawn-input decode failure onto its loop channel.
+///
+/// The spawn-args codec decodes MODEL-SUPPLIED JSON, so an
+/// `InvalidInvocation` failure (malformed JSON, schema-violating wire args,
+/// model-correctable rejections like requesting the disabled background mode)
+/// is the model's own mistake: surface it on the `spawn_rejected` `Denied`
+/// channel with the codec's sanitized summary so the model can correct the
+/// call. Propagating it as `Err(AgentLoopHostError)` instead lets the
+/// executor map it to a run-ending `HostUnavailable`, killing the run on
+/// malformed model output. Genuine host faults (input-store outages and every
+/// other error kind) still propagate as errors.
+fn spawn_input_decode_outcome(error: AgentLoopHostError) -> Result<Resolution, AgentLoopHostError> {
+    if error.kind != AgentLoopHostErrorKind::InvalidInvocation {
+        return Err(error);
+    }
+    Ok(resolution::denied(
+        CapabilityDeniedReasonKind::unknown("invalid_spawn_input")
+            .unwrap_or(CapabilityDeniedReasonKind::EmptySurface),
+        error.safe_summary,
+    )
+    .resolution)
 }
 
 fn background_subagents_disabled() -> AgentLoopHostError {
@@ -1536,3 +1577,4 @@ fn mode_label(mode: SpawnSubagentMode) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+// arch-exempt: large_file, subagent port migration remains centralized, plan #6175

@@ -12,7 +12,6 @@ use ironclaw_loop_host::{
 };
 use ironclaw_turns::TurnStatus;
 
-use crate::input::RebornBuildInput;
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::{RebornRuntimeError, build_reborn_runtime};
@@ -102,9 +101,9 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
-                && message.content.contains("Run origin: WebUI chat")
+                && message.content.contains("Run origin: CLI chat")
         }),
-        "local-dev runtime send_user_message should tag WebUiChat origin in runtime context"
+        "local-dev runtime send_user_message should tag CLI source-channel origin in runtime context"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -151,6 +150,19 @@ async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
         }),
         "default-on disclosure should append the tool-search protocol to the edited prompt"
     );
+    // Docs grounding is ground knowledge about the runtime (#6734), not a seed
+    // default: an install whose SYSTEM.md never contained it must still be told
+    // to look IronClaw's own capabilities up in the published docs.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("custom edited runtime prompt")
+                && message
+                    .content
+                    .contains("https://docs.ironclaw.com/llms.txt")
+        }),
+        "self-knowledge docs grounding should reach the model even for a custom system prompt"
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -187,8 +199,8 @@ fn runtime_input(
     requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
 ) -> RebornRuntimeInput {
     let gateway = Arc::new(RecordingGateway { requests });
-    RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-system-prompt-owner", storage_root)
+    RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-system-prompt-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {

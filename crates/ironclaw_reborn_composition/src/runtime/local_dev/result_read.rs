@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{DispatchInputIssueCode, InvocationId, Resolution, UserId};
+use ironclaw_host_api::{DispatchInputIssueCode, FailureKind, InvocationId, Resolution, UserId};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
@@ -9,11 +9,10 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityFailureKind,
-    CapabilityInputIssue, CapabilityProgress, ConcurrencyHint,
-    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-    ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
-    resolution, sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
+    CapabilityProgress, ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+    ToolObservationStatus, resolution, sanitize_model_visible_text,
 };
 
 use super::{
@@ -56,7 +55,7 @@ pub(crate) fn wrap_result_read_capability_for_test(
         None,
         // `result_read` never raises an approval gate, so its resume path never
         // loads a replay payload; an in-memory store keeps the seam wired.
-        Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+        Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
             crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
         )),
     )
@@ -247,17 +246,23 @@ fn result_read_observation(
     }
 }
 
+/// The named result ref does not exist in this thread — a domain failure of
+/// the read operation, not an encoding fault (`InputEncode`) and not a
+/// retryable host outage (`Unavailable` would quietly retry a ref that can
+/// never appear). Model-visible and non-retryable.
 fn unavailable_result_reference() -> Resolution {
     resolution::failed(
-        CapabilityFailureKind::InvalidInput,
+        FailureKind::OperationFailed,
         "result reference is unavailable in this thread".to_string(),
         None,
     )
 }
 
+/// The stored result exists but cannot be decoded as text — an output-decode
+/// failure, not an input-encoding fault.
 fn non_text_result_content() -> Resolution {
     resolution::failed(
-        CapabilityFailureKind::InvalidInput,
+        FailureKind::OutputDecode,
         "stored tool result cannot be returned as text".to_string(),
         None,
     )
@@ -286,7 +291,7 @@ struct ResultReadInput {
 /// parse result is large (`clippy::result_large_err`).
 fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> Box<Resolution> {
     Box::new(resolution::failed(
-        CapabilityFailureKind::InvalidInput,
+        FailureKind::InputEncode,
         safe_summary.to_string(),
         Some(CapabilityFailureDetail::InvalidInput {
             issues: vec![issue],

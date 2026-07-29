@@ -50,34 +50,7 @@
         {
           "tool_call_id": "toolu_01ApWFEBdutjV4KmM9N4kCNn",
           "name": "builtin__extension_search",
-          "content": " object payload object count 1 extensions array object credential_requirements array object name gmail_account provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth gmail.modify https:  www.googleapis.com auth gmail.readonly https:  www.googleapis.com auth gmail.send description First-party Gmail capabilities for Reborn. name Gmail onboarding object credential_instructions Authorize the Google account that IronClaw should use for Gmail. credential_next_step After authorization completes, activate Gmail to publish its tools. instructions Gmail needs Google OAuth authorization before mail tools can run. package_ref object id gmail kind extension runtime_kind first_party source host_bundled version 0.1.0 visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message visible_read_only_capability_ids array gmail.list_messages gmail.get_message kind extension_search phase discovered"
-        }
-      ]
-    },
-    {
-      "request_hint": {
-        "last_user_message_contains": "connect to Gmail",
-        "min_message_count": 6
-      },
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
-            "id": "toolu_01Xh95ZcW1HgD1Kkew5H84Qx",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "gmail"
-            }
-          }
-        ],
-        "input_tokens": 12880,
-        "output_tokens": 58
-      },
-      "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_01755hQcURRbSb5sqfyoLzZ8",
-          "name": "builtin__extension_install",
-          "content": " object package_ref object id gmail kind extension payload object installed true kind extension_install next_step Call builtin.extension_activate now with input  \"extension_id\":\"gmail\" . Activation publishes the tools and opens the auth gate if credentials are missing. visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message phase installed"
+          "content": " object payload object count 1 extensions array object credential_requirements array object name gmail_account provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth gmail.modify https:  www.googleapis.com auth gmail.readonly https:  www.googleapis.com auth gmail.send description First-party Gmail capabilities for Reborn. name Gmail onboarding object credential_instructions Authorize the Google account that IronClaw should use for Gmail. credential_next_step After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools. instructions Gmail needs Google OAuth authorization before mail tools can run. package_ref object id gmail kind extension runtime_kind first_party source host_bundled version 0.1.0 visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message visible_read_only_capability_ids array gmail.list_messages gmail.get_message kind extension_search phase discovered"
         }
       ]
     }

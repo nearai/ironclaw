@@ -11,11 +11,6 @@
     "chat",
     "telegram"
   ],
-  "source": {
-    "dir": "channels-src/telegram",
-    "capabilities": "telegram.capabilities.json",
-    "crate_name": "telegram-channel"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.26.0/channel-telegram-0.2.10-wasm32-wasip2.tar.gz",

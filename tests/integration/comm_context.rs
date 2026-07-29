@@ -3,7 +3,7 @@
 //! renders into the model request on a real coordinator-path turn.
 //!
 //! Distinct from the outbound delivery sink (E-OUTBOUND): this covers prompt
-//! context, not a delivery recorder. The facade→context mapping itself is
+//! context, not a delivery recorder. The service→context mapping itself is
 //! unit-tested at crate tier (`ironclaw_reborn_composition::communication_context`);
 //! this binary covers only that the field threads through the coordinator path
 //! into the model request.

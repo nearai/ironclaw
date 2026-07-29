@@ -47,10 +47,9 @@ pub use driver::{
 pub use host::{
     AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, AuthResumeApprovalIdentity, BatchPolicyKind,
-    BeginAssistantDraft, CapabilityApprovalResume, CapabilityAuthResume, CapabilityBatchInvocation,
-    CapabilityCallCandidate, CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue,
-    CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue,
-    CapabilityInputRef, CapabilityInvocation, CapabilityProgress, CapabilityResultMessage,
+    BeginAssistantDraft, CapabilityApprovalResume, CapabilityAuthResume, CapabilityCallCandidate,
+    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
+    CapabilityFailure, CapabilityInputRef, CapabilityProgress, CapabilityResultMessage,
     CapabilityResumeToken, CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
@@ -64,15 +63,15 @@ pub use host::{
     LoopModelRequest, LoopModelResponse, LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef,
     LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
     LoopPromptBundleGrant, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
-    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition,
-    RegisterProviderToolCallRequest, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
-    validate_model_route_component_value,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+    LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, StageCheckpointPayloadRequest,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    sanitize_model_visible_text, validate_model_route_component_value,
 };
 pub use instruction_bundle::{
-    InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
+    EphemeralInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
     InstructionBundleFingerprint, InstructionBundleMaterializedMessage, InstructionBundleRequest,
     InstructionMaterializationStore, InstructionSafetyContext,
     sort_instruction_snippets_for_prompt,
@@ -92,11 +91,10 @@ pub use model::{
     NoOpBudgetAccountant, NoOpPolicyGuard,
 };
 pub use model_observation::{
-    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair, CapabilityRecoveryHint,
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair,
     MODEL_OBSERVATION_DETAIL_MAX_BYTES, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint,
-    ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
-    validate_model_observation_detail,
+    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+    ToolObservationStatus, ToolRecoveryObservation, validate_model_observation_detail,
 };
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{

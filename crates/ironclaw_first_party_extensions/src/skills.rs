@@ -4,15 +4,16 @@
 //! [`SkillManagementCapabilityRequest`]; this module receives scoped mounts
 //! and an explicit filesystem handle only.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use ironclaw_skills::{
-    InstalledSkillMetadataSource, SkillInstallFile, SkillInstallRequest, SkillInstallSource,
-    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
-    install_skill, list_skills, remove_skill, skill_summary_json,
+    InstalledSkillMetadataSource, SkillContentRequest, SkillInstallFile, SkillInstallRequest,
+    SkillInstallSource, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
+    SkillRemoveRequest, SkillUpdateRequest, install_skill, list_skills, read_skill_content,
+    remove_skill, skill_summary_json, update_skill,
 };
 use serde_json::{Value, json};
 
@@ -20,6 +21,8 @@ use serde_json::{Value, json};
 pub enum SkillManagementCapabilityKind {
     List,
     Install,
+    Update,
+    SetAutoActivate,
     Remove,
 }
 
@@ -83,6 +86,8 @@ pub async fn dispatch(
     match request.kind {
         SkillManagementCapabilityKind::List => dispatch_list(request).await,
         SkillManagementCapabilityKind::Install => dispatch_install(request).await,
+        SkillManagementCapabilityKind::Update => dispatch_update(request).await,
+        SkillManagementCapabilityKind::SetAutoActivate => dispatch_set_auto_activate(request).await,
         SkillManagementCapabilityKind::Remove => dispatch_remove(request).await,
     }
 }
@@ -126,6 +131,7 @@ async fn dispatch_install(
             tracing::debug!("skill management install missing string content input");
             input_error()
         })?;
+    validate_skill_content_safety(content)?;
     let parsed_files = parse_install_files(request.input)?;
     let files = parsed_files
         .iter()
@@ -169,6 +175,106 @@ async fn dispatch_install(
 #[tracing::instrument(
     level = "debug",
     skip(request),
+    fields(
+        has_name = request.input.get("name").is_some(),
+        has_content = request.input.get("content").is_some(),
+    )
+)]
+async fn dispatch_update(
+    request: &SkillManagementCapabilityRequest<'_>,
+) -> Result<Value, SkillManagementCapabilityError> {
+    let name = request
+        .input
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            tracing::debug!("skill management update missing string name input");
+            input_error()
+        })?;
+    let content = request
+        .input
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            tracing::debug!("skill management update missing string content input");
+            input_error()
+        })?;
+    reject_extra_fields(request.input, &["name", "content"])?;
+    validate_skill_content_safety(content)?;
+    let context = management_context(request)?;
+    let updated = update_skill(&context, SkillUpdateRequest { name, content })
+        .await
+        .map_err(capability_error)?;
+    tracing::debug!(
+        skill_name = %updated.name,
+        "skill management update completed"
+    );
+
+    Ok(json!({
+        "updated": true,
+        "name": updated.name,
+    }))
+}
+
+#[tracing::instrument(
+    level = "debug",
+    skip(request),
+    fields(
+        has_name = request.input.get("name").is_some(),
+        has_enabled = request.input.get("enabled").is_some(),
+    )
+)]
+async fn dispatch_set_auto_activate(
+    request: &SkillManagementCapabilityRequest<'_>,
+) -> Result<Value, SkillManagementCapabilityError> {
+    let name = request
+        .input
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            tracing::debug!("skill management auto-activate missing string name input");
+            input_error()
+        })?;
+    let enabled = request
+        .input
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            tracing::debug!("skill management auto-activate missing boolean enabled input");
+            input_error()
+        })?;
+    reject_extra_fields(request.input, &["name", "enabled"])?;
+    let context = management_context(request)?;
+    let current = read_skill_content(&context, SkillContentRequest { name })
+        .await
+        .map_err(capability_error)?;
+    let updated_content = ironclaw_skills::set_skill_auto_activate(&current.content, enabled);
+    validate_skill_content_safety(&updated_content)?;
+    let updated = update_skill(
+        &context,
+        SkillUpdateRequest {
+            name,
+            content: &updated_content,
+        },
+    )
+    .await
+    .map_err(capability_error)?;
+    tracing::debug!(
+        skill_name = %updated.name,
+        enabled,
+        "skill management auto-activate update completed"
+    );
+
+    Ok(json!({
+        "updated": true,
+        "name": updated.name,
+        "auto_activate": enabled,
+    }))
+}
+
+#[tracing::instrument(
+    level = "debug",
+    skip(request),
     fields(has_name = request.input.get("name").is_some())
 )]
 async fn dispatch_remove(
@@ -182,6 +288,7 @@ async fn dispatch_remove(
             tracing::debug!("skill management remove missing string name input");
             input_error()
         })?;
+    reject_extra_fields(request.input, &["name"])?;
     let context = management_context(request)?;
     let removed = remove_skill(&context, SkillRemoveRequest { name })
         .await
@@ -195,6 +302,27 @@ async fn dispatch_remove(
         "removed": true,
         "name": removed.name,
     }))
+}
+
+fn reject_extra_fields(
+    input: &Value,
+    allowed: &[&str],
+) -> Result<(), SkillManagementCapabilityError> {
+    let Some(object) = input.as_object() else {
+        return Err(input_error());
+    };
+    if object.keys().all(|key| allowed.contains(&key.as_str())) {
+        Ok(())
+    } else {
+        Err(input_error())
+    }
+}
+
+fn validate_skill_content_safety(content: &str) -> Result<(), SkillManagementCapabilityError> {
+    static SKILL_CONTENT_SAFETY: LazyLock<ironclaw_safety::Sanitizer> =
+        LazyLock::new(ironclaw_safety::Sanitizer::new);
+    ironclaw_safety::validate_trusted_trigger_prompt(&*SKILL_CONTENT_SAFETY, content)
+        .map_err(|_| SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
 }
 
 fn management_context(

@@ -42,20 +42,20 @@ use ironclaw_turns::{
     TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
-        LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel,
-        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+        CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
+        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
+        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
+        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
+        ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel, SkillVisibility,
+        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
@@ -1288,7 +1288,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
         .with_identity_context_source(source.clone()),
     );
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let prompt_port =
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
             .with_instruction_materialization_store(materialization_store);
@@ -1849,7 +1849,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
 #[tokio::test]
 async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
     let fixture = ThreadFixture::new().await;
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let context_port = Arc::new(StaticLoopContextPort {
         bundle: LoopContextBundle {
             identity_messages: vec![LoopContextMessage {
@@ -3019,7 +3019,7 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
     assert!(surface.descriptors.is_empty());
 
     let error = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -3039,8 +3039,8 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
     let port = EmptyLoopCapabilityPort;
 
     let outcome = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -3072,8 +3072,8 @@ async fn empty_capability_batch_rejects_stale_surface() {
     let port = EmptyLoopCapabilityPort;
 
     let error = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -4964,7 +4964,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
 
     async fn invoke_capability(
         &self,
-        _request: CapabilityInvocation,
+        _request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(resolution::denied(
             CapabilityDeniedReasonKind::EmptySurface,
@@ -4975,7 +4975,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let resolutions = request
             .invocations
@@ -4993,4 +4993,90 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
             stopped_on_suspension: false,
         })
     }
+}
+// arch-exempt: large_file, thread loop host contract remains one integration suite, plan #6175
+
+/// Records every memory request and returns one fixed snippet, so the
+/// caller-level test can assert both the captured request and the once-per-run
+/// fetch guarantee.
+struct RecordingMemoryPromptContextService {
+    calls: Mutex<Vec<ironclaw_turns::run_profile::MemoryPromptContextRequest>>,
+}
+
+#[async_trait]
+impl ironclaw_turns::run_profile::MemoryPromptContextService
+    for RecordingMemoryPromptContextService
+{
+    async fn load_memory_snippets(
+        &self,
+        request: ironclaw_turns::run_profile::MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        self.calls.lock().expect("memory calls lock").push(request);
+        Ok(vec![LoopContextSnippet {
+            snippet_ref: "memory-snippet:test".to_string(),
+            model_content: "remembered fact".to_string(),
+            safe_summary: "remembered fact".to_string(),
+            metadata: None,
+        }])
+    }
+}
+
+/// Caller-level proof of the proactive-memory lane through the REAL
+/// `LoopContextPort::load_loop_context` path (not the message-selection helper
+/// alone): the wired service is queried with the latest user message as the
+/// query, its snippets surface on `LoopContextBundle.memory_snippets`, and the
+/// fetch happens ONCE per run — the second prompt build reuses the cache.
+#[tokio::test]
+async fn thread_context_port_loads_memory_snippets_through_wired_service_once_per_run() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(RecordingMemoryPromptContextService {
+        calls: Mutex::new(Vec::new()),
+    });
+    // Memory retrieval is keyed to the acting human user; a context without an
+    // actor deliberately skips the fetch, so stamp one like production does —
+    // the actor must be the thread-scope owner or scope validation fails.
+    let owner = fixture
+        .thread_scope
+        .owner_user_id
+        .clone()
+        .expect("fixture thread scope carries an owner");
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(owner.clone()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context.clone(),
+        16,
+    )
+    .with_memory_context_service(Arc::clone(&service) as Arc<_>);
+
+    let request = || LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+    };
+    let first = adapter.load_loop_context(request()).await.unwrap();
+    let second = adapter.load_loop_context(request()).await.unwrap();
+
+    for bundle in [&first, &second] {
+        assert_eq!(bundle.memory_snippets.len(), 1);
+        assert_eq!(bundle.memory_snippets[0].snippet_ref, "memory-snippet:test");
+        assert_eq!(bundle.memory_snippets[0].model_content, "remembered fact");
+    }
+
+    let calls = service.calls.lock().expect("memory calls lock");
+    assert_eq!(
+        calls.len(),
+        1,
+        "memory is fetched once per run and cached; the second prompt build must reuse it"
+    );
+    assert_eq!(
+        calls[0].query, "hello reborn",
+        "the retrieval query is the latest user message"
+    );
+    assert_eq!(calls[0].max_snippets, 8);
+    assert_eq!(calls[0].scope, run_context.scope);
+    assert_eq!(calls[0].actor.user_id, owner);
 }

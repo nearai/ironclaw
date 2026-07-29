@@ -63,7 +63,7 @@ export const SETTINGS_SUB_ROUTES = [
 export const EXTENSIONS_SUB_ROUTES = [
   { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
-  { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
+  { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
 ];
 
 // Only the Users tab ships in this admin port. The dashboard and usage tabs
@@ -71,6 +71,7 @@ export const EXTENSIONS_SUB_ROUTES = [
 // components remain in the tree but are not routed).
 export const ADMIN_SUB_ROUTES = [
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
+  { id: "configuration", labelKey: "admin.tab.configuration", icon: "tool" },
 ];
 
 export const EXPANDABLE_SUB_ROUTES = {

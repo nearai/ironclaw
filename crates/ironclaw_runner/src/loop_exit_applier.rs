@@ -12,9 +12,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
-    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef, LoopMessageRef,
-    LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    CheckpointStateStorePort, GetCheckpointStateRequest, GetLoopCheckpointRequest,
+    GetRunStateRequest, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef,
+    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -163,7 +164,8 @@ where
     thread_service: Arc<S>,
     turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
-    checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
+    // arch-exempt: optional_arc, checkpoint evidence is absent in minimal loop-exit tests, plan #4539
+    checkpoint_state_store: Option<Arc<dyn CheckpointStateStorePort>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
     resource_gate_evidence: Option<Arc<dyn ResourceGateEvidenceStore>>,
     await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -247,7 +249,7 @@ where
 
     pub fn with_checkpoint_state_store(
         mut self,
-        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     ) -> Self {
         self.checkpoint_state_store = Some(checkpoint_state_store);
         self
@@ -590,7 +592,7 @@ where
 
 // §3 replacement: the `AwaitDependentRunEvidenceStore` impl for the deleted
 // `BoundedSubagentGateResolutionStore` moves to
-// `subagent::await_edge::store::FilesystemAwaitEdgeStore` (same trait,
+// `subagent::await_edge::store::AwaitEdgeStore` (same trait,
 // implemented against the new CAS'd edge store instead of the in-memory
 // gate map).
 

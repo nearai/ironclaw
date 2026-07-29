@@ -470,9 +470,9 @@ impl<S> PostCompletionProbeStore<S> {
 }
 
 #[async_trait]
-impl<S> ProcessStore for PostCompletionProbeStore<S>
+impl<S> ProcessStorePort for PostCompletionProbeStore<S>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
 {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         self.inner.start(start).await
@@ -553,6 +553,7 @@ fn process_start_with_input(
         mounts: MountView::default(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input,
     }
 }
@@ -603,10 +604,10 @@ fn processes_test_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
     ))
 }
 
-fn in_mem_process_store() -> FilesystemProcessStore<InMemoryBackend> {
-    FilesystemProcessStore::new(processes_test_fs())
+fn in_mem_process_store() -> ProcessStore<InMemoryBackend> {
+    ProcessStore::new(processes_test_fs())
 }
 
-fn in_mem_process_result_store() -> FilesystemProcessResultStore<InMemoryBackend> {
-    FilesystemProcessResultStore::new(processes_test_fs())
+fn in_mem_process_result_store() -> ProcessResultStore<InMemoryBackend> {
+    ProcessResultStore::new(processes_test_fs())
 }

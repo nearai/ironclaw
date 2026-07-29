@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
@@ -21,22 +21,22 @@ use ironclaw_events::{
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
+    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -111,7 +111,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         "host_path_sentinel": "/private/tmp/reborn-e2e-gate"
     });
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default().set_output_bytes(4096),
@@ -207,7 +207,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
         approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id).await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -242,7 +242,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
     );
 
     let replay = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -251,7 +251,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
         ))
         .await
         .unwrap();
-    assert_failed_outcome(replay, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(replay, FailureKind::Authorization);
     assert_eq!(
         fixture.events.events().len(),
         3,
@@ -285,7 +285,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     let invocation_id = context.invocation_id;
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -294,7 +294,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(events.events().is_empty());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
@@ -339,7 +339,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
     let leaked = format!("Bearer {leaked_header}.{leaked_payload}.{leaked_signature}");
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -401,7 +401,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     let backend_secret = "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live";
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -412,7 +412,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            assert_eq!(failure.kind, FailureKind::Backend);
             let rendered = format!("{failure:?}");
             for forbidden in [
                 input_sentinel,
@@ -500,7 +500,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
     let forbidden = "OUTPUT_LIMIT_SENTINEL_MUST_NOT_LEAK";
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -511,7 +511,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+            assert_eq!(failure.kind, FailureKind::OutputTooLarge);
             let rendered = format!("{failure:?}");
             assert!(!rendered.contains(forbidden));
         }
@@ -549,7 +549,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let capability_id = script_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
     let staged_policy = sample_policy();
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -646,15 +646,14 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
 type InMemoryServices = HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<InMemoryBackend>,
-    FilesystemProcessResultStore<InMemoryBackend>,
+    ProcessStore<InMemoryBackend>,
+    ProcessResultStore<InMemoryBackend>,
 >;
 
 struct ApprovalFixture {
     services: InMemoryServices,
-    run_state:
-        Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
+    run_state: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    capability_leases: Arc<CapabilityLeaseStore<InMemoryBackend>>,
     events: InMemoryEventSink,
 }
 
@@ -695,7 +694,7 @@ async fn block_for_approval(
     input: serde_json::Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -882,6 +881,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -889,7 +889,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 fn execution_context_with_dispatch_grant() -> ExecutionContext {
     let mut grants = CapabilitySet::default();
     grants.grants.push(dispatch_grant());
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -897,11 +897,13 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -909,7 +911,9 @@ fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {
@@ -1005,7 +1009,7 @@ fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind])
     assert_eq!(actual, expected);
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome {expected:?}, got {other:?}"),
@@ -1032,3 +1036,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

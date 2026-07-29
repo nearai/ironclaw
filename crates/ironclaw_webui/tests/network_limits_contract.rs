@@ -1,12 +1,12 @@
 //! Caller-level network-control contract for the WebChat v2 surface,
-//! focused on the gaps that the composition crate's `webui_v2_serve.rs`
+//! focused on the gaps that WebUI's `webui_serve.rs`
 //! and the OAuth-route tests do NOT already cover — the rules that ride
 //! on the **host-owned public SSO mount** (`webui_v2_auth_router`) plus
 //! the CORS fail-closed default.
 //!
 //! Already locked elsewhere (cross-referenced, not duplicated here):
 //! CORS allow / reject-with-configured-origin, descriptor body-limit 413
-//! and rate-limit 429 on the v2 facade routes, and WebSocket
+//! and rate-limit 429 on the v2 service routes, and WebSocket
 //! same-origin 403 all live in
 //! `ironclaw_reborn_composition/tests/webui_v2_serve.rs`; OAuth CSRF
 //! state single-use, cross-provider replay, and redirect sanitization
@@ -17,7 +17,7 @@
 //!
 //! 1. The public SSO routes inherit the descriptor-driven **per-IP**
 //!    rate limit (`/auth/login/{provider}` → 429 after the 60/60s
-//!    budget) — a distinct scope from the facade's per-caller limiter —
+//!    budget) — a distinct scope from the service's per-caller limiter —
 //!    and that the `PerIp` scope keys each distinct peer IP to its own
 //!    independent budget (one IP's flood cannot deny another).
 //! 2. The SSO body caps: `POST /auth/session/exchange` and
@@ -46,12 +46,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
-    EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
-    OAuthRouterConfig, OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
+    EmailUserDirectory, OAuthError, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
+    OAuthUserProfile, SessionAuthenticator, signed_session_store, webui_v2_auth_router,
 };
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
+use secrecy::SecretString;
 use tower::ServiceExt;
 
 #[path = "support/harness.rs"]
@@ -105,22 +105,21 @@ impl OAuthProvider for StubProvider {
 /// SSO mount, parameterized on the CORS allow-list so the fail-closed
 /// case can pass an empty list.
 fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
-    let session_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let session_store = signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        &TenantId::new(TENANT).expect("tenant"),
+    );
     let authenticator = Arc::new(SessionAuthenticator::new(session_store.clone()));
 
     let oauth_mount = webui_v2_auth_router(OAuthRouterConfig::new(
         TenantId::new(TENANT).expect("tenant"),
-        session_store as Arc<dyn SessionStore>,
+        session_store,
         Arc::new(EmailUserDirectory),
         vec![StubProvider::new() as Arc<dyn OAuthProvider>],
         "https://gateway.example",
     ));
 
-    let bundle = RebornWebuiBundle {
-        api: Arc::new(StubServices::default()),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(StubServices::default());
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -129,7 +128,7 @@ fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(oauth_mount);
-    webui_v2_app(bundle, config).expect("webui v2 app")
+    webui_v2_app(product_surface, config).expect("webui v2 app")
 }
 
 fn default_origins() -> Vec<HeaderValue> {
@@ -158,7 +157,7 @@ fn login_request_from(addr: SocketAddr) -> Request<Body> {
 async fn sso_login_enforces_per_ip_rate_limit() {
     // The public SSO mount declares `RateLimitScope::PerIp` at 60 req /
     // 60s on `/auth/login/{provider}` (a different scope from the v2
-    // facade's per-caller limiter). A single IP must be cut off after
+    // service's per-caller limiter). A single IP must be cut off after
     // the budget so an unauthenticated login flood is bounded.
     //
     // Two implementation properties this test relies on, both held by

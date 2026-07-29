@@ -10,6 +10,24 @@ pub const MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY: &str = "model_credentials_unav
 /// This must not be presented as a provider balance or configured-budget outcome.
 pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
 
+/// Model-stage failures that are PERMANENT for an identical retry.
+///
+/// These four kinds previously returned no category and fell through to
+/// `host_stage_unavailable_model`, which `is_auto_retriable_category` treats as
+/// a transient outage that re-drives cleanly. None of them can succeed on an
+/// identical retry — policy does not change between attempts and a malformed
+/// request stays malformed — so the run burned retries on a call that could not
+/// work and reported a generic host outage instead of the real cause.
+///
+/// Deliberately NOT in `is_auto_retriable_category`.
+pub const MODEL_STAGE_REQUEST_INVALID_CATEGORY: &str = "model_stage_request_invalid";
+/// Model-stage call refused by policy. Permanent; see
+/// [`MODEL_STAGE_REQUEST_INVALID_CATEGORY`].
+pub const MODEL_STAGE_POLICY_DENIED_CATEGORY: &str = "model_stage_policy_denied";
+/// Model-stage call outside the granted scope — configuration-shaped, not
+/// transient. See [`MODEL_STAGE_REQUEST_INVALID_CATEGORY`].
+pub const MODEL_STAGE_SCOPE_MISMATCH_CATEGORY: &str = "model_stage_scope_mismatch";
+
 pub const HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY: &str = "host_stage_unavailable_prompt";
 pub const HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY: &str = "host_stage_unavailable_model";
 pub const HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY: &str = "host_stage_unavailable_capability";
@@ -36,5 +54,76 @@ pub(crate) fn host_stage_unavailable_category(reason: &str) -> &'static str {
         "checkpoint" => HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
         "input" => HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
         _ => HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_agent_loop::executor::HostStage;
+
+    #[test]
+    fn host_stage_unavailable_categories_cover_every_host_stage() {
+        use HostStage as S;
+
+        let stage_reason_and_category = |stage| match stage {
+            S::Prompt => ("prompt", HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY),
+            S::Model => ("model", HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY),
+            S::Capability => ("capability", HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY),
+            S::Transcript => ("transcript", HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY),
+            S::Checkpoint => ("checkpoint", HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY),
+            S::Input => ("input", HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY),
+        };
+
+        for stage in [
+            S::Prompt,
+            S::Model,
+            S::Capability,
+            S::Transcript,
+            S::Checkpoint,
+            S::Input,
+        ] {
+            let (reason_prefix, category) = stage_reason_and_category(stage);
+            let reason = format!("{reason_prefix}: unavailable");
+            assert_eq!(
+                host_stage_unavailable_category(&reason),
+                category,
+                "host stage {stage:?} must map to its unavailable category"
+            );
+        }
+    }
+
+    #[test]
+    fn host_stage_unavailable_reason_prefixes_are_classified() {
+        for (reason, expected) in [
+            (
+                "prompt: unavailable",
+                HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
+            ),
+            ("model: unavailable", HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY),
+            (
+                "capability: unavailable",
+                HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
+            ),
+            (
+                "transcript: unavailable",
+                HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
+            ),
+            (
+                "checkpoint: unavailable",
+                HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+            ),
+            ("input: unavailable", HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY),
+            (
+                "unexpected: unavailable",
+                HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+            ),
+        ] {
+            assert_eq!(
+                host_stage_unavailable_category(reason),
+                expected,
+                "{reason}"
+            );
+        }
     }
 }

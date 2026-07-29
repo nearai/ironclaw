@@ -198,6 +198,16 @@ jobs:
             exit 0
           fi
 
+          # Harness and CI-guard behaviour is tested by shell self-tests, not by
+          # cargo or pytest — scripts/test-*.sh and scripts/ci/test-*.sh are an
+          # established convention here (14 of them at time of writing). Without
+          # this, a fix to a guard script plus its new self-test reads to this
+          # check as "a bug fix with no tests", which is the opposite of true.
+          if grep -qE '^scripts/(ci/)?test-[^/]*\.sh$' <<< "$CHANGED_FILES"; then
+            echo "Shell self-test changes found under scripts/."
+            exit 0
+          fi
+
           # --- 5. No tests found ---
           if [ "$IS_FIX" = true ]; then
             echo "::warning::This PR looks like a bug fix but contains no test changes."

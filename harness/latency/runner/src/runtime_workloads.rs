@@ -112,7 +112,7 @@ async fn build_webui_runtime_context(
                     postgres_pool_size
                 )
             })?;
-            RebornBuildInput::hosted_single_tenant_postgres(
+            RebornHostBindings::hosted_single_tenant_postgres(
                 RebornCompositionProfile::HostedSingleTenant,
                 WEBUI_SESSION_RUNTIME_USER,
                 storage_root,
@@ -126,7 +126,7 @@ async fn build_webui_runtime_context(
     let tenant_id = TenantId::new(WEBUI_SESSION_TENANT)?;
     let agent_id = AgentId::new(WEBUI_SESSION_AGENT)?;
     build_input = build_input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
-    let runtime_input = RebornRuntimeInput::from_services(build_input)
+    let runtime_input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: WEBUI_SESSION_TENANT.to_string(),
             agent_id: WEBUI_SESSION_AGENT.to_string(),
@@ -138,14 +138,14 @@ async fn build_webui_runtime_context(
             max_total: Duration::from_secs(10),
         });
     let runtime = build_reborn_runtime(runtime_input).await?;
-    let bundle = build_webui_services(&runtime, None)?;
+    let product_surface = runtime.product_surface(None)?;
     let config = WebuiServeConfig::new(
         tenant_id,
         Arc::new(LatencyWebuiAuthenticator),
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(agent_id);
-    let router = webui_v2_app(bundle, config)?;
+    let router = webui_v2_app(product_surface, config)?;
     Ok(WebuiRuntimeContext {
         router,
         _runtime: runtime,

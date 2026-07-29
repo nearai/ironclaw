@@ -23,6 +23,12 @@
   --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
   --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
     monospace;
+  /* Semantic type scale for shared controls (upstream `text-ui*`
+     utilities), resolved through the canonical type tokens so the
+     values can't fork. Viewport-independent by design. */
+  --text-ui-sm: var(--v2-font-size-caption);
+  --text-ui: var(--v2-font-size-body-sm);
+  --text-ui-lg: var(--v2-font-size-body-lg);
   --color-iron-950: var(--v2-canvas-strong);
   --color-iron-900: var(--v2-surface);
   --color-iron-800: var(--v2-surface-soft);

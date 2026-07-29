@@ -155,6 +155,7 @@ fn trigger_record(
         name: format!("latency trigger {sample}"),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *")?,
+        delivery_target: None,
         prompt: "run the deterministic latency fixture".to_string(),
         state: TriggerState::Scheduled,
         next_run_at,
@@ -172,8 +173,8 @@ fn timestamp(seconds: i64) -> Result<DateTime<Utc>, Box<dyn std::error::Error + 
 }
 
 pub(super) async fn control_plane_snapshot(
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    secret_store: Arc<dyn SecretStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    secret_store: Arc<dyn SecretStorePort>,
     resource_governor: Arc<dyn ResourceGovernor>,
     backend: BackendName,
     postgres_pool_size: Option<usize>,
@@ -635,6 +636,7 @@ fn turn_lifecycle_submit_request(
         source_binding_ref: SourceBindingRef::new(format!("source-{lane}-{key}"))?,
         reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-{lane}-{key}"))?,
         requested_run_profile: Some(RunProfileRequest::new("default")?),
+        requested_model: None,
         idempotency_key: IdempotencyKey::new(format!("idem-{lane}-{key}"))?,
         received_at: Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap(),
         requested_run_id: None,

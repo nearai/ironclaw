@@ -440,7 +440,7 @@ mod tests {
     use crate::{
         LoopMessageRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+            EphemeralInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
             LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
             LoopContextMessage, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
             LoopRuntimeContext, ResolvedRunProfile,
@@ -477,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn host_managed_prompt_port_materializes_inline_messages() {
         let context = test_context();
-        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let store = Arc::new(EphemeralInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
             context.clone(),
             Arc::new(PanicContextPort),
@@ -513,7 +513,7 @@ mod tests {
     #[tokio::test]
     async fn inline_only_zero_message_prompt_skips_context_loading() {
         let context = test_context();
-        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let store = Arc::new(EphemeralInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
             context.clone(),
             Arc::new(UnavailableContextPort),
@@ -601,7 +601,7 @@ mod tests {
             safe_summary: summary_text.to_string(),
             compaction: None,
         };
-        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let store = Arc::new(EphemeralInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
             context.clone(),
             Arc::new(StubContextPort::new(vec![identity_msg], vec![])),
@@ -654,7 +654,7 @@ mod tests {
             safe_summary: "What is the capital of France?".to_string(),
             compaction: None,
         };
-        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let store = Arc::new(EphemeralInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
             context.clone(),
             Arc::new(StubContextPort::new(vec![], vec![summary_only])),
@@ -733,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_port_attaches_runtime_context() {
         let context = test_context();
-        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let store = Arc::new(EphemeralInstructionMaterializationStore::default());
         let runtime_ctx = LoopRuntimeContext {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)

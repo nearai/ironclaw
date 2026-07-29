@@ -7,7 +7,7 @@ use crate::InboundTurnError;
 ///
 /// This stays in `ironclaw_conversations` because it is the crate that owns
 /// `InboundTurnError`. Callers keep their own local `TriggerError` wording and
-/// logging, so this module does not become a generic trusted-ingress facade.
+/// logging, so this module does not become a generic trusted-ingress service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrustedTriggerInboundFailureKind {
     RetryableBackend,

@@ -26,6 +26,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::{
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -35,12 +36,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, builtin_first_party_handlers,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -254,7 +254,7 @@ pub fn execution_context_with_network(
             network,
         )],
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new(user_id).unwrap(),
         ExtensionId::new(caller_extension_id).unwrap(),
         RuntimeKind::FirstParty,
@@ -262,7 +262,9 @@ pub fn execution_context_with_network(
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 /// Execution context granting a read-only capability (no network needed).
@@ -333,7 +335,7 @@ pub fn runtime() -> impl HostRuntime {
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .try_with_host_http_egress(network)
     .expect("real http egress wiring must succeed")
     .with_runtime_policy(network_permitted_policy())
@@ -346,9 +348,9 @@ pub async fn invoke_with_context(
     capability: &str,
     input: Value,
     context: ExecutionContext,
-) -> Result<Value, RuntimeFailureKind> {
+) -> Result<Value, FailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),

@@ -14,6 +14,19 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
     }
 
     match category {
+        // Permanent model-stage failures. Each states plainly that retrying
+        // will not help, because these previously routed through the generic
+        // host-outage summary that told the user to "retry the run" — advice
+        // that could never work for a refused or malformed request.
+        "model_stage_request_invalid" => {
+            "The model request was rejected as invalid. Retrying it unchanged will not help; the request itself needs to change."
+        }
+        "model_stage_policy_denied" => {
+            "Policy does not permit this model request. Retrying will not help; the policy or the model profile needs to change."
+        }
+        "model_stage_scope_mismatch" => {
+            "The model request fell outside the granted scope. Retrying will not help; the scope or configuration needs to change."
+        }
         "driver_not_found" => {
             "The run could not start because the configured agent runtime was unavailable."
         }
@@ -54,6 +67,9 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         }
         "model_invalid_output" => {
             "The run failed because the model returned output the runner could not use. Retry the run or choose a different model."
+        }
+        "model_stale_request" => {
+            "The run failed because the available tools changed while a model request was in flight. Retry the run."
         }
         "context_build_failed" => {
             "The run failed while building the model context. Retry the run, and contact support if it keeps happening."

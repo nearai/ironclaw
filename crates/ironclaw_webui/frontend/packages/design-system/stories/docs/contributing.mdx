@@ -16,7 +16,11 @@ decision, is `crates/ironclaw_webui/DESIGN_SYSTEM.md`.
    file gains a raw color; the baseline only goes down. `color-mix(...)`
    over `--v2-*` vars is fine. One trap: the compat shim remaps
    `text-white` to the theme ink — on an accent fill you want
-   `text-[var(--v2-on-accent)]`.
+   `text-[var(--v2-on-accent)]`. The one sanctioned exception: the token
+   catalog itself (`tokens.css`, `tokens.ts`, and the docs pages that
+   display the catalog, like Brand & token spec) restates canonical
+   values, because that's where the values are defined and documented —
+   `tokens.test.ts` pins them so the copies can't drift.
 2. **Control heights come from the density scale.** Interactive controls
    share `--v2-control-h-sm/md/lg` (28/32/36px) and the matching paddings
    so mixed rows align. Don't invent a height.

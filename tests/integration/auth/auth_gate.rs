@@ -4,9 +4,8 @@
 //!
 //! Path: scripted `github.*` call -> `FixedRuntimeCredentialAccountResolver`
 //! returns `AuthRequired` -> `BlockedAuth` (`gate:auth-` ref) -> deny+resume ->
-//! the deny short-circuit in `executor/capabilities.rs`
-//! (`state.pending_auth_resume` check) surfaces gate-declined instead of
-//! re-dispatching. Only the model is faked.
+//! the typed denied auth-resume crosses the capability port and terminalizes
+//! the parked invocation without re-dispatching. Only the model is faked.
 //!
 //! DEFERRED here, COVERED by `tests/reborn_group_journeys/` (C-JOURNEY) via
 //! `RebornIntegrationGroup::live_auth_and_approval()`: the "submit credentials
@@ -82,10 +81,7 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
              re-dispatch)",
         );
 
-    // `short_circuit_denied_resume` (capabilities.rs ~1149) persists a raw
-    // planner summary bypassing the "capability denied with " prefix, so
-    // `assert_tool_error(Denied, ..)` can't express this; use the raw-summary
-    // assertion instead.
+    // The terminal capability outcome preserves the stable denial summary.
     harness
         .assert_tool_error_summary_contains("auth gate denied by user")
         .await
@@ -144,8 +140,7 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
     let requirement = &state.credential_requirements[0];
     assert_eq!(
         requirement.provider,
-        ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github")
-            .expect("valid provider id"),
+        ironclaw_host_api::VendorId::new("github").expect("valid provider id"),
         "provider must be populated so AuthPromptView.provider is non-null"
     );
     assert_eq!(

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{ResourceScope, SecretHandle};
 use ironclaw_secrets::{
-    SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
+    SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial, SecretMetadata,
+    SecretStoreError, SecretStorePort,
 };
 
 pub(crate) struct StaticSecretStore {
@@ -17,7 +17,7 @@ impl StaticSecretStore {
 }
 
 #[async_trait]
-impl SecretStore for StaticSecretStore {
+impl SecretStorePort for StaticSecretStore {
     async fn put(
         &self,
         scope: ResourceScope,

@@ -13,20 +13,20 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{RunStateStore, RunStatus};
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::{Value, json};
 
@@ -64,12 +64,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     let input = json!({"message":"status"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            capability_id(),
-            estimate.clone(),
-            input.clone(),
-        ))
+        .invoke_capability((context, capability_id(), estimate.clone(), input.clone()))
         .await
         .unwrap();
 
@@ -113,7 +108,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
     });
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let network = RecordingNetworkHttpEgress::default();
     let network_recorder = network.requests.clone();
     let runtime = HostRuntimeServices::new(
@@ -141,7 +136,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
     stage_http_secret(&secret_store, &scope, &handle).await;
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default()
@@ -183,7 +178,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
             RuntimeHttpEgressError::Credential {
                 reason: "missing staged credential".to_string(),
             },
-            RuntimeFailureKind::Backend,
+            FailureKind::Client,
         ),
         (
             RuntimeHttpEgressError::Request {
@@ -191,7 +186,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -199,7 +194,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Network,
+            FailureKind::NetworkDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -207,7 +202,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::PolicyDenied,
+            FailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -215,7 +210,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 22,
             },
-            RuntimeFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -223,13 +218,13 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 4097,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
     ];
 
     for (error, expected_kind) in cases {
         let handle = SecretHandle::new("api-token").unwrap();
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let secret_store = Arc::new(SecretStore::ephemeral());
         let runtime = http_first_party_services(&handle)
             .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(FailingRuntimeHttpEgress { error }))
@@ -254,7 +249,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     }
 
     let handle = SecretHandle::new("api-token").unwrap();
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let runtime = http_first_party_services(&handle)
         .with_secret_store(Arc::clone(&secret_store))
         .with_trust_policy(Arc::new(first_party_trust_policy()))
@@ -272,10 +267,10 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected missing egress to fail, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Network);
+    assert_eq!(failure.kind, FailureKind::NetworkDenied);
 
     let handle = SecretHandle::new("api-token").unwrap();
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let runtime = http_first_party_services(&handle)
         .with_secret_store(Arc::clone(&secret_store))
         .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
@@ -289,14 +284,14 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected missing URL to fail, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure.kind, FailureKind::InputEncode);
 }
 
 #[tokio::test]
 async fn first_party_handler_rejects_non_string_url_input() {
     for input in [json!({"url": 123}), json!({"url": true})] {
         let handle = SecretHandle::new("api-token").unwrap();
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let secret_store = Arc::new(SecretStore::ephemeral());
         let runtime = http_first_party_services(&handle)
             .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
@@ -312,7 +307,7 @@ async fn first_party_handler_rejects_non_string_url_input() {
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("expected non-string URL to fail, got {outcome:?}");
         };
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
     }
 }
 
@@ -425,7 +420,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default().set_network_egress_bytes(100),
@@ -437,7 +432,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected failed first-party invocation, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(failure.kind, FailureKind::Backend);
     assert_eq!(governor.usage_for(&account).network_egress_bytes, 77);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
 }
@@ -470,7 +465,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let invocation_id = context.invocation_id;
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let outcome = AssertUnwindSafe(runtime.invoke_capability(RuntimeCapabilityRequest::new(
+    let outcome = AssertUnwindSafe(runtime.invoke_capability((
         context,
         capability_id(),
         ResourceEstimate::default().set_network_egress_bytes(100),
@@ -484,7 +479,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected handler panic to fail closed, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(failure.kind, FailureKind::Backend);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
@@ -519,7 +514,7 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     });
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -533,11 +528,11 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     };
     assert_eq!(failure.capability_id, capability_id());
     // A capability the model named that has no registered handler is a
-    // model-fixable request error (UndeclaredCapability -> InvalidInput ->
-    // model-visible tool error), not an infra Backend fault — it can never
-    // resolve by retrying, so it must surface to the model immediately. See the
-    // From<DispatchFailureKind> mapping in production.rs.
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    // model-fixable request error (UndeclaredCapability, model-visible), not
+    // an infra Backend fault — it can never resolve by retrying, so it must
+    // surface to the model immediately. The precise mechanism name survives
+    // 1:1 via host_api's From<DispatchFailureKind> injection.
+    assert_eq!(failure.kind, FailureKind::UndeclaredCapability);
     assert_eq!(
         failure.message.as_deref(),
         Some("the tool used an undeclared capability")
@@ -668,9 +663,9 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 service: "host".to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             capabilities: vec![CapabilityManifest {
                 id: capability_id(),
-                implements: Vec::new(),
                 description: "Reports host status".to_string(),
                 effects,
                 default_permission: PermissionMode::Allow,
@@ -679,17 +674,18 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                     "schemas/host/status.input.v1.json",
                 )
                 .unwrap(),
-                output_schema_ref: CapabilityProfileSchemaRef::new(
-                    "schemas/host/status.output.v1.json",
-                )
-                .unwrap(),
+                output_schema_ref: Some(
+                    CapabilityProfileSchemaRef::new("schemas/host/status.output.v1.json").unwrap(),
+                ),
                 prompt_doc_ref: Some(
                     CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
                 ),
                 required_host_ports: Vec::new(),
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 resource_profile: None,
+                origin_gate_matrix: None,
             }],
             hooks: Vec::new(),
         },
@@ -778,8 +774,8 @@ fn http_first_party_services(
 ) -> HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
-    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     let handler = Arc::new(HttpFirstPartyHandler {
         handle: handle.clone(),
@@ -804,7 +800,7 @@ async fn invoke_http_fixture(
     input: Value,
 ) -> RuntimeCapabilityOutcome {
     runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default()
@@ -817,7 +813,7 @@ async fn invoke_http_fixture(
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -825,7 +821,9 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {
@@ -899,7 +897,7 @@ fn test_network_policy() -> NetworkPolicy {
 }
 
 async fn stage_http_secret(
-    secret_store: &FilesystemSecretStore<InMemoryBackend>,
+    secret_store: &SecretStore<InMemoryBackend>,
     scope: &ResourceScope,
     handle: &SecretHandle,
 ) {

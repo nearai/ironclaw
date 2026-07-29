@@ -9,7 +9,7 @@
 //!   a CSRF state + PKCE verifier and redirects to the provider.
 //! - `GET  /auth/callback/{provider}` — exchange the code, resolve
 //!   the user through [`UserDirectory`], create a session via
-//!   [`SessionStore`](crate::SessionStore), and land the browser on
+//!   [`SignedTokenSessionStore`](crate::SignedTokenSessionStore), and land the browser on
 //!   the SPA with a one-time exchange ticket.
 //! - `POST /auth/session/exchange` — consume the one-time ticket and
 //!   return the bearer over same-origin JSON.
@@ -37,7 +37,7 @@ pub use config::{GitHubOAuthConfig, GoogleOAuthConfig};
 pub use error::{OAuthError, ProviderInitError};
 pub use github::GitHubProvider;
 pub use google::GoogleProvider;
-pub use ironclaw_reborn_composition::PublicRouteMount;
+pub use ironclaw_host_ingress::PublicRouteMount;
 pub use profile::OAuthUserProfile;
 pub use provider::OAuthProvider;
 pub use provider_name::{OAuthProviderName, OAuthProviderNameError};
