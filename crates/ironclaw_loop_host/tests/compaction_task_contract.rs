@@ -446,6 +446,39 @@ async fn compaction_port_rejects_injection_introduced_by_output_redaction() {
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_injection_introduced_by_output_xml_escaping() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("summarize me").await;
+    let port = fixture.port(
+        "safe before escaping: <unsafe>",
+        Arc::new(EscapedXmlInjectionScanner),
+        Arc::new(CleanLeakScanner),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("XML-escaped injection markers must fail before persistence");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.summary_artifacts.is_empty(),
+        "XML-escaped injection content must not be persisted"
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_rejects_residual_output_match_after_redaction() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("summarize me").await;
@@ -551,21 +584,75 @@ async fn compaction_port_rejects_serialized_cross_boundary_matches() {
 
 #[tokio::test]
 async fn compaction_port_rejects_private_keys_split_across_message_boundaries() {
+    for (index, label) in [
+        "RSA PRIVATE KEY",
+        "PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "DSA PRIVATE KEY",
+        "RSA\tPRIVATE\tKEY",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = CompactionFixture::new_with_thread(&format!("split-key-{index}")).await;
+        fixture
+            .append_user(&format!(
+                "before\n-----BEGIN {label}-----\nFIRST_PRIVATE_KEY_FRAGMENT"
+            ))
+            .await;
+        fixture
+            .append_user(&format!(
+                "TRAILING_PRIVATE_KEY_FRAGMENT\n-----END {label}-----\nafter"
+            ))
+            .await;
+        let inference = Arc::new(CapturingInference::new("summary"));
+        let port = fixture.port_with_inference(
+            inference.clone(),
+            Arc::new(CleanInjectionScanner),
+            Arc::new(LeakDetector::new()),
+            fixture.scope.clone(),
+        );
+
+        let error = port
+            .compact_loop_context(fixture.request(2))
+            .await
+            .expect_err("private keys spanning messages must fail closed");
+
+        assert!(
+            matches!(error, LoopCompactionError::SecurityRejected { .. }),
+            "label: {label}"
+        );
+        assert!(
+            inference.last_input().is_empty(),
+            "split {label} material must not reach inference"
+        );
+        let history = fixture
+            .threads
+            .list_thread_history(ThreadHistoryRequest {
+                scope: fixture.scope.clone(),
+                thread_id: fixture.thread_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            history.summary_artifacts.is_empty(),
+            "split {label} material must not be persisted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn compaction_port_redacts_unterminated_private_key_before_later_messages() {
     let fixture = CompactionFixture::new().await;
     fixture
         .append_user(concat!(
             "before\n",
             "-----BEGIN RSA PRIVATE KEY-----\n",
-            "FIRST_PRIVATE_KEY_FRAGMENT"
+            "TRUNCATED_PRIVATE_KEY_FRAGMENT"
         ))
         .await;
-    fixture
-        .append_user(concat!(
-            "TRAILING_PRIVATE_KEY_FRAGMENT\n",
-            "-----END RSA PRIVATE KEY-----\n",
-            "after"
-        ))
-        .await;
+    fixture.append_user("later safe context").await;
     let inference = Arc::new(CapturingInference::new("summary"));
     let port = fixture.port_with_inference(
         inference.clone(),
@@ -574,31 +661,14 @@ async fn compaction_port_rejects_private_keys_split_across_message_boundaries() 
         fixture.scope.clone(),
     );
 
-    let error = port
-        .compact_loop_context(fixture.request(2))
+    port.compact_loop_context(fixture.request(2))
         .await
-        .expect_err("private keys spanning messages must fail closed");
+        .expect("an unterminated key must redact without consuming later messages");
 
-    assert!(matches!(
-        error,
-        LoopCompactionError::SecurityRejected { .. }
-    ));
-    assert!(
-        inference.last_input().is_empty(),
-        "split private-key material must not reach inference"
-    );
-    let history = fixture
-        .threads
-        .list_thread_history(ThreadHistoryRequest {
-            scope: fixture.scope.clone(),
-            thread_id: fixture.thread_id.clone(),
-        })
-        .await
-        .unwrap();
-    assert!(
-        history.summary_artifacts.is_empty(),
-        "split private-key material must not be persisted"
-    );
+    let input = inference.last_input();
+    assert!(input.contains("[REDACTED]"));
+    assert!(input.contains("later safe context"));
+    assert!(!input.contains("TRUNCATED_PRIVATE_KEY_FRAGMENT"));
 }
 
 #[tokio::test]
@@ -1731,6 +1801,23 @@ impl InjectionScanner for SplitBoundaryInjectionScanner {
                 severity: Severity::High,
                 location: 0..content.len(),
                 description: "test cross-message injection".to_string(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+struct EscapedXmlInjectionScanner;
+
+impl InjectionScanner for EscapedXmlInjectionScanner {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning> {
+        if content.contains("&lt;unsafe&gt;") {
+            vec![InjectionWarning {
+                pattern: "escaped_xml".to_string(),
+                severity: Severity::High,
+                location: 0..content.len(),
+                description: "test XML-escaped injection".to_string(),
             }]
         } else {
             Vec::new()

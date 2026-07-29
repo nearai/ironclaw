@@ -1148,6 +1148,30 @@ mod tests {
     }
 
     #[test]
+    fn redact_all_matches_rejects_non_char_boundary_scanner_ranges() {
+        let content = "éx";
+
+        for location in [1..2, 0..1] {
+            let scan = LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "synthetic".to_string(),
+                    severity: LeakSeverity::High,
+                    action: LeakAction::Redact,
+                    location,
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: false,
+                redacted_content: None,
+            };
+
+            assert_eq!(
+                scan.redact_all_matches(content),
+                Err(LeakRedactionError::InvalidMatchRange)
+            );
+        }
+    }
+
+    #[test]
     fn redact_all_secrets_masks_sandbox_credential_placeholder_without_dropping_context() {
         // Detection of `icsbx_` placeholders is covered elsewhere; this pins
         // that *redaction* actually removes the token value from

@@ -466,12 +466,25 @@ where
                 return Err(CompactionError::LeakRedactionFailed);
             }
             let candidate = body_ranges.partition_point(|body| body.end <= location.start);
-            let contained = body_ranges
+            let Some(origin_body) = body_ranges
                 .get(candidate)
-                .is_some_and(|body| body.start <= location.start && location.end <= body.end);
-            if !contained {
+                .filter(|body| body.start <= location.start)
+            else {
                 return Err(CompactionError::LeakRedactionFailed);
+            };
+            if location.end <= origin_body.end {
+                continue;
             }
+            if is_unterminated_private_key_boundary_match(
+                &text,
+                &leak_match.pattern_name,
+                location.start,
+                location.end,
+                origin_body.end,
+            ) {
+                continue;
+            }
+            return Err(CompactionError::LeakRedactionFailed);
         }
         Ok(())
     }
@@ -869,6 +882,59 @@ fn escape_xml(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrivateKeyLabel {
+    Generic,
+    Rsa,
+    OpenSsh,
+    Ec,
+    Dsa,
+}
+
+fn is_unterminated_private_key_boundary_match(
+    content: &str,
+    pattern_name: &str,
+    match_start: usize,
+    match_end: usize,
+    origin_body_end: usize,
+) -> bool {
+    if !matches!(pattern_name, "pem_private_key" | "ssh_private_key") {
+        return false;
+    }
+    let Some(matched) = content.get(match_start..match_end) else {
+        return false;
+    };
+    let Some(begin_label) = parse_private_key_label(matched, "-----BEGIN") else {
+        return false;
+    };
+    let Some(boundary_offset) = origin_body_end.checked_sub(match_start) else {
+        return false;
+    };
+
+    !matched.match_indices("-----END").any(|(offset, _)| {
+        offset >= boundary_offset
+            && parse_private_key_label(&matched[offset..], "-----END")
+                .is_some_and(|end_label| end_label == begin_label)
+    })
+}
+
+fn parse_private_key_label(content: &str, marker: &str) -> Option<PrivateKeyLabel> {
+    let remainder = content.strip_prefix(marker)?;
+    if !remainder.chars().next()?.is_whitespace() {
+        return None;
+    }
+    let delimiter_end = remainder.find("-----")?;
+    let mut words = remainder[..delimiter_end].split_whitespace();
+    match (words.next(), words.next(), words.next(), words.next()) {
+        (Some("PRIVATE"), Some("KEY"), None, None) => Some(PrivateKeyLabel::Generic),
+        (Some("RSA"), Some("PRIVATE"), Some("KEY"), None) => Some(PrivateKeyLabel::Rsa),
+        (Some("OPENSSH"), Some("PRIVATE"), Some("KEY"), None) => Some(PrivateKeyLabel::OpenSsh),
+        (Some("EC"), Some("PRIVATE"), Some("KEY"), None) => Some(PrivateKeyLabel::Ec),
+        (Some("DSA"), Some("PRIVATE"), Some("KEY"), None) => Some(PrivateKeyLabel::Dsa),
+        _ => None,
+    }
 }
 
 fn map_inference_error(error: SystemInferenceError) -> CompactionError {
