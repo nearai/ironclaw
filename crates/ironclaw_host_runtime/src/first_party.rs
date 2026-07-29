@@ -409,6 +409,17 @@ impl FirstPartyCapabilityRegistry {
         self.handlers.insert(capability_id, handler);
     }
 
+    /// `insert_handler` for an already type-erased handler — used by callers
+    /// that receive the handler as `Arc<dyn FirstPartyCapabilityHandler>`
+    /// (e.g. the bound memory provider's tool handler from composition).
+    pub fn insert_handler_dyn(
+        &mut self,
+        capability_id: CapabilityId,
+        handler: Arc<dyn FirstPartyCapabilityHandler>,
+    ) {
+        self.handlers.insert(capability_id, handler);
+    }
+
     pub fn remove_handler(&mut self, capability_id: &CapabilityId) {
         self.handlers.remove(capability_id);
     }

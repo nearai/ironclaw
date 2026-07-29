@@ -16,6 +16,8 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod scenario_disabled_binding_offers_no_memory_tools;
+mod scenario_lifecycle_gates_host_memory_calls;
 mod scenario_memory_search_finds_seeded;
 mod scenario_memory_tree_reflects_structure;
 mod scenario_write_then_read_cross_thread;
@@ -49,6 +51,22 @@ async fn memory_group_e2e() {
     report.record(
         "memory_tree_reflects_structure",
         scenario_memory_tree_reflects_structure::run(&g).await,
+    );
+
+    // Scenario 4 (lifecycle capabilities, F3/F8): an undeclared lifecycle hook
+    // is never called across a full turn; a full declaration drives every
+    // hook. Builds its own groups (the provider + declared lifecycle are
+    // construction inputs).
+    report.record(
+        "lifecycle_gates_host_memory_calls",
+        scenario_lifecycle_gates_host_memory_calls::run().await,
+    );
+
+    // Scenario 5 (registration, Disabled shape): with no memory package
+    // registered, zero ironclaw.memory.* tools reach the model's tool list.
+    report.record(
+        "disabled_binding_offers_no_memory_tools",
+        scenario_disabled_binding_offers_no_memory_tools::run().await,
     );
 
     report.assert_all_passed();

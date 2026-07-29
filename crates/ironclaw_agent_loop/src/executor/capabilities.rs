@@ -3,9 +3,10 @@ use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, Blocked, CorrelationId, DenyReason, DependentRunResult, FailureKind,
-    INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic, ModelInputIssue, Outcome,
-    Resolution, ResultProgress, ResumeToken, Suspension, ToolVerdict,
+    ApprovalRequestId, Blocked, CapabilityRecoveryHint, CorrelationId, DenyReason,
+    DependentRunResult, FailureKind, INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic,
+    ModelInputIssue, Outcome, Resolution, ResultProgress, ResumeToken, SameCallRetryConstraint,
+    Suspension, ToolVerdict,
 };
 use ironclaw_turns::{
     LoopFailureKind, LoopGateRef, LoopResultRef,
@@ -15,7 +16,8 @@ use ironclaw_turns::{
         CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
         ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRequestBatch,
         MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
-        ObservationTrust, ToolObservationDetail, ToolObservationStatus, VisibleCapabilitySurface,
+        ObservationTrust, ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -748,15 +750,39 @@ impl CapabilityStage {
                     .unwrap_or_default();
                 let summary = CapabilityErrorSummary {
                     kind: FailureKind::PolicyDenied,
-                    safe_summary: capability_denied_summary(reason, safe_summary),
+                    safe_summary: capability_denied_summary(reason, safe_summary.clone()),
                     diagnostic_ref: None,
+                };
+                // Denials used to pass `None` here, so nothing actionable
+                // reached the model: no recovery, no retry constraint, no
+                // repairs. The reason #6781 made specific was legible only as
+                // text inside the summary. Carry it as structured recovery so
+                // the model can tell "authenticate" from "ask a human" from
+                // "this is permanently refused" (#6284 item 4).
+                let (same_call_retry, recovery_hint) =
+                    denial.reason_kind.map(deny_recovery).unwrap_or((
+                        SameCallRetryConstraint::Forbidden,
+                        CapabilityRecoveryHint::ReviseApproach,
+                    ));
+                let observation = ModelVisibleToolObservation {
+                    schema_version:
+                        ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                    status: ToolObservationStatus::Error,
+                    summary: capability_denied_observation_summary(reason),
+                    detail: ToolObservationDetail::GenericFailure {
+                        failure_kind: FailureKind::PolicyDenied,
+                        detail: denial_detail_text(&safe_summary),
+                    },
+                    artifacts: Vec::new(),
+                    recovery: Some(ToolRecoveryObservation::new(same_call_retry, recovery_hint)),
+                    trust: ObservationTrust::UntrustedToolOutput,
                 };
                 Box::pin(self.handle_capability_error(
                     ctx,
                     state,
                     call,
                     summary,
-                    None,
+                    Some(observation),
                     capability_batch,
                 ))
                 .await
@@ -1597,6 +1623,79 @@ fn capability_input_issue_from(issue: &ModelInputIssue) -> CapabilityInputIssue 
             .as_ref()
             .map(|value| value.as_str().to_string()),
     }
+}
+
+/// What the model should do about a denial, and whether re-issuing the same
+/// call could ever work.
+///
+/// Denials reached the model with `model_observation: None` — no recovery, no
+/// retry constraint, no repairs — so a denial meaning *authenticate and this
+/// succeeds* was indistinguishable from a permanent block (#6284 item 4).
+/// #6781 made the *reason* specific; this makes the reason **actionable**.
+///
+/// Exhaustive and wildcard-free: a new [`DenyReason`] cannot compile until its
+/// next move is chosen.
+fn deny_recovery(reason: DenyReason) -> (SameCallRetryConstraint, CapabilityRecoveryHint) {
+    match reason {
+        // A credential unlocks it — the same call succeeds afterwards.
+        DenyReason::UnknownSecret => (
+            SameCallRetryConstraint::Forbidden,
+            CapabilityRecoveryHint::AuthenticateThenRetry,
+        ),
+        // A human unlocks it. Worth asking; the same call may then succeed.
+        DenyReason::ApprovalDenied => (
+            SameCallRetryConstraint::Forbidden,
+            CapabilityRecoveryHint::RequestApproval,
+        ),
+        // A grant is missing. Not the model's to fix by rewording.
+        DenyReason::MissingGrant => (
+            SameCallRetryConstraint::Forbidden,
+            CapabilityRecoveryHint::RequestApproval,
+        ),
+        // Not this caller's capability; re-calling cannot succeed.
+        DenyReason::UnknownCapability => (
+            SameCallRetryConstraint::Forbidden,
+            CapabilityRecoveryHint::UseDifferentCapability,
+        ),
+        // The model named a path it can correct.
+        DenyReason::InvalidPath | DenyReason::PathOutsideMount => (
+            SameCallRetryConstraint::RequiresChangedInput,
+            CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
+        ),
+        // Capacity, not permission: waiting is the move.
+        DenyReason::BudgetDenied | DenyReason::ResourceLimitExceeded => (
+            SameCallRetryConstraint::AllowedAfterDelay,
+            CapabilityRecoveryHint::WaitThenRetry,
+        ),
+        // Permanently refused.
+        DenyReason::NetworkDenied | DenyReason::PolicyDenied => (
+            SameCallRetryConstraint::Forbidden,
+            CapabilityRecoveryHint::ReviseApproach,
+        ),
+        // A host fault, not a refusal. Nothing the model can unlock, but the
+        // same call is not forbidden on principle.
+        DenyReason::InternalInvariantViolation => (
+            SameCallRetryConstraint::NotUseful,
+            CapabilityRecoveryHint::RespectFailureConstraint,
+        ),
+    }
+}
+
+/// Fixed, host-authored one-line summary for a denial observation.
+///
+/// Deliberately not the capability's own text: the summary channel is strictly
+/// validated and a denial's `safe_summary` may degrade to a placeholder. The
+/// untrusted cause rides `detail` instead, where the lenient validator applies.
+fn capability_denied_observation_summary(reason_kind: &str) -> String {
+    format!("The capability was denied ({reason_kind}).")
+}
+
+/// The denial's own text, when there is any, for the model-visible detail
+/// channel. Empty summaries degrade to `None` rather than an empty string,
+/// which the observation validator rejects.
+fn denial_detail_text(safe_summary: &str) -> Option<String> {
+    let trimmed = safe_summary.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn deny_reason_tag(reason: DenyReason) -> &'static str {

@@ -527,7 +527,7 @@ registerPack("ja", {
   "tools.description.builtin.trace_commons.credits": "現在のユーザーの Trace Commons クレジット状態、残高、提出数、最近の説明を報告します。",
   "tools.description.builtin.trace_commons.profile_token": "ブラウザまたは手動プロフィール設定用の短期 Trace Commons プロフィール管理値を発行します。",
   "tools.description.builtin.trace_commons.profile_set": "明示的な同意後、現在のユーザーの公開 Trace Commons コミュニティプロフィールを作成または更新します。",
-  "tools.description.builtin.profile_set": "ユーザーのエージェントコンテキストに関する非公開のローカル事実（タイムゾーン、ロケール、場所）を記録します。",
+  "tools.description.ironclaw.memory.profile_set": "ユーザーのエージェントコンテキストに関する非公開のローカル事実（タイムゾーン、ロケール、場所）を記録します。",
   "tools.description.builtin.memory_search": "現在のスコープ内の Reborn 永続メモリ文書を検索します",
   "tools.description.builtin.memory_write": "現在のスコープ内の Reborn 永続メモリ文書を書き込み、追記、またはパッチします",
   "tools.description.builtin.memory_read": "現在のスコープ内の Reborn 永続メモリ文書を読み取ります",

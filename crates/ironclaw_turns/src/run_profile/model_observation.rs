@@ -1,4 +1,12 @@
-use ironclaw_host_api::{DispatchInputIssueCode, FailureKind, HostRemediation};
+// `CapabilityRecoveryHint` and `SameCallRetryConstraint` live in `host_api`
+// beside `FailureKind`, not here. Both this crate and `ironclaw_threads` (which
+// validates the persisted form) depend on `host_api` but not on each other, so
+// a home below both is the only one where the vocabulary can have a single
+// definition instead of a hand-maintained copy per crate.
+use ironclaw_host_api::{
+    CapabilityRecoveryHint, DispatchInputIssueCode, FailureKind, HostRemediation,
+    SameCallRetryConstraint,
+};
 use serde::{Deserialize, Serialize};
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -232,9 +240,52 @@ pub struct ToolRecoveryObservation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<CapabilityInputRepair>,
     pub recovery_hint: CapabilityRecoveryHint,
+    /// How long to wait before re-issuing, when the provider told us.
+    ///
+    /// [`SameCallRetryConstraint::AllowedAfterDelay`] says *wait* without
+    /// saying *how long*, so the model had to guess and the provider's own
+    /// `Retry-After` was discarded. The value lives here rather than inside the
+    /// constraint variant so the addition stays wire-compatible: the constraint
+    /// keeps serializing as a bare string, and observations persisted before
+    /// this field existed still deserialize (pinned by
+    /// `recovery_observation_without_a_delay_still_loads`).
+    ///
+    /// Only meaningful alongside `AllowedAfterDelay`; `None` means the provider
+    /// gave no hint, not "retry immediately".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl ToolRecoveryObservation {
+    /// A recovery observation carrying no repairs and no delay.
+    ///
+    /// Every construction site goes through this or [`Self::with_retry_after`],
+    /// so adding a field to the struct cannot silently leave a producer
+    /// defaulting it.
+    pub fn new(
+        same_call_retry: SameCallRetryConstraint,
+        recovery_hint: CapabilityRecoveryHint,
+    ) -> Self {
+        Self {
+            same_call_retry,
+            repairs: Vec::new(),
+            recovery_hint,
+            retry_after_ms: None,
+        }
+    }
+
+    /// Attach the provider's requested wait.
+    pub fn with_retry_after(mut self, retry_after_ms: Option<u64>) -> Self {
+        self.retry_after_ms = retry_after_ms;
+        self
+    }
+
+    /// Attach model-actionable input repairs.
+    pub fn with_repairs(mut self, repairs: Vec<CapabilityInputRepair>) -> Self {
+        self.repairs = repairs;
+        self
+    }
+
     fn validate(&self) -> Result<(), String> {
         validate_len(
             self.repairs.len(),
@@ -291,23 +342,6 @@ impl CapabilityInputRepair {
             }
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SameCallRetryConstraint {
-    Allowed,
-    AllowedAfterDelay,
-    RequiresChangedInput,
-    NotUseful,
-    Forbidden,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityRecoveryHint {
-    CorrectArgumentsBeforeRetry,
-    RespectFailureConstraint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,13 +451,15 @@ mod tests {
                 }],
             },
             artifacts: Vec::new(),
-            recovery: Some(ToolRecoveryObservation {
-                same_call_retry: SameCallRetryConstraint::RequiresChangedInput,
-                repairs: vec![CapabilityInputRepair::ProvideRequiredField {
+            recovery: Some(
+                ToolRecoveryObservation::new(
+                    SameCallRetryConstraint::RequiresChangedInput,
+                    CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
+                )
+                .with_repairs(vec![CapabilityInputRepair::ProvideRequiredField {
                     path: "file_path".to_string(),
-                }],
-                recovery_hint: CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
-            }),
+                }]),
+            ),
             trust: ObservationTrust::UntrustedToolOutput,
         };
 
@@ -551,5 +587,99 @@ mod tests {
         );
         let back: CapabilityFailureDetail = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back, detail);
+    }
+
+    /// The conformance rule for #6284 item 4: **no failure may reach the model
+    /// without naming what to do about it**.
+    ///
+    /// Before this, `CapabilityRecoveryHint` had two variants and one was a
+    /// constant — 18 of 19 kinds got `RespectFailureConstraint`, which names no
+    /// action. This pins that only kinds that are genuinely unclassifiable, or
+    /// whose cause is opaque to the host, may answer that way. Every other kind
+    /// must name a move.
+    ///
+    /// If this fails after adding a kind, give it a real hint in
+    /// `for_failure_kind` rather than widening this list.
+    #[test]
+    fn only_genuinely_unclassifiable_failures_may_decline_to_name_an_action() {
+        // Opaque by nature: the extension broke, the operation genuinely
+        // failed, or the run was stopped. No specific action follows.
+        let may_defer = [
+            FailureKind::OperationFailed,
+            FailureKind::Guest,
+            FailureKind::ExitFailure,
+            FailureKind::Memory,
+            FailureKind::Client,
+            FailureKind::Executor,
+            FailureKind::Cancelled,
+            FailureKind::Unclassified,
+        ];
+        for kind in FailureKind::ALL {
+            let hint = CapabilityRecoveryHint::for_failure_kind(*kind);
+            if may_defer.contains(kind) {
+                continue;
+            }
+            assert!(
+                hint.names_an_action(),
+                "{} reaches the model with no action to take; give it a hint in \
+                 for_failure_kind",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// Guard against the hint collapsing back into one answer. If every kind
+    /// maps to the same value again, the vocabulary is decorative.
+    #[test]
+    fn recovery_hints_stay_distinguishable_across_kinds() {
+        let distinct: std::collections::HashSet<CapabilityRecoveryHint> = FailureKind::ALL
+            .iter()
+            .map(|kind| CapabilityRecoveryHint::for_failure_kind(*kind))
+            .collect();
+        assert!(
+            distinct.len() >= 6,
+            "recovery hints collapsed to {} distinct values; the model cannot \
+             tell an auth prompt from a setup step from a permanent refusal",
+            distinct.len()
+        );
+    }
+
+    /// The delay payload is additive: observations persisted before
+    /// `retry_after_ms` existed must still load. (LLM data is never deleted —
+    /// stored observations outlive the schema that wrote them.)
+    #[test]
+    fn recovery_observation_without_a_delay_still_loads() {
+        let legacy = serde_json::json!({
+            "same_call_retry": "allowed_after_delay",
+            "recovery_hint": "respect_failure_constraint"
+        });
+        let observation: ToolRecoveryObservation =
+            serde_json::from_value(legacy).expect("pre-retry_after_ms observation deserializes");
+        assert_eq!(observation.retry_after_ms, None);
+        assert_eq!(
+            observation.same_call_retry,
+            SameCallRetryConstraint::AllowedAfterDelay
+        );
+
+        // And the constraint itself still serializes as a bare string, so a
+        // new writer stays readable by an old reader.
+        assert_eq!(
+            serde_json::to_value(SameCallRetryConstraint::AllowedAfterDelay).expect("serialize"),
+            serde_json::json!("allowed_after_delay")
+        );
+    }
+
+    /// A provider-supplied wait survives the round trip.
+    #[test]
+    fn recovery_observation_carries_the_providers_requested_wait() {
+        let observation = ToolRecoveryObservation::new(
+            SameCallRetryConstraint::AllowedAfterDelay,
+            CapabilityRecoveryHint::WaitThenRetry,
+        )
+        .with_retry_after(Some(30_000));
+        let value = serde_json::to_value(&observation).expect("serialize");
+        assert_eq!(value["retry_after_ms"], serde_json::json!(30_000));
+        let back: ToolRecoveryObservation = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, observation);
     }
 }

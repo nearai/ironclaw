@@ -4,7 +4,7 @@
 //! [`ironclaw_memory::MemoryService`] contract (the first being
 //! `ironclaw_memory_native`). It proves the Reborn memory layer (issue #3537 /
 //! #5264) is genuinely swappable: it slots in behind the same
-//! `memory.document_store.v1` capability-profile binding the native provider
+//! compose-time `[memory]` binding the native provider
 //! uses, resolved by `ironclaw_host_runtime`'s `MemoryServiceResolver` and
 //! constructed by the composition-layer provider factory.
 //!
@@ -37,7 +37,7 @@
 //! unless a deployment both binds it AND supplies a base URL (via config or the
 //! `MEMORY_MEM0_BASE_URL` env override); a bound-but-unset mem0 fails closed. No
 //! API key is required for a server running with `AUTH_DISABLED=true`. Every add
-//! sets `infer=false` so content is stored verbatim (document-store semantics),
+//! sets `infer=false` so content is stored verbatim (document-tool semantics),
 //! needing only the embedder. The hosted cloud's `/v1/memories/…` paths and
 //! bearer key are *not* used. The endpoint
 //! paths and request shaping are isolated to a handful of constants and helpers
@@ -58,7 +58,7 @@ mod transport;
 mod url_check;
 
 /// Reserved extension id under which a deployment binds the mem0 provider to the
-/// `memory.document_store.v1` profile (third-party; in production-shaped
+/// compose-time memory binding (third-party; in production-shaped
 /// deployments this binding requires an admin override). Valid against the
 /// host-api `ExtensionId` grammar (lowercase, dot-segmented). `local` because
 /// this provider targets a self-hosted mem0 OSS server, not the hosted cloud.

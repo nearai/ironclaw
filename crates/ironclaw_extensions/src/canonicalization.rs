@@ -76,18 +76,6 @@ pub fn canonicalize_installation_rows(
                 })
                 .collect();
 
-            let health = rows
-                .iter()
-                .max_by(|left, right| {
-                    left.health()
-                        .checked_at()
-                        .cmp(&right.health().checked_at())
-                        .then_with(|| left.installation_id().cmp(right.installation_id()))
-                })
-                .map(|row| row.health().clone())
-                .ok_or_else(|| ExtensionInstallationError::InvalidInstallation {
-                    reason: "installation group unexpectedly empty".to_string(),
-                })?;
             let updated_at = rows
                 .iter()
                 .map(ExtensionInstallation::updated_at)
@@ -102,7 +90,6 @@ pub fn canonicalize_installation_rows(
                 extension_id,
                 manifest_ref,
                 credential_bindings,
-                health,
                 updated_at,
                 owner,
             })

@@ -11,6 +11,7 @@ import json
 import httpx
 import pytest
 
+from conftest import skip_if_emulate_capability_absent
 from emulate_provider import (
     github_json,
     github_headers,
@@ -261,7 +262,7 @@ async def test_emulate_google_covers_reborn_docs_contract(emulate_google_server)
             json={"title": marker},
         )
         if created.status_code == 404:
-            pytest.skip("Emulate 0.7.0 does not expose the Google Docs API")
+            skip_if_emulate_capability_absent("Emulate 0.7.0 does not expose the Google Docs API")
         created.raise_for_status()
         document_id = created.json()["documentId"]
         assert created.json()["title"] == marker
@@ -307,7 +308,7 @@ async def test_emulate_google_covers_reborn_sheets_contract(emulate_google_serve
             json={"properties": {"title": marker}},
         )
         if created.status_code == 404:
-            pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
+            skip_if_emulate_capability_absent("Emulate 0.7.0 does not expose the Google Sheets API")
         created.raise_for_status()
         spreadsheet = created.json()
         spreadsheet_id = spreadsheet["spreadsheetId"]
@@ -504,7 +505,7 @@ async def test_emulate_slack_covers_reborn_search_messages(emulate_slack_server)
             params={"query": marker, "count": 20, "sort": "timestamp"},
         )
         if response.status_code == 404:
-            pytest.skip("Emulate 0.7.0 does not expose Slack search.messages")
+            skip_if_emulate_capability_absent("Emulate 0.7.0 does not expose Slack search.messages")
         response.raise_for_status()
         body = response.json()
         assert body["ok"] is True
