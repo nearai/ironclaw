@@ -69,19 +69,69 @@ def _contains_field(value, field: str, expected: str) -> bool:
 
 
 def _event_matches_run_status(event: dict, run_id: str, status: str) -> bool:
-    data = event["data"]
-    return _contains_field(data, "run_id", run_id) and _contains_field(
-        data, "status", status
+    def contains_run_status(value) -> bool:
+        if isinstance(value, dict):
+            if value.get("run_id") == run_id and value.get("status") == status:
+                return True
+            return any(contains_run_status(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_run_status(item) for item in value)
+        return False
+
+    return contains_run_status(event["data"])
+
+
+def _normalize_projection_value(value):
+    if isinstance(value, dict):
+        return {
+            key: _normalize_projection_value(item)
+            for key, item in value.items()
+            if key != "updated_at"
+        }
+    if isinstance(value, list):
+        return [_normalize_projection_value(item) for item in value]
+    return value
+
+
+def _latest_projection_items(events: list[dict]) -> dict[tuple[str, str], str]:
+    """Reduce a projection window by each item's stable product identity."""
+    latest = {}
+    identity_fields = {
+        "text": "id",
+        "thinking": "id",
+        "capability_activity": "invocation_id",
+        "work_summary": "id",
+        "run_status": "run_id",
+        "gate": "gate_ref",
+        "skill_activation": "id",
+    }
+    for event in events:
+        for item in event["data"].get("state", {}).get("items", []):
+            assert len(item) == 1, item
+            kind, value = next(iter(item.items()))
+            identity_field = identity_fields[kind]
+            identity = value[identity_field]
+            latest[(kind, identity)] = json.dumps(
+                _normalize_projection_value(item),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+    return latest
+
+
+def _durable_cursor_position(event: dict) -> tuple[int | None, int, int | None]:
+    """Return the durable resume position, excluding volatile live cursor state."""
+    cursor = json.loads(json.loads(event["id"]))
+    runtime = cursor.get("runtime")
+    runtime_position = cursor.get("runtime_item")
+    if runtime_position is None and runtime is not None:
+        runtime_position = runtime["runtime"]
+    turn = cursor.get("turn")
+    return (
+        runtime_position,
+        cursor.get("runtime_payloads_delivered", 0),
+        None if turn is None else turn["event"],
     )
-
-
-def _sse_payload_signature(event: dict) -> str:
-    """Compare logical frames while allowing a replay cursor to be re-based."""
-    payload = dict(event["data"])
-    payload.pop("cursor", None)
-    if payload.get("type") in {"projection_snapshot", "projection_update"}:
-        payload["type"] = "projection_state"
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 async def _collect_sse_until_run_status(
@@ -396,7 +446,7 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
                 client,
                 reborn_v2_server,
                 thread_id,
-                "served Last-Event-ID replay: what is 2+2?",
+                "reborn builtin echo served-last-event-id-replay",
             )
             initial_events = await _collect_sse_until_run_status(
                 initial_stream,
@@ -409,7 +459,9 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
         assert len(initial_ids) >= 2, initial_events
         assert len(initial_ids) == len(set(initial_ids)), initial_ids
         replay_from = initial_ids[0]
-        expected_terminal_payload = _sse_payload_signature(initial_events[-1])
+        expected_items = _latest_projection_items(initial_cursor_events[1:])
+        expected_kinds = {kind for kind, _ in expected_items}
+        assert {"text", "capability_activity", "run_status"} <= expected_kinds
 
         async with sse_stream(
             reborn_v2_server,
@@ -430,9 +482,14 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
         replayed_ids = [event["id"] for event in replayed_cursor_events]
         assert len(replayed_ids) == len(set(replayed_ids)), replayed_ids
         assert replay_from not in replayed_ids
-        # Replay may compact live updates into a snapshot. The logical terminal
-        # projection must still be identical even when the frame kind changes.
-        assert _sse_payload_signature(replayed_events[-1]) == expected_terminal_payload
+        assert _durable_cursor_position(
+            replayed_cursor_events[-1]
+        ) == _durable_cursor_position(initial_cursor_events[-1])
+        # Live projection updates may compact by stable item identity during
+        # replay. Compare the complete reduced post-cursor state, not only the
+        # terminal run status: dropping intermediate durable state would omit
+        # the text or capability activity and fail this assertion.
+        assert _latest_projection_items(replayed_cursor_events) == expected_items
 
 
 async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
