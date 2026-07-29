@@ -856,6 +856,14 @@ async fn gateway_does_not_recover_truncated_textual_tool_syntax_as_a_capability_
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
+    assert_eq!(
+        error.usage,
+        Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        })
+    );
     assert!(
         capabilities.registered.lock().unwrap().is_empty(),
         "a truncated textual tool call must never reach capability registration"
@@ -2347,6 +2355,14 @@ async fn gateway_rejects_truncated_provider_responses() {
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
+    assert_eq!(
+        error.usage,
+        Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        })
+    );
 }
 
 #[tokio::test]

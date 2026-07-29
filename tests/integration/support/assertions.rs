@@ -1146,6 +1146,36 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert provider-reported token usage was durably reconciled by the
+    /// production budget accountant.
+    pub async fn assert_budget_spent_tokens(
+        &self,
+        expected_input: u64,
+        expected_output: u64,
+    ) -> HarnessResult<()> {
+        let governor = self._shared.budget_governor.as_ref().ok_or(
+            "harness was not built with budget accounting wired (call with_budget_accounting)",
+        )?;
+        let account = self
+            ._shared
+            .budget_account
+            .as_ref()
+            .ok_or("budget-accounting harness is missing its run-owner account")?;
+        let snapshot = governor
+            .account_snapshot(account)
+            .map_err(|e| format!("budget account snapshot failed: {e}"))?
+            .ok_or("budget accountant never recorded model usage")?;
+        let spent = snapshot.ledger.spent;
+        if spent.input_tokens == expected_input && spent.output_tokens == expected_output {
+            return Ok(());
+        }
+        Err(format!(
+            "expected spent tokens ({expected_input}, {expected_output}), saw ({}, {})",
+            spent.input_tokens, spent.output_tokens
+        )
+        .into())
+    }
+
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed
     /// scripted body actually surfaced back to the model as a tool result.

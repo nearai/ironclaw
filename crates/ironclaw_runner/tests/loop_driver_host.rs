@@ -1546,7 +1546,7 @@ async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
             content: "Use OPENAI_API_KEY in the environment".to_string(),
         }),
         usage: None,
-        effective_fallback_index: 0,
+        effective_fallback_index: Some(0),
     }));
     let driver = TextOnlyModelReplyDriver::default();
     assign_driver_to_fixture(&mut fixture, driver.descriptor());
@@ -10278,7 +10278,7 @@ impl RecordingGateway {
             safe_text_deltas: Vec::new(),
             safe_reasoning_deltas: Vec::new(),
             usage: None,
-            effective_fallback_index: 0,
+            effective_fallback_index: Some(0),
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
                     activity_id: ironclaw_turns::CapabilityActivityId::new(),
@@ -10308,7 +10308,7 @@ fn capability_call_response() -> HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
-        effective_fallback_index: 0,
+        effective_fallback_index: Some(0),
         output: ParentLoopOutput::CapabilityCalls(vec![
             ironclaw_turns::run_profile::CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),

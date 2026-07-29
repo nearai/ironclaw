@@ -3194,6 +3194,41 @@ async fn model_port_rejects_mismatched_fallback_route_evidence() {
 }
 
 #[tokio::test]
+async fn model_port_rejects_missing_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_without_fallback_evidence(
+        "model says hi",
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    assert_eq!(
+        error.safe_summary,
+        "model gateway returned mismatched fallback route evidence"
+    );
+}
+
+#[tokio::test]
 async fn model_port_accepts_matching_fallback_route_evidence() {
     let fixture = ThreadFixture::new().await;
     let gateway = Arc::new(RecordingGateway::reply_with_fallback(
@@ -4976,6 +5011,16 @@ impl RecordingGateway {
                 HostManagedModelResponse::assistant_reply(content.to_string())
                     .with_effective_fallback_index(fallback_index),
             ),
+        }
+    }
+
+    fn reply_without_fallback_evidence(content: &str) -> Self {
+        let mut response = HostManagedModelResponse::assistant_reply(content.to_string());
+        response.effective_fallback_index = None;
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(response),
         }
     }
 

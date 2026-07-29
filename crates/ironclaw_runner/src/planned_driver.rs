@@ -348,12 +348,9 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 };
             }
             if let Some(category) = permanent_prompt_stage_failure_category(stage, kind) {
-                let detail = detail
-                    .or_else(|| Some(safe_summary.as_str().to_string()))
-                    .map(ironclaw_loop_host::scrub_model_visible_detail);
                 return AgentLoopDriverError::Failed {
                     reason_kind: category.to_string(),
-                    detail,
+                    detail: Some(safe_summary.as_str().to_string()),
                 };
             }
             AgentLoopDriverError::Unavailable {
@@ -806,7 +803,9 @@ mod tests {
             kind: AgentLoopHostErrorKind::PolicyDenied,
             safe_summary: LoopSafeSummary::new("explicit skill is ambiguous").expect("safe"),
             reason_kind: None,
-            detail: None,
+            detail: Some(
+                "provider rejected /private/path with api_key=raw-secret-value".to_string(),
+            ),
         });
 
         assert_eq!(

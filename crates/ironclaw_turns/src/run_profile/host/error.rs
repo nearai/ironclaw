@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::LoopGateRef;
 
+use super::model::LoopModelUsage;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorKind {
@@ -153,6 +155,9 @@ pub struct AgentLoopHostError {
     /// route available for recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
     /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
     /// carries the original error text (paths, codes, schema refs) so the model
     /// can retry or explain. Secret VALUES are redacted by the producer via
@@ -171,6 +176,7 @@ impl AgentLoopHostError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -196,6 +202,11 @@ impl AgentLoopHostError {
 
     pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
         self.next_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 }

@@ -28,8 +28,8 @@ use ironclaw_resources::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
-    LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId, ModelWorkOutcome,
-    ModelWorkRequest,
+    LoopModelResponse, LoopModelUsage, LoopRunContext, ModelCallOutcome, ModelProfileId,
+    ModelWorkOutcome, ModelWorkRequest,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 use rust_decimal::Decimal;
@@ -587,7 +587,7 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
     async fn post_model_call(
         &self,
         context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        request: &LoopModelRequest,
         outcome: ModelCallOutcome<'_>,
     ) -> Result<(), LoopModelGatewayError> {
         let entry = match self.in_flight.get(&context.run_id) {
@@ -609,7 +609,22 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                 );
                 PendingAccounting::Reconcile(usage)
             }
-            ModelCallOutcome::Failure(_) => PendingAccounting::Release,
+            ModelCallOutcome::Failure(error) => match error.usage {
+                Some(usage) => {
+                    let effective_model = request
+                        .model_preference
+                        .as_ref()
+                        .unwrap_or(&context.resolved_run_profile.model_profile_id);
+                    PendingAccounting::Reconcile(usage_for_reported_usage(
+                        usage,
+                        0,
+                        self.cost_table.as_ref(),
+                        effective_model,
+                        &self.default_cost,
+                    ))
+                }
+                None => PendingAccounting::Release,
+            },
         };
         let Some(entry) = self.mark_pending(context, pending) else {
             return Ok(());
@@ -693,26 +708,42 @@ fn usage_for_response(
         .map(|chunk| chunk.safe_text_delta.len() as u64)
         .sum();
     if let Some(usage) = response.usage {
-        let cost = cost_table
-            .cost_for(effective_model)
-            .unwrap_or(*default_cost);
-        let actual_usd = Decimal::from(usage.input_tokens) * cost.input_per_token
-            + Decimal::from(usage.output_tokens) * cost.output_per_token;
-        return ResourceUsage {
-            usd: actual_usd,
-            input_tokens: u64::from(usage.input_tokens),
-            output_tokens: u64::from(usage.output_tokens),
-            wall_clock_ms: 0,
+        return usage_for_reported_usage(
+            usage,
             output_bytes,
-            network_egress_bytes: 0,
-            process_count: 0,
-        };
+            cost_table,
+            effective_model,
+            default_cost,
+        );
     }
     let chunks = response.chunks.len() as u64;
     ResourceUsage {
         usd: estimate.usd.unwrap_or(Decimal::ZERO),
         input_tokens: estimate.input_tokens.unwrap_or(0),
         output_tokens: chunks,
+        wall_clock_ms: 0,
+        output_bytes,
+        network_egress_bytes: 0,
+        process_count: 0,
+    }
+}
+
+fn usage_for_reported_usage(
+    usage: LoopModelUsage,
+    output_bytes: u64,
+    cost_table: &dyn ModelCostTable,
+    effective_model: &ModelProfileId,
+    default_cost: &ModelCost,
+) -> ResourceUsage {
+    let cost = cost_table
+        .cost_for(effective_model)
+        .unwrap_or(*default_cost);
+    let actual_usd = Decimal::from(usage.input_tokens) * cost.input_per_token
+        + Decimal::from(usage.output_tokens) * cost.output_per_token;
+    ResourceUsage {
+        usd: actual_usd,
+        input_tokens: u64::from(usage.input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
         wall_clock_ms: 0,
         output_bytes,
         network_egress_bytes: 0,
@@ -1327,6 +1358,52 @@ mod tests {
         );
         assert_eq!(snapshot.ledger.spent.input_tokens, 7);
         assert_eq!(snapshot.ledger.spent.output_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn post_model_call_reconciles_provider_usage_when_call_fails() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let context = run_context();
+        let user_account = ResourceAccount::user(
+            context.scope.tenant_id.clone(),
+            UserId::new("acct-user").unwrap(),
+        );
+        governor
+            .set_limit(
+                user_account.clone(),
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10_000.00))
+                    .set_period(BudgetPeriod::Rolling24h),
+            )
+            .unwrap();
+        let cost = ModelCost {
+            input_per_token: dec!(0.01),
+            output_per_token: dec!(0.10),
+            max_output_tokens: 1024,
+        };
+        let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(CostStub(cost)));
+        let request = sample_request();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let failure = LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::OutputTruncated,
+            "model response was truncated",
+        )
+        .unwrap()
+        .with_usage(LoopModelUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..Default::default()
+        });
+
+        accountant
+            .post_model_call(&context, &request, ModelCallOutcome::Failure(&failure))
+            .await
+            .unwrap();
+
+        let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
+        assert_eq!(snapshot.ledger.spent.usd, dec!(0.81));
+        assert_eq!(snapshot.ledger.spent.input_tokens, 11);
+        assert_eq!(snapshot.ledger.spent.output_tokens, 7);
     }
 
     #[tokio::test]

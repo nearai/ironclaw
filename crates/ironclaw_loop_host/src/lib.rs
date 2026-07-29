@@ -1275,7 +1275,7 @@ where
                     usage,
                     effective_fallback_index,
                 } = response;
-                if effective_fallback_index != request.fallback_index {
+                if effective_fallback_index != Some(request.fallback_index) {
                     Err(AgentLoopHostError::new(
                         AgentLoopHostErrorKind::Internal,
                         "model gateway returned mismatched fallback route evidence",
@@ -1818,8 +1818,8 @@ pub struct HostManagedModelResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<LoopModelUsage>,
     /// Authoritative ordered-chain index used for this successful call.
-    #[serde(default)]
-    pub effective_fallback_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_fallback_index: Option<u32>,
 }
 
 impl HostManagedModelResponse {
@@ -1833,7 +1833,7 @@ impl HostManagedModelResponse {
                 content: sanitized_content,
             }),
             usage: None,
-            effective_fallback_index: 0,
+            effective_fallback_index: Some(0),
         }
     }
 
@@ -1860,7 +1860,7 @@ impl HostManagedModelResponse {
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
-            effective_fallback_index: 0,
+            effective_fallback_index: Some(0),
         }
     }
 
@@ -1882,7 +1882,7 @@ impl HostManagedModelResponse {
     }
 
     pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
-        self.effective_fallback_index = fallback_index;
+        self.effective_fallback_index = Some(fallback_index);
         self
     }
 }
@@ -1948,6 +1948,8 @@ pub struct HostManagedModelError {
     /// Deterministic evidence that the provider chain has another configured
     /// route. Recovery may advance only when this is present.
     pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    pub usage: Option<LoopModelUsage>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -1966,6 +1968,7 @@ impl HostManagedModelError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -1978,6 +1981,7 @@ impl HostManagedModelError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -2023,6 +2027,11 @@ impl HostManagedModelError {
 
     pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
         self.next_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 }
@@ -2353,6 +2362,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(next_fallback_index) = error.next_fallback_index {
         host_error = host_error.with_next_fallback_index(next_fallback_index);
     }
+    if let Some(usage) = error.usage {
+        host_error = host_error.with_usage(usage);
+    }
     // `error.detail` is already producer-scrubbed; fall back to the scrubbed
     // rejected summary only when there is no structured detail.
     if let Some(detail) = error.detail.or(rejected_summary_detail) {
@@ -2428,6 +2440,40 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    #[test]
+    fn missing_model_route_evidence_stays_explicit_after_deserialization() {
+        let response = HostManagedModelResponse::assistant_reply("ok");
+        let mut serialized = serde_json::to_value(response).expect("response serializes");
+        serialized
+            .as_object_mut()
+            .expect("response is an object")
+            .remove("effective_fallback_index");
+
+        let decoded: HostManagedModelResponse =
+            serde_json::from_value(serialized).expect("legacy response shape deserializes");
+
+        assert_eq!(decoded.effective_fallback_index, None);
+    }
+
+    #[test]
+    fn failed_model_usage_survives_host_error_mapping() {
+        let usage = LoopModelUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..Default::default()
+        };
+
+        let mapped = model_gateway_error(
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::OutputTruncated,
+                "model response was truncated before completion",
+            )
+            .with_usage(usage),
+        );
+
+        assert_eq!(mapped.usage, Some(usage));
+    }
 
     #[test]
     fn typed_provider_errors_reach_distinct_loop_recovery_classes_with_retry_payload() {

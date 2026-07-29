@@ -192,6 +192,7 @@ async fn invalid_output_recovers_with_model_visible_observation() {
 async fn output_truncation_recovers_without_shrinking_input_context() {
     let harness = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
+        .with_budget_accounting()
         .output_truncated_model_times(1)
         .script([RebornScriptedReply::text(
             "concise complete answer after truncation",
@@ -234,4 +235,8 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
         .assert_egress_count(0)
         .await
         .expect("a truncated textual tool call must never reach HTTP egress");
+    harness
+        .assert_budget_spent_tokens(11, 7)
+        .await
+        .expect("truncated provider usage must still be durably charged");
 }

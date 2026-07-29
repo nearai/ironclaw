@@ -1815,7 +1815,13 @@ async fn tool_response_to_host(
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::OutputTruncated,
             "model response was truncated before completion",
-        )),
+        )
+        .with_usage(LoopModelUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+        })),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
@@ -2143,7 +2149,8 @@ fn response_to_host_reply(
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::OutputTruncated,
             "model response was truncated before completion",
-        )),
+        )
+        .with_usage(usage)),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
