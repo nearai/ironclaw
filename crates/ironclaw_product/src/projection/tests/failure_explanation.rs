@@ -1,13 +1,13 @@
 use super::*;
 use ironclaw_runner::failure_categories::{
-    BUDGET_ACCOUNTING_FAILED_CATEGORY, HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY, HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY, HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY, HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, MODEL_STAGE_POLICY_DENIED_CATEGORY,
-    MODEL_STAGE_REQUEST_INVALID_CATEGORY, MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
-    TRANSCRIPT_WRITE_FAILED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 use ironclaw_turns::LoopFailureKind;
 
@@ -142,7 +142,7 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
         ),
         (
             LoopFailureKind::CheckpointRejected.as_str(),
-            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run.",
+            "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
         (
             LoopFailureKind::CheckpointUnavailable.as_str(),
@@ -218,6 +218,10 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         (
             TRANSCRIPT_WRITE_FAILED_CATEGORY,
             "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        ),
+        (
+            CHECKPOINT_REJECTED_CATEGORY,
+            "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
         (
             HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
@@ -366,7 +370,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
         ),
         (
             "checkpoint_rejected",
-            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run.",
+            "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
         (
             "transcript_write_failed",
@@ -701,6 +705,51 @@ async fn product_event_stream_pins_transcript_failure_before_explainer() {
         })),
     )
     .await;
+}
+
+#[tokio::test]
+async fn product_event_stream_projects_checkpoint_rejection_without_model_explainer() {
+    const FALLBACK: &str = "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+    const VALID_DETAIL: &str = "The host rejected the pre-model checkpoint because checkpoint state write conflicted with current turn state. No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    for (thread_id, detail, expected_summary) in [
+        (
+            "webui-events-checkpoint-rejected-detail-thread",
+            Some(VALID_DETAIL),
+            VALID_DETAIL,
+        ),
+        (
+            "webui-events-checkpoint-rejected-legacy-thread",
+            None,
+            FALLBACK,
+        ),
+        (
+            "webui-events-checkpoint-rejected-malformed-thread",
+            Some(
+                "The host rejected the pre-model checkpoint because {raw checkpoint payload}. No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
+            ),
+            FALLBACK,
+        ),
+    ] {
+        assert_failed_run_status_summary_for_event(
+            thread_id,
+            CHECKPOINT_REJECTED_CATEGORY,
+            detail,
+            expected_summary,
+            Some(Arc::new(CountingFailureExplainer {
+                explanation: "SENTINEL model explanation must not be used".to_string(),
+                calls: Arc::clone(&calls),
+            })),
+        )
+        .await;
+    }
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "checkpoint rejection is a host-authored exception; projection must not call a model"
+    );
 }
 
 #[tokio::test]

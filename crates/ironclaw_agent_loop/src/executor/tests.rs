@@ -4007,9 +4007,10 @@ async fn retry_transition_checkpoint_failure_stops_before_second_model_call() {
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::CheckpointFailed {
-            stage: CheckpointKind::BeforeModel
-        }
+        AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::BeforeModel,
+            safe_summary,
+        } if safe_summary.as_str() == "scripted checkpoint failure"
     ));
     assert_eq!(host.model_requests().len(), 1);
 }
@@ -5010,8 +5011,12 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
 
     assert_eq!(
         error,
-        AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Capability
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Transcript,
+            kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+            safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+            reason_kind: None,
+            detail: None,
         }
     );
     assert!(host.appended_result_refs().is_empty());

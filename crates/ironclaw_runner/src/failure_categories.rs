@@ -16,6 +16,12 @@ pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
 /// Failure category for assistant output that could not be durably committed.
 pub const TRANSCRIPT_WRITE_FAILED_CATEGORY: &str = "transcript_write_failed";
 
+/// A deterministic checkpoint validation rejection.
+///
+/// The rejected state is never used to run a model or capability. The
+/// independent turn lifecycle journal records the terminal explanation.
+pub const CHECKPOINT_REJECTED_CATEGORY: &str = "checkpoint_rejected";
+
 /// Model-stage failures that are PERMANENT for an identical retry.
 ///
 /// These four kinds previously returned no category and fell through to

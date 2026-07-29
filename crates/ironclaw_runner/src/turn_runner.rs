@@ -15,9 +15,9 @@ use tracing::{debug, error};
 use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
 use crate::failure_categories::{
-    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
-    TRANSCRIPT_WRITE_FAILED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -56,6 +56,7 @@ pub(crate) fn sanitized_driver_failure(
             | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
             | TRANSCRIPT_WRITE_FAILED_CATEGORY
+            | CHECKPOINT_REJECTED_CATEGORY
             | "model_context_overflow"
             | "model_output_truncated"
             | "interrupted_unexpectedly"
@@ -128,7 +129,8 @@ impl std::error::Error for HostFactoryError {}
 mod tests {
     use super::sanitized_driver_failure;
     use crate::failure_categories::{
-        BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+        BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+        MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     };
 
     #[test]
@@ -205,6 +207,16 @@ mod tests {
             crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
         );
         assert_eq!(failure.detail(), Some("assistant transcript write failed"));
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_checkpoint_rejection_and_explanation() {
+        let detail = "host-authored checkpoint rejection explanation";
+        let failure = sanitized_driver_failure(CHECKPOINT_REJECTED_CATEGORY, Some(detail))
+            .expect("checkpoint rejection category is valid");
+
+        assert_eq!(failure.category(), CHECKPOINT_REJECTED_CATEGORY);
+        assert_eq!(failure.detail(), Some(detail));
     }
 
     #[test]

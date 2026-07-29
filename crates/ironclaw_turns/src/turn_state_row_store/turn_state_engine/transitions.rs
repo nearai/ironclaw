@@ -388,6 +388,11 @@ impl Inner {
                     run_id: request.run_id,
                 });
             }
+            if self.failure_prohibits_retry(failed) {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            }
             let source_checkpoint = match failed.checkpoint_id {
                 Some(source_checkpoint_id) => {
                     let Some(source_checkpoint) =
@@ -1087,8 +1092,21 @@ impl Inner {
     }
 
     pub(super) fn failed_run_retryable(&self, record: &RunRecord) -> bool {
+        if self.failure_prohibits_retry(record) {
+            // A checkpoint rejection is deterministic for the proposed state.
+            // The private staged payload is not a committed resume point, and
+            // re-driving the same run from input would blindly repeat the
+            // rejected persistence operation. Remediation starts a new run.
+            return false;
+        }
         record.checkpoint_id.is_some()
             || !self.run_has_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
+    }
+
+    fn failure_prohibits_retry(&self, record: &RunRecord) -> bool {
+        record.failure.as_ref().is_some_and(|failure| {
+            failure.category() == crate::LoopFailureKind::CheckpointRejected.as_str()
+        })
     }
 
     fn latest_resumable_loop_checkpoint(

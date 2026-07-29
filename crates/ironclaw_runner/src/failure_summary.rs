@@ -1,9 +1,58 @@
 use crate::failure_categories::{
-    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
-    TRANSCRIPT_WRITE_FAILED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
-use ironclaw_turns::ModelInvalidOutputDetailReason;
+use ironclaw_agent_loop::state::CheckpointKind;
+use ironclaw_turns::{ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary};
+
+const CHECKPOINT_REJECTION_PREFIX: &str = "The host rejected the ";
+const CHECKPOINT_REJECTION_CAUSE_SEPARATOR: &str = " checkpoint because ";
+const CHECKPOINT_REJECTION_REMEDIATION: &str = ". No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+const CHECKPOINT_REJECTION_FALLBACK: &str = "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+
+pub(crate) fn checkpoint_rejection_host_explanation(
+    stage: CheckpointKind,
+    cause: &LoopSafeSummary,
+) -> String {
+    format!(
+        "{CHECKPOINT_REJECTION_PREFIX}{}{CHECKPOINT_REJECTION_CAUSE_SEPARATOR}{}{CHECKPOINT_REJECTION_REMEDIATION}",
+        checkpoint_stage_name(stage),
+        cause.as_str(),
+    )
+}
+
+/// Revalidate a durable checkpoint-rejection explanation before projecting it.
+///
+/// Persisted failure detail is intentionally generic for compatibility. This
+/// parser accepts only the exact host-authored envelope produced above, with a
+/// closed checkpoint stage and a revalidated [`LoopSafeSummary`] cause. Legacy
+/// or malformed detail falls back to the pinned static explanation and never
+/// reaches the failure-explainer model.
+pub fn checkpoint_rejection_host_explanation_from_detail(detail: Option<&str>) -> Option<String> {
+    let detail = detail?;
+    let body = detail
+        .strip_prefix(CHECKPOINT_REJECTION_PREFIX)?
+        .strip_suffix(CHECKPOINT_REJECTION_REMEDIATION)?;
+    let (stage, cause) = body.split_once(CHECKPOINT_REJECTION_CAUSE_SEPARATOR)?;
+    if !matches!(
+        stage,
+        "pre-model" | "pre-side-effect" | "pre-block" | "final"
+    ) {
+        return None;
+    }
+    LoopSafeSummary::new(cause.to_string()).ok()?;
+    Some(detail.to_string())
+}
+
+fn checkpoint_stage_name(stage: CheckpointKind) -> &'static str {
+    match stage {
+        CheckpointKind::BeforeModel => "pre-model",
+        CheckpointKind::BeforeSideEffect => "pre-side-effect",
+        CheckpointKind::BeforeBlock => "pre-block",
+        CheckpointKind::Final => "final",
+    }
+}
 
 pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static str {
     let Some(category) = category else {
@@ -109,9 +158,7 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "invalid_model_output" => {
             "The run failed because the model returned output the runner could not use. Retry the run or choose a different model."
         }
-        "checkpoint_rejected" => {
-            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run."
-        }
+        CHECKPOINT_REJECTED_CATEGORY => CHECKPOINT_REJECTION_FALLBACK,
         "checkpoint_unavailable" => {
             "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable."
         }
@@ -253,6 +300,7 @@ pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static st
         TRANSCRIPT_WRITE_FAILED_CATEGORY => Some(
             "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
         ),
+        CHECKPOINT_REJECTED_CATEGORY => Some(CHECKPOINT_REJECTION_FALLBACK),
         _ => None,
     }
 }
@@ -264,10 +312,33 @@ fn unknown_failure_summary() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        TRANSCRIPT_WRITE_FAILED_CATEGORY, reborn_failure_summary_for_category,
+        TRANSCRIPT_WRITE_FAILED_CATEGORY, checkpoint_rejection_host_explanation,
+        checkpoint_rejection_host_explanation_from_detail, reborn_failure_summary_for_category,
         reborn_failure_summary_for_category_and_detail,
     };
-    use ironclaw_turns::ModelInvalidOutputDetailReason;
+    use ironclaw_agent_loop::state::CheckpointKind;
+    use ironclaw_host_api::{MODEL_DIAGNOSTIC_MAX_BYTES, ModelDiagnostic};
+    use ironclaw_turns::{ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary};
+
+    #[test]
+    fn checkpoint_rejection_explanation_is_bounded_and_provenance_validated() {
+        let cause = LoopSafeSummary::new("a".repeat(512)).expect("maximum safe summary");
+        let explanation =
+            checkpoint_rejection_host_explanation(CheckpointKind::BeforeModel, &cause);
+
+        assert!(explanation.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(ModelDiagnostic::new(explanation.clone()).is_ok());
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(Some(&explanation)),
+            Some(explanation)
+        );
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(Some(
+                "The host rejected the unknown checkpoint because safe cause. No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility."
+            )),
+            None
+        );
+    }
 
     #[test]
     fn reborn_failure_summary_describes_known_category() {
