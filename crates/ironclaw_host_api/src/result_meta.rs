@@ -280,6 +280,161 @@ declare_failure_kinds! {
     Cancelled => "cancelled",
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SameCallRetryConstraint {
+    Allowed,
+    AllowedAfterDelay,
+    RequiresChangedInput,
+    NotUseful,
+    Forbidden,
+}
+
+/// What the model should actually *do* about a failure.
+///
+/// Before #6284 item 4 this had two variants and one of them was a constant:
+/// every kind except `InputEncode` got [`RespectFailureConstraint`], which says
+/// only "obey the retry rule you were already given" — it names no action. A
+/// missing credential, a pending approval, an absent runtime and a permanent
+/// refusal were all told the same nothing.
+///
+/// Each variant below names a *different next move*. They are assigned beside
+/// the failure kind in a wildcard-free match ([`FailureKind::recovery_hint`]),
+/// so a new kind cannot compile until someone decides what the model should do
+/// about it.
+///
+/// [`RespectFailureConstraint`]: Self::RespectFailureConstraint
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityRecoveryHint {
+    /// The input was wrong and the model can fix it — see `repairs`.
+    CorrectArgumentsBeforeRetry,
+    /// No action names itself: obey `same_call_retry` and use judgment.
+    ///
+    /// Retained as the honest answer for genuinely unclassifiable failures.
+    /// It is no longer the default for everything else.
+    RespectFailureConstraint,
+    /// A credential is missing or was refused. Completing an auth flow for the
+    /// provider is what unlocks this call.
+    AuthenticateThenRetry,
+    /// A human can approve this. Asking is worthwhile; the same call may
+    /// succeed once approval lands.
+    RequestApproval,
+    /// The world hiccuped. Wait — see `retry_after_ms` when the provider told
+    /// us how long — and re-issue the same call.
+    WaitThenRetry,
+    /// The runtime or configuration this capability needs is absent. A setup
+    /// step outside the run must happen first; the accompanying
+    /// `HostRemediation` detail carries it when one is known.
+    CompleteSetup,
+    /// This capability is not available to this caller and re-calling it cannot
+    /// succeed. Reach the goal a different way.
+    UseDifferentCapability,
+    /// Permanently refused. Neither this call nor a variation of it will be
+    /// permitted; change the plan rather than the arguments.
+    ReviseApproach,
+}
+
+impl CapabilityRecoveryHint {
+    /// The action the model should take for a given failure kind.
+    ///
+    /// Exhaustive and wildcard-free over the closed [`FailureKind`] vocabulary
+    /// (it is deliberately not `#[non_exhaustive]`), so adding a kind refuses
+    /// to compile until its next move is chosen here — the same compile-forcing
+    /// discipline [`FailureKind::fate`] uses for the retry/terminal decision.
+    ///
+    /// `fate()` answers *what the loop does*; this answers *what the model
+    /// does*. They are deliberately separate: `Unavailable` is retried by the
+    /// host **and**, once retries are spent, tells the model to wait.
+    pub fn for_failure_kind(kind: FailureKind) -> Self {
+        match kind {
+            // A credential is the unlock.
+            FailureKind::Authorization
+            | FailureKind::AuthRequired
+            | FailureKind::SecretDenied => Self::AuthenticateThenRetry,
+
+            // A human is the unlock.
+            FailureKind::GateDeclined => Self::RequestApproval,
+
+            // The world hiccuped; the same call can succeed later.
+            FailureKind::Network
+            | FailureKind::Transient
+            | FailureKind::Unavailable
+            | FailureKind::Backend
+            | FailureKind::Internal
+            | FailureKind::Resource => Self::WaitThenRetry,
+
+            // The model wrote something it can rewrite.
+            FailureKind::InputEncode
+            | FailureKind::OutputTooLarge
+            | FailureKind::OutputDecode
+            | FailureKind::InvalidResult => Self::CorrectArgumentsBeforeRetry,
+
+            // Not available to this caller; another route is needed.
+            FailureKind::MethodMissing
+            | FailureKind::UndeclaredCapability
+            | FailureKind::UnknownCapability
+            | FailureKind::UnknownProvider
+            | FailureKind::StaleSurface => Self::UseDifferentCapability,
+
+            // Something outside the run must be installed or configured.
+            FailureKind::MissingRuntime
+            | FailureKind::MissingRuntimeBackend
+            | FailureKind::UnsupportedRunner
+            | FailureKind::RuntimeMismatch
+            | FailureKind::ExtensionRuntimeMismatch
+            | FailureKind::Manifest => Self::CompleteSetup,
+
+            // Refused, and no amount of rewording changes that.
+            FailureKind::PolicyDenied
+            | FailureKind::NetworkDenied
+            | FailureKind::FilesystemDenied => Self::ReviseApproach,
+
+            // The extension is broken or the operation genuinely failed. The
+            // model may reasonably try something else, but no specific action
+            // names itself, so it gets the constraint and its own judgment.
+            FailureKind::OperationFailed
+            | FailureKind::Guest
+            | FailureKind::ExitFailure
+            | FailureKind::Memory
+            | FailureKind::Client
+            | FailureKind::Executor
+            | FailureKind::Cancelled
+            // Unclassifiable by construction: this is the one honest use of
+            // the old blanket answer.
+            | FailureKind::Unclassified => Self::RespectFailureConstraint,
+        }
+    }
+
+    /// Every variant, for cross-crate conformance checks.
+    ///
+    /// `ironclaw_threads` re-declares this vocabulary as a JSON allowlist (the
+    /// two crates are siblings; neither can import the other), and a hint
+    /// missing from that list does not fail validation loudly — it silently
+    /// drops the entire observation. `ironclaw_loop_host` owns the test that
+    /// walks this array through the real persistence path.
+    pub const ALL: &'static [Self] = &[
+        Self::CorrectArgumentsBeforeRetry,
+        Self::RespectFailureConstraint,
+        Self::AuthenticateThenRetry,
+        Self::RequestApproval,
+        Self::WaitThenRetry,
+        Self::CompleteSetup,
+        Self::UseDifferentCapability,
+        Self::ReviseApproach,
+    ];
+
+    /// Whether this hint names a concrete next move.
+    ///
+    /// [`RespectFailureConstraint`](Self::RespectFailureConstraint) does not —
+    /// it defers to the retry constraint. The conformance test
+    /// `only_genuinely_unclassifiable_failures_may_decline_to_name_an_action`
+    /// uses this to pin the small set of kinds allowed to answer that way.
+    pub fn names_an_action(self) -> bool {
+        !matches!(self, Self::RespectFailureConstraint)
+    }
+}
+
 /// What the loop does with a [`FailureKind`] — the single fate decision,
 /// decided once beside the enum instead of re-derived per layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -1383,6 +1383,19 @@ impl RebornIntegrationHarness {
     /// No `[baseline..]` slice (unlike `captured_egress_requests`): `scripted_llm`
     /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
     /// not a group-shared recorder, so it only ever holds this thread's requests.
+    /// Every tool NAME offered to the model across the captured requests
+    /// (model-facing wire names, e.g. `ironclaw__memory__search`),
+    /// deduplicated. Same per-thread `scripted_llm` source (and the same
+    /// no-baseline rationale) as `captured_system_prompts`.
+    pub(super) fn captured_model_tool_names(&self) -> std::collections::BTreeSet<String> {
+        self.scripted_llm
+            .captured_tool_definitions()
+            .into_iter()
+            .flatten()
+            .map(|tool| tool.name)
+            .collect()
+    }
+
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()

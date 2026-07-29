@@ -15,7 +15,7 @@ const distDir = resolve(here, "..", "dist");
 const manifestPath = resolve(distDir, ".vite", "manifest.json");
 
 const LOGIN_GZIP_BUDGET = 180_000;
-const CHAT_GZIP_BUDGET = 280_000;
+const CHAT_GZIP_BUDGET = 210_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

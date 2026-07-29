@@ -2,7 +2,8 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, FailureKind, ProviderToolName,
+    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, DispatchInputIssueCode, FailureKind,
+    ProviderToolName, SameCallRetryConstraint,
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
@@ -10,15 +11,14 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInputRepair, CapabilityRecoveryHint, CapabilityResumeToken, LoopCancelReasonKind,
-        LoopCancellationSignal, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView,
-        LoopProcessRef, LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
         MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
         ObservationTrust, ParentLoopOutput, PromptMode, ProviderToolCallReplay,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        VisibleCapabilityRequest, resolution,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest, resolution,
     },
 };
 
@@ -4560,6 +4560,79 @@ async fn retry_uses_single_call_invocation() {
         assert!(matches!(exit, LoopExit::Completed(_)));
         assert_eq!(final_staged_state(&host).recovery_state, Default::default());
     }
+}
+
+/// A denial must reach the model with something it can act on.
+///
+/// Denials passed `model_observation: None`, so the model got a summary string
+/// and nothing structured — no recovery, no retry constraint, no repairs. A
+/// denial meaning *authenticate and this works* was indistinguishable from a
+/// permanent block (#6284 item 4). This drives a real denial through the
+/// executor and asserts the appended result carries a recovery observation
+/// naming the next move.
+#[tokio::test]
+async fn a_denial_tells_the_model_what_would_unlock_it() {
+    // `auth_denied` is minted by the capability port for a real authorization
+    // failure; #6781 maps it to `DenyReason::UnknownSecret`. Provider replay
+    // metadata is required for a denial to mint a result ref, so this uses the
+    // two-provider-call shape (one completed, one denied) that
+    // `denied_provider_call_appends_failure_tool_result_for_replay` uses.
+    let result_ref = LoopResultRef::new("result:denial-hint-ok").expect("valid");
+    let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![
+                resolution::completed(
+                    result_ref.clone(),
+                    "provider call completed".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    true,
+                    0,
+                    None,
+                    None,
+                ),
+                resolution::denied(
+                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::unknown("auth_denied")
+                        .expect("valid reason tag"),
+                    // Deliberately avoids the word "credential": the summary
+                    // channel's credential-marker guard would scrub it to a
+                    // placeholder, which is orthogonal to what this pins.
+                    "sign-in required for this provider".to_string(),
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 2, "completed call plus the denial");
+    let denial_result = &appended[1];
+    let observation = denial_result
+        .model_observation
+        .as_ref()
+        .expect("a denial must carry a model observation, not None");
+    let recovery = observation
+        .recovery
+        .as_ref()
+        .expect("a denial observation must carry recovery guidance");
+
+    // The specific action, not a generic "obey the constraint".
+    assert_eq!(
+        recovery.recovery_hint,
+        CapabilityRecoveryHint::AuthenticateThenRetry,
+        "a credential-missing denial must point the model at an auth flow"
+    );
+    assert!(
+        recovery.recovery_hint.names_an_action(),
+        "the denial hint must name a concrete next move"
+    );
+    assert_eq!(recovery.same_call_retry, SameCallRetryConstraint::Forbidden);
 }
 
 #[tokio::test]

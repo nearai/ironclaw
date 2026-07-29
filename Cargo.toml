@@ -99,6 +99,7 @@ toml = "1.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
 ironclaw_host_ingress = { path = "crates/ironclaw_host_ingress", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_common = { path = "crates/ironclaw_common" }
