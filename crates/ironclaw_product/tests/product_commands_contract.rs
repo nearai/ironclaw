@@ -1,11 +1,11 @@
 //! Contract tests for the Reborn-native product command model.
 
-use ironclaw_product::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
 use ironclaw_product::{
     CommandAudience, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
     LifecycleProductAction, ProductCommand, ProductModelCommand, declared_command_help_text,
     product_command_descriptors, required_audience, validate_declared_product_command,
 };
+use ironclaw_product::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
 
 #[test]
 fn command_payload_maps_to_typed_model_command_without_v1_parser() {
@@ -451,7 +451,11 @@ fn listing_audience_is_user_for_model_and_status_and_admin_for_lifecycle() {
             "model" | "status" => CommandAudience::User,
             _ => CommandAudience::Admin, // the lifecycle family
         };
-        assert_eq!(descriptor.audience, expected, "descriptor {}", descriptor.name);
+        assert_eq!(
+            descriptor.audience, expected,
+            "descriptor {}",
+            descriptor.name
+        );
     }
 }
 
@@ -468,13 +472,15 @@ fn execution_audience_is_per_action() {
         },
     ];
     for command in user_cases {
-        assert_eq!(required_audience(&command), CommandAudience::User, "{command:?}");
+        assert_eq!(
+            required_audience(&command),
+            CommandAudience::User,
+            "{command:?}"
+        );
     }
     let admin_cases = [
         ProductCommand::Model {
-            action: ProductModelCommand::Set {
-                model: "m".into(),
-            },
+            action: ProductModelCommand::Set { model: "m".into() },
         },
         ProductCommand::Model {
             action: ProductModelCommand::SetProvider {
@@ -487,6 +493,10 @@ fn execution_audience_is_per_action() {
         },
     ];
     for command in admin_cases {
-        assert_eq!(required_audience(&command), CommandAudience::Admin, "{command:?}");
+        assert_eq!(
+            required_audience(&command),
+            CommandAudience::Admin,
+            "{command:?}"
+        );
     }
 }

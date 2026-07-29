@@ -59,7 +59,7 @@ metadata, `GET/POST` WebUI command routes, and the composer slash menu.
 | 1 | Fate of #6678 | **Rebase it** onto main as the PR-2 vehicle; main's landed shapes win every conflict. |
 | 2 | Slack-native naming | **Single `/ironclaw` dispatcher** (`/ironclaw status`, `/ironclaw model set …`). Slack's command namespace is workspace-global, built-ins (`/status`) cannot be overridden, and the ecosystem convention is an app-named dispatcher (`/github …`, `/jira …`). No aliases registered; future commands need zero Slack app changes. Direct `/model` registration stays available as a purely additive later option. **Slack-only:** Telegram's command namespace is per-bot (`/status` in the bot DM is unambiguous; groups disambiguate natively with `/status@BotName`), so Telegram keeps direct commands — the dispatcher is Slack presentation, not pipeline vocabulary. |
 | 3 | Admin commands | **Role-gate now** (product decision remove-vs-gate is pending with Sergey; gating was chosen so either outcome is reachable — see Contingency). Per-**action** granularity: `/model` bare read is User; `set`/`set-provider` and the lifecycle family are Admin. |
-| 4 | Visibility | **Role-filtered everywhere**: WebUI inventory filtered by caller role; Slack natively registers only user-facing commands; channel help text lists only what the actor may run. Admission denial is the backstop — hiding is never the control. |
+| 4 | Visibility | **Role-filtered everywhere**: WebUI inventory filtered by caller role; Slack natively registers only user-facing commands; channel help text is filtered to user-audience commands (uniform for all actors; per-actor filtering is the WebUI palette's job, admission is the backstop). Admission denial is the backstop — hiding is never the control. |
 | 5 | Train order | **Gate → Palette → Slack** (PR-1 → PR-2 → PR-3, stacked). No window where the browser or a manifest exposes ungated tenant controls. |
 | 6 | WebUI results | **Ephemeral** system-notice bubble (Slack-like, #6678's shape). Explicitly ephemeral per the gateway-events rule; not a durable timeline event. Durable rendering is a future decision. |
 | 7 | Bundled manifests | Declare `["model", "status"]` (in PR-1, same PR as gating). Lifecycle commands stay undeclared on bundled channels; admins manage extensions from the WebUI. Third-party manifests may declare them; admission gates. |
@@ -132,7 +132,7 @@ admin-users role lookup; composition wires it.
 
 Fail-closed semantics:
 
-- Positive resolution of a non-admin → permanent `PolicyDenied`.
+- Positive resolution of a non-admin → permanent `AccessDenied`.
 - Resolver **error** → retryable failure notice (never silent admin
   treatment, never silent member treatment of an admin).
 - Unpaired/unknown actors never reach admission (pairing interceptor
@@ -162,11 +162,15 @@ keyed by the reused wire-stable `ProductRejectionKind::AccessDenied`.
   descriptors).
 - Workflow-caller admission matrix: member `/model` read allowed; member
   `/model set` denied with the admin notice; admin `/model set` allowed;
-  resolver error → retryable failure; direct-only preserved; help filtered
-  per role.
+  resolver error → retryable failure; direct-only preserved.
+- Observer/run-delivery contract: static command help excludes admin-audience
+  commands (uniform for every actor, not per-role — see Decision 4); the
+  `AccessDenied` rejection delivers the fixed admin-account notice without
+  leaking the internal reason.
 - Channel-host e2e at the seam: member `/model set` → denial notice delivered
-  **and** active LLM config unchanged; admin path executes and the snapshot
-  reflects the change.
+  and zero command-surface invokes recorded; admin path executes exactly one
+  `product.model.command` invoke as the bound user (both through a recording
+  `ProductSurface` double; zero turns submitted either way).
 
 ## PR-2 — WebUI command palette (the #6678 rebase)
 
@@ -296,7 +300,7 @@ Telegram is unchanged.
 ## Cross-cutting error handling
 
 - Role-resolver failures are retryable, sanitized notices; member denials are
-  permanent `PolicyDenied` with the admin-account copy; no backend strings,
+  permanent `AccessDenied` with the admin-account copy; no backend strings,
   paths, or provider details in any notice (existing
   `ProductSurfaceError` taxonomy).
 - All new rejection copy flows through the existing observer notice paths;

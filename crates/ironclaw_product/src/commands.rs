@@ -215,7 +215,9 @@ pub fn required_audience(command: &ProductCommand) -> CommandAudience {
 }
 
 fn command_spec_for_name(name: &str) -> Option<&'static ProductCommandSpec> {
-    COMMAND_SPECS.iter().find(|spec| spec.descriptor.name == name)
+    COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.descriptor.name == name)
 }
 
 fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
