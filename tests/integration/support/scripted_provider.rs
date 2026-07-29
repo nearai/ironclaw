@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
+    LlmProvider, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;
 use tokio::sync::oneshot;
@@ -275,6 +275,99 @@ impl ModelProviderCallProbe {
             .chain(&records.text_requests)
             .flatten()
             .any(|content| content.contains(needle))
+    }
+}
+
+/// Additive provider-call recorder that preserves the selected provider mode.
+///
+/// Unlike a model-mode enum variant, this decorator can wrap normal, parked,
+/// recoverable, or failing providers without making builder-call order alter
+/// the behavior under test.
+pub struct RecordingLlm {
+    inner: Arc<dyn LlmProvider>,
+    calls: ModelProviderCallProbe,
+}
+
+pub fn recording_llm(inner: Arc<dyn LlmProvider>) -> (RecordingLlm, ModelProviderCallProbe) {
+    let calls = ModelProviderCallProbe::default();
+    (
+        RecordingLlm {
+            inner,
+            calls: calls.clone(),
+        },
+        calls,
+    )
+}
+
+#[async_trait]
+impl LlmProvider for RecordingLlm {
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
+        self.inner.complete(request).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
+        self.inner.complete_streaming(request, sink).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
+        self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        self.inner.active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
     }
 }
 

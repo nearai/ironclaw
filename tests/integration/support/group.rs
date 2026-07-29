@@ -110,7 +110,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
-use super::doubles::RecordingSecurityAuditSink;
+use super::doubles::{FailingAppendFinalizedAssistantThreadService, RecordingSecurityAuditSink};
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -124,9 +124,10 @@ use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
     ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
-    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
+    SCRIPTED_MODEL_NAME, parking_trace_llm, recording_llm, recoverable_failure_trace_llm,
+    scripted_trace_llm,
 };
-use super::session_thread::{FailingFinalizedAssistantThreadService, RebornThreadHarness};
+use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
 
@@ -450,7 +451,7 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             planned_default_iteration_limit: None,
-            fail_transcript_finalize: false,
+            fail_append_finalized_assistant_message: false,
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
@@ -555,6 +556,7 @@ impl RebornIntegrationGroup {
             replies: Vec::new(),
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
+            record_model_calls: false,
             model_override: None,
         }
     }
@@ -747,7 +749,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// Test-only override for the canonical loop's default iteration limit.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Test-only runtime seam that rejects final assistant transcript writes.
-    fail_transcript_finalize: bool,
+    fail_append_finalized_assistant_message: bool,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -988,14 +990,14 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),
             );
-        let runtime_thread_service: Arc<dyn SessionThreadService> = if self.fail_transcript_finalize
-        {
-            Arc::new(FailingFinalizedAssistantThreadService::new(
-                group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
-            ))
-        } else {
-            group_thread_harness.service.clone() as Arc<dyn SessionThreadService>
-        };
+        let runtime_thread_service: Arc<dyn SessionThreadService> =
+            if self.fail_append_finalized_assistant_message {
+                Arc::new(FailingAppendFinalizedAssistantThreadService::new(
+                    group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+                ))
+            } else {
+                group_thread_harness.service.clone() as Arc<dyn SessionThreadService>
+            };
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the
@@ -1253,6 +1255,8 @@ pub struct RebornThreadBuilder<'g> {
     replies: Vec<RebornScriptedReply>,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
+    /// Additive raw-provider call recording for this thread.
+    record_model_calls: bool,
     /// C-ATTACH seam: overrides `LlmModelProfileRoute.model_override` (the same
     /// production model-pin field, `model_gateway.rs:160-162`). `None` keeps the
     /// prior behavior (scripted model id, not a vision pattern, so image parts
@@ -1294,6 +1298,11 @@ impl<'g> RebornThreadBuilder<'g> {
 
     pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
         self.model_mode = mode;
+        self
+    }
+
+    pub(crate) fn record_model_calls_for_test(mut self, record: bool) -> Self {
+        self.record_model_calls = record;
         self
     }
 
@@ -1422,6 +1431,13 @@ impl<'g> RebornThreadBuilder<'g> {
             }
             ThreadModelMode::Normal => (scripted_llm.clone(), None),
         };
+        let (raw, model_provider_call_probe) =
+            if self.record_model_calls && model_provider_call_probe.is_none() {
+                let (provider, probe) = recording_llm(raw);
+                (Arc::new(provider) as Arc<dyn LlmProvider>, Some(probe))
+            } else {
+                (raw, model_provider_call_probe)
+            };
         let session = create_session_manager(SessionConfig {
             session_path: shared
                 .turn_root

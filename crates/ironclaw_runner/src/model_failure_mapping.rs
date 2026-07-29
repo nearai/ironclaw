@@ -47,19 +47,6 @@ pub(crate) fn host_stage_failure_category(
     }
 }
 
-pub(crate) fn model_stage_failure_category(
-    is_model_stage: bool,
-    kind: AgentLoopHostErrorKind,
-    reason_kind: Option<AgentLoopHostErrorReasonKind>,
-) -> Option<&'static str> {
-    let stage = if is_model_stage {
-        HostStage::Model
-    } else {
-        HostStage::Prompt
-    };
-    host_stage_failure_category(stage, kind, reason_kind)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

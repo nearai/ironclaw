@@ -138,7 +138,7 @@ Rules:
   appended only when another model call is safe and possible, while a
   user-visible terminal explanation is host-authored from a typed failure
   category and must not imply that the failed model saw it;
-- model authorization failures do not blindly retry the same rejected route;
+- model provider authentication or credential failures do not blindly retry the same rejected route;
   when no already-authorized fallback route exists, the run fails with a
   durable credential/account remediation;
 - transcript finalization failure ends the run before another model call or

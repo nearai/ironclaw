@@ -327,13 +327,10 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 "planned driver host stage unavailable"
             );
             if let Some(category) = host_stage_failure_category(stage, kind, reason_kind) {
-                // Prefer the secret-scrubbed model-visible detail; fall back to
-                // the bounded safe summary so the explainer still gets the real
-                // cause rather than only the category. Fail-closed backstop:
-                // executor-side producers can only run the token-prefix scrub
-                // (ironclaw_agent_loop cannot depend on the hardened scrubber),
-                // so re-scrub through the full LeakDetector registry +
-                // injection fencing here, where the detail becomes visible.
+                // Model-stage details may reach the failure explainer after a
+                // hardened re-scrub. Transcript failures carry only the fixed
+                // host-authored cause; their pinned projection bypasses model
+                // inference because no further output can be committed.
                 let detail = detail
                     .or_else(|| Some(safe_summary.as_str().to_string()))
                     .map(ironclaw_loop_host::scrub_model_visible_detail);

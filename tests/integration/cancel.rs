@@ -184,6 +184,9 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
 async fn mid_turn_auth_provider_error_reaches_failed_with_credentials_category() {
     let harness = RebornIntegrationHarness::test_default()
         .fail_model_auth()
+        // Recording is additive: placing it after the failing mode must not
+        // replace the selected provider behavior.
+        .record_model_calls_for_test()
         .with_turn_event_sink()
         .build()
         .await

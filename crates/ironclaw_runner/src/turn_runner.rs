@@ -72,8 +72,9 @@ pub(crate) fn sanitized_driver_failure(
     } else {
         sanitized_failure("driver_failed")
     };
-    // Carry the secret-scrubbed model-visible detail onto the failure record so
-    // it can reach `TurnLifecycleEvent.detail` and the failure explainer.
+    // Carry the bounded detail onto the durable failure record. Model-stage
+    // details may reach the explainer; transcript failures carry only their
+    // fixed host-authored cause and bypass model inference in projection.
     base.map(|failure| match detail {
         Some(detail) => failure.with_detail(detail),
         None => failure,

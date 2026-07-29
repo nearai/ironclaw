@@ -186,7 +186,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Test-only runtime seam that rejects final assistant transcript writes.
-    fail_transcript_finalize: bool,
+    fail_append_finalized_assistant_message: bool,
+    /// Additive raw-provider call recording for terminal side-effect assertions.
+    record_model_calls: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -333,10 +335,7 @@ impl RebornIntegrationHarnessBuilder {
     /// playback. Used by terminal-path tests that need to prove no second model
     /// call happens after a non-model persistence boundary fails.
     pub fn record_model_calls_for_test(mut self) -> Self {
-        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
-            RecoverableModelFailure::InvalidOutput,
-            0,
-        ));
+        self.record_model_calls = true;
         self
     }
 
@@ -376,8 +375,8 @@ impl RebornIntegrationHarnessBuilder {
 
     /// Reject the runtime's final assistant transcript write while retaining
     /// the real scheduler, loop host, turn store, and thread read path.
-    pub fn fail_transcript_finalize_for_test(mut self) -> Self {
-        self.fail_transcript_finalize = true;
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
         self
     }
 
@@ -680,8 +679,8 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
         }
-        if self.fail_transcript_finalize {
-            group_builder = group_builder.fail_transcript_finalize_for_test();
+        if self.fail_append_finalized_assistant_message {
+            group_builder = group_builder.fail_append_finalized_assistant_message_for_test();
         }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
@@ -690,6 +689,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .model_mode(self.model_mode)
+            .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
     }
@@ -798,7 +798,8 @@ impl RebornIntegrationHarness {
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             planned_default_iteration_limit: None,
-            fail_transcript_finalize: false,
+            fail_append_finalized_assistant_message: false,
+            record_model_calls: false,
         }
     }
 

@@ -2,6 +2,7 @@
 //! and host-runtime capability harnesses. One file per substituted port.
 
 mod empty_identity_context_source;
+mod failing_append_finalized_assistant_thread_service;
 mod fixed_runtime_credential_account_resolver;
 mod github_harness_authorizer;
 mod harness_capability_port_factory;
@@ -22,6 +23,10 @@ mod static_secret_store;
 mod unavailable_project_service;
 
 pub(crate) use empty_identity_context_source::EmptyIdentityContextSource;
+#[allow(unused_imports)]
+pub(crate) use failing_append_finalized_assistant_thread_service::{
+    FailingAppendFinalizedAssistantThreadService, TRANSCRIPT_FAILURE_SECRET,
+};
 pub(crate) use fixed_runtime_credential_account_resolver::FixedRuntimeCredentialAccountResolver;
 pub(crate) use github_harness_authorizer::GithubHarnessAuthorizer;
 pub(crate) use harness_capability_port_factory::HarnessCapabilityPortFactory;

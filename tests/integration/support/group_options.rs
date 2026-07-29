@@ -182,8 +182,8 @@ impl RebornIntegrationGroupBuilder {
     /// Reject final assistant transcript writes at the runtime port while
     /// leaving the real filesystem service in place for inbound messages and
     /// read-back assertions.
-    pub fn fail_transcript_finalize_for_test(mut self) -> Self {
-        self.fail_transcript_finalize = true;
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
         self
     }
 

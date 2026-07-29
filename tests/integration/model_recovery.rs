@@ -12,9 +12,9 @@ mod support;
 
 use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::doubles::TRANSCRIPT_FAILURE_SECRET;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
-use reborn_support::session_thread::TRANSCRIPT_FAILURE_SECRET;
 
 const UNPERSISTED_ASSISTANT_REPLY: &str =
     "raw assistant transcript that must never be reported as a reply";
@@ -202,7 +202,7 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
 async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect() {
     let harness = RebornIntegrationHarness::test_default()
         .record_model_calls_for_test()
-        .fail_transcript_finalize_for_test()
+        .fail_append_finalized_assistant_message_for_test()
         .with_turn_event_sink()
         .script([RebornScriptedReply::text(UNPERSISTED_ASSISTANT_REPLY)])
         .build()
