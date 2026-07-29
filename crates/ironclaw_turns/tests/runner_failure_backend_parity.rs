@@ -34,7 +34,7 @@ async fn build_libsql_scoped() -> (
             .await
             .unwrap(),
     );
-    let root = Arc::new(LibSqlRootFilesystem::new(db));
+    let root = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     root.run_migrations().await.unwrap();
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").unwrap(),

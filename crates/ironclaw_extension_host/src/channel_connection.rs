@@ -998,6 +998,7 @@ team_id = "/team/id"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(EXTENSION).expect("extension id");
@@ -1144,6 +1145,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("pairing channel manifest parses");
         let extension_id = ExtensionId::new("pairchat").expect("extension id");

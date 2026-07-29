@@ -60,6 +60,7 @@ ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
+ironclaw_libsql_runtime = { path = "../ironclaw_libsql_runtime" }
 ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 # Memory contract + provider crates. Composition is the layer that wires the

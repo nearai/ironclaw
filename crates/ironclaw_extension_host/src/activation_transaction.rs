@@ -999,6 +999,7 @@ default_permission = "ask"
 effects = ["network"]
 "#;
         let contracts = HostApiContractRegistry::new();
+        let root = VirtualPath::new("/system/extensions/hosted").expect("package root");
         let manifest = ExtensionManifestRecord::from_toml(
             raw_manifest,
             ManifestSource::HostBundled,
@@ -1008,6 +1009,7 @@ effects = ["network"]
             .expect("host port catalog"),
             None,
             &contracts,
+            Some(root.clone()),
         )
         .expect("manifest record");
         let package_manifest: ExtensionManifest = manifest
@@ -1015,12 +1017,8 @@ effects = ["network"]
             .clone()
             .try_into()
             .expect("package manifest");
-        let package = ExtensionPackage::from_manifest_toml(
-            package_manifest,
-            VirtualPath::new("/system/extensions/hosted").expect("package root"),
-            raw_manifest,
-        )
-        .expect("package");
+        let package = ExtensionPackage::from_manifest_toml(package_manifest, root, raw_manifest)
+            .expect("package");
         (package, manifest)
     }
 

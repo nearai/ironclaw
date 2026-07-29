@@ -3826,6 +3826,7 @@ dependencies = [
  "deadpool",
  "deadpool-postgres",
  "ironclaw_host_api",
+ "ironclaw_libsql_runtime",
  "ironclaw_observability",
  "ironclaw_safety",
  "libsql",
@@ -3961,6 +3962,7 @@ dependencies = [
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_common",
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extensions",
@@ -4017,6 +4019,18 @@ dependencies = [
  "x509-parser",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "ironclaw_libsql_runtime"
+version = "0.1.0"
+dependencies = [
+ "deadpool",
+ "libsql",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4384,6 +4398,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_ingress",
  "ironclaw_host_runtime",
+ "ironclaw_libsql_runtime",
  "ironclaw_llm",
  "ironclaw_loop_host",
  "ironclaw_mcp",
@@ -4934,7 +4949,9 @@ dependencies = [
  "deadpool-postgres",
  "hex",
  "ironclaw_common",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_libsql_runtime",
  "ironclaw_turns",
  "libsql",
  "serde",

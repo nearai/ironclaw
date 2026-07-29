@@ -23,6 +23,11 @@ hex = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+# `sandbox_process::connect` reads the `IRONCLAW_REBORN_DOCKER_HOST` override
+# through `ironclaw_common::env_helpers::env_or_override`, so the retry path
+# honors the same runtime-override precedence the rest of Reborn uses instead
+# of a second, bare `std::env::var` lookup.
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_process_sandbox = { path = "../ironclaw_process_sandbox" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }

@@ -2,9 +2,9 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ironclaw_filesystem::{
@@ -36,16 +36,36 @@ use super::{
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
 const DELTA_JOURNAL_FLUSH_COALESCE_DELAY: Duration = Duration::from_micros(500);
 const DELTA_JOURNAL_MATERIALIZE_IDLE_DELAY: Duration = Duration::from_millis(25);
+const DELTA_JOURNAL_CONTENTION_BACKOFF_BASE: Duration = Duration::from_millis(25);
+const DELTA_JOURNAL_CONTENTION_BACKOFF_MAX: Duration = Duration::from_secs(1);
 const MATERIALIZED_ROW_CAS_RETRIES: usize = 16;
 
 pub(super) type DeltaAck = oneshot::Receiver<Result<(), TurnError>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum DeltaJournalHealth {
+    Healthy = 0,
+    RecoveringContention = 1,
+    FailedFatal = 2,
+}
+
+impl DeltaJournalHealth {
+    fn load(health: &AtomicU8) -> Self {
+        match health.load(Ordering::SeqCst) {
+            0 => Self::Healthy,
+            1 => Self::RecoveringContention,
+            _ => Self::FailedFatal,
+        }
+    }
+}
+
 pub(super) struct DeltaJournal {
     sender: mpsc::UnboundedSender<DeltaJournalRequest>,
-    /// Latched `true` by the flusher when a write-behind append fails. The row
-    /// store checks this at mutation entry to fail fast and to reload its hot
-    /// cache from the last consistent durable point.
-    degraded: Arc<AtomicBool>,
+    /// Process-local health of the ordered durable pipeline. Retryable
+    /// contention retains the exact batch and may recover; fatal failures
+    /// permanently stop this journal generation.
+    health: Arc<AtomicU8>,
     /// Background task handles, aborted on drop so a "crashed" (dropped) store
     /// cannot keep appending queued write-behind deltas to a shared backend
     /// after the crash point.
@@ -79,7 +99,7 @@ impl DeltaJournal {
     {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (materialize_sender, materialize_receiver) = mpsc::unbounded_channel();
-        let degraded = Arc::new(AtomicBool::new(false));
+        let health = Arc::new(AtomicU8::new(DeltaJournalHealth::Healthy as u8));
         let materializer = tokio::spawn(run_delta_journal_materializer(
             Arc::clone(&filesystem),
             materialize_gate,
@@ -89,20 +109,18 @@ impl DeltaJournal {
             filesystem,
             receiver,
             materialize_sender,
-            Arc::clone(&degraded),
+            Arc::clone(&health),
         ));
         Self {
             sender,
-            degraded,
+            health,
             flusher,
             materializer,
         }
     }
 
-    /// Whether the flusher has halted the durable sequence after a write-behind
-    /// append failure. Once `true`, the store is degraded until reopened.
-    pub(super) fn is_degraded(&self) -> bool {
-        self.degraded.load(Ordering::SeqCst)
+    pub(super) fn health(&self) -> DeltaJournalHealth {
+        DeltaJournalHealth::load(&self.health)
     }
 
     pub(super) fn enqueue(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, TurnError> {
@@ -139,7 +157,7 @@ async fn run_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     mut receiver: mpsc::UnboundedReceiver<DeltaJournalRequest>,
     materialize_sender: mpsc::UnboundedSender<SeqNo>,
-    degraded: Arc<AtomicBool>,
+    health: Arc<AtomicU8>,
 ) where
     F: RootFilesystem,
 {
@@ -155,39 +173,86 @@ async fn run_delta_journal_flusher<F>(
                 }
             }
         }
-        let result = append_delta_journal_batch(filesystem.as_ref(), &requests).await;
-        match result {
-            Ok(seqs) => {
-                let target_seq = seqs.iter().copied().max();
-                for request in requests {
-                    let _ = request.ack.send(Ok(()));
-                }
-                if let Some(target_seq) = target_seq {
-                    let _ = materialize_sender.send(target_seq);
-                }
-            }
+        let payloads = match prepare_delta_journal_batch(&requests) {
+            Ok(payloads) => payloads,
             Err(error) => {
-                for request in requests {
-                    let _ = request.ack.send(Err(error.clone()));
-                }
-                // Append-failure HALT. A non-critical op already returned `Ok`
-                // to its caller when it enqueued, so CONTINUING to the next
-                // batch would append later deltas AFTER a durable GAP the lost
-                // op left — corruption on replay. Instead, latch the store
-                // degraded and stop the flusher so nothing can append behind
-                // the gap. The store then fails subsequent mutations fast and
-                // reloads its hot cache from the last consistent durable point
-                // (the accepted, recoverable crash-loss). Drain the remaining
-                // queue with the halt error so a critical-op barrier parked on
-                // its ack unblocks with a retryable error rather than hanging.
-                degraded.store(true, Ordering::SeqCst);
-                receiver.close();
-                while let Ok(request) = receiver.try_recv() {
-                    let _ = request.ack.send(Err(delta_journal_halted()));
-                }
+                fail_delta_journal(&mut receiver, &health, requests, error);
                 return;
             }
+        };
+        let recovery_started = Instant::now();
+        let mut contention_attempt = 0usize;
+        loop {
+            match append_delta_journal_payloads(filesystem.as_ref(), &payloads).await {
+                Ok(seqs) => {
+                    if contention_attempt > 0 {
+                        health.store(DeltaJournalHealth::Healthy as u8, Ordering::SeqCst);
+                        tracing::debug!(
+                            attempts = contention_attempt,
+                            recovery_ms = recovery_started.elapsed().as_millis(),
+                            batch_size = requests.len(),
+                            "turn-state delta journal recovered from filesystem contention"
+                        );
+                    }
+                    let target_seq = seqs.iter().copied().max();
+                    for request in requests {
+                        let _ = request.ack.send(Ok(()));
+                    }
+                    if let Some(target_seq) = target_seq {
+                        let _ = materialize_sender.send(target_seq);
+                    }
+                    break;
+                }
+                Err(DeltaJournalAppendError::BackendBusy) => {
+                    contention_attempt = contention_attempt.saturating_add(1);
+                    if contention_attempt == 1 {
+                        health.store(
+                            DeltaJournalHealth::RecoveringContention as u8,
+                            Ordering::SeqCst,
+                        );
+                        tracing::debug!(
+                            batch_size = requests.len(),
+                            "turn-state delta journal entered filesystem contention recovery"
+                        );
+                    }
+                    let backoff = contention_retry_delay(contention_attempt);
+                    tracing::debug!(
+                        attempt = contention_attempt,
+                        backoff_ms = backoff.as_millis(),
+                        recovery_ms = recovery_started.elapsed().as_millis(),
+                        batch_size = requests.len(),
+                        "turn-state delta journal waiting to retry retained batch"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(DeltaJournalAppendError::Fatal(error)) => {
+                    fail_delta_journal(&mut receiver, &health, requests, error);
+                    return;
+                }
+            }
         }
+    }
+}
+
+fn fail_delta_journal(
+    receiver: &mut mpsc::UnboundedReceiver<DeltaJournalRequest>,
+    health: &AtomicU8,
+    requests: Vec<DeltaJournalRequest>,
+    error: TurnError,
+) {
+    tracing::error!(
+        batch_size = requests.len(),
+        "turn-state delta journal stopped after fatal append failure"
+    );
+    health.store(DeltaJournalHealth::FailedFatal as u8, Ordering::SeqCst);
+    for request in requests {
+        let _ = request.ack.send(Err(error.clone()));
+    }
+    // A non-critical op may already have returned `Ok`. Continuing after a
+    // non-replayable failure would append later deltas behind a durable gap.
+    receiver.close();
+    while let Ok(request) = receiver.try_recv() {
+        let _ = request.ack.send(Err(delta_journal_halted()));
     }
 }
 
@@ -215,14 +280,9 @@ async fn run_delta_journal_materializer<F>(
     }
 }
 
-async fn append_delta_journal_batch<F>(
-    filesystem: &ScopedFilesystem<F>,
+fn prepare_delta_journal_batch(
     requests: &[DeltaJournalRequest],
-) -> Result<Vec<SeqNo>, TurnError>
-where
-    F: RootFilesystem,
-{
-    let path = delta_log_path()?;
+) -> Result<Vec<Vec<u8>>, TurnError> {
     let mut payloads = Vec::with_capacity(requests.len());
     for request in requests {
         payloads.push(serde_json::to_vec(&request.delta).map_err(|error| {
@@ -231,25 +291,64 @@ where
             }
         })?);
     }
-    let seqs = if let [payload] = payloads.as_slice() {
+    Ok(payloads)
+}
+
+enum DeltaJournalAppendError {
+    BackendBusy,
+    Fatal(TurnError),
+}
+
+async fn append_delta_journal_payloads<F>(
+    filesystem: &ScopedFilesystem<F>,
+    payloads: &[Vec<u8>],
+) -> Result<Vec<SeqNo>, DeltaJournalAppendError>
+where
+    F: RootFilesystem,
+{
+    let path = delta_log_path().map_err(DeltaJournalAppendError::Fatal)?;
+    let seqs = if let [payload] = payloads {
         vec![
             filesystem
                 .append(&ResourceScope::system(), &path, payload.clone())
                 .await
-                .map_err(fs_error)?,
+                .map_err(classify_delta_append_error)?,
         ]
     } else {
         filesystem
-            .append_batch(&ResourceScope::system(), &path, payloads)
+            .append_batch(&ResourceScope::system(), &path, payloads.to_vec())
             .await
-            .map_err(fs_error)?
+            .map_err(classify_delta_append_error)?
     };
-    if seqs.len() != requests.len() {
-        return Err(TurnError::Unavailable {
+    if seqs.len() != payloads.len() {
+        return Err(DeltaJournalAppendError::Fatal(TurnError::Unavailable {
             reason: "turn-state delta batch append returned an unexpected ack count".to_string(),
-        });
+        }));
     }
     Ok(seqs)
+}
+
+fn classify_delta_append_error(error: FilesystemError) -> DeltaJournalAppendError {
+    match error {
+        FilesystemError::BackendBusy { .. } => DeltaJournalAppendError::BackendBusy,
+        error => DeltaJournalAppendError::Fatal(fs_error(error)),
+    }
+}
+
+fn contention_retry_delay(attempt: usize) -> Duration {
+    let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    let multiplier = 2u32.saturating_pow(exponent);
+    let base = DELTA_JOURNAL_CONTENTION_BACKOFF_BASE
+        .saturating_mul(multiplier)
+        .min(DELTA_JOURNAL_CONTENTION_BACKOFF_MAX);
+    let jitter_ceiling_ms = base.as_millis().max(1) as u64;
+    let jitter_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64
+        % jitter_ceiling_ms;
+    base.saturating_add(Duration::from_millis(jitter_ms))
+        .min(DELTA_JOURNAL_CONTENTION_BACKOFF_MAX)
 }
 
 async fn materialize_delta_batch<F>(

@@ -291,6 +291,7 @@ fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest 
         &ironclaw_host_api::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
+        None,
     )
     .unwrap();
     ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone()).unwrap()

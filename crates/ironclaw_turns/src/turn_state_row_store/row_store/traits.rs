@@ -21,6 +21,7 @@ use crate::{
 
 use super::{
     PendingRowCommit, RunStateTransitionTarget, TurnStateRowStore,
+    commit::SnapshotMutationGuard,
     delta::{
         SnapshotDelta, blocked_run_targeted_delta, claimed_run_targeted_delta, full_snapshot_delta,
         retry_turn_full_delta, row_store_durable_delta, run_state_targeted_delta,
@@ -246,8 +247,8 @@ where
         // before its durable append, so a durable-row read here could miss it
         // (`ScopeNotFound` or a stale status). Serve from the hot snapshot — the
         // single-writer authority under write-behind. Write-through (durable ==
-        // cache) and the degraded path (cache cleared) read the durable rows.
-        let state = if self.is_write_behind_healthy() {
+        // cache) and the fatal path (cache cleared) read the durable rows.
+        let state = if self.can_serve_hot_snapshot() {
             match self.read_run_state_from_hot_cache(&request).await? {
                 Some(state) => Some(state),
                 // Hot-cache miss under healthy write-behind: the hot snapshot is
@@ -433,13 +434,14 @@ where
             Some(&request.run_id),
         );
         async move {
-            self.ensure_not_degraded().await?;
+            self.ensure_mutation_admitted().await?;
             let (record, ack) = {
                 // Serialize the durable enqueue on the shared snapshot-state lock
                 // — the same lock every apply path holds across its
                 // read-seq -> enqueue window — so the delta journal observes a
                 // consistent append order without a separate commit gate.
-                let mut guard = self.snapshot_state.lock().await;
+                let guard = self.snapshot_state.lock().await;
+                let mut guard = SnapshotMutationGuard::new(self, guard);
                 self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
                 let cached_store = {
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
@@ -477,11 +479,17 @@ where
                 // concurrent checkpoints can't grow the journal channel past the
                 // cap while a flush is in flight — the same reserve→enqueue→track
                 // flow every other async commit uses.
-                if !checkpoint_critical && let Err(error) = self.reserve_write_behind_slot().await {
-                    *guard = None;
-                    return Err(error);
+                let mut pending_window = if checkpoint_critical {
+                    None
+                } else {
+                    Some(self.reserve_write_behind_slot(&mut guard).await?)
+                };
+                let mut ack = self.enqueue_delta(row_store_durable_delta(delta.clone()))?;
+                if let Some(window) = pending_window.as_mut()
+                    && let Some(pending_ack) = ack.take()
+                {
+                    window.push_back(pending_ack);
                 }
-                let ack = self.enqueue_delta(row_store_durable_delta(delta.clone()))?;
                 if let Some(state) = guard.as_mut()
                     && let Err(error) = state.apply_delta(delta, state.journal_seq)
                 {
@@ -493,12 +501,7 @@ where
                     *guard = None;
                     return Err(error);
                 }
-                // Track the ack in the bounded window and return `None` on the
-                // async path so `commit_pending` lazy-flushes (no await); on
-                // write-through it returns the ack unchanged to be awaited.
-                let ack = self
-                    .track_write_behind_ack_if_async(checkpoint_critical, ack)
-                    .await;
+                guard.disarm();
                 (record, ack)
             };
             self.commit_pending(

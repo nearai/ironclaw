@@ -30,6 +30,8 @@ pub enum RebornBuildError {
     Secret(#[from] ironclaw_secrets::SecretError),
     #[error("reborn filesystem build failed")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime build failed")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor build failed")]
     Resource(#[from] ironclaw_resources::ResourceError),
     #[error("reborn run state build failed")]
