@@ -17,10 +17,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_event_projections::{
+    EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
+    ProjectionSnapshot, ReplayEventProjectionService,
+};
+use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
-    ThreadId,
+    CapabilityId, InvocationId, NetworkPolicy, ProviderToolName, ResourceScope,
+    RuntimeHttpEgressRequest, ThreadId,
 };
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
@@ -48,6 +53,7 @@ use ironclaw_runner::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
         FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
     },
+    milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink},
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
         RuntimeTurnStateStore, build_default_planned_runtime,
@@ -65,8 +71,9 @@ use ironclaw_turns::{
     TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateRowStore,
     TurnStateStore, TurnStatus,
     run_profile::{
-        CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopRequest, ParentLoopOutput, ProviderToolCallReplay,
+        AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopRequest,
+        ParentLoopOutput, ProviderToolCallReplay,
     },
 };
 use serde_json::json;
@@ -105,6 +112,7 @@ pub struct RebornBinaryE2EHarness {
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    runtime_event_log: Arc<InMemoryDurableEventLog>,
     scheduler_handle: Option<TurnRunSchedulerHandle>,
     scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
     _turn_root: Arc<tempfile::TempDir>,
@@ -780,6 +788,16 @@ impl RebornBinaryE2EHarness {
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
+        let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
+            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_events::DurableEventLog>,
+            DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)?,
+        ));
+        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
+            Arc::new(HarnessLoopHostMilestoneSink {
+                recorded: Arc::clone(&milestone_sink),
+                durable: durable_milestone_sink,
+            });
         let exposes_spawn_subagent = capability_mode.exposes_spawn_subagent();
         let (
             capability_factory,
@@ -854,7 +872,7 @@ impl RebornBinaryE2EHarness {
             model_gateway: Arc::new(model_gateway.clone()),
             checkpoint_state_store,
             loop_checkpoint_store,
-            milestone_sink: milestone_sink.clone(),
+            milestone_sink: runtime_milestone_sink,
             capability_factory,
             capability_surface_resolver,
             capability_result_writer,
@@ -914,6 +932,7 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_recorder,
             milestone_sink,
+            runtime_event_log,
             composition,
             turn_root,
         ))
@@ -933,6 +952,7 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
         capability_recorder: HarnessCapabilityRecorder,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        runtime_event_log: Arc<InMemoryDurableEventLog>,
         composition: RebornRuntimeLoopComposition<
             dyn SessionThreadService,
             RebornTraceReplayModelGateway,
@@ -955,6 +975,7 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_recorder,
             milestone_sink,
+            runtime_event_log,
             scheduler_handle: Some(composition.scheduler_handle),
             scheduler_notifier,
             _turn_root: turn_root,
@@ -1370,6 +1391,51 @@ impl RebornBinaryE2EHarness {
 
     pub fn milestones(&self) -> Vec<LoopHostMilestone> {
         self.milestone_sink.milestones()
+    }
+
+    pub async fn runtime_projection(&self, run_id: TurnRunId) -> HarnessResult<ProjectionSnapshot> {
+        let user_id = self
+            .thread_scope
+            .owner_user_id
+            .clone()
+            .ok_or("runtime projection requires a thread owner")?;
+        let resource_scope = ResourceScope {
+            tenant_id: self.thread_scope.tenant_id.clone(),
+            user_id,
+            agent_id: Some(self.thread_scope.agent_id.clone()),
+            project_id: self.thread_scope.project_id.clone(),
+            mission_id: self.thread_scope.mission_id.clone(),
+            thread_id: Some(self.binding.thread_id.clone()),
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        };
+        Ok(
+            ReplayEventProjectionService::new(Arc::clone(&self.runtime_event_log))
+                .snapshot(ProjectionRequest {
+                    scope: ProjectionScope::from_resource_scope(&resource_scope),
+                    after: None,
+                    limit: MAX_PROJECTION_PAGE_LIMIT,
+                })
+                .await?,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct HarnessLoopHostMilestoneSink {
+    recorded: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    durable: Arc<DurableLoopHostMilestoneSink>,
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for HarnessLoopHostMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        self.durable
+            .publish_loop_milestone(milestone.clone())
+            .await?;
+        self.recorded.publish_loop_milestone(milestone).await
     }
 }
 
