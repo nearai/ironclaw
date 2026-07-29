@@ -236,6 +236,40 @@ pairing parser always accepts a bare proof code and strips only a
 manifest-declared prefix followed by whitespace; it has no implicit provider
 commands.
 
+Product commands exposed through a channel are declared independently on the
+channel descriptor:
+
+```toml
+[channel]
+id = "messages"
+display_name = "Example messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+commands = ["status"]
+```
+
+Each entry is an exact product command token without a leading `/`. Missing
+`commands` and `commands = []` both expose no product commands. Aliases are
+independent declarations: `commands = ["status"]` does not enable
+`/progress`. The neutral channel descriptor bounds command count and token
+length and rejects malformed or duplicate entries. Generic channel assembly
+then validates every well-formed entry against the centralized product command
+registry; an unknown name prevents the channel graph from registering.
+
+This allowlist controls command exposure only. It does not grant operator,
+administrator, owner, membership, capability, or action authority. Pairing
+syntax from `inbound_code_prefixes` and gate-resolution syntax such as
+`approve`, `deny`, and `auth deny` are separate protocols and are not affected
+by `channel.commands`.
+
+The bundled Slack and Telegram manifests currently declare only `status`.
+Their generic host policy rejects all other slash commands before a product
+command handler runs, and user feedback names only the enabled inventory.
+Rollback to an older binary that strictly rejects unknown channel fields may
+require restoring a pre-upgrade resolved-manifest snapshot before reverting
+the binary.
+
 Host-bundled WASM manifest:
 
 ```toml

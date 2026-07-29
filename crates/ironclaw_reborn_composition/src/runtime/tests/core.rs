@@ -140,7 +140,6 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: None,
         preference_target_codec: None,
     }]);
     let input =

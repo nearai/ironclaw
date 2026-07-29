@@ -455,7 +455,9 @@ pub trait ChannelAdapter: Send + Sync {
     }
 
     /// Parse one host-verified inbound request into a normalized outcome.
-    /// Pure protocol work: no I/O, no secrets, bounded input.
+    /// `VerifiedInbound` includes the verified installation's host-resolved,
+    /// manifest-declared non-secret config. Pure protocol work: no I/O, no
+    /// secrets, bounded input.
     fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
 
     /// Render and send one normalized outbound envelope through restricted
@@ -470,6 +472,16 @@ pub trait ChannelAdapter: Send + Sync {
     }
 }
 ```
+
+For inbound calls, `ChannelError::Parse` means the verified vendor payload is
+malformed and maps to a permanent 400. `ChannelError::Configuration` means
+host-supplied adapter configuration is missing or invalid and maps to a
+retryable 503; this distinction prevents operator mistakes from being
+misreported as vendor payload failures. Telegram validates the configured
+public bot username syntactically (5–32 ASCII alphanumeric/underscore
+characters ending in `bot`, case-insensitively). A syntactically valid but
+wrong identity requires a future mediated `getMe` verification step; inbound
+normalization does not perform live vendor I/O.
 
 ```rust
 pub enum InboundOutcome {

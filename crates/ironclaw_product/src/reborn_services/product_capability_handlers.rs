@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum ProductCommandHandler {
     ProductLifecycleCommand,
     ProductModelCommand,
+    ProductStatusCommand,
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -35,6 +36,7 @@ impl ProductCommandHandler {
         match capability.as_str() {
             PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
             PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
+            PRODUCT_STATUS_COMMAND_OPERATION_ID => Some(Self::ProductStatusCommand),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
             SUBMIT_TURN_COMMAND_ID => Some(Self::SubmitTurn),
             CANCEL_RUN_COMMAND_ID => Some(Self::CancelRun),
@@ -103,6 +105,14 @@ impl ProductCommandHandler {
                 command_output(
                     services
                         .execute_product_model_command(caller, request.action)
+                        .await?,
+                )
+            }
+            Self::ProductStatusCommand => {
+                let request: ProductStatusCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_status_command(caller, request)
                         .await?,
                 )
             }

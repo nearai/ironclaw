@@ -55,16 +55,18 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductContext,
-    LifecycleProductService, LifecycleProductSurfaceContext, ListPendingApprovalsRequest,
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    AuthInteractionRejectionKind, AuthInteractionService, CommandResultField, CommandResultView,
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+    ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
     ProductInboundCommand, ProductLifecycleCommandInput, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSubmitTurnRequest, ProductSurfaceFailure, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
+    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -548,6 +550,75 @@ const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+
+fn command_result_field(label: &str, value: impl Into<String>) -> CommandResultField {
+    CommandResultField {
+        label: label.to_string(),
+        value: value.into(),
+    }
+}
+
+fn model_command_view(title: &str, snapshot: &llm_config::LlmConfigSnapshot) -> CommandResultView {
+    let mut fields = Vec::new();
+    let mut lines = Vec::new();
+    match &snapshot.active {
+        Some(active) => {
+            fields.push(command_result_field("Provider", active.provider_id.clone()));
+            fields.push(command_result_field(
+                "Model",
+                active
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "provider default".to_string()),
+            ));
+        }
+        None => lines.push("No active model configured.".to_string()),
+    }
+    if !snapshot.providers.is_empty() {
+        lines.push(format!(
+            "Providers: {}",
+            snapshot
+                .providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    CommandResultView {
+        title: title.to_string(),
+        fields,
+        lines,
+    }
+}
+
+fn describe_turn_status(status: TurnStatus) -> (&'static str, Option<&'static str>) {
+    match status {
+        TurnStatus::Queued => ("queued", None),
+        TurnStatus::Running => ("working", None),
+        TurnStatus::BlockedApproval => (
+            "waiting for approval",
+            Some("Reply `approve` or `deny` to continue."),
+        ),
+        TurnStatus::BlockedAuth => (
+            "waiting for authentication",
+            Some("Complete the pending connection to continue."),
+        ),
+        TurnStatus::CancelRequested => ("cancelling", None),
+        TurnStatus::Completed => ("idle", Some("The last task completed.")),
+        TurnStatus::Failed => ("idle", Some("The last task failed.")),
+        TurnStatus::Cancelled => ("idle", Some("The last task was cancelled.")),
+        _ => ("working", None),
+    }
+}
+
+fn idle_status_command_view() -> CommandResultView {
+    CommandResultView {
+        title: "Status".to_string(),
+        fields: vec![command_result_field("State", "idle")],
+        lines: vec!["No assistant activity in this conversation yet.".to_string()],
+    }
+}
 
 fn rejected_busy_notice(status: TurnStatus) -> String {
     match status {
@@ -2992,11 +3063,11 @@ where
         &self,
         caller: ProductSurfaceCaller,
         action: ProductModelCommand,
-    ) -> Result<serde_json::Value, ProductSurfaceError> {
+    ) -> Result<CommandResultView, ProductSurfaceError> {
         match action {
             ProductModelCommand::Status => {
                 let snapshot = self.build_llm_config_view(caller).await?;
-                serde_json::to_value(snapshot).map_err(ProductSurfaceError::internal_from)
+                Ok(model_command_view("Model", &snapshot))
             }
             ProductModelCommand::Set { model } => {
                 let snapshot = self.build_llm_config_view(caller.clone()).await?;
@@ -3013,7 +3084,7 @@ where
                 )
                 .await?;
                 let snapshot = self.build_llm_config_view(caller).await?;
-                serde_json::to_value(snapshot).map_err(ProductSurfaceError::internal_from)
+                Ok(model_command_view("Model updated", &snapshot))
             }
             ProductModelCommand::SetProvider { provider, model } => {
                 self.invoke_llm_active_set(
@@ -3025,9 +3096,60 @@ where
                 )
                 .await?;
                 let snapshot = self.build_llm_config_view(caller).await?;
-                serde_json::to_value(snapshot).map_err(ProductSurfaceError::internal_from)
+                Ok(model_command_view("Model updated", &snapshot))
             }
         }
+    }
+
+    async fn execute_product_status_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: ProductStatusCommandInput,
+    ) -> Result<CommandResultView, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", input.thread_id)?;
+        let scope = caller.turn_scope(thread_id.clone());
+        let history = match self
+            .resolve_thread_history_for_caller(caller.clone(), &scope)
+            .await
+        {
+            Ok((_thread_scope, history)) => history,
+            Err(error) if error.code == ProductSurfaceErrorCode::NotFound => {
+                return Ok(idle_status_command_view());
+            }
+            Err(error) => return Err(error),
+        };
+        let latest_run = history
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.turn_run_id.clone());
+        let Some(run_id) = latest_run else {
+            return Ok(idle_status_command_view());
+        };
+        let state = self
+            .get_run_state(
+                caller,
+                RebornGetRunStateRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id,
+                },
+            )
+            .await?;
+        let (state_label, detail) = describe_turn_status(state.status);
+        let mut fields = vec![command_result_field("State", state_label)];
+        fields.push(command_result_field("Run", state.run_id.to_string()));
+        fields.push(command_result_field(
+            "Since",
+            state
+                .received_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ));
+        let lines = detail.into_iter().map(str::to_string).collect();
+        Ok(CommandResultView {
+            title: "Status".to_string(),
+            fields,
+            lines,
+        })
     }
 
     pub async fn list_admin_users(

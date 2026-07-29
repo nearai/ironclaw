@@ -22,11 +22,12 @@ use ironclaw_outbound::{
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
-    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundOutcome,
-    OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome, ProductAdapterError,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence,
-    TrustedInboundContext, UserMessagePayload, VerifiedInbound,
+    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    InboundCommandPayload, InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound,
+    PartDeliveryOutcome, ProductAdapterError, ProductAdapterId, ProductCommandResultPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
+    UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
@@ -598,11 +599,14 @@ fn build_harness_with_settings(
         auth_flow_cancel: None,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
-    let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
-        services,
-        settings,
-        connection_notices.clone(),
-    ));
+    let observer = Arc::new(
+        RunDeliveryObserver::with_settings_and_connection_notices(
+            services,
+            settings,
+            connection_notices.clone(),
+        )
+        .with_enabled_commands(["status"]),
+    );
     Harness {
         observer,
         connection_notices,
@@ -678,6 +682,82 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn observer_delivers_command_result_through_the_coordinator() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command =
+        InboundCommandPayload::new("model", "", ProductTriggerReason::BotCommand).expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-result",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::CommandResult {
+                command: "model".to_string(),
+                payload: ProductCommandResultPayload::new(serde_json::json!({
+                    "active": {
+                        "model": "gpt-5.5"
+                    },
+                    "configured": true
+                })),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec![
+            "Command `/model` completed.\n\n    {\n      \"active\": {\n        \"model\": \"gpt-5.5\"\n      },\n      \"configured\": true\n    }"
+                .to_string()
+        ]
+    );
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
+    assert_eq!(envelopes[0].extension_id, EXTENSION_ID);
+}
+
+#[tokio::test]
+async fn observer_delivers_scoped_command_help_for_invalid_request() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
+        .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-invalid",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "opaque parser or admission detail",
+            )),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["Available commands:\n/status".to_string()]
     );
 }
 
