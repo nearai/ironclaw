@@ -60,6 +60,7 @@ const ENGLISH_FAILURE_COPY = {
   "chat.failure.connectionLost":
     "Connection to the server was lost. Please reconnect and try again.",
   "chat.failure.request": "The request failed before it could be sent.",
+  "chat.commandFailed": "Couldn't run that command.",
 };
 
 function testTranslator(copy = ENGLISH_FAILURE_COPY) {
@@ -5715,7 +5716,7 @@ test("useChat.send: blocks a send addressed to a busy thread that is NOT the vie
   assert.equal(createThreadCalls(), 0);
 });
 
-test("useChat.runCommand: threads t into the failure localizer on a client-side error", async () => {
+test("useChat.runCommand: shows the localized chat.commandFailed notice on a client-side error", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
 
@@ -5734,6 +5735,12 @@ test("useChat.runCommand: threads t into the failure localizer on a client-side 
     createThreadRequest: async () => {
       throw new Error("thread should already exist");
     },
+    // The REAL helper — not a stand-in. runCommand's catch no longer routes
+    // through it (see the fix below), but binding the production
+    // implementation here means a future regression that reintroduces a call
+    // to it exercises real logic instead of a hand-rolled fake that could
+    // hardcode away the very failure this test exists to catch.
+    failureMessageForRequestError,
     globalThis: {},
     queryClient: {
       fetchQuery: async () => {
@@ -5753,16 +5760,12 @@ test("useChat.runCommand: threads t into the failure localizer on a client-side 
       throw new TypeError("Failed to fetch");
     },
     renderCommandResultMarkdown: () => "unused on the failure path",
-    // Mirror #6625: the localizer requires `t` and calls it for client-side
-    // failures. Omitting `t` (the pre-fix bug) throws here — inside
-    // runCommand's own catch — defeating the try/catch.
-    failureMessageForRequestError: (error, t) => {
-      if (typeof t !== "function") {
-        throw new TypeError("t is not a function");
-      }
-      return t("chat.commandFailed");
-    },
-    useT: () => (key) => `t:${key}`,
+    // No `useT` override: `runUseChatSource` defaults it to the shared
+    // module-level `t = testTranslator()`, which resolves
+    // "chat.commandFailed" to real English copy (`ENGLISH_FAILURE_COPY`
+    // above) rather than echoing the bare key back — so a regression that
+    // forgets to call `t(...)` at all (and just appends the raw key string)
+    // fails this assertion instead of accidentally matching it.
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
@@ -5784,11 +5787,11 @@ test("useChat.runCommand: threads t into the failure localizer on a client-side 
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  // Must resolve to null (graceful), NOT reject — the pre-fix bug threw
-  // `t is not a function` inside the catch and rejected this promise.
+  // Must resolve to null (graceful), not reject.
   const result = await chat.runCommand("/status");
   assert.equal(result, null);
   assert.equal(renderedMessages.length, 1);
   assert.equal(renderedMessages[0].role, CHAT_MESSAGE_ROLES.SYSTEM);
-  assert.equal(renderedMessages[0].content, "t:chat.commandFailed");
+  assert.equal(renderedMessages[0].content, t("chat.commandFailed"));
+  assert.equal(renderedMessages[0].content, "Couldn't run that command.");
 });

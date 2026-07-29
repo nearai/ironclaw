@@ -1112,10 +1112,12 @@ export function useChat(threadId) {
         const response = await executeChatCommand({ threadId, text });
         appendNotice(renderCommandResultMarkdown(response));
         return response;
-      } catch (error) {
-        // `failureMessageForRequestError` localizes client-side failures via
-        // `t`; omitting it throws inside this very catch handler.
-        appendNotice(failureMessageForRequestError(error, t));
+      } catch {
+        // A thrown error here has no server-shaped `result`/`rejection` to
+        // render (network failure, timeout, or an unexpected client-side
+        // exception) — show one generic, localized notice instead of a raw
+        // (and potentially unlocalized) error message.
+        appendNotice(t("chat.commandFailed"));
         return null;
       }
     },
