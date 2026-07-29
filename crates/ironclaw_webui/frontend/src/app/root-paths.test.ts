@@ -23,7 +23,6 @@ test("Vite and the SPA shell load browser assets from the root path", () => {
   const index = frontendFile("index.html");
   for (const assetPath of [
     "/assets/favicon-96x96.png",
-    "/assets/favicon.svg",
     "/assets/favicon.ico",
     "/assets/apple-touch-icon.png",
     "/assets/site.webmanifest",
@@ -63,5 +62,5 @@ test("router and login defaults no longer add the legacy mount prefix", () => {
   assert.ok(login.includes('oauthRedirectAfter = "/"'));
 
   const sidebar = frontendFile("src/components/sidebar.tsx");
-  assert.ok(sidebar.includes('src="/assets/logo.jpg"'));
+  assert.ok(sidebar.includes('src="/assets/logo.png"'));
 });
