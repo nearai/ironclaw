@@ -643,7 +643,7 @@ async fn compaction_port_rejects_private_keys_split_across_message_boundaries() 
 }
 
 #[tokio::test]
-async fn compaction_port_redacts_unterminated_private_key_before_later_messages() {
+async fn compaction_port_redacts_unterminated_private_key_span_across_later_messages() {
     let fixture = CompactionFixture::new().await;
     fixture
         .append_user(concat!(
@@ -661,14 +661,62 @@ async fn compaction_port_redacts_unterminated_private_key_before_later_messages(
         fixture.scope.clone(),
     );
 
-    port.compact_loop_context(fixture.request(2))
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
         .await
-        .expect("an unterminated key must redact without consuming later messages");
+        .expect("an unterminated key span must redact without failing compaction");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
 
     let input = inference.last_input();
-    assert!(input.contains("[REDACTED]"));
-    assert!(input.contains("later safe context"));
+    assert_eq!(input.matches("<message ").count(), 2);
+    assert_eq!(input.matches("[REDACTED]").count(), 2);
+    assert_eq!(response.redacted_leak_count, 1);
+    assert!(!input.contains("later safe context"));
     assert!(!input.contains("TRUNCATED_PRIVATE_KEY_FRAGMENT"));
+}
+
+#[tokio::test]
+async fn compaction_port_redacts_cross_message_private_key_with_mismatched_end() {
+    let fixture = CompactionFixture::new().await;
+    fixture
+        .append_user(concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "FIRST_PRIVATE_KEY_FRAGMENT"
+        ))
+        .await;
+    fixture
+        .append_user(concat!(
+            "TRAILING_PRIVATE_KEY_FRAGMENT\n",
+            "-----END PRIVATE KEY-----\n",
+            "after"
+        ))
+        .await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect("a mismatched cross-message key span must redact without leaking");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome")
+    };
+
+    let input = inference.last_input();
+    assert_eq!(input.matches("<message ").count(), 2);
+    assert_eq!(input.matches("[REDACTED]").count(), 2);
+    assert_eq!(response.redacted_leak_count, 1);
+    assert!(!input.contains("FIRST_PRIVATE_KEY_FRAGMENT"));
+    assert!(!input.contains("TRAILING_PRIVATE_KEY_FRAGMENT"));
+    assert!(!input.contains("-----END PRIVATE KEY-----"));
 }
 
 #[tokio::test]

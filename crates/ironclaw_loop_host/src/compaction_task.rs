@@ -403,13 +403,16 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
-        self.validate_unredacted_message_boundaries(range)?;
+        let fully_redacted_messages = self.validate_unredacted_message_boundaries(range)?;
 
         let mut text = String::new();
         let mut redacted_leak_count = 0_u32;
-        for message in &range.messages {
-            let sanitized =
-                self.sanitize_retained_fragment(&message.body, Some(self.max_input_bytes))?;
+        for (index, message) in range.messages.iter().enumerate() {
+            let sanitized = self.sanitize_retained_fragment(
+                &message.body,
+                Some(self.max_input_bytes),
+                fully_redacted_messages[index],
+            )?;
             redacted_leak_count = redacted_leak_count
                 .checked_add(sanitized.redacted_leak_count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
@@ -439,9 +442,10 @@ where
     fn validate_unredacted_message_boundaries(
         &self,
         range: &ValidatedCompactionRange,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<Vec<bool>, CompactionError> {
         let mut text = String::new();
         let mut body_ranges = Vec::with_capacity(range.messages.len());
+        let mut fully_redacted_messages = vec![false; range.messages.len()];
         for message in &range.messages {
             if !text.is_empty() {
                 push_checked(&mut text, "\n", self.max_input_bytes)?;
@@ -482,11 +486,17 @@ where
                 location.end,
                 origin_body.end,
             ) {
+                for (index, body) in body_ranges.iter().enumerate().skip(candidate + 1) {
+                    if body.start >= location.end {
+                        break;
+                    }
+                    fully_redacted_messages[index] = true;
+                }
                 continue;
             }
             return Err(CompactionError::LeakRedactionFailed);
         }
-        Ok(())
+        Ok(fully_redacted_messages)
     }
 
     async fn run_inference(
@@ -517,7 +527,7 @@ where
         response: &SystemInferenceResponse,
         input_bytes: usize,
     ) -> Result<SanitizedSummary, CompactionError> {
-        let sanitized = self.sanitize_retained_fragment(&response.output_text, None)?;
+        let sanitized = self.sanitize_retained_fragment(&response.output_text, None, false)?;
         let content = format!(
             "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
             sanitized.content
@@ -540,6 +550,7 @@ where
         &self,
         content: &str,
         max_escaped_bytes: Option<usize>,
+        force_full_redaction: bool,
     ) -> Result<SanitizedFragment, CompactionError> {
         if !self.injection_scanner.scan_injection(content).is_empty() {
             return Err(CompactionError::InjectionDetected);
@@ -554,6 +565,23 @@ where
                 .is_empty()
         {
             return Err(CompactionError::InjectionDetected);
+        }
+        if force_full_redaction {
+            let forced_content = "[REDACTED]".to_string();
+            if !self
+                .injection_scanner
+                .scan_injection(&forced_content)
+                .is_empty()
+            {
+                return Err(CompactionError::InjectionDetected);
+            }
+            if !self.leak_detector.scan_leaks(&forced_content).is_clean() {
+                return Err(CompactionError::LeakRedactionFailed);
+            }
+            return Ok(SanitizedFragment {
+                content: forced_content,
+                redacted_leak_count: redaction.count,
+            });
         }
 
         let escaped = match max_escaped_bytes {
