@@ -107,10 +107,11 @@ blocked_approval
 blocked_auth
 waiting_tool
 waiting_process
-recovery_required
+cancel_requested
 completed
 failed
 cancelled
+recovery_required (legacy compatibility only; no new transition produces it)
 ```
 
 Transitions:
@@ -120,8 +121,10 @@ accepted -> queued -> running
 running -> blocked_approval -> running
 running -> waiting_tool -> running
 running -> waiting_process -> running
-running -> recovery_required
-recovery_required -> cancelled
+running -> cancel_requested -> cancelled
+running(no checkpoint, expired lease, reclaim budget remains) -> queued
+running(any checkpoint, expired lease) -> failed
+running(no checkpoint, expired lease, reclaim budget exhausted) -> failed
 running -> completed|failed|cancelled
 ```
 
