@@ -85,10 +85,19 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
         };
         match self.admin_users.get_user(&self.tenant, &user_id).await {
             Ok(Some(record)) if record.status == AdminUserStatus::Active => Ok(Some(record.role)),
-            // The env-bearer operator has no directory record but is the
-            // deployment's implicit owner — mirror
-            // `RebornServices::authorize_admin`'s contract. A persisted
-            // record (any status) still governs when present.
+            // Implicit-owner rule, keyed on bound-user identity: when the
+            // resolved actor IS the operator (`user_id == operator_user_id`)
+            // and the directory has no record at all, treat it as Owner. A
+            // persisted record of ANY status (including Suspended) still
+            // governs — this arm only fires on "no record", never overriding
+            // the arm above.
+            //
+            // This deliberately differs from the WebUI's
+            // `RebornServices::authorize_admin`, whose `caller.operator_config`
+            // flag short-circuits to `Ok(())` before ever calling `get_user` —
+            // it has no record-governs behavior at all. A suspended operator
+            // record therefore denies through this resolver but still admits
+            // through the WebUI door. Tracked asymmetry: issue #6877.
             Ok(None) if user_id == self.operator_user_id => Ok(Some(AdminUserRole::Owner)),
             Ok(_) => Ok(None),
             Err(AdminUserError::Unavailable) => Err(Self::unavailable()),
@@ -493,6 +502,36 @@ mod tests {
             admin_users,
             tenant("tenant-a"),
             operator.clone(),
+        );
+
+        let role = resolver
+            .actor_role(&sample_context("whatever-actor"))
+            .await
+            .expect("resolves");
+
+        assert_eq!(role, Some(AdminUserRole::Owner));
+    }
+
+    /// Compound highest-risk lane: composition without a durable identity
+    /// store runs under the operator-actor policy (`identity_lookup: None`,
+    /// so EVERY actor resolves to `operator_user_id`), combined with no
+    /// directory record at all. This pins today's deliberate behavior so a
+    /// future change to the fallback lane can't silently alter it — see
+    /// issue #6877 for the tracked asymmetry with the WebUI's
+    /// `authorize_admin`.
+    #[tokio::test]
+    async fn operator_fallback_lane_without_directory_record_is_implicit_owner() {
+        let operator = user("operator-c");
+        let admin_users = Arc::new(FakeAdminUsers {
+            roles: Mutex::new(std::collections::HashMap::new()),
+            fail: None,
+        });
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            None,
+            admin_users,
+            tenant("tenant-a"),
+            operator,
         );
 
         let role = resolver
