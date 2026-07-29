@@ -3,6 +3,41 @@ import { test } from "vitest";
 
 import { groupMessages } from "./message-groups";
 
+test("groupMessages: live and final replies share a stable render key", () => {
+  const live = groupMessages([
+    {
+      id: "text-text:run-1:2",
+      role: "assistant",
+      content: "Here is the final",
+      isFinalReply: false,
+      isStreaming: true,
+      turnRunId: "run-1",
+    },
+  ]);
+  const finalized = groupMessages([
+    {
+      id: "reply-run-1",
+      role: "assistant",
+      content: "Here is the final answer.",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+  const refreshed = groupMessages([
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "Here is the final answer.",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(live[0].id, "assistant-reply-run-1");
+  assert.equal(finalized[0].id, live[0].id);
+  assert.equal(refreshed[0].id, live[0].id);
+});
+
 test("groupMessages: consecutive tool_activity messages collapse into one run", () => {
   const grouped = groupMessages([
     { id: "a", role: "tool_activity", toolName: "read" },

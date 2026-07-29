@@ -100,7 +100,20 @@ function appendActivityRun(items, activity) {
 }
 
 function appendMessage(items, message) {
-  items.push({ type: "message", id: message.id, message });
+  items.push({ type: "message", id: messageRenderKey(message), message });
+}
+
+function messageRenderKey(message) {
+  const runId =
+    typeof message?.turnRunId === "string" ? message.turnRunId : null;
+  const isActiveAssistantReply =
+    message?.role === "assistant" &&
+    message?.isFinalReply === false &&
+    message?.isStreaming === true;
+  if (runId && (isFinalAssistantReply(message) || isActiveAssistantReply)) {
+    return `assistant-reply-${runId}`;
+  }
+  return message.id;
 }
 
 function isFinalAssistantReply(msg) {

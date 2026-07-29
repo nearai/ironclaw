@@ -5039,13 +5039,14 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
         panic!("webui submit should start a run");
     };
     let stream = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut after_cursor = None;
         loop {
             let stream = stream_product_events(
                 bundle.as_ref(),
                 caller.clone(),
                 RebornStreamEventsRequest {
                     thread_id: created.thread.thread_id.to_string(),
-                    after_cursor: None,
+                    after_cursor: after_cursor.clone(),
                 },
             )
             .await
@@ -5068,6 +5069,10 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
             }) {
                 break stream;
             }
+            after_cursor = stream
+                .events
+                .last()
+                .map(|event| event.projection_cursor().clone());
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
