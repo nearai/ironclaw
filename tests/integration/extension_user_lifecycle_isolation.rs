@@ -336,9 +336,14 @@ async fn legacy_tenant_owned_installation_migrates_to_operator_private_state() {
 // (the sibling test below,
 // `extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root`)
 // still binds via the fallback — that's the back-compat contract — while a
-// `Some(root)` that disagrees with the manifest's own id now actually
-// reaches package construction and fails loud, proving the loader reads the
-// persisted value instead of fabricating over it.
+// `Some(root)` that disagrees with the manifest's own id now fails activation
+// loudly instead of silently binding, proving the loader reads the persisted
+// value instead of fabricating over it. What discriminates the two tests at
+// this tier is the route-level activation outcome (`installation_state` /
+// `activation_error` below vs. a plain "active" phase in the sibling test);
+// the exact root-selection values themselves (which root wins, and the
+// fabricated fallback shape) are pinned directly by the `resolve_package_root`
+// unit tests in `crates/ironclaw_extension_host/src/generic_host.rs`.
 //
 // A root that disagrees with the manifest's own id is illegal by
 // construction (`ExtensionPackage::from_manifest` /
@@ -449,7 +454,6 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
     // stays `Failed`, but the wire never exposes a third state; see
     // `crates/ironclaw_product/src/reborn_services/types.rs`) and no adapter
     // ever binds.
-    fixture_assert_no_bound_package_root(&rebuilt, EXTENSION_ID);
     let (status, body) = get_json(
         rebuilt.member_router(rebuilt.operator()),
         "/api/webchat/v2/extensions",
@@ -473,17 +477,6 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
     rebuilt.shutdown().await;
 }
 
-fn fixture_assert_no_bound_package_root(fixture: &LifecycleIsolationFixture, extension_id: &str) {
-    assert_eq!(
-        fixture
-            .runtime
-            .extension_bound_package_root_for_test(extension_id),
-        None,
-        "activation must not silently succeed with a fabricated root when the \
-         persisted root was illegal for this manifest id"
-    );
-}
-
 // Back-compat guard: a row persisted before `ResolvedExtensionManifest::root`
 // existed has no root at all (`None`), not the fabricated value — a normal
 // install today always persists `Some(root)` (see the guard in the sibling
@@ -491,7 +484,12 @@ fn fixture_assert_no_bound_package_root(fixture: &LifecycleIsolationFixture, ext
 // manifest record with `root: None`. The loader must still fall back to the
 // historical fabricated `/system/extensions/{id}` value and bind
 // successfully; this is the ONE thing standing between this change and
-// breaking every extension installed before it shipped.
+// breaking every extension installed before it shipped. At this tier the
+// discriminator against the sibling test above is the route-level activation
+// outcome (this test reaches "active"; the sibling reaches "setup_needed" +
+// `activation_error`) — the exact fabricated-root value is pinned by the
+// `resolve_package_root` unit tests in
+// `crates/ironclaw_extension_host/src/generic_host.rs`.
 #[tokio::test]
 async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root() {
     let fixture = LifecycleIsolationFixture::new("root-fallback").await;
@@ -564,17 +562,6 @@ async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root(
     rebuilt
         .assert_user_phase(rebuilt.operator(), "active")
         .await;
-    let loaded_root = rebuilt
-        .runtime
-        .extension_bound_package_root_for_test(EXTENSION_ID)
-        .expect("extension loader publishes a bound package root");
-    let fabricated_root =
-        VirtualPath::new(format!("/system/extensions/{EXTENSION_ID}")).expect("fabricated root");
-    assert_eq!(
-        loaded_root, fabricated_root,
-        "with no persisted root (the pre-field legacy shape), the loader must \
-         still fabricate the historical value and bind successfully"
-    );
 
     rebuilt.shutdown().await;
 }

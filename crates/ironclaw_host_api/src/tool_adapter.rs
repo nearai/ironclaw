@@ -14,8 +14,6 @@
 
 use async_trait::async_trait;
 
-#[cfg(any(test, feature = "test-support"))]
-use crate::VirtualPath;
 use crate::{
     CapabilityDisplayOutputPreview, CapabilityId, MountView, NetworkMethod, ResourceEstimate,
     ResourceReservation, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
@@ -97,16 +95,6 @@ pub struct ToolPorts<'a> {
 #[async_trait]
 pub trait ToolAdapter: Send + Sync {
     async fn invoke(&self, call: ToolCall, ports: &ToolPorts<'_>) -> Result<ToolResult, ToolError>;
-
-    /// Test-only seam: the package root this adapter was bound over, when the
-    /// adapter holds one. Lets integration tests confirm the loader used the
-    /// persisted package root rather than a fabricated one, without going
-    /// through wasm dispatch. `None` by default; lane-backed adapters that
-    /// hold an `ExtensionPackage` override it.
-    #[cfg(any(test, feature = "test-support"))]
-    fn bound_package_root_for_test(&self) -> Option<VirtualPath> {
-        None
-    }
 }
 
 /// Host-mediated outbound HTTP for adapters: scheme/host/method allowlists
