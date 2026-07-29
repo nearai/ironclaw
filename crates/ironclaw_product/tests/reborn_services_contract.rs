@@ -127,6 +127,12 @@ use ironclaw_product::{
     UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
+    AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
+};
+use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
@@ -135,10 +141,6 @@ use ironclaw_product::{
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
-};
-use ironclaw_product::{
-    ProductAdapterError, ProductOutboundEnvelope, ProductSurfaceRejectionKind, ProjectionCursor,
-    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -166,7 +168,7 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
@@ -1712,6 +1714,73 @@ impl ProjectionStream for RecordingProjectionStream {
         self.drains.lock().expect("lock").push(request);
         Ok(Vec::new())
     }
+}
+
+struct SubscribingProjectionStream {
+    event: ProductOutboundEnvelope,
+    subscriptions: Mutex<Vec<ProjectionSubscriptionRequest>>,
+    drain_count: Mutex<usize>,
+}
+
+impl SubscribingProjectionStream {
+    fn new(event: ProductOutboundEnvelope) -> Self {
+        Self {
+            event,
+            subscriptions: Mutex::new(Vec::new()),
+            drain_count: Mutex::new(0),
+        }
+    }
+
+    fn subscription_count(&self) -> usize {
+        self.subscriptions.lock().expect("lock").len()
+    }
+
+    fn drain_count(&self) -> usize {
+        *self.drain_count.lock().expect("lock")
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for SubscribingProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        *self.drain_count.lock().expect("lock") += 1;
+        Ok(Vec::new())
+    }
+
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
+    async fn subscribe(
+        &self,
+        request: ProjectionSubscriptionRequest,
+    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
+        self.subscriptions.lock().expect("lock").push(request);
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(Ok(self.event.clone()))
+            .await
+            .expect("test subscription receiver remains open");
+        Ok(ProjectionStreamSubscription::new(receiver))
+    }
+}
+
+fn keep_alive_outbound(cursor: &str) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new("webui_v2").expect("adapter id"),
+        AdapterInstallationId::new("install:alpha").expect("installation id"),
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
+            ExternalConversationRef::new(None, "conversation:test", None, None)
+                .expect("conversation ref"),
+            None,
+        ),
+        ProjectionCursor::new(cursor).expect("projection cursor"),
+        ProductOutboundPayload::KeepAlive,
+    )
 }
 
 /// Lighter-weight projection stream used by the timeline drain
@@ -3633,6 +3702,38 @@ async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated
     assert_eq!(
         request.after_cursor.as_ref().map(ProjectionCursor::as_str),
         Some(after_cursor.as_str())
+    );
+}
+
+#[tokio::test]
+async fn stream_events_waits_on_supported_subscription_instead_of_polling_drain() {
+    let web_caller = caller();
+    let expected = keep_alive_outbound("cursor-live");
+    let event_stream = Arc::new(SubscribingProjectionStream::new(expected.clone()));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(event_stream.clone());
+    create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
+
+    let response = services
+        .stream_events(
+            web_caller,
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("subscription event is returned");
+
+    assert_eq!(response.events, vec![expected]);
+    assert_eq!(event_stream.subscription_count(), 1);
+    assert_eq!(
+        event_stream.drain_count(),
+        0,
+        "a supported live subscription must not fall back to an empty poll"
     );
 }
 

@@ -32,6 +32,12 @@ const V2_EVENT_NAMES = [
 
 const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
+// axum emits transport keep-alive comments every 15 seconds, but EventSource
+// does not expose comment frames to JavaScript. If an already-open connection
+// goes half-open, neither onerror nor another message is guaranteed to arrive.
+// Bound that silence while a run is active so the browser can resume from the
+// last cumulative projection instead of waiting for a route remount.
+const ACTIVE_STREAM_STALL_DEADLINE_MS = 30_000;
 // Stable for this browser tab's loaded SPA. Reusing it across Chat route
 // mounts lets the server supersede a proxy-held stream from the prior thread
 // instead of rejecting the replacement against the per-user connection cap.
@@ -68,12 +74,20 @@ function isBrowserOffline() {
   return typeof navigator !== "undefined" && navigator.onLine === false;
 }
 
-export function useSSE({ threadId, onEvent, enabled }) {
+export function useSSE({
+  threadId,
+  onEvent,
+  enabled,
+  activityExpected = false,
+}) {
   const [status, setStatus] = React.useState<ConnectionStatus>(
     CONNECTION_STATUS.IDLE,
   );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
+  const activityExpectedRef = React.useRef(activityExpected);
+  activityExpectedRef.current = activityExpected;
+  const syncActivityWatchdogRef = React.useRef(() => {});
   React.useEffect(() => {
     if (!enabled || !threadId) {
       setStatus(CONNECTION_STATUS.IDLE);
@@ -82,6 +96,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let es = null;
     let reconnectTimer = null;
     let openWatchdog = null;
+    let activityWatchdog = null;
     let reconnectAttempts = 0;
     let disposed = false;
     let terminalErrorReceived = false;
@@ -101,11 +116,47 @@ export function useSSE({ threadId, onEvent, enabled }) {
       }
     }
 
+    function clearActivityWatchdog() {
+      if (activityWatchdog) {
+        clearTimeout(activityWatchdog);
+        activityWatchdog = null;
+      }
+    }
+
+    function activityIsExpected() {
+      return activityExpectedRef.current === true;
+    }
+
+    function scheduleActivityWatchdog(source) {
+      clearActivityWatchdog();
+      if (
+        disposed ||
+        terminalErrorReceived ||
+        es !== source ||
+        !activityIsExpected()
+      ) {
+        return;
+      }
+      activityWatchdog = setTimeout(() => {
+        activityWatchdog = null;
+        if (
+          disposed ||
+          terminalErrorReceived ||
+          es !== source ||
+          !activityIsExpected()
+        ) {
+          return;
+        }
+        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+      }, ACTIVE_STREAM_STALL_DEADLINE_MS);
+    }
+
     function markConnected(source) {
       if (disposed || terminalErrorReceived || es !== source) return;
       clearOpenWatchdog();
       reconnectAttempts = 0;
       setStatus(CONNECTION_STATUS.CONNECTED);
+      scheduleActivityWatchdog(source);
     }
 
     function scheduleOpenWatchdog(source) {
@@ -134,6 +185,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         reconnectTimer = null;
       }
       clearOpenWatchdog();
+      clearActivityWatchdog();
       setStatus(status);
       reconnectAttempts++;
       const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
@@ -200,6 +252,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
           frame,
           lastEventId: event.lastEventId || null,
         });
+        // Reset an already-armed active-run watchdog after each delivered
+        // frame. The activityExpected effect below handles the false→true and
+        // true→false transitions caused by this dispatch.
+        scheduleActivityWatchdog(source);
         // The server has already classified this failure as permanent for
         // this subscription (for example, a thread that no longer exists).
         // EventSource reports the subsequent clean server close through
@@ -212,6 +268,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
           }
+          clearActivityWatchdog();
           es = null;
           source.close();
           setStatus(CONNECTION_STATUS.DISCONNECTED);
@@ -274,6 +331,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         reconnectTimer = null;
       }
       clearOpenWatchdog();
+      clearActivityWatchdog();
       if (es) {
         es.close();
         es = null;
@@ -313,6 +371,14 @@ export function useSSE({ threadId, onEvent, enabled }) {
       connect();
     }
 
+    syncActivityWatchdogRef.current = () => {
+      const source = es;
+      if (source) {
+        scheduleActivityWatchdog(source);
+      } else {
+        clearActivityWatchdog();
+      }
+    };
     connect();
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("offline", handleNetworkOffline);
@@ -325,11 +391,20 @@ export function useSSE({ threadId, onEvent, enabled }) {
       window.removeEventListener("online", handleNetworkOnline);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       clearOpenWatchdog();
+      clearActivityWatchdog();
+      syncActivityWatchdogRef.current = () => {};
       const source = es;
       es = null;
       source?.close();
     };
   }, [enabled, threadId]);
+
+  React.useEffect(() => {
+    // A send can begin after an idle EventSource has already gone half-open,
+    // so no accepted/running frame is available to arm the watchdog. Sync it
+    // when processing state changes as well as when frames arrive.
+    syncActivityWatchdogRef.current();
+  }, [activityExpected]);
 
   return { status };
 }

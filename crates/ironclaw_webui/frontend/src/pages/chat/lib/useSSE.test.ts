@@ -28,15 +28,19 @@ function createHarness({
   online = true,
   visibilityState = "visible",
   onEvent = () => {},
+  activityExpected = false,
 } = {}) {
   const statuses = [];
   const streams = [];
   const timers = [];
   const documentListeners = new Map();
   const windowListeners = new Map();
-  let cleanup = null;
   let refIndex = 0;
+  let effectIndex = 0;
+  let currentThreadId = "thread-1";
+  let currentActivityExpected = activityExpected;
   const refs = [];
+  const effects = [];
 
   function EventSource() {}
   EventSource.CONNECTING = 0;
@@ -75,8 +79,25 @@ function createHarness({
       return stream;
     },
     React: {
-      useEffect: (effect) => {
-        cleanup = effect();
+      useEffect: (effect, dependencies) => {
+        const index = effectIndex++;
+        const previous = effects[index];
+        const changed =
+          !previous ||
+          !dependencies ||
+          !previous.dependencies ||
+          dependencies.length !== previous.dependencies.length ||
+          dependencies.some(
+            (dependency, dependencyIndex) =>
+              !Object.is(dependency, previous.dependencies[dependencyIndex]),
+          );
+        if (!changed) return;
+        previous?.cleanup?.();
+        const cleanup = effect();
+        effects[index] = {
+          dependencies: dependencies ? [...dependencies] : null,
+          cleanup: typeof cleanup === "function" ? cleanup : null,
+        };
       },
       useRef: (initial) => {
         const index = refIndex++;
@@ -107,31 +128,42 @@ function createHarness({
 
   vm.runInNewContext(useSSESourceForTest(), context);
   let result = null;
-  function render(threadId = "thread-1") {
-    cleanup?.();
-    cleanup = null;
+  function cleanupEffects() {
+    for (const effect of effects.splice(0)) effect?.cleanup?.();
+  }
+  function render(
+    threadId = currentThreadId,
+    nextActivityExpected = currentActivityExpected,
+  ) {
+    currentThreadId = threadId;
+    currentActivityExpected = nextActivityExpected;
     refIndex = 0;
+    effectIndex = 0;
     result = context.globalThis.__testExports.useSSE({
       threadId,
       enabled: true,
       onEvent,
+      activityExpected: currentActivityExpected,
     });
     return result;
   }
   function remount(threadId = "thread-1") {
+    cleanupEffects();
     refs.length = 0;
     return render(threadId);
   }
   render();
 
   return {
-    cleanup: () => cleanup?.(),
+    cleanup: cleanupEffects,
     context,
     documentListeners,
     get result() {
       return result;
     },
     render,
+    renderActivityExpected: (nextActivityExpected) =>
+      render(currentThreadId, nextActivityExpected),
     remount,
     statuses,
     streams,
@@ -231,6 +263,78 @@ test("useSSE lets EventSource recover transient failures natively", () => {
   assert.equal(timers[0].cleared, true);
   assert.equal(streams.length, 1);
   assert.deepEqual(statuses, ["connecting", "reconnecting", "connected"]);
+});
+
+test("useSSE reconnects an active run when an open stream stops delivering frames", () => {
+  const { context, statuses, streams, timers } = createHarness({
+    activityExpected: true,
+  });
+
+  const stalled = streams[0];
+  stalled.readyState = context.EventSource.OPEN;
+  stalled.onopen();
+  stalled.listener("projection_update")({
+    data: JSON.stringify({
+      type: "projection_update",
+      state: { items: [{ text: { id: "text:run-1", body: "partial" } }] },
+    }),
+    lastEventId: "partial-cursor",
+  });
+
+  const activityWatchdog = timers
+    .filter((timer) => timer.delay === 30_000 && !timer.cleared)
+    .at(-1);
+  assert.ok(activityWatchdog);
+  activityWatchdog.handler();
+
+  assert.equal(stalled.closeCalls, 1);
+  assert.equal(statuses.at(-1), "reconnecting");
+  const reconnectTimer = timers.find(
+    (timer) => timer.delay === 2000 && !timer.cleared,
+  );
+  assert.ok(reconnectTimer);
+  reconnectTimer.handler();
+
+  assert.equal(streams.length, 2);
+  assert.equal(streams[1].args.afterCursor, "partial-cursor");
+});
+
+test("useSSE does not arm the stall watchdog for an idle thread", () => {
+  const { context, streams, timers } = createHarness();
+
+  const stream = streams[0];
+  stream.readyState = context.EventSource.OPEN;
+  stream.onopen();
+  stream.listener("keep_alive")({
+    data: JSON.stringify({ type: "keep_alive" }),
+    lastEventId: "idle-cursor",
+  });
+
+  assert.equal(
+    timers.filter((timer) => timer.delay === 30_000 && !timer.cleared).length,
+    0,
+  );
+  assert.equal(stream.closeCalls, 0);
+});
+
+test("useSSE arms the stall watchdog when an idle thread starts a run", () => {
+  const { context, renderActivityExpected, streams, timers } = createHarness();
+
+  const stream = streams[0];
+  stream.readyState = context.EventSource.OPEN;
+  stream.onopen();
+  assert.equal(
+    timers.filter((timer) => timer.delay === 30_000 && !timer.cleared).length,
+    0,
+  );
+
+  renderActivityExpected(true);
+
+  assert.equal(
+    timers.filter((timer) => timer.delay === 30_000 && !timer.cleared).length,
+    1,
+    "starting a run must arm recovery even when the stalled stream cannot deliver an accepted frame",
+  );
 });
 
 test("useSSE keeps one watchdog across repeated native errors", () => {

@@ -4400,14 +4400,31 @@ where
         //
         // For normal session threads `explicit_owner_user_id()` is `None` and
         // we fall back to the caller's id — behaviour is unchanged.
-        let events = event_stream
-            .drain(ProjectionSubscriptionRequest {
-                actor: access.run_actor,
-                scope: access.scope,
-                after_cursor: request.after_cursor,
-            })
-            .await
-            .map_err(map_projection_error)?;
+        let subscription_request = ProjectionSubscriptionRequest {
+            actor: access.run_actor,
+            scope: access.scope,
+            after_cursor: request.after_cursor,
+        };
+        // The runtime projection stream's subscription path waits until it has
+        // a real outbound payload. Its one-shot drain can return an empty batch
+        // after consuming only the replay cursor, which makes SSE fall back to
+        // its idle poll sleep while live text accumulates in the replay window.
+        let events = if event_stream.supports_subscription() {
+            let mut subscription = event_stream
+                .subscribe(subscription_request)
+                .await
+                .map_err(map_projection_error)?;
+            match subscription.next().await {
+                Some(Ok(event)) => vec![event],
+                Some(Err(error)) => return Err(map_projection_error(error)),
+                None => Vec::new(),
+            }
+        } else {
+            event_stream
+                .drain(subscription_request)
+                .await
+                .map_err(map_projection_error)?
+        };
         Ok(RebornStreamEventsResponse { events })
     }
 
