@@ -620,7 +620,7 @@ fn default_patterns() -> Vec<LeakPattern> {
             // A missing END sentinel consumes the bounded remainder of the
             // scanned content, which deliberately over-redacts fail-safe.
             regex: Regex::new(
-                r"(?s)(?:-----BEGIN\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|-----BEGIN\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$))",
+                r"-----BEGIN(?s:(?:\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$)))",
             )
             .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
@@ -630,7 +630,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         LeakPattern {
             name: "ssh_private_key".to_string(),
             regex: Regex::new(
-                r"(?s)(?:-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|-----BEGIN\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|-----BEGIN\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$))",
+                r"-----BEGIN(?s:(?:\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$)))",
             )
             .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
@@ -827,6 +827,27 @@ mod tests {
                 .iter()
                 .any(|m| m.pattern_name == "pem_private_key")
         );
+    }
+
+    #[test]
+    fn private_key_patterns_use_the_shared_begin_prefix_filter() {
+        let detector = LeakDetector::new();
+
+        for pattern_name in ["pem_private_key", "ssh_private_key"] {
+            let pattern_index = detector
+                .patterns
+                .iter()
+                .position(|pattern| pattern.name == pattern_name)
+                .expect("default private-key pattern should exist");
+
+            assert!(
+                detector
+                    .known_prefixes
+                    .iter()
+                    .any(|(prefix, index)| prefix == "-----BEGIN" && *index == pattern_index),
+                "{pattern_name} should be eliminated before regex matching when the input has no private-key sentinel"
+            );
+        }
     }
 
     #[test]

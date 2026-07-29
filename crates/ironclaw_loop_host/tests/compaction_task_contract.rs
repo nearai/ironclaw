@@ -78,6 +78,46 @@ async fn compaction_port_scans_raw_messages_before_xml_escaping() {
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_injection_split_across_message_boundaries() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("SPLIT").await;
+    fixture.append_user("INJECTION").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(SplitBoundaryInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect_err("injection markers spanning messages must fail closed");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::SecurityRejected { .. }
+    ));
+    assert!(
+        inference.last_input().is_empty(),
+        "split injection content must not reach inference"
+    );
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history.summary_artifacts.is_empty(),
+        "split injection content must not be persisted"
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_uses_configured_prompt_id_for_inference_identity() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("summarize me").await;
@@ -1674,6 +1714,23 @@ impl InjectionScanner for ChatMlInjectionScanner {
                 severity: Severity::High,
                 location: 0..content.len(),
                 description: "test chatml marker".to_string(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+struct SplitBoundaryInjectionScanner;
+
+impl InjectionScanner for SplitBoundaryInjectionScanner {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning> {
+        if content.contains("SPLIT\nINJECTION") {
+            vec![InjectionWarning {
+                pattern: "split_boundary".to_string(),
+                severity: Severity::High,
+                location: 0..content.len(),
+                description: "test cross-message injection".to_string(),
             }]
         } else {
             Vec::new()

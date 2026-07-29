@@ -141,6 +141,11 @@ struct LeakRedaction {
     count: u32,
 }
 
+struct SanitizedFragment {
+    content: String,
+    redacted_leak_count: u32,
+}
+
 impl<S> HostManagedLoopCompactionPort<S>
 where
     S: SessionThreadService + ?Sized,
@@ -398,44 +403,21 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
-        for message in &range.messages {
-            if !self
-                .injection_scanner
-                .scan_injection(&message.body)
-                .is_empty()
-            {
-                return Err(CompactionError::InjectionDetected);
-            }
-        }
         self.validate_unredacted_message_boundaries(range)?;
 
         let mut text = String::new();
         let mut redacted_leak_count = 0_u32;
         for message in &range.messages {
-            let body = message.body.as_str();
-            let redaction = self.redact_leaks(body)?;
-            let body = redaction.content.as_deref().unwrap_or(body);
-            if redaction.count > 0 && !self.injection_scanner.scan_injection(body).is_empty() {
-                return Err(CompactionError::InjectionDetected);
-            }
+            let sanitized =
+                self.sanitize_retained_fragment(&message.body, Some(self.max_input_bytes))?;
             redacted_leak_count = redacted_leak_count
-                .checked_add(redaction.count)
-                .ok_or(CompactionError::LeakRedactionFailed)?;
-
-            let escaped_body = escape_xml_checked(body, self.max_input_bytes)?;
-            let escaped_redaction = self.redact_leaks(&escaped_body)?;
-            let escaped_body = escaped_redaction
-                .content
-                .as_deref()
-                .unwrap_or(&escaped_body);
-            redacted_leak_count = redacted_leak_count
-                .checked_add(escaped_redaction.count)
+                .checked_add(sanitized.redacted_leak_count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
             append_message_checked(
                 &mut text,
                 message.sequence,
                 message.kind,
-                escaped_body,
+                &sanitized.content,
                 self.max_input_bytes,
             )?;
         }
@@ -522,47 +504,67 @@ where
         response: &SystemInferenceResponse,
         input_bytes: usize,
     ) -> Result<SanitizedSummary, CompactionError> {
-        if !self
-            .injection_scanner
-            .scan_injection(&response.output_text)
-            .is_empty()
-        {
-            return Err(CompactionError::InjectionDetected);
-        }
-        let redaction = self.redact_leaks(&response.output_text)?;
-        let output_text = redaction
-            .content
-            .as_deref()
-            .unwrap_or(&response.output_text);
-        if redaction.count > 0
-            && !self
-                .injection_scanner
-                .scan_injection(output_text)
-                .is_empty()
-        {
-            return Err(CompactionError::InjectionDetected);
-        }
-        let escaped_output = escape_xml(output_text);
-        let escaped_redaction = self.redact_leaks(&escaped_output)?;
-        let escaped_output = escaped_redaction
-            .content
-            .as_deref()
-            .unwrap_or(&escaped_output);
-        let content = format!("{ANTI_INJECTION_PREFIX}<summary>{escaped_output}</summary>");
+        let sanitized = self.sanitize_retained_fragment(&response.output_text, None)?;
+        let content = format!(
+            "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
+            sanitized.content
+        );
         if !self.injection_scanner.scan_injection(&content).is_empty() {
             return Err(CompactionError::InjectionDetected);
         }
         if !self.leak_detector.scan_leaks(&content).is_clean() {
             return Err(CompactionError::LeakRedactionFailed);
         }
-        let redacted_leak_count = redaction
-            .count
-            .checked_add(escaped_redaction.count)
-            .ok_or(CompactionError::LeakRedactionFailed)?;
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, content.len());
         Ok(SanitizedSummary {
             content,
             compression_ratio_ppm,
+            redacted_leak_count: sanitized.redacted_leak_count,
+        })
+    }
+
+    fn sanitize_retained_fragment(
+        &self,
+        content: &str,
+        max_escaped_bytes: Option<usize>,
+    ) -> Result<SanitizedFragment, CompactionError> {
+        if !self.injection_scanner.scan_injection(content).is_empty() {
+            return Err(CompactionError::InjectionDetected);
+        }
+
+        let redaction = self.redact_leaks(content)?;
+        let redacted_content = redaction.content.as_deref().unwrap_or(content);
+        if redaction.count > 0
+            && !self
+                .injection_scanner
+                .scan_injection(redacted_content)
+                .is_empty()
+        {
+            return Err(CompactionError::InjectionDetected);
+        }
+
+        let escaped = match max_escaped_bytes {
+            Some(max_bytes) => escape_xml_checked(redacted_content, max_bytes)?,
+            None => escape_xml(redacted_content),
+        };
+        let escape_transformed_content = escaped != redacted_content;
+        let escaped_redaction = self.redact_leaks(&escaped)?;
+        let escaped_content = escaped_redaction.content.unwrap_or(escaped);
+        if (escape_transformed_content || escaped_redaction.count > 0)
+            && !self
+                .injection_scanner
+                .scan_injection(&escaped_content)
+                .is_empty()
+        {
+            return Err(CompactionError::InjectionDetected);
+        }
+
+        let redacted_leak_count = redaction
+            .count
+            .checked_add(escaped_redaction.count)
+            .ok_or(CompactionError::LeakRedactionFailed)?;
+        Ok(SanitizedFragment {
+            content: escaped_content,
             redacted_leak_count,
         })
     }
