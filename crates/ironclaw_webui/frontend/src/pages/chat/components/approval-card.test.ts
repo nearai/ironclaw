@@ -25,6 +25,7 @@ function approvalCardSourceForTest() {
 }
 
 function renderApprovalCard({
+  always = false,
   expandedPayload = false,
   gate = defaultApprovalGate(),
   globalAutoApproveEnabled = null,
@@ -34,6 +35,7 @@ function renderApprovalCard({
 } = {}) {
   let stateCalls = 0;
   const effects = [];
+  const alwaysUpdates = [];
   const expandedPayloadUpdates = [];
   const resolvingUpdates = [];
   const refs = [];
@@ -53,6 +55,14 @@ function renderApprovalCard({
       },
       useState: (initial) => {
         stateCalls += 1;
+        if (stateCalls === 1) {
+          return [
+            always,
+            (value) => {
+              alwaysUpdates.push(value);
+            },
+          ];
+        }
         if (stateCalls === 2) {
           return [
             expandedPayload,
@@ -100,6 +110,7 @@ function renderApprovalCard({
   return {
     rendered,
     effects,
+    alwaysUpdates,
     expandedPayloadUpdates,
     resolvingUpdates,
     refs,
@@ -215,6 +226,20 @@ test("ApprovalCard resets expanded command details when the gate changes", () =>
 
   effects[0].fn();
   assert.deepEqual(expandedPayloadUpdates, [false]);
+});
+
+test("ApprovalCard resets always allow when the gate changes", () => {
+  const gate = { ...defaultApprovalGate(), allowAlways: true };
+  const { effects, alwaysUpdates } = renderApprovalCard({
+    always: true,
+    gate,
+  });
+
+  assert.equal(effects.length, 1);
+  assert.equal(effects[0].deps[0], gate);
+
+  effects[0].fn();
+  assert.deepEqual(alwaysUpdates, [false]);
 });
 
 test("ApprovalCard links to tool settings when global auto-approve is off", () => {

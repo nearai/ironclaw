@@ -53,6 +53,7 @@ export function ApprovalCard({
   currentGateRef.current = gate;
 
   React.useEffect(() => {
+    setAlways(false);
     setExpandedPayload(false);
     isResolvingRef.current = false;
     setIsResolving(false);
