@@ -463,49 +463,46 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
 /// at the gateway (`CapabilitySurfaceDenyFilter`, before
-/// `register_provider_tool_call` ever stages an invocation) — the whole
-/// provider response fails with `InvalidOutput` → `Unavailable`, reaching a
-/// terminal `TurnStatus::Failed`/`"model_unavailable"` after exactly one
-/// scripted turn. No `ToolResultReference` is persisted; `assert_tool_invoked`
-/// returning `Err` proves the capability was never dispatched.
+/// `register_provider_tool_call` ever stages an invocation). The loop must
+/// surface the precise `outside_capability_surface` observation to the model,
+/// let it repair the response on the next call, and complete without ever
+/// dispatching or reporting the rejected call as successful.
 #[tokio::test]
-async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
+async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     let h = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::tool_call(
-            "builtin.spawn_subagent",
-            json!({"goal": "test"}),
-        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.spawn_subagent", json!({"goal": "test"})),
+            RebornScriptedReply::text(
+                "I cannot use that capability, so I will continue without it.",
+            ),
+        ])
         .build()
         .await
         .expect("harness builds");
 
-    let run_id = h
-        .submit_turn_async("spawn a subagent")
+    h.submit_turn("spawn a subagent")
         .await
-        .expect("turn submitted");
-    let state = h
-        .wait_for_status(run_id, ironclaw_turns::TurnStatus::Failed)
+        .expect("run recovers from the disabled capability call");
+    h.assert_reply_contains("continue without it")
         .await
-        .expect("run reaches Failed after the disabled capability is rejected at the gateway");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("a Failed run must carry a failure detail");
-    assert_eq!(
-        failure.category(),
-        "model_unavailable",
-        "expected the Unavailable fidelity category (InvalidOutput -> Unavailable), got {failure:?}"
-    );
+        .expect("repaired reply is finalized");
+    h.assert_model_request_contains(
+        "model error observation: invalid_output reason=outside_capability_surface; \
+         repair the response and continue",
+    )
+    .await
+    .expect("the retry tells the model precisely why its tool call was rejected");
 
-    // No side effect: the capability was rejected before dispatch, so it was
-    // never invoked.
     assert!(
         h.assert_tool_invoked("builtin.spawn_subagent")
             .await
             .is_err(),
-        "disabled capability must never be dispatched, even when the model calls it anyway"
+        "the rejected capability must never be dispatched or recorded as successful"
     );
+    h.assert_capability_result_count("builtin.spawn_subagent", 0)
+        .await
+        .expect("the rejected call must not produce a successful capability result");
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`

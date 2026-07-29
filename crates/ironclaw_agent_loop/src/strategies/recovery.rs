@@ -350,6 +350,16 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
             ModelErrorClass::InvalidOutput => {
                 let reason =
                     ModelInvalidOutputDetailReason::from_safe_summary(err.safe_summary.as_str());
+                if reason == Some(ModelInvalidOutputDetailReason::OutsideCapabilitySurface) {
+                    // A blind shape-repair retry cannot tell the model which
+                    // advertised-tool constraint it violated. Spend the one
+                    // typed observation attempt immediately instead.
+                    return observe_once_or_abort(
+                        state,
+                        RetryScope::Call,
+                        ModelErrorRecoveryObservation::invalid_output(reason),
+                    );
+                }
                 retry_observe_or_abort(
                     state,
                     self.max_attempts_per_class,
@@ -988,8 +998,8 @@ mod tests {
     mod default_recovery_strategy {
         use ironclaw_host_api::{TenantId, ThreadId};
         use ironclaw_turns::{
-            AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
-            TurnScope,
+            AgentLoopDriverDescriptor, ModelInvalidOutputDetailReason, RunProfileId,
+            RunProfileVersion, TurnId, TurnRunId, TurnScope,
             run_profile::{
                 CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
                 CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
@@ -1551,6 +1561,50 @@ mod tests {
                 .await;
             assert!(matches!(
                 outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::InvalidModelOutput,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn model_outside_capability_surface_observes_immediately_before_abort() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let error = ModelErrorSummary {
+                class: ModelErrorClass::InvalidOutput,
+                safe_summary: SanitizedStrategySummary::from_trusted_static(
+                    ModelInvalidOutputDetailReason::OutsideCapabilitySurface.safe_summary(),
+                ),
+                diagnostic_ref: None,
+            };
+
+            let outcome = strategy
+                .on_model_error(&state_with_no_attempts(), &error)
+                .await;
+            let recovery = match outcome {
+                RecoveryOutcome::ModelErrorObservation {
+                    recovery,
+                    scope,
+                    alter,
+                    observation,
+                } => {
+                    assert_eq!(scope, RetryScope::Call);
+                    assert_eq!(alter, None);
+                    assert_eq!(
+                        observation.model_instruction(),
+                        "model error observation: invalid_output \
+                         reason=outside_capability_surface; repair the response and continue"
+                    );
+                    recovery
+                }
+                other => panic!("expected immediate model-visible observation, got {other:?}"),
+            };
+
+            let mut state = state_with_no_attempts();
+            state.recovery_state = recovery;
+            assert!(matches!(
+                strategy.on_model_error(&state, &error).await,
                 RecoveryOutcome::Abort {
                     failure_kind: LoopFailureKind::InvalidModelOutput,
                     ..
