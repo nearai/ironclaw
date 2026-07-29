@@ -392,7 +392,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
     let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service.clone())
-        .with_product_command_surface(command_surface);
+        .with_product_command_surface(command_surface.clone());
     let envelope = sample_command_envelope("command-context", "progress", "");
     let expected_adapter_id = envelope.adapter_id().clone();
     let expected_installation_id = envelope.installation_id().clone();
@@ -403,14 +403,25 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
 
     let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
+    // Aliases are retired: `progress` is now an unrecognized token, so the
+    // admission-time context is still captured (it records the raw requested
+    // command before rejection), but the command itself resolves to `Unknown`
+    // and is rejected before it ever reaches the command surface.
     assert!(matches!(
         ack,
-        ProductInboundAck::CommandResult { ref command, .. } if command == "status"
+        ProductInboundAck::Rejected(ref rejection)
+            if rejection.kind == ProductRejectionKind::InvalidRequest
     ));
     let records = admission_service.records();
     assert_eq!(records.len(), 1);
     let (context, command) = &records[0];
-    assert_eq!(command, &ProductCommand::Status);
+    assert_eq!(
+        command,
+        &ProductCommand::Unknown {
+            name: "progress".to_string(),
+            arguments: String::new(),
+        }
+    );
     assert_eq!(context.requested_command, "progress");
     assert_eq!(context.adapter_id, expected_adapter_id);
     assert_eq!(context.installation_id, expected_installation_id);
@@ -419,6 +430,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     assert_eq!(context.auth_claim, expected_auth_claim);
     assert_eq!(context.trigger, ProductTriggerReason::BotCommand);
     assert_eq!(context.received_at, expected_received_at);
+    assert!(command_surface.invokes().is_empty());
 
     let settled = ledger.settled_actions();
     assert_eq!(settled.len(), 1);
@@ -429,7 +441,10 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
 #[tokio::test]
 async fn manifest_command_admission_is_exact_and_blocks_sensitive_handlers() {
     for (suffix, command, arguments) in [
-        ("alias", "progress", ""),
+        // Retired alias: `progress` is now just an unknown token, not a
+        // registered command's alias — the exact-match admission gate must
+        // still reject it rather than let it slip past a `status`-only allowlist.
+        ("retired-alias", "progress", ""),
         (
             "model-provider",
             "model",

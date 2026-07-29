@@ -56,7 +56,6 @@ pub struct CommandResultField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductCommandDescriptor {
     pub name: &'static str,
-    pub aliases: &'static [&'static str],
 }
 
 struct ProductCommandSpec {
@@ -66,17 +65,11 @@ struct ProductCommandSpec {
 
 const COMMAND_SPECS: &[ProductCommandSpec] = &[
     ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "model",
-            aliases: &[],
-        },
+        descriptor: ProductCommandDescriptor { name: "model" },
         parse: parse_model_command,
     },
     ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "status",
-            aliases: &["progress"],
-        },
+        descriptor: ProductCommandDescriptor { name: "status" },
         parse: parse_status_command,
     },
 ];
@@ -89,7 +82,6 @@ pub fn product_command_descriptors() -> impl Iterator<Item = ProductCommandDescr
         .copied()
         .map(|kind| ProductCommandDescriptor {
             name: kind.command_name(),
-            aliases: &[],
         })
         .chain(COMMAND_SPECS.iter().map(|spec| spec.descriptor.clone()))
 }
@@ -101,9 +93,7 @@ pub struct UnknownProductCommandName {
 }
 
 pub fn validate_declared_product_command(name: &str) -> Result<(), UnknownProductCommandName> {
-    if product_command_descriptors()
-        .any(|descriptor| descriptor.name == name || descriptor.aliases.contains(&name))
-    {
+    if product_command_descriptors().any(|descriptor| descriptor.name == name) {
         return Ok(());
     }
     Err(UnknownProductCommandName {
@@ -198,16 +188,12 @@ impl ProductCommand {
     }
 
     pub fn descriptor(&self) -> Option<ProductCommandDescriptor> {
-        product_command_descriptors().find(|descriptor| {
-            descriptor.name == self.name() || descriptor.aliases.contains(&self.name())
-        })
+        product_command_descriptors().find(|descriptor| descriptor.name == self.name())
     }
 }
 
 fn command_spec_for_name(name: &str) -> Option<&'static ProductCommandSpec> {
-    COMMAND_SPECS
-        .iter()
-        .find(|spec| spec.descriptor.name == name || spec.descriptor.aliases.contains(&name))
+    COMMAND_SPECS.iter().find(|spec| spec.descriptor.name == name)
 }
 
 fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {

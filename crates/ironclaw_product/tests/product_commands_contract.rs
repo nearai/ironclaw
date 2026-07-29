@@ -125,13 +125,6 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
             Some("status"),
         ),
         (
-            "progress",
-            "",
-            ProductCommand::Status,
-            "status",
-            Some("status"),
-        ),
-        (
             "unknown",
             "raw args",
             ProductCommand::Unknown {
@@ -392,11 +385,9 @@ fn lifecycle_command_parser_preserves_skill_install_content() {
 
 #[test]
 fn command_registry_declares_model_without_source_policy() {
-    let model = product_command_descriptors()
+    product_command_descriptors()
         .find(|descriptor| descriptor.name == "model")
         .expect("model descriptor");
-
-    assert!(model.aliases.is_empty());
 }
 
 #[test]
@@ -423,7 +414,8 @@ fn command_registry_declares_canonical_lifecycle_commands() {
 #[test]
 fn declared_command_validation_uses_exact_registry_tokens() {
     assert!(validate_declared_product_command("status").is_ok());
-    assert!(validate_declared_product_command("progress").is_ok());
+    // Aliases are retired: `progress` is no longer a declarable token.
+    assert!(validate_declared_product_command("progress").is_err());
 
     let error =
         validate_declared_product_command("notacommand").expect_err("unknown command must fail");
