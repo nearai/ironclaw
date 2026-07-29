@@ -1,8 +1,8 @@
 // @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
+import { Button, Text } from "@ironclaw/design-system";
 import QRCode from "qrcode";
 import React from "react";
-import { Button } from "../design-system/button";
 import { useT } from "../lib/i18n";
 import { notifyChannelConnected } from "../lib/channel-connection-events";
 import {
@@ -241,7 +241,7 @@ export function PairingWebCodePanel({
 
   const containerClass = compact
     ? "mt-3"
-    : "mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4";
+    : "mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4";
 
   if (connected) {
     return (
@@ -254,12 +254,12 @@ export function PairingWebCodePanel({
           onClick={disconnect}
           disabled={isDisconnecting}
           data-testid="pairing-disconnect"
-          className="mt-2 text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-2 text-xs text-[var(--v2-text-faint)] underline underline-offset-2 hover:text-[var(--v2-text)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {t("pairing.web.disconnect")}
         </button>
         {error &&
-        (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
+        (<p role="alert" className="mt-2 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
       </div>
     );
   }
@@ -270,7 +270,7 @@ export function PairingWebCodePanel({
         {error
           ? (
               <div className="space-y-2">
-                <p role="alert" className="text-xs leading-5 text-red-300">{error}</p>
+                <p role="alert" className="text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -291,10 +291,10 @@ export function PairingWebCodePanel({
     return (
       <div data-testid="pairing-web-code-panel" className={containerClass}>
         {!compact &&
-        (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+        (<Text variant="eyebrow" tone="accent" as="h4" className="mb-2">
           {t("pairing.web.title", { name: displayName || extensionId })}
-        </h4>)}
-        <p data-testid="pairing-expired" className="text-xs leading-5 text-iron-300">
+        </Text>)}
+        <p data-testid="pairing-expired" className="text-xs leading-5 text-[var(--v2-text-muted)]">
           {t("pairing.web.expired")}
         </p>
         <Button
@@ -308,7 +308,7 @@ export function PairingWebCodePanel({
           {t("pairing.web.getNewCode")}
         </Button>
         {error &&
-        (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
+        (<p role="alert" className="mt-2 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
       </div>
     );
   }
@@ -316,10 +316,10 @@ export function PairingWebCodePanel({
   return (
     <div data-testid="pairing-web-code-panel" className={containerClass}>
       {!compact &&
-      (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+      (<Text variant="eyebrow" tone="accent" as="h4" className="mb-2">
         {t("pairing.web.title", { name: displayName || extensionId })}
-      </h4>)}
-      <p className="mb-3 text-xs leading-5 text-iron-300">{instructions ||
+      </Text>)}
+      <p className="mb-3 text-xs leading-5 text-[var(--v2-text-muted)]">{instructions ||
         (deepLink
           ? t("pairing.web.instructions", { name: displayName || extensionId })
           : t("pairing.web.instructionsNoLink", { name: displayName || extensionId }))}</p>
@@ -330,14 +330,14 @@ export function PairingWebCodePanel({
           <img
             src={qrDataUrl}
             alt={t("pairing.web.qrAlt", { name: displayName || extensionId })}
-            className="h-36 w-36 shrink-0 rounded-md border border-white/[0.06] bg-white p-1"
+            className="h-36 w-36 shrink-0 rounded-md border border-[var(--v2-panel-border)] bg-white p-1"
           />
         )}
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid="pairing-code"
-              className="font-mono text-xl tracking-[0.18em] text-iron-100"
+              className="font-mono text-xl tracking-[var(--v2-tracking-code)] text-[var(--v2-text-strong)]"
             >
               {pending.code}
             </span>
@@ -364,7 +364,7 @@ export function PairingWebCodePanel({
               {t("pairing.web.openIn", { name: displayName || extensionId })}
             </Button>
           </div>)}
-          <p data-testid="pairing-countdown" className="text-[11px] text-iron-400">
+          <p data-testid="pairing-countdown" className="text-[11px] text-[var(--v2-text-faint)]">
             {t("pairing.web.expiresIn", {
               time: formatPairingCountdown(expiresAtMs - now),
             })}
@@ -372,7 +372,7 @@ export function PairingWebCodePanel({
         </div>
       </div>
       {error &&
-      (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+      (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
   );
 }

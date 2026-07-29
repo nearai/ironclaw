@@ -77,6 +77,8 @@ function renderModal({
     PairingWebCodePanel() {},
     Button() {},
     Icon() {},
+    Input() {},
+    Text() {},
     console: { error() {} },
     React: {
       useState: (initial) => [

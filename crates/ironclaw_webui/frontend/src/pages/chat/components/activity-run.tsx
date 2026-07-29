@@ -1,4 +1,4 @@
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { summarizeActivity } from "../lib/activity-summary";
@@ -45,7 +45,7 @@ export function ActivityRun({ activity, activeRunId = null }: ActivityRunProps) 
           "v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
           summary.hasError
             ? "text-[var(--v2-danger-text)]"
-            : "text-iron-400 hover:text-iron-200",
+            : "text-[var(--v2-text-faint)] hover:text-[var(--v2-text)]",
         ].join(" ")}
       >
         <Icon name="layers" className="h-4 w-4 shrink-0" />
@@ -99,11 +99,11 @@ function ReasoningItem({ content, streaming = false }: ReasoningItemProps) {
   return (
     <div className="flex min-w-0 gap-3">
       <div
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)]"
       >
         <Icon name="spark" className="h-4 w-4" />
       </div>
-      <div className="min-w-0 flex-1 border-l-2 border-white/10 pl-3 text-iron-300 v2-chat-readable-width">
+      <div className="min-w-0 flex-1 border-l-2 border-[var(--v2-panel-border)] pl-3 text-[var(--v2-text-muted)] v2-chat-readable-width">
         <MarkdownRenderer
           content={content}
           className="text-[13px]"

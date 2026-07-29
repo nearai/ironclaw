@@ -1,0 +1,117 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+import { Callout } from "../../src/callout";
+
+<Meta title="Docs/Generative UI" />
+
+# Generative UI
+
+This design system is built so that an agent can assemble product surfaces
+from it, not just a person. That is a specific engineering property, and it
+falls out of decisions documented across this Storybook rather than a
+feature bolted on top. This page explains the property, what enforces it,
+and what it does not cover.
+
+<Callout tone="accent" title="The claim, precisely">
+  A model generating UI is only as reliable as the vocabulary it is allowed
+  to use. Given free-form HTML and CSS, it has an unbounded set of ways to
+  be wrong: off-palette colors, invented spacing, missing focus states,
+  unlabeled controls. Given a closed set of atomic components with typed
+  props, most of those failure modes stop being expressible. The system is
+  the guardrail.
+</Callout>
+
+## Why atomicity is the mechanism
+
+Generative UI fails in predictable ways, and each failure maps to a place
+where a design system leaks. If a component accepts arbitrary class
+overrides for its core appearance, a generator will use them. If colors are
+raw hex values, a generator will invent new ones. If accessibility is
+"remember to add aria attributes," a generator will forget. Atomicity
+closes the leaks:
+
+1. **A closed vocabulary — by convention, enforced in layers.** Every
+   component in the sidebar is a complete, self-contained unit: `Button`,
+   `Badge`, `Card`, `NavItem`, `ListRow`, `ChatMessage`, `Callout`, and
+   the rest. Their typed props are the intended API surface: a generated
+   screen is a tree of these components and nothing else. Precision about
+   what enforces this: wrong prop values fail typecheck; raw colors fail
+   the CI token ratchet; but `className` escape hatches remain on most
+   components (for layout composition), so a determined generator *can*
+   express raw styling — that's caught by the mechanical lint pass
+   described in point 6, not by the compiler. The vocabulary is closed as
+   a target and a review contract, not as a type-level guarantee.
+
+2. **Decisions are already made.** Color, spacing, radius, type, and motion
+   live in the `--v2-*` tokens (see Tokens). Components consume tokens, not
+   values, so a generated surface cannot be off-palette or off-rhythm. The
+   generator chooses *what to say*, never *what green means*.
+
+3. **Semantics, not styles.** Props express intent: `tone="danger"`, not a
+   red hex; `active`, not a highlight class; `divider`, not a border
+   utility. The status canon (Tokens page) fixes what each tone means, so a
+   generated badge on a failed run is correct by construction.
+
+4. **Accessibility comes with the part.** Interactive atoms are built on
+   Radix primitives or carry their own contract: `NavItem` sets
+   `aria-current` on the active destination, `ListRow` becomes a real
+   button when it is interactive, `Callout` is a `role="note"` aside,
+   icon-only buttons require labels. A generator does not need to know any
+   of this to produce accessible output.
+
+5. **The spec is machine-readable.** Autodocs publish every component's
+   props table and usage notes. The Compositions section is ground truth:
+   full app surfaces (workspace, automations page, run detail, activity
+   feed) built exclusively from published components. They are working
+   examples of the target grammar, usable as few-shot context or as a
+   correctness reference.
+
+6. **Generated output is reviewable.** Because a screen is a component
+   tree, a diff reads as intent ("a Card with three ListRows and a danger
+   Badge") and can be linted mechanically: no raw hex, no one-off spacing,
+   no unlabeled icon buttons.
+
+## The gap rule keeps it honest
+
+The rule that governs the Compositions section governs generation too: if
+a surface needs something the system does not provide, that is a gap in the
+system, not a license for one-off styling. `NavItem`, `ListRow`,
+`ChatMessage`, and `Callout` all exist because compositions demanded them.
+The same loop applies when a generator hits a wall: extend the vocabulary
+once, in one place, with tests and a story, and every future surface gets
+the part.
+
+This matters more for machine authors than human ones. A person who
+hand-rolls a nav row creates one inconsistency. A generator that learns to
+hand-roll nav rows creates an unbounded supply of them.
+
+## What this enables
+
+Concretely, and within the current vocabulary:
+
+- **Assembled screens.** Settings panes, list-and-detail views, dashboards,
+  and feeds composed from the same parts as the hand-built product. The
+  Compositions page shows the ceiling of what assembly alone produces.
+- **Data-shaped UI.** An agent holding a run record can render it as the
+  Run detail composition: steps as `ListRow`s, statuses as `Badge`s from
+  the canon, failures as a plain-language `Callout` with the fix.
+- **In-conversation surfaces.** `ChatMessage` accepts components as
+  children, so the agent can place a live receipt card, a settings form, or
+  a run summary inside its own turn in the thread.
+- **Consistent copy.** Voice & copy and Brand principles are written as
+  checkable rules (receipts read as receipts, calm status language,
+  sentence case), so generated text can be reviewed against them the same
+  way generated markup is reviewed against the component set.
+
+## What it does not cover
+
+Honest limits, so the claim stays credible:
+
+- **Layout judgment.** The system constrains parts, not taste. A generator
+  can still put twelve stat cards above the fold. Compositions narrow this
+  by example; they do not eliminate it.
+- **Novel parts.** Anything outside the vocabulary requires a human to
+  extend the system first. That is the gap rule working as intended, but it
+  is a stop, not a slowdown.
+- **Review.** Generated surfaces ship through the same review as
+  hand-written ones. The system makes review cheap and mechanical; it does
+  not replace it.

@@ -1,7 +1,7 @@
 import React from "react";
 import { statProjectFile, projectFileContentUrl } from "../../../lib/api";
 import { AttachmentChip } from "./attachment-chip";
-import { AttachmentPreviewModal } from "./attachment-preview";
+import { AttachmentPreviewModal } from "./attachment-preview-lazy";
 import { basename, extractWorkspaceFilePaths, formatSize } from "../lib/project-file-paths";
 
 // One chip for an agent-referenced workspace file. Builds an attachment-shaped

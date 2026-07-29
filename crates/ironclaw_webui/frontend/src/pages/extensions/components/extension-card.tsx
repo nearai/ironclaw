@@ -1,8 +1,9 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Badge } from "../../../design-system/badge";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Badge } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import {
   RUNTIME_LABELS,
   STATE_TONES,
@@ -28,7 +29,8 @@ const CARD =
   "flex self-start flex-col rounded-[14px] border border-[var(--v2-panel-border)] " +
   "bg-[var(--v2-surface-soft)] p-4";
 const META = "mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] text-[var(--v2-text-faint)]";
-const DESC = "mt-2 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-[var(--v2-text-muted)]";
+/* Layout-only classes — the type/tone comes from <Text variant="caption" tone="muted">. */
+const DESC = "mt-2 line-clamp-2 min-h-[2.5rem]";
 const FOOTER = "mt-3 flex items-center gap-2 border-t border-[var(--v2-panel-border)] pt-3";
 const DISCLOSURE =
   "v2-button inline-flex items-center gap-1.5 border-0 bg-transparent p-0 " +
@@ -96,7 +98,7 @@ function OverflowMenu({ actions, isBusy }) {
       (
         <div
           role="menu"
-          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[var(--v2-shadow-menu)]"
         >
           {actions.map(
             (action) => (
@@ -236,7 +238,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
     >
       <div className="flex items-start gap-2">
         <Badge tone={tone} label={label} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
           {displayName}
         </span>
         {overflowActions.length > 0 &&
@@ -251,7 +253,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
         {ext.version && (<span>· v{ext.version}</span>)}
       </div>
 
-      {ext.description && (<p className={DESC}>{ext.description}</p>)}
+      {ext.description && (<Text as="p" variant="caption" tone="muted" className={DESC}>{ext.description}</Text>)}
 
       {/* Internal startup failures remain attached to the public
           `setup_needed` state as redacted remediation context. */}
@@ -275,7 +277,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
 
       {onboardingHint &&
       (
-        <div className="mt-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+        <div className="mt-2 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
           {onboardingHint}
         </div>
       )}
@@ -348,7 +350,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           label={statusLabel || t("extensions.state.available") || "available"}
           size="sm"
         />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
           {displayName}
         </span>
       </div>
@@ -358,7 +360,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
         {entry.version && (<span>· v{entry.version}</span>)}
       </div>
 
-      {entry.description && (<p className={DESC}>{entry.description}</p>)}
+      {entry.description && (<Text as="p" variant="caption" tone="muted" className={DESC}>{entry.description}</Text>)}
 
       <div className={FOOTER}>
         {keywords.length > 0

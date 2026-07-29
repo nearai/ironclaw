@@ -20,7 +20,7 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
       <button
         type="button"
         onClick={() => onNavigate("/workspace")}
-        className="text-signal hover:underline"
+        className="text-[var(--v2-accent-text)] hover:underline"
       >
         {t("workspace.breadcrumbRoot")}
       </button>
@@ -30,12 +30,12 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
         const label = index === 0 ? areaDisplayName(part, t) : part;
         return (
           <>
-          <span key={target} className="text-iron-400">/</span>
+          <span key={target} className="text-[var(--v2-text-faint)]">/</span>
           <button
             key={`${target}-button`}
             type="button"
             onClick={() => onNavigate(routeForWorkspacePath(target))}
-            className="max-w-[220px] truncate text-signal hover:underline"
+            className="max-w-[220px] truncate text-[var(--v2-accent-text)] hover:underline"
           >
             {label}
           </button>

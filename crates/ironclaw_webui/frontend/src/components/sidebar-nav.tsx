@@ -1,9 +1,9 @@
 import { NavLink, useLocation } from "react-router";
 import { primaryRoutes, EXPANDABLE_SUB_ROUTES } from "../app/routes";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 const ROUTE_ICONS = {
   chat: "chat",
@@ -70,7 +70,7 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
         <Icon
           name="chevron"
           className={cn(
-            "h-3.5 w-3.5 shrink-0 transition-transform duration-150",
+            "h-3.5 w-3.5 shrink-0 transition-transform duration-[var(--v2-duration-fast)]",
             isExpanded && "rotate-180"
           )}
         />

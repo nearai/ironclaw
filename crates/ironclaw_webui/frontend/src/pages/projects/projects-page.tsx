@@ -2,8 +2,8 @@
 import { useNavigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { Button } from "../../design-system/button";
-import { EmptyPanel } from "../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { EmptyPanel } from "@ironclaw/design-system";
 import { useProjectsOverview } from "./hooks/useProjectsOverview";
 import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
 import { useProjectInspector } from "./hooks/useProjectInspector";
@@ -166,7 +166,7 @@ export function ProjectsPage() {
             {headerActions}
           </div>
           {overviewState.error && (
-            <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]">
               {overviewState.error.message}
             </div>
           )}

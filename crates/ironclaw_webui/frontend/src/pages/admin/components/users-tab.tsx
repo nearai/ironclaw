@@ -1,10 +1,13 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Panel, StatusPill, EmptyPanel } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { SelectMenu } from "@ironclaw/design-system";
+import { Input, FormField } from "@ironclaw/design-system";
+import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -41,13 +44,13 @@ function TokenBanner({ token, onDismiss }) {
   };
 
   return (
-    <div className="rounded-xl border border-signal/30 bg-signal/10 p-4 sm:p-5">
+    <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)] bg-[var(--v2-accent-soft)] p-4 sm:p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
-          <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
+          <Text variant="body" tone="strong" weight="medium">{t("admin.users.tokenCreated")}</Text>
+          <Text as="p" variant="caption" tone="muted" className="mt-1">{t("admin.users.tokenCreatedDesc")}</Text>
           <div className="mt-3 flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
+            <code className="min-w-0 flex-1 truncate rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-code-bg)] px-3 py-2 font-mono text-xs text-[var(--v2-text-strong)]">
               {token}
             </code>
             <Button variant="secondary" onClick={handleCopy}>
@@ -55,9 +58,9 @@ function TokenBanner({ token, onDismiss }) {
             </Button>
           </div>
         </div>
-        <button onClick={onDismiss} className="text-iron-300 hover:text-iron-100">
+        <Button variant="ghost" size="icon-sm" onClick={onDismiss} aria-label={t("common.close")}>
           <Icon name="close" className="h-4 w-4" />
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -96,43 +99,38 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 
   return (
     <Panel className="p-5 sm:p-6">
-      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.users.createUser")}</h3>
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">{t("admin.users.createUser")}</Text>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.displayName")}</label>
-            <input
+          <FormField label={t("admin.users.displayName")}>
+            <Input
               type="text"
               value={name}
               onChange={(e) => setName(e.currentTarget.value)}
               required
-              className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
               placeholder={t("admin.users.displayNamePlaceholder")}
             />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.email")}</label>
-            <input
+          </FormField>
+          <FormField label={t("admin.users.email")}>
+            <Input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.currentTarget.value)}
-              className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
               placeholder={t("admin.users.emailPlaceholder")}
             />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.role")}</label>
+          </FormField>
+          <FormField label={t("admin.users.role")}>
             <SelectMenu
               value={role}
               options={roleOptions}
               onChange={setRole}
               ariaLabel={t("admin.users.role")}
               className="w-full"
-              buttonClassName="h-9 rounded-md border-iron-700 bg-iron-800/70 px-3 font-sans text-sm text-iron-100"
+              buttonClassName="h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-sans text-sm text-[var(--v2-text-strong)]"
             />
-          </div>
+          </FormField>
         </div>
-        {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
+        {error && (<Text variant="body" tone="danger">{error.message}</Text>)}
         <div className="flex gap-2">
           <Button type="submit" disabled={isCreating}>
             {isCreating ? t("admin.users.creating") : t("admin.users.createUser")}
@@ -147,29 +145,36 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 export function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel, isPending, error }) {
   const t = useT();
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
-      <div data-testid="admin-user-confirm-dialog" className="w-full max-w-md rounded-xl border border-iron-700 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold text-iron-100">{title}</h3>
-        <p className="mt-2 text-sm text-iron-300">{message}</p>
+    <Modal
+      open
+      size="sm"
+      data-testid="admin-user-confirm-dialog"
+      title={title}
+      closeLabel={t("admin.users.cancel")}
+      onClose={onCancel}
+    >
+      <ModalBody>
+        <Text variant="body" tone="muted">{message}</Text>
         {error && (
-          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-confirm-error">
+          <Text variant="body" tone="danger" className="mt-4" role="alert" data-testid="admin-user-confirm-error">
             {adminUserActionErrorMessage(error, t)}
-          </p>
+          </Text>
         )}
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="ghost" disabled={isPending} onClick={onCancel}>{t("admin.users.cancel")}</Button>
-          <Button
-            variant="danger"
-            loading={isPending}
-            disabled={isPending}
-            data-testid="admin-user-confirm-submit"
-            onClick={onConfirm}
-          >
-            {isPending ? t("common.loading") : confirmLabel}
-          </Button>
-        </div>
-      </div>
-    </div>
+      </ModalBody>
+      <ModalFooter>
+        <Button variant="ghost" size="sm" disabled={isPending} onClick={onCancel}>{t("admin.users.cancel")}</Button>
+        <Button
+          variant="danger"
+          size="sm"
+          loading={isPending}
+          disabled={isPending}
+          data-testid="admin-user-confirm-submit"
+          onClick={onConfirm}
+        >
+          {isPending ? t("common.loading") : confirmLabel}
+        </Button>
+      </ModalFooter>
+    </Modal>
   );
 }
 
@@ -186,12 +191,12 @@ export function UserRow({
 }) {
   const t = useT();
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-iron-700 py-3.5 first:border-0 first:pt-0">
+    <div className="flex items-center justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3.5 first:border-0 first:pt-0">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => onSelect(user.id)}
-            className="text-sm font-medium text-signal hover:underline"
+            className="text-sm font-medium text-[var(--v2-accent-text)] hover:underline"
           >
             {user.display_name || user.id}
           </button>
@@ -199,31 +204,56 @@ export function UserRow({
           <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
-          {user.email && (<span className="font-mono text-xs text-iron-300">{user.email}</span>)}
-          <span className="font-mono text-xs text-iron-700">{truncateId(user.id)}</span>
+          {user.email && (<Text variant="mono" tone="muted">{user.email}</Text>)}
+          <Text variant="mono" tone="faint">{truncateId(user.id)}</Text>
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <span className="hidden font-mono text-xs text-iron-300 sm:inline">
+        <Text variant="mono" tone="muted" className="hidden sm:inline">
           {user.job_count != null ? t("admin.users.jobsCount", { count: user.job_count }) : ""}
           {user.total_cost != null ? ` · ${formatCost(user.total_cost)}` : ""}
-        </span>
-        <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
+        </Text>
+        <Text variant="caption" tone="faint" className="hidden lg:inline">{formatRelativeTime(user.last_active_at, t)}</Text>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
-            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
-          <button
+            ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="admin-user-suspend"
+                  disabled={isActionPending}
+                  aria-busy={isSuspending || undefined}
+                  onClick={() => onSuspend(user.id)}
+                  className="hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)]"
+                >
+                  {isSuspending ? t("common.loading") : t("admin.users.suspend")}
+                </Button>
+              )
+            : (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="admin-user-activate"
+                  disabled={isActionPending}
+                  aria-busy={isActivating || undefined}
+                  onClick={() => onActivate(user.id)}
+                  className="hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] hover:text-[var(--v2-accent-text)]"
+                >
+                  {isActivating ? t("common.loading") : t("admin.users.activate")}
+                </Button>
+              )}
+          <Button
+            variant="secondary"
+            size="sm"
             data-testid="admin-user-role"
             disabled={isActionPending}
             aria-busy={isUpdating || undefined}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
-            className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-iron-700 hover:text-iron-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isUpdating
               ? t("common.saving")
               : user.role === "admin" ? t("admin.users.demote") : t("admin.users.promote")}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -315,7 +345,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
       <Panel className="p-5 sm:p-6">
         <div className="v2-skeleton mb-4 h-3 w-24 rounded" />
         {[1, 2, 3].map((i) => (
-          <div key={i} className="flex items-center justify-between border-t border-iron-700 py-3.5 first:border-0">
+          <div key={i} className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0">
             <div className="v2-skeleton h-4 w-32 rounded" />
             <div className="v2-skeleton h-6 w-20 rounded-full" />
           </div>
@@ -328,12 +358,12 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
     return (
       <Panel className="p-6 sm:p-8">
         <div className="flex items-center gap-3">
-          <Icon name="lock" className="h-5 w-5 text-iron-700" />
-          <h3 className="text-lg font-semibold text-iron-100">{t("users.adminRequired")}</h3>
+          <Icon name="lock" className="h-5 w-5 text-[var(--v2-text-faint)]" />
+          <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">{t("users.adminRequired")}</h3>
         </div>
-        <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
+        <Text variant="body" tone="muted" className="mt-2 max-w-md">
           {t("users.adminRequiredDesc")}
-        </p>
+        </Text>
       </Panel>
     );
   }
@@ -356,32 +386,35 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
 
       <Panel className="p-5 sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+          <Text as="h3" variant="eyebrow" tone="accent">
             {t("admin.users.title", { count: filtered.length, total: users.length })}
-          </h3>
+          </Text>
           <div className="flex items-center gap-2">
-            <input
-              type="text"
-              placeholder={t("admin.users.searchPlaceholder")}
-              value={search}
-              onChange={(e) => setSearch(e.currentTarget.value)}
-              className="h-8 w-48 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-xs text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
-            />
+            <div className="w-48">
+              <Input
+                type="text"
+                size="md"
+                placeholder={t("admin.users.searchPlaceholder")}
+                value={search}
+                onChange={(e) => setSearch(e.currentTarget.value)}
+              />
+            </div>
             <div className="flex gap-1">
               {FILTERS.map(
                 (f) => (
-                  <button
+                  <Button
                     key={f.value}
+                    variant="ghost"
+                    size="sm"
                     onClick={() => setFilter(f.value)}
-                    className={[
-                      "rounded-md px-2.5 py-1.5 text-[11px] font-medium",
+                    className={
                       filter === f.value
-                        ? "border border-signal/35 bg-signal/10 text-iron-100"
-                        : "border border-transparent text-iron-300 hover:text-iron-100",
-                    ].join(" ")}
+                        ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                        : undefined
+                    }
                   >
                     {f.label}
-                  </button>
+                  </Button>
                 )
               )}
             </div>
@@ -389,13 +422,13 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
         </div>
 
         {actionError && (
-          <p className="mb-4 text-sm text-red-200" role="alert" data-testid="admin-user-action-error">
+          <Text variant="body" tone="danger" className="mb-4" role="alert" data-testid="admin-user-action-error">
             {adminUserActionErrorMessage(actionError, t)}
-          </p>
+          </Text>
         )}
 
         {filtered.length === 0
-          ? (<p className="py-4 text-sm text-iron-300">{t("admin.users.noMatch")}</p>)
+          ? (<Text variant="body" tone="muted" className="py-4">{t("admin.users.noMatch")}</Text>)
           : filtered.map(
               (user) => (
                 <UserRow

@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel } from "../../../design-system/primitives";
+import { Input, Panel } from "@ironclaw/design-system";
 import { WorkspaceTree } from "./workspace-tree";
 
 // Read-only navigation rail. The tree is rooted at the mount list (memory,
@@ -19,13 +19,13 @@ export function WorkspaceSidebar({
 
   return (
     <Panel className="flex min-h-[420px] flex-col overflow-hidden p-0 xl:min-h-0">
-      <div className="border-b border-white/10 p-3">
-        <input
+      <div className="border-b border-[var(--v2-panel-border)] p-3">
+        <Input
+          size="sm"
           value={filter}
           onInput={(event) => onFilterChange(event.currentTarget.value)}
           placeholder={t("workspace.filterPlaceholder")}
           aria-label={t("workspace.filterPlaceholder")}
-          className="h-9 w-full rounded-md border border-white/10 bg-iron-950/80 px-3 text-sm text-white outline-none placeholder:text-iron-400 focus:border-signal/45"
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">

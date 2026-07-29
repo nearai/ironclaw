@@ -111,6 +111,7 @@ function createHarness({ clipboard = async () => {}, includeClipboard = true } =
   function Button() {}
   function Icon() {}
   function Panel() {}
+  function Text() {}
 
   const React = {
     useEffect(effect) {
@@ -149,6 +150,7 @@ function createHarness({ clipboard = async () => {}, includeClipboard = true } =
     Button,
     Icon,
     Panel,
+    Text,
     React,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
@@ -211,7 +213,7 @@ test("example prompt copies to clipboard and shows success state", async () => {
   const harness = createHarness();
   const initial = harness.renderPrompt();
 
-  const [copyButton] = nativeProps(initial, "button");
+  const [copyButton] = componentProps(initial, harness.Button);
   assert.equal(copyButton["aria-label"], "Copy prompt");
 
   await copyButton.onClick();
@@ -220,14 +222,14 @@ test("example prompt copies to clipboard and shows success state", async () => {
     "Remind me every weekday morning to review alerts.",
   ]);
   const copied = harness.renderPrompt();
-  assert.equal(nativeProps(copied, "button")[0]["aria-label"], "Copied");
+  assert.equal(componentProps(copied, harness.Button)[0]["aria-label"], "Copied");
   assert.equal(componentProps(copied, harness.Icon)[0].name, "check");
 });
 
 test("example prompt replaces the success reset timer on rapid recopy", async () => {
   const harness = createHarness();
   const rendered = harness.renderPrompt();
-  const [copyButton] = nativeProps(rendered, "button");
+  const [copyButton] = componentProps(rendered, harness.Button);
 
   await copyButton.onClick();
   await copyButton.onClick();
@@ -245,7 +247,7 @@ test("example prompt replaces the success reset timer on rapid recopy", async ()
 test("example prompt clears the pending success reset timer on unmount", async () => {
   const harness = createHarness();
   const rendered = harness.renderPrompt();
-  const [copyButton] = nativeProps(rendered, "button");
+  const [copyButton] = componentProps(rendered, harness.Button);
 
   await copyButton.onClick();
   harness.cleanup();
@@ -264,12 +266,12 @@ test("example prompt ignores clipboard rejection and stays copyable", async () =
   });
 
   const rendered = harness.renderPrompt();
-  const [copyButton] = nativeProps(rendered, "button");
+  const [copyButton] = componentProps(rendered, harness.Button);
 
   await assert.doesNotReject(copyButton.onClick());
 
   const afterReject = harness.renderPrompt();
-  assert.equal(nativeProps(afterReject, "button")[0]["aria-label"], "Copy prompt");
+  assert.equal(componentProps(afterReject, harness.Button)[0]["aria-label"], "Copy prompt");
   assert.equal(componentProps(afterReject, harness.Icon)[0].name, "copy");
 });
 
@@ -277,12 +279,12 @@ test("example prompt ignores missing clipboard API and stays copyable", async ()
   const harness = createHarness({ includeClipboard: false });
 
   const rendered = harness.renderPrompt();
-  const [copyButton] = nativeProps(rendered, "button");
+  const [copyButton] = componentProps(rendered, harness.Button);
 
   await assert.doesNotReject(copyButton.onClick());
 
   assert.deepEqual(harness.copiedText, []);
   const afterCopy = harness.renderPrompt();
-  assert.equal(nativeProps(afterCopy, "button")[0]["aria-label"], "Copy prompt");
+  assert.equal(componentProps(afterCopy, harness.Button)[0]["aria-label"], "Copy prompt");
   assert.equal(componentProps(afterCopy, harness.Icon)[0].name, "copy");
 });

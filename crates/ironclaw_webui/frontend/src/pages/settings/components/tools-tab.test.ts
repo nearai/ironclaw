@@ -94,6 +94,8 @@ function renderToolsModule({
     Card: "Card",
     Icon: "Icon",
     SelectMenu: "SelectMenu",
+    Switch: "Switch",
+    Text: "Text",
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
@@ -124,11 +126,12 @@ test("Tools tab renders global auto-approve control and saves the operator key",
     onSave: (key, value) => saved.push({ key, value }),
   });
 
-  assert.match(collectTemplateText(exports.Switch({ checked: false, label: "x", onChange: () => {} })), /role="switch"/);
   const switchNode = findComponentNode(rendered, exports.Switch);
   assert.ok(switchNode, "expected auto-approve card to render a switch");
 
-  componentProps(switchNode, exports.Switch).onChange(true);
+  const switchProps = componentProps(switchNode, exports.Switch);
+  assert.equal(switchProps.label, "settings.field.autoApproveEligibleTools");
+  switchProps.onCheckedChange(true);
   assert.deepEqual(saved, [{ key: "agent.auto_approve_tools", value: true }]);
 });
 

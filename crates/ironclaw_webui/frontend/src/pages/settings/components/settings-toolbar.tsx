@@ -1,6 +1,8 @@
 // @ts-nocheck
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Input } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";
@@ -101,7 +103,7 @@ export function SettingsToolbar({
   );
 
   return (
-    <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3">
+    <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
         <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
           {canGoBack &&
@@ -124,12 +126,13 @@ export function SettingsToolbar({
               name="search"
               className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--v2-text-faint)]"
             />
-            <input
+            <Input
+              size="lg"
               type="search"
               value={searchQuery}
               onChange={(event) => onSearchChange(event.currentTarget.value)}
               placeholder={t("settings.searchPlaceholder")}
-              className="h-9 w-full rounded-md border border-white/12 bg-white/[0.04] pl-9 pr-9 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+              className="pl-9 pr-9"
             />
             {searchQuery &&
             (
@@ -137,7 +140,7 @@ export function SettingsToolbar({
                 type="button"
                 onClick={onSearchClear}
                 aria-label={t("settings.clearSearch")}
-                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)]"
+                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
               >
                 <Icon name="close" className="h-3.5 w-3.5" />
               </button>
@@ -179,18 +182,18 @@ export function SettingsToolbar({
       </div>
 
       <div className="mt-2 min-w-0">
-        <div className="text-xs font-medium text-iron-400">{t("settings.manageJson")}</div>
+        <Text as="div" variant="caption" tone="faint" weight="medium">{t("settings.manageJson")}</Text>
         {message &&
         (
-          <div
+          <Text
+            as="div"
             role="status"
-            className={[
-              "mt-1 text-xs",
-              message.tone === "error" ? "text-red-200" : "text-mint",
-            ].join(" ")}
+            variant="caption"
+            tone={message.tone === "error" ? "danger" : "positive"}
+            className="mt-1"
           >
             {message.text}
-          </div>
+          </Text>
         )}
       </div>
     </div>

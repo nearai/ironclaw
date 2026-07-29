@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React from "react";
+import { Callout } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
 import { toast } from "../../lib/toast";
 import {
@@ -13,7 +14,7 @@ import { AuthOauthCard } from "./components/auth-oauth-card";
 import { AuthTokenCard } from "./components/auth-token-card";
 import { ChatInput } from "./components/chat-input";
 import { EmptyState } from "./components/empty-state";
-import { KeyboardShortcuts } from "./components/keyboard-shortcuts";
+import { KeyboardShortcuts } from "./components/keyboard-shortcuts-lazy";
 import { MessageList } from "./components/message-list";
 import { OnboardingPairingCard } from "./components/onboarding-pairing-card";
 import { RecoveryNotice } from "./components/recovery-notice";
@@ -325,12 +326,9 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         {historyLoadError &&
         (
-          <div
-            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
-            role="alert"
-          >
+          <Callout tone="danger" role="alert" icon={null} className="mx-4 mt-3">
             {t(historyLoadError)}
-          </div>
+          </Callout>
         )}
 
         {showLanding &&
@@ -437,13 +435,15 @@ export function Chat({
             ))}
             {busyGateNotice &&
             (
-              <div
-                data-testid="busy-gate-notice"
+              <Callout
+                tone="warning"
                 role="status"
-                className="mx-auto mt-3 max-w-lg rounded-lg border border-copper/25 bg-copper/10 px-4 py-3 text-center text-sm leading-6 text-copper"
+                icon={null}
+                data-testid="busy-gate-notice"
+                className="mx-auto mt-3 max-w-lg text-center"
               >
                 {busyGateNotice.content}
-              </div>
+              </Callout>
             )}
           </MessageList>
 

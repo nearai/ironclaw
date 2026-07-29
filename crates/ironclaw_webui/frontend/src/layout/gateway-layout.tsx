@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { useInterfaceTheme } from "../design-system/theme";
+import { useInterfaceTheme } from "@ironclaw/design-system";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
 import { useNotifications } from "../hooks/useNotifications";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
@@ -19,7 +19,7 @@ import { PageHeader } from "../components/page-header";
 import { CommandPalette } from "../components/command-palette";
 import { ToastViewport } from "../components/toast-viewport";
 import React from "react";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 export function GatewayLayout({
   token,
@@ -119,7 +119,7 @@ export function GatewayLayout({
         type="button"
         aria-label={t("nav.close")}
         onClick={sidebar.close}
-        className="fixed inset-0 z-40 bg-black/40 md:hidden"
+        className="fixed inset-0 z-40 bg-[var(--v2-scrim)] md:hidden"
       />)}
 
       <div

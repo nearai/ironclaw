@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Card } from "../../../design-system/card";
+import { Button, Card, Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
 import { useAccountTraces } from "../hooks/useAccountTraces";
@@ -89,9 +89,9 @@ function StatRow({ label, value, description = "" }) {
       className="flex items-center justify-between gap-3 border-t border-[var(--v2-panel-border)] py-3 first:border-0"
     >
       <div className="min-w-0">
-        <div className="text-sm text-[var(--v2-text-strong)]">{label}</div>
+        <Text as="div" variant="body" tone="strong">{label}</Text>
         {description &&
-        (<div className="mt-0.5 text-xs text-[var(--v2-text-muted)]">{description}</div>)}
+        (<Text as="div" variant="caption" tone="muted" className="mt-0.5">{description}</Text>)}
       </div>
       <div className="shrink-0 font-mono text-sm text-[var(--v2-text-strong)]">{value}</div>
     </div>
@@ -150,8 +150,8 @@ export function TraceCommonsTab({ searchQuery = "" }) {
               key={i}
               className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3 first:border-0"
             >
-              <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-              <div className="h-4 w-16 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+              <div className="v2-skeleton h-4 w-32 rounded" />
+              <div className="v2-skeleton h-4 w-16 rounded" />
             </div>
           )
         )}
@@ -160,7 +160,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
   } else if (query.isError) {
     body = (
       <div
-        className="mt-4 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+        className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_35%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
       >
         {t("traceCommons.loadFailed")}
       </div>
@@ -219,27 +219,23 @@ export function TraceCommonsTab({ searchQuery = "" }) {
       {explanations.length > 0 &&
       (
         <div className="mt-5">
-          <h4
-            className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-          >
+          <Text as="h4" variant="eyebrow" tone="accent" className="mb-2">
             {t("traceCommons.recentExplanations")}
-          </h4>
-          <ul className="ml-4 list-disc space-y-1 text-xs text-[var(--v2-text-muted)]">
+          </Text>
+          <Text as="ul" variant="caption" tone="muted" className="ml-4 list-disc space-y-1">
             {explanations.map((line, index) => (<li key={index}>{line}</li>))}
-          </ul>
+          </Text>
         </div>
       )}
       {holds.length > 0 &&
       (
         <div className="mt-5">
-          <h4
-            className="mb-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-          >
+          <Text as="h4" variant="eyebrow" tone="accent" className="mb-1">
             {t("traceCommons.heldTitle")}
-          </h4>
-          <p className="mb-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+          </Text>
+          <Text as="p" variant="caption" tone="muted" className="mb-2">
             {t("traceCommons.heldDescription")}
-          </p>
+          </Text>
           <ul className="space-y-2">
             {holds.map(
               (hold) => (
@@ -248,21 +244,23 @@ export function TraceCommonsTab({ searchQuery = "" }) {
                   className="flex items-start justify-between gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2"
                 >
                   <div className="min-w-0">
-                    <div className="text-xs text-[var(--v2-text-strong)]">{hold.reason}</div>
+                    <Text as="div" variant="caption" tone="strong">{hold.reason}</Text>
                     <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--v2-text-faint)]">
                       {hold.submission_id}
                     </div>
                   </div>
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="sm"
                     onClick={() => authorize.mutate(hold.submission_id)}
                     disabled={authorize.isPending}
-                    className="shrink-0 rounded-lg border border-[var(--v2-accent-soft)] px-2.5 py-1 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="shrink-0 border-[var(--v2-accent-soft)] font-medium text-[var(--v2-accent-text)] hover:bg-[var(--v2-accent-soft)] hover:text-[var(--v2-accent-text)]"
                   >
                     {authorize.isPending
                       ? t("traceCommons.authorizing")
                       : t("traceCommons.authorize")}
-                  </button>
+                  </Button>
                 </li>
               )
             )}
@@ -286,14 +284,12 @@ export function TraceCommonsTab({ searchQuery = "" }) {
   });
   const tracesSection = tracesMode !== "hidden" && (
       <div className="mt-5">
-        <h4
-          className="mb-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-        >
+        <Text as="h4" variant="eyebrow" tone="accent" className="mb-1">
           {t("traceCommons.submittedTracesTitle")}
-        </h4>
+        </Text>
         {tracesMode === "error" ? (
           <div
-            className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+            className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_35%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
           >
             {t("traceCommons.tracesLoadFailed")}
           </div>
@@ -349,31 +345,31 @@ export function TraceCommonsTab({ searchQuery = "" }) {
 
   return (
     <Card padding="md">
-      <h3
-        className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-      >
+      <Text as="h3" variant="eyebrow" tone="accent" className="mb-2">
         {t("traceCommons.title")}
-      </h3>
-      <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+      </Text>
+      <Text variant="body" tone="muted">
         {t("traceCommons.description")}
-      </p>
+      </Text>
 
       {(credits?.enrolled || tracesEnrolled) && (
         <div className="mt-3">
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             onClick={handleOpenAccount}
             disabled={openState === "pending"}
-            className="rounded-lg border border-[var(--v2-accent-soft)] px-3 py-1.5 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="border-[var(--v2-accent-soft)] font-medium text-[var(--v2-accent-text)] hover:bg-[var(--v2-accent-soft)] hover:text-[var(--v2-accent-text)]"
           >
             {openState === "pending"
               ? t("traceCommons.openingAccount")
               : t("traceCommons.openAccount")}
-          </button>
+          </Button>
           {openState === "failed" && (
-            <span className="ml-3 text-xs text-red-300">
+            <Text variant="caption" tone="danger" className="ml-3">
               {t("traceCommons.openAccountFailed")}
-            </span>
+            </Text>
           )}
         </div>
       )}
@@ -382,9 +378,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
 
       {tracesSection}
 
-      <p className="mt-5 text-xs leading-5 text-[var(--v2-text-faint)]">
+      <Text as="p" variant="caption" tone="faint" className="mt-5">
         {t("traceCommons.note")}
-      </p>
+      </Text>
     </Card>
   );
 }

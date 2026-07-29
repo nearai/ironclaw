@@ -95,6 +95,8 @@ function setupContext(state, { saveResponses = [], mutationOverrides = {}, confi
   state.mutationSuccess = state.mutationSuccess || {};
   const context = {
     Button: "button",
+    Input: "input",
+    Text: "h4",
     React: createReactStub(state),
     globalThis: {},
     getTelegramSetup: () => ({}),

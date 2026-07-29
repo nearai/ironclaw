@@ -1,6 +1,6 @@
 import React from "react";
-import { Button } from "../../../design-system/button";
-import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
+import { Button } from "@ironclaw/design-system";
+import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel-lazy";
 import { useT } from "../../../lib/i18n";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 
@@ -45,11 +45,11 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
     return (
       <div
         data-testid="onboarding-pairing-card"
-        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
       >
-        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
         {instructions &&
-        (<p className="mt-1 text-sm leading-6 text-iron-300">{instructions}</p>)}
+        (<p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{instructions}</p>)}
         <PairingWebCodePanel
           compact
           extensionId={onboarding.extensionName}
@@ -77,10 +77,10 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
   return (
     <div
       data-testid="onboarding-pairing-card"
-      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
     >
-      <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
-      <p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>
+      <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
+      <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         {onConfigure &&
         (
@@ -106,12 +106,12 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
       </div>
       {!onConfigure &&
       (
-        <p className="mt-2 text-xs leading-5 text-iron-400">
+        <p className="mt-2 text-xs leading-5 text-[var(--v2-text-faint)]">
           {t("pairing.connectFromExtensions", { name: copy.displayName })}
         </p>
       )}
       {error &&
-      (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+      (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
   );
 }

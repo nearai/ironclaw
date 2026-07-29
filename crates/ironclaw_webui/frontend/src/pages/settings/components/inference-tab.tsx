@@ -1,5 +1,6 @@
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { INFERENCE_FIELDS } from "../lib/settings-schema";
 import { filterSettingsSections, matchesSearch } from "../lib/settings-search";
@@ -68,20 +69,20 @@ export function InferenceTab({
       {showProviderSummary &&
       (
       <Card padding="none" className="p-4 sm:p-5">
-        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("inference.provider")}</h3>
+        <Text as="h3" variant="eyebrow" tone="accent" className="mb-4">{t("inference.provider")}</Text>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
-            <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.backend")}</div>
+            <Text as="div" variant="caption" tone="muted">{t("inference.backend")}</Text>
             <div className="mt-1 flex items-center gap-2">
-              <span className="font-mono text-lg font-semibold text-[var(--v2-text-strong)]">{backend || t("inference.none")}</span>
+              <span className="font-mono text-lg font-medium text-[var(--v2-text-strong)]">{backend || t("inference.none")}</span>
               {hasActiveProvider
                 ? (<Badge tone="positive" label={t("inference.active")} size="sm" />)
                 : (<Badge tone="muted" label={t("llm.notConfigured")} size="sm" />)}
             </div>
           </div>
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
-            <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.model")}</div>
-            <div className="mt-1 font-mono text-lg font-semibold text-[var(--v2-text-strong)]">
+            <Text as="div" variant="caption" tone="muted">{t("inference.model")}</Text>
+            <div className="mt-1 font-mono text-lg font-medium text-[var(--v2-text-strong)]">
               {model || t("inference.none")}
             </div>
           </div>
@@ -118,7 +119,7 @@ export function InferenceTab({
 function Skeleton({ className = "" }) {
   return (
     <div
-      className={"rounded animate-pulse bg-[var(--v2-surface-muted)] " + className}
+      className={"v2-skeleton rounded " + className}
     />
   );
 }

@@ -6,7 +6,11 @@ const NETWORK_RE = /(curl|http|fetch|web|network|request|api|gh\b|git|download|u
    write/exec categories. Description/parameters are only used as fallback for
    exec/network hints, preventing safe read tools whose description mentions
    "edit" from turning into a red write badge. */
-export function classifyRisk(toolName, description, parameters) {
+export function classifyRisk(
+  toolName?: unknown,
+  description?: unknown,
+  parameters?: unknown
+): { tone: "danger" | "warning" | "info" | "muted"; key: string } {
   const name = String(toolName || "").toLowerCase();
   const context = [description, parameters].filter(Boolean).join(" ").toLowerCase();
 

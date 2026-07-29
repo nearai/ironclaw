@@ -78,6 +78,7 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
   function FormField() {}
   function Icon() {}
   function Input() {}
+  function Text() {}
   function Textarea() {}
 
   const React = {
@@ -106,6 +107,7 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
     Icon,
     Input,
     React,
+    Text,
     Textarea,
     html,
     useT: () => (key, values = {}) => {
@@ -122,7 +124,7 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
     context,
     import.meta.url
   );
-  const allComponents = new Set([Button, Card, FormField, Icon, Input, Textarea]);
+  const allComponents = new Set([Button, Card, FormField, Icon, Input, Text, Textarea]);
 
   return {
     Button,

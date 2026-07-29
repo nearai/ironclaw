@@ -27,6 +27,7 @@ test("ToastViewport wires the lifecycle provider with accessible dismissible con
   const dismissals = [];
   let removed = false;
   function Toaster() {}
+  function Button() {}
   const hotToast = {
     dismiss: (id) => dismissals.push(id),
     remove: () => {
@@ -39,6 +40,7 @@ test("ToastViewport wires the lifecycle provider with accessible dismissible con
     },
     hotToast,
     Toaster,
+    Button,
     resolveValue: (message) => message,
     Icon: ({ name }) => ({ type: "icon", props: { name }, children: [] }),
     useT: () => (key) => (key === "common.dismiss" ? "Dismiss" : key),
@@ -69,7 +71,7 @@ test("ToastViewport wires the lifecycle provider with accessible dismissible con
 
   const dismiss = nodeBy(
     alert,
-    (node) => node.type === "button" && node.props?.["aria-label"] === "Dismiss",
+    (node) => node.type === Button && node.props?.["aria-label"] === "Dismiss",
     "dismiss button"
   );
   dismiss.props.onClick();

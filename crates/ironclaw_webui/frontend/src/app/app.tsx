@@ -1,10 +1,11 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import React from "react";
+import { DesignSystemI18nProvider } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { useAuthSession } from "./auth";
 import { defaultRoute } from "./routes";
 import { LoginPage as LoginView } from "../pages/login/login-page";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import { RouteLoadBoundary } from "./route-load-boundary";
 
 const GatewayLayout = React.lazy(() =>
@@ -61,6 +62,11 @@ const AdminPage = React.lazy(() =>
 );
 const LogsPage = React.lazy(() =>
   import("../pages/logs/logs-page").then(({ LogsPage }) => ({ default: LogsPage }))
+);
+const PlaygroundPage = React.lazy(() =>
+  import("../pages/playground/playground-page").then(({ PlaygroundPage }) => ({
+    default: PlaygroundPage,
+  }))
 );
 
 function LazyRoute({ children }) {
@@ -210,11 +216,20 @@ function AdminRoute({ auth }) {
 
 export function App() {
   const auth = useAuthSession();
+  // Bridge the app's translator into the design-system package (its
+  // Modal/ConfirmDialog built-in strings default to English otherwise).
+  const t = useT();
 
   return (
+    <DesignSystemI18nProvider t={t}>
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
+        {/* Design-system workbench. Lives outside the authenticated
+            layout (like /login) so it renders full-bleed with no app
+            chrome. Static reference surface only: it makes no API
+            calls and exposes no data. See DESIGN_SYSTEM.md. */}
+        <Route path="/playground" element={(<PlaygroundPage />)} />
         <Route path="/" element={(<AuthenticatedLayout auth={auth} />)}>
           <Route index element={(<Navigate to={defaultRoute} replace />)} />
           <Route path="overview" element={(<Navigate to={defaultRoute} replace />)} />
@@ -262,5 +277,6 @@ export function App() {
         <Route path="*" element={(<Navigate to={defaultRoute} replace />)} />
       </Routes>
     </BrowserRouter>
+    </DesignSystemI18nProvider>
   );
 }

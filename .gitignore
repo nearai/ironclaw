@@ -66,6 +66,10 @@ trace_*.json
 # root they land in ./attachments/. These are user uploads, never source.
 /attachments/
 
+# Generated WebUI v2 bundle. Cargo builds and embeds this from OUT_DIR when
+# `webui-v2-beta` is enabled; the reviewable source lives under static/js/.
+/crates/ironclaw_webui/static/dist/
+
 # Python cache
 __pycache__/
 *.pyc

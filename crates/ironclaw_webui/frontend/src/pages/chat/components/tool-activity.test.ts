@@ -23,18 +23,18 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
   );
   assert.match(
     toolActivitySource,
-    /className="min-w-0 overflow-hidden rounded-b-lg border-x border-b border-iron-700\/40 bg-iron-950"/,
+    /className="min-w-0 overflow-hidden rounded-b-lg border-x border-b border-\[var\(--v2-panel-border\)\] bg-\[var\(--v2-canvas-strong\)\]"/,
     "tool detail panel should clip overflow to its card instead of widening the page",
   );
   assert.match(
     toolActivitySource,
-    /const PRE_WRAP_CLASS =\s*\n\s*"v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono";/,
+    /const PRE_WRAP_CLASS =\s*\n\s*"v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-\[var\(--v2-code-bg\)\] p-2 font-mono";/,
     "tool preformatted previews should share the mobile-safe wrapping class",
   );
   assert.equal(
     (
       toolActivitySource.match(
-        /"v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono"/g,
+        /"v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-\[var\(--v2-code-bg\)\] p-2 font-mono"/g,
       ) || []
     ).length,
     1,
@@ -42,12 +42,12 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
   );
   assert.match(
     toolActivitySource,
-    /<pre className=\{\[PRE_WRAP_CLASS, "text-iron-100"\]\.join\(" "\)\}>/,
+    /<pre className=\{\[PRE_WRAP_CLASS, "text-\[var\(--v2-text-strong\)\]"\]\.join\(" "\)\}>/,
     "tool parameters should wrap long lines within the detail panel",
   );
   assert.match(
     toolActivitySource,
-    /PRE_WRAP_CLASS,[\s\S]*active === "declined" \? "text-iron-300" : "text-\[var\(--v2-danger-text\)\]"/,
+    /PRE_WRAP_CLASS,[\s\S]*active === "declined" \? "text-\[var\(--v2-text-muted\)\]" : "text-\[var\(--v2-danger-text\)\]"/,
     "tool errors should reuse the shared preformatted preview class",
   );
   assert.match(
@@ -57,12 +57,12 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
   );
   assert.match(
     toolActivitySource,
-    /<div className="max-w-full overflow-x-auto rounded border border-iron-700\/60">/,
+    /<div className="max-w-full overflow-x-auto rounded border border-\[var\(--v2-panel-border\)\]">/,
     "tool result tables should scroll horizontally inside the detail panel",
   );
   assert.doesNotMatch(
     toolActivitySource,
-    /className="v2-wrap-anywhere border-b border-iron-700\/(?:60|40)/,
+    /className="v2-wrap-anywhere border-b border-\[var\(--v2-panel-border\)\]/,
     "tool result table cells should keep natural column widths instead of aggressively wrapping",
   );
 });
@@ -75,7 +75,7 @@ test("activity run wrappers use mobile-safe width constraints", () => {
   );
   assert.match(
     activityRunSource,
-    /className="min-w-0 flex-1 border-l-2 border-white\/10 pl-3 text-iron-300 v2-chat-readable-width"/,
+    /className="min-w-0 flex-1 border-l-2 border-\[var\(--v2-panel-border\)\] pl-3 text-\[var\(--v2-text-muted\)\] v2-chat-readable-width"/,
     "reasoning inside activity runs should keep the same shared width",
   );
   assert.match(

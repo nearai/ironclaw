@@ -1,5 +1,5 @@
-import { Icon } from "../../../design-system/icons";
-import { Button } from "../../../design-system/button";
+import { Icon } from "@ironclaw/design-system";
+import { Button, Callout } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { authScope } from "../../../lib/auth-scope";
@@ -406,13 +406,13 @@ export function ChatInput({
     // still allow draft editing.
     disabled
       ? ""
-      : "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
+      : "focus-within:border-[var(--v2-accent)] focus-within:ring-[3px] focus-within:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
     isHero ? "min-h-[120px]" : "",
     disabled ? "opacity-70" : "",
   ].join(" ");
   const textClass = [
     "w-full flex-1 resize-none border-0 !border-transparent !bg-transparent px-2 text-[0.9375rem] leading-6",
-    "text-white outline-none placeholder:text-iron-700 focus:!border-transparent focus:!bg-transparent focus:!outline-none focus:!shadow-none disabled:opacity-50",
+    "text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:!border-transparent focus:!bg-transparent focus:!outline-none focus:!shadow-none disabled:opacity-50",
     isHero ? "min-h-[72px]" : "min-h-[40px]",
   ].join(" ");
 
@@ -432,21 +432,26 @@ export function ChatInput({
         )}
         {attachmentError &&
         (
-          <div
+          <Callout
+            tone="danger"
             role="alert"
-            className="mb-3 flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-danger-text)]"
+            icon={null}
+            className="mb-3 rounded-md px-3 py-2 text-xs leading-5"
           >
-            <span className="min-w-0 flex-1">{attachmentError}</span>
-            <button
-              type="button"
-              onClick={() => setAttachmentError("")}
-              aria-label={t("common.dismiss")}
-              title={t("common.dismiss")}
-              className="-mr-1 -mt-0.5 shrink-0 rounded p-0.5 text-[color-mix(in_srgb,var(--v2-danger-text)_80%,transparent)] transition hover:bg-[color-mix(in_srgb,var(--v2-danger-text)_14%,transparent)] hover:text-[var(--v2-danger-text)]"
-            >
-              <Icon name="close" className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
-          </div>
+            <span className="flex items-start gap-2 text-[var(--v2-danger-text)]">
+              <span className="min-w-0 flex-1">{attachmentError}</span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setAttachmentError("")}
+                aria-label={t("common.dismiss")}
+                title={t("common.dismiss")}
+                className="-mr-1 -mt-0.5 h-5 w-5 shrink-0 rounded p-0.5 text-[color-mix(in_srgb,var(--v2-danger-text)_80%,transparent)] hover:bg-[color-mix(in_srgb,var(--v2-danger-text)_14%,transparent)] hover:text-[var(--v2-danger-text)]"
+              >
+                <Icon name="close" className="h-3.5 w-3.5" strokeWidth={2} />
+              </Button>
+            </span>
+          </Callout>
         )}
 
         {attachments.length > 0 &&
@@ -456,7 +461,7 @@ export function ChatInput({
               (att) => (
                 <div
                   key={att.id}
-                  className="group/att relative flex items-center gap-2 rounded-lg border border-iron-700 bg-iron-900/60 py-1.5 pl-1.5 pr-7 text-xs text-iron-100"
+                  className="group/att relative flex items-center gap-2 rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface)]/60 py-1.5 pl-1.5 pr-7 text-xs text-[var(--v2-text-strong)]"
                 >
                   {att.previewUrl
                     ? (<img
@@ -465,7 +470,7 @@ export function ChatInput({
                         className="h-9 w-9 shrink-0 rounded object-cover"
                       />)
                     : (<span
-                        className="grid h-9 w-9 shrink-0 place-items-center rounded bg-iron-800 text-signal"
+                        className="grid h-9 w-9 shrink-0 place-items-center rounded bg-[var(--v2-surface-soft)] text-[var(--v2-accent-text)]"
                       >
                         <Icon name="file" className="h-4 w-4" />
                       </span>)}
@@ -473,17 +478,18 @@ export function ChatInput({
                     <span className="max-w-[12rem] truncate font-medium">
                       {att.filename}
                     </span>
-                    <span className="text-[10px] text-iron-400">{att.sizeLabel}</span>
+                    <span className="text-[10px] text-[var(--v2-text-faint)]">{att.sizeLabel}</span>
                   </span>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
                     onClick={() => removeAttachment(att.id)}
                     aria-label={t("chat.attachmentRemove")}
                     title={t("chat.attachmentRemove")}
-                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-iron-400 hover:bg-iron-700 hover:text-white"
+                    className="absolute right-1 top-1 h-5 w-5 rounded-full text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
                   >
                     <Icon name="close" className="h-3 w-3" />
-                  </button>
+                  </Button>
                 </div>
               )
             )}
@@ -522,16 +528,18 @@ export function ChatInput({
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="icon"
+              data-testid="chat-attach-files"
               onClick={openFilePicker}
               disabled={disabled}
               aria-label={t("chat.attachFiles")}
               title={t("chat.attachFiles")}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-9 w-9 shrink-0 rounded-full text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)]"
             >
               <Icon name="plus" className="h-5 w-5" />
-            </button>
+            </Button>
             {canCancel
               ? (
                 <Button
@@ -553,6 +561,7 @@ export function ChatInput({
                   type="button"
                   variant="primary"
                   size="icon-sm"
+                  data-testid="chat-send"
                   onClick={handleSend}
                   disabled={isSubmitDisabled || isSending || !hasPayload}
                   aria-label={t("chat.send")}

@@ -1,4 +1,4 @@
-import { Panel, StatCard } from "../../../design-system/primitives";
+import { Panel, StatCard } from "@ironclaw/design-system";
 
 const SUMMARY_CARDS = [
   { key: "total", label: "Total jobs", tone: "muted", detail: "All tracked work across agent and sandbox execution." },
@@ -7,7 +7,7 @@ const SUMMARY_CARDS = [
   { key: "completed", label: "Completed", tone: "success", detail: "Finished without intervention." },
   { key: "failed", label: "Failed", tone: "danger", detail: "Runs that terminated with an error or interruption." },
   { key: "stuck", label: "Stuck", tone: "danger", detail: "Agent work needing recovery or operator attention." },
-];
+] as const;
 
 export function JobsSummaryStrip({ summary }) {
   return (
@@ -16,7 +16,7 @@ export function JobsSummaryStrip({ summary }) {
         {SUMMARY_CARDS.map((card) => (
           <div
             key={card.key}
-            className="rounded-2xl border border-white/8 bg-white/[0.03] p-4"
+            className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4"
           >
             <StatCard
               label={card.label}

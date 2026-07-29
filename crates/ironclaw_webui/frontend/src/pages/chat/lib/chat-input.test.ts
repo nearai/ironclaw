@@ -39,6 +39,29 @@ function findComponent(node, component) {
   return null;
 }
 
+function findComponentByTestId(node, component, testId) {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findComponentByTestId(item, component, testId);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!node || typeof node !== "object") return null;
+  if (!Array.isArray(node.values)) return null;
+  if (
+    node.values.indexOf(component) >= 0 &&
+    componentProps(node, component)["data-testid"] === testId
+  ) {
+    return node;
+  }
+  for (const value of node.values) {
+    const found = findComponentByTestId(value, component, testId);
+    if (found) return found;
+  }
+  return null;
+}
+
 // HTML attribute names may contain hyphens (for example, data-testid).
 const HTML_ATTRIBUTE_PATTERN = /([A-Za-z][A-Za-z0-9-]*)=\s*$/;
 
@@ -91,6 +114,7 @@ function renderChatInput({
 } = {}) {
   const components = {
     Button() {},
+    Callout() {},
     Icon() {},
   };
   let stateIndex = 0;
@@ -166,7 +190,7 @@ test("ChatInput cancel button invokes onCancel and resets cancelling state", asy
       }),
   });
 
-  const cancelButton = findComponent(tree, components.Button);
+  const cancelButton = findComponentByTestId(tree, components.Button, "chat-cancel-run");
   const props = componentProps(cancelButton, components.Button);
   assert.equal(props["data-testid"], "chat-cancel-run");
   const cancelPromise = props.onClick();
@@ -189,7 +213,7 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
     },
   });
 
-  const cancelButton = findComponent(tree, components.Button);
+  const cancelButton = findComponentByTestId(tree, components.Button, "chat-cancel-run");
   const props = componentProps(cancelButton, components.Button);
   await assert.rejects(props.onClick(), /cancel failed/);
 
@@ -214,7 +238,7 @@ test("ChatInput keeps the textarea editable when only submit is disabled", () =>
   assert.equal(textareaProps.disabled, false);
   assert.equal(textareaProps.value, "next thought");
 
-  const sendButton = findComponent(tree, components.Button);
+  const sendButton = findComponentByTestId(tree, components.Button, "chat-send");
   const sendProps = componentProps(sendButton, components.Button);
   assert.equal(sendProps.disabled, true);
 });

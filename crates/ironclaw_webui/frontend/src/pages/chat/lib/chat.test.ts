@@ -89,6 +89,7 @@ function renderChat({
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
+    Callout() {},
     AuthOauthCard() {},
     AuthTokenCard() {},
     ChatInput() {},

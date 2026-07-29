@@ -165,8 +165,11 @@ export function formatViolation(violation: ConventionViolation): string {
 
 function runCli(): void {
   const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-  const sourceRoot = resolve(scriptDirectory, "../src");
-  const violations = checkSourceTree(sourceRoot);
+  const sourceRoots = [
+    resolve(scriptDirectory, "../src"),
+    resolve(scriptDirectory, "../packages/design-system/src"),
+  ];
+  const violations = sourceRoots.flatMap((sourceRoot) => checkSourceTree(sourceRoot));
   if (violations.length === 0) return;
 
   for (const violation of violations) {

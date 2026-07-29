@@ -1,0 +1,82 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+import { Callout } from "../../src/callout";
+
+<Meta title="Docs/Voice & copy" />
+
+# Voice & copy
+
+The **Brand principles** page holds what IronClaw believes; this page is
+those beliefs cascaded into UI-copy rules — the words on buttons, cards,
+statuses, and empty states. Tone in one line: human and plain-spoken,
+closer to how Claude's product copy reads than to edgy tech branding.
+
+<Callout title="This repository is the source of truth">
+  Per the design review (Jul 21), these rules live here, in markdown, and
+  are edited collaboratively like any other change. They're written to be
+  as correct and thorough as we can make them today, so apply them as-is
+  when writing product copy. If one fights a real surface, change it here
+  rather than working around it.
+</Callout>
+
+## UI copy principles
+
+1. **Say what happens, in the user's words.** "Drafts replies for routine
+   email" — not "leverages LLM inference for message synthesis."
+2. **The agent acts; the user steers.** IronClaw derives routines and
+   sets them up unprompted, with the user's principles (productivity,
+   security, privacy) baked in. Copy narrates what it did and why it
+   helps — "I set up a morning digest — 34 newsletter threads were
+   burying your real mail" — and always ships with the steering verbs:
+   *Review*, *Adjust*, *Pause*, *Undo*. Don't ask permission for routine
+   work inside the trust the user has granted, and never hide that the
+   agent acted. Outside that envelope, copy shifts from receipt to
+   suggestion: "I can set this up — want it?". Irreversible external
+   actions (money, first-time sends as the user, sharing data with a new
+   party) always ask first — see Brand principles §3.
+3. **Calm status language.** `Success`, `Running`, `Warning`, `Failed`,
+   `Paused`. No exclamation marks, no alarm-speak. A failed run is a fact,
+   not an emergency.
+4. **Sentence case everywhere** — buttons, labels, menus, tabs. The only
+   uppercase in the system is the pixel tag face on badges and eyebrows,
+   and that's typography, not voice.
+5. **Short verbs on buttons.** `Save`, `Connect Google`, `Run now`,
+   `Delete`. Destructive confirms restate the object ("Delete this
+   automation?") and the button repeats the verb. Never "OK" or "Yes".
+6. **Empty states teach.** Name the value and the next step ("Connect a
+   tool and the agent will start setting up routines"), not just
+   "No data".
+7. **Numbers are content.** Stats, durations, and schedules stay exact and
+   render in mono/tabular contexts — "128 runs", "every weekday at 8:00am".
+8. **Receipts read as receipts.** When the agent narrates its own actions
+   (activity feed, run summaries), use past tense + the reason + the
+   escape hatch: "Archived 12 newsletters — they matched your triage
+   rules. Undo". This is the Trust principle wearing words.
+9. **Every message stands alone.** Channel-first (Brand principles §4)
+   means copy delivered in Slack, email, or chat carries the finding, the
+   action, and the escape hatch by itself. "Open the app for details" is
+   a fallback, never the payload. Standing alone never means dumping
+   data: external channels get the summary of the finding, not the raw
+   records behind it, and only through channels the user connected
+   (Brand principles §4 spells out the boundary).
+
+## Built-in component strings
+
+`Modal` (close) and `ConfirmDialog` (cancel) carry built-in strings that
+default to English. Localized hosts bridge their translator via
+`DesignSystemI18nProvider`; the keys are `common.close` and
+`common.cancel`. Provider, hook, and the English defaults are defined in
+`packages/design-system/src/i18n.tsx` (`useDesignSystemT`); the
+consuming call sites are `src/modal.tsx` and `src/confirm-dialog.tsx`.
+
+## Microcopy patterns
+
+| Surface | Pattern | Example |
+|---|---|---|
+| Primary CTA | verb + object | `Create automation` |
+| Agent receipt | past tense + reason + escape hatch | `Set up "Morning digest" — 34 newsletters matched. Adjust · Undo` |
+| Agent suggestion (outside envelope) | finding + offer, user decides | `3 repos publish releases you open manually. Want a release digest?` |
+| Confirmation title | question restating the object | `Delete this automation?` |
+| Confirmation body | the consequence, plainly | `"Morning digest" will stop running immediately. This cannot be undone.` |
+| Hint text | why it matters, one sentence | `Shown in the sidebar and page titles.` |
+| Error text | what happened + what to do | `This token has expired. Generate a new one in Settings.` |
+| Badge label | one word from the status canon | `Running` |

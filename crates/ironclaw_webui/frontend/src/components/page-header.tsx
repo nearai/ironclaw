@@ -1,9 +1,9 @@
 import { NavLink, useLocation } from "react-router";
 import React from "react";
 import { primaryRoutes, EXPANDABLE_SUB_ROUTES } from "../app/routes";
-import { Icon } from "../design-system/icons";
+import { Button, Icon } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 import { TeeShield } from "./tee-shield";
 import { NotificationCenter } from "./notification-center";
 
@@ -65,21 +65,23 @@ export function PageHeader({
         "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_88%,transparent)] backdrop-blur-xl"
       )}
     >
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         onClick={onToggleSidebar}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)]"
+        className="shrink-0 hover:bg-[var(--v2-surface-muted)]"
         aria-label={toggleSidebarLabel}
         aria-controls="gateway-sidebar"
         aria-expanded={sidebarOpen ? "true" : "false"}
         title={toggleSidebarLabel}
       >
         <Icon name="list" className="h-4 w-4" />
-      </button>
+      </Button>
 
       {breadcrumb
         ? (
-            <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold">
+            <div className="flex min-w-0 items-center gap-2 text-[14px] font-medium">
               <span className="shrink-0 text-[var(--v2-text-muted)]">
                 {breadcrumb.parent}
               </span>
@@ -94,7 +96,7 @@ export function PageHeader({
           )
         : (
             <span
-              className="truncate text-[14px] font-semibold text-[var(--v2-text-strong)]"
+              className="truncate text-[14px] font-medium text-[var(--v2-text-strong)]"
             >
               {title}
             </span>

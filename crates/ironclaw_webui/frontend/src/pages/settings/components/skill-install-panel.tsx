@@ -1,8 +1,9 @@
 // @ts-nocheck
-import { Button } from "../../../design-system/button";
-import { Card } from "../../../design-system/card";
-import { FormField, Input, Textarea } from "../../../design-system/input";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { FormField, Input, Textarea } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Text } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 
@@ -53,12 +54,12 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
     <Card padding="md">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+          <Text as="h3" variant="eyebrow" tone="accent">
             {t("skills.import")}
-          </h3>
-          <p className="mt-1 text-sm text-[var(--v2-text-muted)]">
+          </Text>
+          <Text variant="body" tone="muted" className="mt-1">
             {t("skills.importDesc")}
-          </p>
+          </Text>
         </div>
       </div>
 

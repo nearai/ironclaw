@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { Icon } from "../design-system/icons";
+import { Icon, Text } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { useTraceCredits } from "../pages/settings/hooks/useTraceCredits";
 
@@ -37,12 +37,12 @@ export function SidebarTraceCredits() {
       >
         <div className="flex items-center gap-2 text-[var(--v2-accent-text)]">
           <Icon name="layers" className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 truncate font-mono text-[11px] uppercase tracking-[0.14em]">
+          <Text variant="eyebrow" tone="inherit" className="min-w-0 truncate">
             {t("settings.traceCommons")}
-          </span>
+          </Text>
         </div>
         <div className="mt-2 flex items-center justify-between gap-2">
-          <span className="text-xs text-[var(--v2-text-muted)]">{t("traceCommons.finalCredit")}</span>
+          <Text variant="caption" tone="muted">{t("traceCommons.finalCredit")}</Text>
           <span className="shrink-0 font-mono text-sm text-[var(--v2-text-strong)]">{final}</span>
         </div>
         <div className="mt-0.5 text-[11px] text-[var(--v2-text-muted)]">

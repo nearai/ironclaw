@@ -82,6 +82,8 @@ function renderAppearanceModule({
   const context = {
     Card: component("Card"),
     Icon: component("Icon"),
+    Switch: component("Switch"),
+    Text: component("Text"),
     matchesSearch: (query, values) =>
       !query ||
       values.some((value) =>
@@ -139,7 +141,7 @@ test("Appearance tab toggles the chat terminal shortcut preference", () => {
 
   const props = componentProps(switchNode, exports.Switch);
   assert.equal(props.checked, true);
-  props.onChange(false);
+  props.onCheckedChange(false);
   assert.deepEqual(toggles, [false]);
 });
 
