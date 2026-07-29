@@ -53,7 +53,7 @@ crates/
 │   └── observability          latency-trace macros
 │
 ├── events/                    evidence → derived views → streams
-│   ├── events                 evidence vocabulary & log traits
+│   ├── event_log              evidence vocabulary & log traits
 │   ├── event_store            durable backends, fail-closed profiles
 │   ├── event_projections      replay-derived read models
 │   └── event_streams          admission-checked stream delivery
@@ -63,8 +63,6 @@ crates/
 │   ├── conversations          external ↔ canonical binding, idempotency
 │   ├── triggers               schedules & trusted-fire minting
 │   ├── memory                 provider-neutral memory contract
-│   ├── memory_native          native memory provider
-│   ├── memory_mem0            mem0 memory provider
 │   ├── skills                 skill parsing, selection, learning
 │   ├── auth                   product auth & the recipe engine
 │   ├── attachments            attachment landing & its ports
@@ -100,7 +98,7 @@ crates/
 │   └── hooks                  trust-tiered hook middleware
 │
 ├── extensions/                everything "installable package"
-│   ├── extensions             manifests, registry, install records
+│   ├── extension_registry     manifests & installation records
 │   ├── extension_host         generic host: verify, bind, deliver
 │   ├── extension_manager      product-side management                 NEW
 │   ├── first_party            shared native executors & the package inventory
@@ -108,10 +106,12 @@ crates/
 │       ├── slack/             adapter crate + manifest + assets
 │       ├── telegram/          adapter crate + manifest + assets
 │       ├── github/            manifest + wasm + prompts (data only)
+│       ├── memory-native/     native memory provider (crate)
+│       ├── mem0/              mem0-backed memory provider (crate)
 │       └── …                  gmail, google-*, web-access, notion, …
 │
 ├── product/                   first-party userland
-│   ├── product                ProductSurface impl & delivery
+│   ├── assistant              the assistant: ProductSurface impl & delivery
 │   ├── operator               deployment-operator control plane
 │   ├── openai_compat          OpenAI-compatible ingress adapter
 │   ├── webui                  web host: routes, auth, gateway, SPA
@@ -161,9 +161,9 @@ One request stitches them together: a message arrives → the **loop** decides t
 ## The five decisions reviewers should weigh
 
 1. **Three new contracts crates** — the load-bearing change. They exist because the dependency graph *proves* the need: `loop_contracts` (six crates consume the loop-port tier through the turn kernel today), `extension_contracts` (lanes/hosts consume adapter+manifest vocabulary through the registry or product today), `product_contracts` (ports defined in product force extension_host/operator/telegram *above* product today). Each is thin, allowlisted, and mass-ratcheted.
-2. **Six layer reassignments, zero matrix changes** — `extensions`→substrates, `skills`→substrates, `extension_host`→loops, `runner`→loops, `hooks`→loops, `processes`→kernel. Together with the contracts crates, these make every current exception's `removes_in` condition true.
+2. **Six layer reassignments, zero matrix changes** — `extensions` (becoming `extension_registry`)→substrates, `skills`→substrates, `extension_host`→loops, `runner`→loops, `hooks`→loops, `processes`→kernel. Together with the contracts crates, these make every current exception's `removes_in` condition true.
 3. **Kernel = nine crates, on purpose.** Each pipeline stage (trust → authorization → approvals → resources → policy → capability membrane → lifecycle → admission → mediated services) is an independently consumed contract with fail-closed rules; merging them trades compiler-proven stage separation for module discipline.
-4. **Packages are directories first, crates when earned** — a package crate exists iff it has a channel adapter (binary-only linking is already enforced) or a heavy isolated dependency; everything else is manifest+assets+modules. Slack is already the model citizen; Telegram reaches parity by merging its two crates and depending only on contracts.
+4. **Packages are directories first, crates when earned** — a package crate exists iff it has a channel adapter (binary-only linking is already enforced), a provider surface, or a heavy isolated dependency; everything else is manifest+assets+modules. Slack is already the model citizen; Telegram reaches parity by merging its two crates and depending only on contracts. The memory providers follow the same rule: both ship as provider packages (`memory-native/`, `mem0/`) declaring a `[memory]` manifest surface, while the provider-neutral contract they implement stays in `domains/`.
 5. **Deletion list is verified, not vibes** — every dead item was checked for zero production consumers at the baseline commit (full inventory in PROPOSAL.md §2.6), and each deletion still lands under the "removing a redundant layer un-masks behavior" review discipline.
 
 ## Security model in three sentences

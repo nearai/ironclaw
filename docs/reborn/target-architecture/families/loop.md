@@ -56,7 +56,7 @@ A claimed run receives only the ports scoped to its own execution — never an a
 - **Never contains:** a provider client or dispatcher internal beyond what a single port adapter strictly needs; product binding; a database migration; driver registration; a decorator that performs a turn-lifecycle state transition — that belongs to the turn-admission crate's own runner-facing seam, never to a port adapter.
 - **Public surface:** implementations of every `loop_contracts` port, consumed by `ironclaw_runner` and, through its composition, by the executor.
 - **Depends on:** `ironclaw_capabilities`, `ironclaw_host_runtime`, `ironclaw_resources`, `ironclaw_safety`, `ironclaw_skills`, `ironclaw_memory`, `ironclaw_threads`, and `loop_contracts`.
-- **Never depends on:** `ironclaw_product`, `ironclaw_extension_host`, `ironclaw_extension_manager`, or any package crate.
+- **Never depends on:** `ironclaw_assistant`, `ironclaw_extension_host`, `ironclaw_extension_manager`, or any package crate.
 - **Security & authority role:** the concrete membrane implementation — every privileged effect a loop requests passes through an adapter defined here before it reaches the kernel. It must never bypass the capability host or the dispatcher.
 - **Why a separate crate:** it is the only place kernel handles and `loop_contracts` types are permitted to coexist; keeping it apart from `ironclaw_agent_loop` is what keeps that crate's contracts-only rule true, and keeping it apart from `ironclaw_runner` keeps port-adaptation concerns separate from driver-registry and claim-control-plane concerns.
 
@@ -67,7 +67,7 @@ A claimed run receives only the ports scoped to its own execution — never an a
 - **Never contains:** a planner strategy slot exposed through a public API; a neutral vocabulary type duplicated from a contracts crate; a product-specific branch inside a driver; a silent fallback between drivers that is not an explicit profile or readiness decision.
 - **Public surface:** the driver registry; the two production driver implementations; the turn-execution entry point the process supervisor invokes.
 - **Depends on:** `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_hooks`, `ironclaw_host_runtime`, `ironclaw_llm`, `ironclaw_memory`, `ironclaw_threads`, and `ironclaw_turns`.
-- **Never depends on:** `ironclaw_product`, `ironclaw_extension_host`; never `ironclaw_composition` — the dependency runs the other way, composition depends on this crate, never the reverse.
+- **Never depends on:** `ironclaw_assistant`, `ironclaw_extension_host`; never `ironclaw_composition` — the dependency runs the other way, composition depends on this crate, never the reverse.
 - **Security & authority role:** the trusted control-plane adapter. It is handed a claimed run under a lease and hands that run only the ports scoped to it; it is the crate that decides a loop's exit is durable only after validating the evidence behind it.
 - **Why a separate crate:** it is the one crate trusted to bridge a kernel-issued claim into loop userland; keeping its charter to exactly that job means the kernel's only reach into this family is a single, well-defined executor registration, not a same-tier dependency.
 
@@ -77,8 +77,8 @@ A claimed run receives only the ports scoped to its own execution — never an a
 - **Owns:** the four trust classes — builtin, trusted, installed, and self-authored — each fixed by the hook's source and never declarable by the hook itself; the sealed decision sinks and decision kinds each class is restricted to; ordering and failure-policy rules; the declarative predicate language and its evaluator; a sandboxed execution engine for portable hook code; the decorator implementation of every `loop_contracts` port.
 - **Never contains:** the driver contract itself — that stays in `loop_contracts`; a base, non-decorating implementation of any port — this crate only ever wraps another implementation; extension-bundle loading or installation authority — a hook executes once its code is resolved, but resolving and sourcing that code is someone else's job.
 - **Public surface:** the hook dispatcher and its trust-tier-specific installers; the hook registry; decorator implementations of the full `loop_contracts` port set.
-- **Depends on:** `ironclaw_events`, `host_api`, `prompt_envelope`, `loop_contracts`.
-- **Never depends on:** `ironclaw_turns` — the dependency runs the other way, nothing in the turn-admission kernel crate depends on this crate; never `ironclaw_product`, `ironclaw_extension_host`, or the dispatcher.
+- **Depends on:** `ironclaw_event_log`, `host_api`, `prompt_envelope`, `loop_contracts`.
+- **Never depends on:** `ironclaw_turns` — the dependency runs the other way, nothing in the turn-admission kernel crate depends on this crate; never `ironclaw_assistant`, `ironclaw_extension_host`, or the dispatcher.
 - **Security & authority role:** a hook cannot grant authority or bypass any kernel-mediated policy stage, and never receives an ambient secret, filesystem handle, network client, or process handle. Gate and mutator decisions fail closed; observer and effect decisions fail isolated with redacted audit; a hook that violates its protocol is barred from acting for the rest of the run.
 - **Why a separate crate:** an independent trust-tier contract with its own sandboxed execution engine, kept apart from `ironclaw_loop_host`'s non-sandboxed adapters so neither carries a dependency the other has no need for.
 

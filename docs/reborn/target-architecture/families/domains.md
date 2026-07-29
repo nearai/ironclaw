@@ -1,7 +1,7 @@
 
 # `crates/domains/` — typed record/service domains
 
-**Layer(s):** substrates · **Crates:** 15 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_memory_native, ironclaw_memory_mem0, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_traces, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint and seal trust narrowly (outbound, triggers), and one is a credential-custody domain (auth).
+**Layer(s):** substrates · **Crates:** 13 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_traces, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint and seal trust narrowly (outbound, triggers), and one is a credential-custody domain (auth).
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -11,8 +11,6 @@ crates/domains/
 ├── ironclaw_conversations    external↔canonical binding & idempotency
 ├── ironclaw_triggers         scheduled triggers & trusted-fire minting
 ├── ironclaw_memory           provider-neutral memory contract
-├── ironclaw_memory_native    native filesystem memory provider
-├── ironclaw_memory_mem0      mem0 memory provider (composition-selected)
 ├── ironclaw_skills           skill parsing, selection & learning
 ├── ironclaw_auth             product auth & the recipe engine
 ├── ironclaw_attachments      attachment landing & its ports
@@ -57,11 +55,11 @@ Domains crates depend only on `substrate/`, `events/`, and `contracts/` — neve
 
 | May depend on | Never depends on |
 |---|---|
-| `substrate/` — filesystem for every crate; secrets and network only where a crate's charter needs them (auth, memory_mem0) · `events/` — chiefly event_projections · `contracts/` — host_api, common, prompt_envelope | `kernel/` in full — capabilities, host_runtime, authorization, approvals, resources, trust, turns, processes · `loop/` · `extensions/` · `product/` · `app/` |
+| `substrate/` — filesystem for every crate; secrets and network only where a crate's charter needs them (auth) · `events/` — chiefly event_projections · `contracts/` — host_api, common, prompt_envelope | `kernel/` in full — capabilities, host_runtime, authorization, approvals, resources, trust, turns, processes · `loop/` · `extensions/` · `product/` · `app/` |
 
-HTTP and vendor SDKs are permitted only inside `ironclaw_llm`, `ironclaw_traces`, `ironclaw_auth`'s engine, and `ironclaw_memory_mem0` — the family's four named vendor and external-service cones. No other domains crate reaches HTTP directly.
+HTTP and vendor SDKs are permitted only inside `ironclaw_llm`, `ironclaw_traces`, and `ironclaw_auth`'s engine — the family's three named vendor and external-service cones. No other domains crate reaches HTTP directly.
 
-Inside the family, dependency edges are shallow and few: `ironclaw_conversations` depends on `ironclaw_triggers` for trusted-submission binding vocabulary; `ironclaw_memory_native` and `ironclaw_memory_mem0` both depend on `ironclaw_memory` for the shared contract; `ironclaw_attachments` depends on `ironclaw_extractors` for pure bytes-to-text transformation; `ironclaw_traces` depends on `ironclaw_llm` to reuse its recording vocabulary. No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh.
+Inside the family, dependency edges are shallow and few: `ironclaw_conversations` depends on `ironclaw_triggers` for trusted-submission binding vocabulary; `ironclaw_attachments` depends on `ironclaw_extractors` for pure bytes-to-text transformation; `ironclaw_traces` depends on `ironclaw_llm` to reuse its recording vocabulary. No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh.
 
 ## Security & authority
 
@@ -143,47 +141,13 @@ Every other crate — threads, conversations, the memory family, skills, attachm
 - **Never contains:**
   - A concrete backend.
   - Embedding computation.
-- **Public surface:** `MemoryService` — the provider seam, implemented independently by two providers and proven interchangeable by the shared conformance suite; `ironclaw.memory.*` as the naming convention for every memory-facing tool built on this contract.
+- **Public surface:** `MemoryService` — the provider seam, implemented by the memory-provider extension packages and proven interchangeable by the shared conformance suite; `ironclaw.memory.*` as the naming convention for every memory-facing tool built on this contract.
 - **Depends on:** `ironclaw_host_api`, `ironclaw_prompt_envelope`.
-- **Never depends on:** either concrete provider crate; anything above substrates.
+- **Never depends on:** any concrete provider crate — providers live above this family, as extension packages; anything above substrates.
 - **Security & authority role:** none directly — a neutral contract.
-- **Why a separate crate:** one neutral contract consumed by two independent providers and every memory-reading caller, proven real by a conformance suite rather than by convention alone.
+- **Why a separate crate:** one neutral contract implemented by provider extension packages above it and consumed by every memory-reading caller below, proven real by a conformance suite rather than by convention alone.
 
-### `ironclaw_memory_native`
-
-- **Purpose:** the filesystem-native implementation of the memory contract.
-- **Owns:**
-  - The `MemoryService` implementation, and the backend abstraction it is built from.
-  - Filesystem and in-memory repository implementations.
-  - Full-text indexing and search.
-  - The prompt-write-safety enforcement engine that implements the vocabulary the neutral contract defines.
-  - Wiring for the shared conformance suite against this backend.
-- **Never contains:**
-  - The neutral `MemoryService` vocabulary itself.
-  - A second backend.
-  - Virtual-path or mount authority, which stays one layer down in the filesystem substrate — this crate owns only memory-specific path grammar built on top of it.
-- **Public surface:** an implementation of `ironclaw_memory::MemoryService`; no additional public ports.
-- **Depends on:** `ironclaw_filesystem`, `ironclaw_host_api`, `ironclaw_memory`, `ironclaw_safety`, `ironclaw_prompt_envelope`.
-- **Never depends on:** `ironclaw_memory_mem0`; any HTTP client.
-- **Security & authority role:** none directly — a record and search backend; the safety engine it hosts enforces vocabulary the kernel and loop tiers consume, but the enforcement call itself grants no authority.
-- **Why a separate crate:** the always-available, no-network half of the two-provider seam, isolating full-text indexing weight from the neutral contract's wide indirect consumer set.
-
-### `ironclaw_memory_mem0`
-
-- **Purpose:** a second, independent implementation of the memory contract, backed by an external memory service.
-- **Owns:**
-  - The mapping from IronClaw's memory operations onto the external service's REST surface.
-  - A transport seam — a trait the mapping speaks through, with a hardened HTTP implementation behind it: bounded timeout, redirects disabled, target URL validated before any request leaves the process.
-  - Configuration and error vocabulary for the external integration.
-- **Never contains:**
-  - The neutral `MemoryService` vocabulary.
-  - Filesystem-backend logic.
-  - Any naming of this provider outside the composition layer that selects it.
-- **Public surface:** an implementation of `ironclaw_memory::MemoryService`; a mock-transport seam that keeps the mapping unit-testable without live network.
-- **Depends on:** `ironclaw_host_api`, `ironclaw_memory`.
-- **Never depends on:** `ironclaw_memory_native`; anything outside its own narrow HTTP cone.
-- **Security & authority role:** none directly; carries the target-validation obligation for its one HTTP egress path.
-- **Why a separate crate:** keeps an external HTTP dependency cone isolated from every other crate's build; the second implementation that makes the memory contract's seam real, selected exclusively by composition and named nowhere else.
+Memory *providers* are not domains crates. Each provider — the bundled native one and the mem0-backed alternative — ships as an extension package (`extensions/packages/memory-native/`, `extensions/packages/mem0/`) declaring a `[memory]` manifest surface, implementing this crate's `MemoryService`, and passing this crate's conformance suite. Their specifications live in [extensions.md](extensions.md).
 
 ### `ironclaw_skills`
 
@@ -216,7 +180,7 @@ Every other crate — threads, conversations, the memory family, skills, attachm
   - Extension lifecycle mutation, or turn replay and resume.
   - Raw OAuth codes, PKCE verifiers, tokens, host paths, or raw secret values in any serializable shape.
 - **Public surface:** the flow, interaction, credential-account, recovery, exchange, continuation, and cleanup trait set; `AuthRecipeResolver`, implemented by the extension host; redacted DTOs safe for every product surface to render.
-- **Depends on:** `ironclaw_common`, `ironclaw_events`, `ironclaw_filesystem`, `ironclaw_host_api`, `ironclaw_secrets`.
+- **Depends on:** `ironclaw_common`, `ironclaw_event_log`, `ironclaw_filesystem`, `ironclaw_host_api`, `ironclaw_secrets`.
 - **Never depends on:** the turn coordinator crate directly — a gate-prompt port exposed through host_api carries the vocabulary it needs instead.
 - **Security & authority role:** the family's credential-custody domain — the one crate whose central job is holding token-lifecycle state, though never raw secret bytes, which stay behind secret-store handles.
 - **Why a separate crate:** a recipe-driven design that is this crate's whole reason to exist — the family's second vendor-scoped charter. Model-provider session handling lives in `ironclaw_llm`, and host login lives in `webui`: three deliberately distinct credential concerns, not one stack.
