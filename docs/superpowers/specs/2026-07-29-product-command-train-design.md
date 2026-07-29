@@ -146,11 +146,10 @@ resolve role, reject non-admins). New distinct rejection notice for the admin
 denial ("this command needs an admin account" copy family), separate from the
 direct-conversation notice. Sensitive commands never reach their handlers.
 
-Help text becomes role-aware: built from the declared set filtered to the
-actor's listing audience at rejection time (admission has both the set and
-the resolved role). Empty filtered set keeps the existing "commands are not
-available in this channel" line. The observer's static help field remains as
-generic fallback only.
+Help is role-safe by filtering: the observer's static help includes only
+user-audience declared commands, for every actor. Admission rejections carry
+internal reasons only; the observer never echoes them. The admin denial is
+keyed by the reused wire-stable `ProductRejectionKind::AccessDenied`.
 
 ### Manifests
 

@@ -135,15 +135,6 @@ where
     format!("Available commands:\n{}", names.join("\n"))
 }
 
-pub fn command_help_text() -> String {
-    let mut names = product_command_descriptors()
-        .map(|descriptor| format!("/{}", descriptor.name))
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    format!("Available commands:\n{}", names.join("\n"))
-}
-
 pub fn render_command_result_text(view: &CommandResultView) -> String {
     let mut text = view.title.clone();
     for field in &view.fields {

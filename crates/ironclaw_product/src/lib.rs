@@ -110,11 +110,10 @@ pub use command_dispatch::{
     RejectingProductCommandAdmissionService,
 };
 pub use commands::{
-    CommandAudience, CommandResultField, CommandResultView,
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandDescriptor,
-    ProductLifecycleCommandInput, ProductModelCommand, ProductModelCommandInput,
-    ProductStatusCommandInput, UnknownProductCommandName, command_help_text,
+    CommandAudience, CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
+    ProductModelCommandInput, ProductStatusCommandInput, UnknownProductCommandName,
     declared_command_help_text, product_command_descriptors, render_command_result_text,
     required_audience, validate_declared_product_command,
 };
