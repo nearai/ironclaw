@@ -54,7 +54,7 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
             data-testid="workspace-directory-entry"
             data-entry-path={entry.path}
             onClick={() => onOpen(entry.path)}
-            className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-[var(--v2-text-strong)] hover:bg-[var(--v2-surface-soft)]"
+            className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-[var(--v2-text-strong)] transition-colors hover:bg-[var(--v2-surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <span className={["w-4 text-center text-xs", entry.is_dir ? "text-[var(--v2-accent-text)]" : "text-[var(--v2-text-muted)]"].join(" ")}>
               {entry.is_dir ? "□" : "·"}

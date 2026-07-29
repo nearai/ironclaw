@@ -80,6 +80,12 @@
   --v2-info-soft:     rgba(76, 167, 230, 0.12);
   --v2-info-text:     #146fae;
 
+  /* Interaction states — shared by every component so keyboard focus and
+     press feedback look identical across the system. `--v2-focus-ring` is
+     the one sanctioned focus-visible ring color; derived from the accent so
+     it adapts to both themes automatically. */
+  --v2-focus-ring: color-mix(in srgb, var(--v2-accent) 32%, transparent);
+
   background: var(--v2-canvas);
 }
 
@@ -152,4 +158,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .v2-spin { animation: none !important; }
+}
+
+/* Interaction transitions (hover/active/focus color shifts) are declared on
+   components via Tailwind's transition utilities (~150ms ease). Inside the
+   app they are neutralized by the static-motion policy in app.css; in other
+   hosts (Storybook) this opt-out keeps them suppressed for users who ask
+   for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+  }
 }

@@ -162,9 +162,12 @@ export function Combobox({
           "border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] text-left transition-colors",
           selected ? "text-[var(--v2-text-strong)]" : "text-[var(--v2-text-faint)]",
           "hover:bg-[var(--v2-surface-soft)]",
+          "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+          "active:bg-[var(--v2-surface-muted)]",
           "focus-visible:outline-none focus-visible:ring-2",
-          "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
-          "disabled:cursor-not-allowed disabled:opacity-60"
+          "focus-visible:ring-[var(--v2-focus-ring)]",
+          "disabled:cursor-not-allowed disabled:opacity-50",
+          "disabled:hover:border-[var(--v2-panel-border)] disabled:hover:bg-[var(--v2-input-bg)]"
         )}
       >
         <span className="truncate">{selected ? labelOf(selected) : placeholder}</span>
@@ -202,7 +205,8 @@ export function Combobox({
               }}
               onKeyDown={handleInputKeyDown}
               className={cn(
-                "w-full bg-transparent text-ui text-[var(--v2-text-strong)] outline-none",
+                "w-full rounded-[4px] bg-transparent text-ui text-[var(--v2-text-strong)] outline-none",
+                "focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                 "placeholder:text-[var(--v2-text-faint)]"
               )}
             />

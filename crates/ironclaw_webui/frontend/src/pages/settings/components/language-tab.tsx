@@ -45,7 +45,8 @@ export function LanguageTab({ searchQuery = "" }) {
               type="button"
               onClick={() => setLang(l.code)}
               className={[
-                "flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left",
+                "flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                 l.code === lang
                   ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
                   : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_20%,var(--v2-panel-border))] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",

@@ -55,7 +55,7 @@ export function ToastViewport() {
             title={t("common.dismiss")}
             data-testid="toast-dismiss"
             onClick={() => hotToast.dismiss(item.id)}
-            className="-mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-md text-current opacity-70 transition hover:bg-[var(--v2-surface-muted)] hover:opacity-100 focus:opacity-100"
+            className="-mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-md text-current opacity-70 transition hover:bg-[var(--v2-surface-muted)] hover:opacity-100 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <Icon name="close" className="h-3.5 w-3.5" />
           </button>

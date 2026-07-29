@@ -31,7 +31,9 @@ const TRIGGER_CLASSES =
   "inline-flex items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-ui font-medium " +
   "text-[var(--v2-text-muted)] outline-none transition-colors " +
   "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)] " +
-  "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)] " +
+  "active:bg-[var(--v2-surface-muted)] " +
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] " +
+  "disabled:pointer-events-none disabled:opacity-50 " +
   "data-[state=open]:bg-[var(--v2-surface-soft)] data-[state=open]:text-[var(--v2-text-strong)]";
 
 export function NavigationMenu({

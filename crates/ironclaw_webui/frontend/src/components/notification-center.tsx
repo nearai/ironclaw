@@ -13,7 +13,8 @@ function NotificationRow({ message, unread, onOpen }) {
       onClick={message.href ? () => onOpen(message) : undefined}
       data-testid="notification-row"
       className={cn(
-        "grid w-full grid-cols-[2rem_minmax(0,1fr)] gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3 text-left last:border-0",
+        "grid w-full grid-cols-[2rem_minmax(0,1fr)] gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3 text-left transition-colors last:border-0",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]",
         message.href
           ? "hover:bg-[var(--v2-surface-soft)]"
           : "cursor-default opacity-80"

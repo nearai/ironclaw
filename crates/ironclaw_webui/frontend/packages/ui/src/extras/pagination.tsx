@@ -58,11 +58,11 @@ export function PaginationButton({
       className={cn(
         "inline-flex h-9 min-w-9 items-center justify-center gap-1 rounded-[10px] border px-2 text-ui font-medium transition-colors",
         "focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
         "disabled:cursor-not-allowed disabled:opacity-50",
         isActive
-          ? "border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-          : "border-transparent bg-transparent text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
+          ? "border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] active:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
+          : "border-transparent bg-transparent text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)] active:bg-[var(--v2-surface-muted)]",
         className
       )}
       {...props}

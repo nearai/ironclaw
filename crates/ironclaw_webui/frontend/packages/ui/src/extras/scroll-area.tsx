@@ -50,7 +50,12 @@ export function ScrollBar({
       {...props}
     >
       <ScrollAreaPrimitive.Thumb
-        className="relative flex-1 rounded-full bg-[color-mix(in_srgb,var(--v2-text-faint)_55%,transparent)]"
+        className={cn(
+          "relative flex-1 rounded-full transition-colors",
+          "bg-[color-mix(in_srgb,var(--v2-text-faint)_55%,transparent)]",
+          "hover:bg-[color-mix(in_srgb,var(--v2-text-faint)_75%,transparent)]",
+          "active:bg-[color-mix(in_srgb,var(--v2-text-faint)_85%,transparent)]"
+        )}
       />
     </ScrollAreaPrimitive.Scrollbar>
   );

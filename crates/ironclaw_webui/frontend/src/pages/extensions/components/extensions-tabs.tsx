@@ -12,7 +12,8 @@ export function ExtensionsTabs({ activeTab, onTabChange, counts }) {
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
             className={[
-              "group flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm",
+              "group flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               activeTab === tab.id
                 ? "v2-nav-active text-white"
                 : "text-iron-300 hover:bg-white/[0.045] hover:text-white",
@@ -52,7 +53,8 @@ export function ExtensionsTabsMobile({ activeTab, onTabChange, counts }) {
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
             className={[
-              "flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm whitespace-nowrap",
+              "flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm whitespace-nowrap transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               activeTab === tab.id
                 ? "border border-signal/35 bg-signal/10 text-white"
                 : "border border-transparent text-iron-300 hover:text-white",

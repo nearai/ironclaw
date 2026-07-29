@@ -61,7 +61,8 @@ export function AutomationsList({
                   aria-pressed={filter === item.value}
                   onClick={() => onFilterChange(item.value)}
                   className={cn(
-                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight",
+                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]",
                     filter === item.value
                       ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                       : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"

@@ -33,7 +33,7 @@ export function ThreadSidebar({
         <button
           onClick={onCreate}
           disabled={createDisabled}
-          className="v2-button h-9 shrink-0 rounded-md border border-signal/25 bg-signal/10 px-3 text-xs font-semibold text-signal disabled:opacity-50"
+          className="v2-button h-9 shrink-0 rounded-md border border-signal/25 bg-signal/10 px-3 text-xs font-semibold text-signal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isCreating ? t("chat.creating") : t("chat.newThread")}
         </button>
@@ -81,7 +81,7 @@ export function ThreadSidebar({
         <button
           onClick={onCreate}
           disabled={createDisabled}
-          className="v2-button inline-flex h-8 items-center gap-1.5 rounded-md border border-signal/25 bg-signal/10 px-2 text-xs font-medium text-signal hover:bg-signal/15 disabled:opacity-50"
+          className="v2-button inline-flex h-8 items-center gap-1.5 rounded-md border border-signal/25 bg-signal/10 px-2 text-xs font-medium text-signal transition-colors hover:bg-signal/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isCreating
             ? t("chat.creating")
@@ -106,7 +106,8 @@ export function ThreadSidebar({
               key={thread.id}
               onClick={() => onSelect(thread.id)}
               className={[
-                "v2-button mb-1 flex w-full justify-start items-start flex-col gap-1 rounded-md border px-3 py-3 text-left",
+                "v2-button mb-1 flex w-full justify-start items-start flex-col gap-1 rounded-md border px-3 py-3 text-left transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                 active
                   ? "border-signal/35 bg-signal/10"
                   : "border-transparent hover:border-white/10 hover:bg-white/[0.045]",

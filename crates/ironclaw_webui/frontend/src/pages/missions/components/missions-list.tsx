@@ -40,7 +40,7 @@ function MissionRow({ mission, selectedMissionId, onSelectMission, onOpenProject
           : "border-iron-700 bg-iron-800/50 hover:border-signal/25 hover:bg-iron-800/80",
       ].join(" ")}
     >
-      <button type="button" onClick={() => onSelectMission(mission.id)} className="block w-full text-left">
+      <button type="button" onClick={() => onSelectMission(mission.id)} className="block w-full rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">

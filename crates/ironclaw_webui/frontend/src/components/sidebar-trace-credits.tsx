@@ -33,7 +33,7 @@ export function SidebarTraceCredits() {
     <div className="px-3 pb-1">
       <Link
         to="/settings/traces"
-        className="block rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5 transition-colors hover:border-[var(--v2-accent-soft)] hover:bg-[var(--v2-surface-muted)]"
+        className="block rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5 transition-colors hover:border-[var(--v2-accent-soft)] hover:bg-[var(--v2-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         <div className="flex items-center gap-2 text-[var(--v2-accent-text)]">
           <Icon name="layers" className="h-3.5 w-3.5 shrink-0" />

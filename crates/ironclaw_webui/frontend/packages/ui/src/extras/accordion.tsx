@@ -52,9 +52,11 @@ export function AccordionTrigger({
           "group flex flex-1 items-center justify-between gap-3 py-3.5 text-left",
           "text-ui font-medium text-[var(--v2-text-strong)] transition-colors",
           "hover:text-[var(--v2-accent-text)]",
+          "active:text-[var(--v2-accent)]",
           "focus-visible:outline-none focus-visible:ring-2",
-          "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+          "focus-visible:ring-[var(--v2-focus-ring)]",
           "disabled:cursor-not-allowed disabled:opacity-50",
+          "disabled:hover:text-[var(--v2-text-strong)]",
           className
         )}
         {...props}

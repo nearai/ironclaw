@@ -282,7 +282,9 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
       (value) => typeof value === "string" && value.includes("v2-canvas-strong")
     )
   );
-  assert.match(optionClasses(rendered)[0], /v2-surface-muted/);
+  // Option 0 is both selected and keyboard-active: it gets the stepped-up
+  // accent tint, not the resting accent-soft selected background.
+  assert.match(optionClasses(rendered)[0], /var\(--v2-accent\)_18%/);
   assert.doesNotMatch(optionClasses(rendered)[0], /v2-accent-soft/);
   assert.ok(collectScalars(rendered).includes("Always allow"));
 

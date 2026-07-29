@@ -226,7 +226,8 @@ export function CommandInput({
           }
         }}
         className={cn(
-          "w-full bg-transparent text-ui text-[var(--v2-text-strong)] outline-none",
+          "w-full rounded-[4px] bg-transparent text-ui text-[var(--v2-text-strong)] outline-none",
+          "focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
           "placeholder:text-[var(--v2-text-faint)]",
           className
         )}

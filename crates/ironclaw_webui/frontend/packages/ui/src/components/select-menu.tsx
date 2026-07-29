@@ -344,9 +344,10 @@ export function SelectMenu({
           "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5",
           "text-[var(--v2-text-strong)] shadow-none transition-colors",
           "hover:bg-[var(--v2-surface-muted)]",
+          "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
           "focus-visible:outline-none focus-visible:ring-2",
-          "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
-          "disabled:cursor-not-allowed disabled:opacity-60",
+          "focus-visible:ring-[var(--v2-focus-ring)]",
+          "disabled:cursor-not-allowed disabled:opacity-50 disabled:pointer-events-none",
           buttonClassName
         )}
       >
@@ -395,13 +396,17 @@ export function SelectMenu({
                   "flex w-full items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
                   "text-left text-[var(--v2-text)] transition-colors",
                   "focus-visible:outline-none",
-                  "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
-                  "disabled:cursor-not-allowed disabled:opacity-50",
+                  "focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
+                  "disabled:cursor-not-allowed disabled:opacity-50 disabled:pointer-events-none",
                   isActive
-                    ? "bg-[var(--v2-surface-muted)] text-[var(--v2-text-strong)]"
+                    ? isSelected
+                      // Selected + hovered/keyboard-active: step the accent tint
+                      // up so the selection still reads under the highlight.
+                      ? "bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)] text-[var(--v2-text-strong)]"
+                      : "bg-[var(--v2-surface-muted)] text-[var(--v2-text-strong)]"
                     : isSelected
                       ? "bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
-                      : "hover:bg-[var(--v2-surface-soft)]",
+                      : "hover:bg-[var(--v2-surface-soft)] active:bg-[var(--v2-surface-muted)]",
                   optionClassName
                 )}
               >

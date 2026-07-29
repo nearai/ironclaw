@@ -8,7 +8,7 @@ const COLOR_TOKENS = [
   "--v2-accent", "--v2-accent-strong", "--v2-accent-soft", "--v2-accent-text",
   "--v2-positive-soft", "--v2-positive-text", "--v2-warning-soft",
   "--v2-warning-text", "--v2-danger-soft", "--v2-danger-text",
-  "--v2-info-soft", "--v2-info-text",
+  "--v2-info-soft", "--v2-info-text", "--v2-focus-ring",
 ];
 
 const TYPE_TOKENS = [

@@ -155,7 +155,7 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
     <div className="space-y-5">
       <button
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-iron-300 hover:text-white"
+        className="flex items-center gap-1.5 rounded text-xs text-iron-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         <span>←</span>
         <span>{t("admin.users.backToUsers")}</span>

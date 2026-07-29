@@ -136,7 +136,7 @@ export function SettingsToolbar({
                 type="button"
                 onClick={onSearchClear}
                 aria-label={t("settings.clearSearch")}
-                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)]"
+                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] transition-colors hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
               >
                 <Icon name="close" className="h-3.5 w-3.5" />
               </button>

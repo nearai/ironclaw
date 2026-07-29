@@ -64,7 +64,8 @@ export function UsageTab({ onSelectUser }) {
                   key={p.value}
                   onClick={() => setPeriod(p.value)}
                   className={[
-                    "rounded-md px-3 py-1.5 text-[11px] font-medium",
+                    "rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                     period === p.value
                       ? "border border-signal/35 bg-signal/10 text-white"
                       : "border border-transparent text-iron-300 hover:text-white",

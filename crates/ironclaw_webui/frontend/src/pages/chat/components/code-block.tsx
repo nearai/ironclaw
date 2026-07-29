@@ -16,7 +16,7 @@ export function CodeBlock({ code, language = "" }) {
         <span className="font-mono text-[11px] text-iron-200">{language || "text"}</span>
         <button
           onClick={handleCopy}
-          className="rounded px-2 py-0.5 text-[11px] text-iron-200 opacity-0 hover:bg-white/10 group-hover:opacity-100"
+          className="rounded px-2 py-0.5 text-[11px] text-iron-200 opacity-0 transition-colors hover:bg-white/10 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         >
           {t("common.copy")}
         </button>

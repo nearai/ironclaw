@@ -35,7 +35,7 @@ function ImportButton({ onImport, isImporting, isBusy }) {
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={isBusy || isImporting}
-        className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] disabled:opacity-50"
+        className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Icon name="upload" className="h-3 w-3" />
         {isImporting ? t("ext.registry.importing") : t("ext.registry.import")}

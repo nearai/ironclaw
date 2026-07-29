@@ -33,6 +33,7 @@ function Demo() {
             New run<MenubarShortcut>⌘N</MenubarShortcut>
           </MenubarItem>
           <MenubarItem>Open…</MenubarItem>
+          <MenubarItem disabled>Revert (no changes)</MenubarItem>
           <MenubarSeparator />
           <MenubarSub>
             <MenubarSubTrigger>Export</MenubarSubTrigger>

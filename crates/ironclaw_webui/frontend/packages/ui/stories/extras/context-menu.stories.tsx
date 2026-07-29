@@ -36,6 +36,7 @@ function Demo() {
         <ContextMenuItem>
           Rename<ContextMenuShortcut>⌘R</ContextMenuShortcut>
         </ContextMenuItem>
+        <ContextMenuItem disabled>Duplicate</ContextMenuItem>
         <ContextMenuCheckboxItem
           checked={pinned}
           onCheckedChange={(next) => setPinned(next === true)}

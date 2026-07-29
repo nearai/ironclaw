@@ -39,7 +39,7 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
       <p className="mt-1 text-sm">{t(descriptionKey)}</p>
       <button
         type="button"
-        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
         onClick={onRetry}
         disabled={isRefetching}
       >

@@ -33,7 +33,7 @@ function FeedbackBanner({ result, onDismiss }) {
       <span className="min-w-0 flex-1">{result.message}</span>
       <button
         onClick={onDismiss}
-        className="shrink-0 opacity-70 hover:opacity-100"
+        className="shrink-0 rounded opacity-70 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         {t("jobs.dismiss")}
       </button>

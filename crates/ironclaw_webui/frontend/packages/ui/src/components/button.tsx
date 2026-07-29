@@ -32,9 +32,9 @@ const PRIMARY_HOVER_BG =
 
 const BASE =
   "inline-flex items-center justify-center font-semibold select-none " +
-  "disabled:cursor-not-allowed disabled:opacity-50 " +
+  "disabled:cursor-not-allowed disabled:opacity-50 disabled:pointer-events-none " +
   "focus-visible:outline-none focus-visible:ring-2 " +
-  "focus-visible:ring-[var(--v2-accent)]/50 focus-visible:ring-offset-1 " +
+  "focus-visible:ring-[var(--v2-focus-ring)] focus-visible:ring-offset-1 " +
   "focus-visible:ring-offset-[var(--v2-canvas)]";
 
 /* ── Size classes ──────────────────────────────────────────────────── */
@@ -60,11 +60,13 @@ const VARIANTS = {
   secondary:
     "border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)] " +
     "hover:bg-[var(--v2-surface-muted)] " +
-    "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+    "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] " +
+    "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
 
   ghost:
     "border border-transparent bg-transparent text-[var(--v2-text-muted)] " +
-    "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
+    "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)] " +
+    "active:bg-[var(--v2-surface-muted)]",
 
   danger:
     "border border-[color-mix(in_srgb,var(--v2-danger-text)_55%,var(--v2-panel-border))] " +
@@ -150,7 +152,7 @@ export function Button({
           fullClass,
           disabledAnchorClass,
           "relative overflow-hidden text-white group",
-          "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
+          "transition-shadow hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
         disabled={nativeDisabled}
@@ -162,7 +164,7 @@ export function Button({
         <span
           aria-hidden="true"
           style={{ background: PRIMARY_HOVER_BG }}
-          className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
+          className="pointer-events-none absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100"
         />
         <span className="relative z-10 flex items-center gap-2">
           {loading && <Spinner />}
@@ -177,7 +179,7 @@ export function Button({
 
   return (
     <Element
-      className={cn(BASE, sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
+      className={cn(BASE, "transition-colors", sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
       disabled={nativeDisabled}
       aria-disabled={isLinkLike && isDisabled ? true : undefined}
       aria-busy={loading || undefined}

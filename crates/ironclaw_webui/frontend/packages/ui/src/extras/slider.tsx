@@ -50,8 +50,8 @@ export function Slider({
             "border-[var(--v2-accent)] bg-[var(--v2-canvas-strong)]",
             "hover:bg-[var(--v2-surface-soft)]",
             "focus-visible:outline-none focus-visible:ring-2",
-            "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
-            "disabled:pointer-events-none"
+            "focus-visible:ring-[var(--v2-focus-ring)]",
+            "data-[disabled]:pointer-events-none"
           )}
         />
       ))}

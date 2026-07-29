@@ -128,12 +128,12 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
           : "border-transparent",
         isActive
           ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-          : "text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)]"
+          : "text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)] active:bg-[var(--v2-surface-muted)]"
       )}
     >
       <button
         onClick={() => onSelect(thread.id)}
-        className="min-w-0 flex-1 px-3 py-2 text-left"
+        className="min-w-0 flex-1 rounded-[8px] px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         title={timeTitle || undefined}
       >
         <div className="flex w-full items-center gap-1.5">
@@ -167,7 +167,8 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
           isPinned
             ? "text-[var(--v2-accent-text)]"
             : "opacity-0 text-[var(--v2-text-faint)] group-hover:opacity-100 focus:opacity-100",
-          "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-accent-text)]"
+          "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-accent-text)]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         )}
       >
         <Icon name="pin" className="h-3.5 w-3.5" strokeWidth={2} />
@@ -183,7 +184,8 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         className={cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
           "opacity-70 transition hover:opacity-100 focus:opacity-100",
-          "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
+          "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         )}
       >
         <Icon name="trash" className="h-3.5 w-3.5" strokeWidth={2} />
@@ -287,7 +289,7 @@ export function SidebarThreads({
     <div className="flex min-h-0 flex-1 flex-col px-2">
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 transition-colors duration-150 hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)]"
+        className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 transition-colors duration-150 hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
       >
         <span
           className="flex-1 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--v2-text-faint)]"
@@ -327,7 +329,8 @@ export function SidebarThreads({
             onClick={onNavigate}
             className={({ isActive }) =>
               cn(
-                "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] font-medium",
+                "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] font-medium transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                 isActive
                   ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                   : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
@@ -382,7 +385,7 @@ export function SidebarThreads({
             disabled={isLoadingMore}
             aria-busy={isLoadingMore || undefined}
             onClick={onLoadMore}
-            className="mx-1 rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-2 text-[12px] font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-wait disabled:opacity-60"
+            className="mx-1 rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-2 text-[12px] font-medium text-[var(--v2-text-muted)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-wait disabled:opacity-60"
           >
             {isLoadingMore ? t("common.loading") : t("common.loadMore")}
           </button>)}

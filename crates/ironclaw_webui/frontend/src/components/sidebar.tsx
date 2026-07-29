@@ -28,7 +28,7 @@ export function Sidebar({
         <Link
           to="/chat"
           onClick={onClose}
-          className="flex items-center gap-2.5 opacity-90 hover:opacity-100"
+          className="flex items-center gap-2.5 rounded-[8px] opacity-90 transition-colors hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           aria-label="NEAR AI"
         >
           {/* Brand mark is the NEAR wordmark; the IronClaw logo is the agent's

@@ -3,7 +3,8 @@
  *
  * Show/hide disclosure region built on @radix-ui/react-collapsible.
  * Unstyled by design — the trigger is usually a Button/IconButton and the
- * content brings its own layout. Only a minimal width default is applied.
+ * content brings its own layout. Only a minimal width default plus the
+ * shared focus-ring/disabled treatment on the trigger are applied.
  *
  * Usage
  *   <Collapsible open={open} onOpenChange={setOpen}>
@@ -24,10 +25,20 @@ export function Collapsible({
   );
 }
 
-export function CollapsibleTrigger(
-  props: ComponentProps<typeof CollapsiblePrimitive.Trigger>
-) {
-  return <CollapsiblePrimitive.Trigger {...props} />;
+export function CollapsibleTrigger({
+  className,
+  ...props
+}: ComponentProps<typeof CollapsiblePrimitive.Trigger>) {
+  return (
+    <CollapsiblePrimitive.Trigger
+      className={cn(
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        className
+      )}
+      {...props}
+    />
+  );
 }
 
 export function CollapsibleContent({

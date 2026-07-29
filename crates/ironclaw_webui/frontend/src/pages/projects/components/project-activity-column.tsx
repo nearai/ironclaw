@@ -43,7 +43,8 @@ export function ProjectActivityColumn({
                   key={thread.id}
                   onClick={() => onSelectThread(thread.id)}
                   className={[
-                    "w-full rounded-[20px] border p-4 text-left",
+                    "w-full rounded-[20px] border p-4 text-left transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                     selectedThreadId === thread.id
                       ? "border-signal/35 bg-signal/10"
                       : "border-white/10 bg-white/[0.025] hover:border-signal/25 hover:bg-white/[0.045]",

@@ -17,6 +17,17 @@ type Story = StoryObj<typeof IconButton>;
 
 export const Ghost: Story = {};
 export const Active: Story = { args: { active: true } };
+export const Disabled: Story = { args: { disabled: true } };
+
+export const States: Story = {
+  render: () => (
+    <div className="flex items-center gap-1">
+      <IconButton aria-label="Default"><Icon name="bell" className="h-4 w-4" /></IconButton>
+      <IconButton aria-label="Selected" active><Icon name="bell" className="h-4 w-4" /></IconButton>
+      <IconButton aria-label="Disabled" disabled><Icon name="bell" className="h-4 w-4" /></IconButton>
+    </div>
+  ),
+};
 export const AsAnchor: Story = {
   args: {
     as: "a",

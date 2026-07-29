@@ -8,7 +8,7 @@ export function RecoveryNotice({ notice, onRecover }) {
         <button
           type="button"
           onClick={onRecover}
-          className="rounded-md border border-copper/40 px-2.5 py-1 text-xs font-medium hover:bg-copper/10"
+          className="rounded-md border border-copper/40 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-copper/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         >
           Reload history
         </button>

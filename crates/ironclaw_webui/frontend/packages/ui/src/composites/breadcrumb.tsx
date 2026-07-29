@@ -40,8 +40,10 @@ export function Breadcrumb({
           <button
             type="button"
             onClick={item.onSelect}
+            aria-current={index === items.length - 1 ? "page" : undefined}
             className={cn(
-              "text-[var(--v2-accent-text)] hover:underline",
+              "rounded-[4px] text-[var(--v2-accent-text)] hover:underline active:opacity-80",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               index > 0 && "max-w-[220px] truncate"
             )}
           >

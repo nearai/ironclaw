@@ -50,7 +50,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
       <button
         type="button"
         onClick={accountPopover.toggle}
-        className="flex min-w-0 flex-1 items-center gap-2 rounded-[8px] text-left"
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-[8px] p-1 -m-1 text-left transition-colors hover:bg-[var(--v2-surface-soft)] active:bg-[var(--v2-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         title={name}
       >
         <div

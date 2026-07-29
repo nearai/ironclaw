@@ -21,8 +21,9 @@ export function Switch({
       className={cn(
         "inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full border transition-colors",
         "border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)]",
+        "data-[state=unchecked]:hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
         "focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
         "disabled:cursor-not-allowed disabled:opacity-50",
         "data-[state=checked]:border-[var(--v2-accent)] data-[state=checked]:bg-[var(--v2-accent)]",
         className

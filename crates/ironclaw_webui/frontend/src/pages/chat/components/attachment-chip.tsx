@@ -141,7 +141,7 @@ export function AttachmentChip({
       aria-label={t("chat.previewAttachment", { name: filename })}
       data-testid={testId}
       data-file-path={dataPath}
-      className={`flex min-w-0 flex-1 items-center gap-2 ${ATTACHMENT_CHIP_PADDING} text-left transition-colors hover:bg-iron-900/80`}
+      className={`flex min-w-0 flex-1 items-center gap-2 ${ATTACHMENT_CHIP_PADDING} text-left transition-colors hover:bg-iron-900/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]`}
     >
       {inner}
     </button>
@@ -152,7 +152,7 @@ export function AttachmentChip({
       disabled={downloading}
       aria-label={t("chat.downloadAttachment", { name: filename })}
       data-testid={downloadTestId}
-      className="flex shrink-0 items-center border-l border-iron-700 px-2.5 text-iron-200 transition-colors hover:bg-iron-900/80 hover:text-white disabled:opacity-50"
+      className="flex shrink-0 items-center border-l border-iron-700 px-2.5 text-iron-200 transition-colors hover:bg-iron-900/80 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
     >
       <Icon name="download" className="h-3.5 w-3.5" />
     </button>)}

@@ -67,7 +67,7 @@ export function PageHeader({
       <button
         type="button"
         onClick={onToggleSidebar}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] transition-colors duration-150 hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] transition-colors duration-150 hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         aria-label={toggleSidebarLabel}
         aria-controls="gateway-sidebar"
         aria-expanded={sidebarOpen ? "true" : "false"}

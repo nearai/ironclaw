@@ -21,15 +21,23 @@ import type { ComponentProps, ElementType, ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
 const BASE =
-  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-150";
+  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-150 " +
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] " +
+  "disabled:cursor-not-allowed disabled:opacity-50 disabled:pointer-events-none";
 
 const VARIANTS = {
   ghost:
-    "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+    "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] " +
+    "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
   plain: "",
 };
 
-const ACTIVE = "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]";
+/* Selected state carries its own hover/active steps so the accent tint still
+   reads under the pointer (the ghost hover classes are skipped when active). */
+const ACTIVE =
+  "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] " +
+  "hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)] " +
+  "active:bg-[color-mix(in_srgb,var(--v2-accent)_24%,transparent)]";
 
 type IconButtonStyleOptions = {
   variant?: keyof typeof VARIANTS;
@@ -42,7 +50,9 @@ export function iconButtonClasses({
   active = false,
   className = "",
 }: IconButtonStyleOptions = {}) {
-  return cn(BASE, VARIANTS[variant] ?? VARIANTS.ghost, active && ACTIVE, className);
+  const variantClass =
+    active && variant === "ghost" ? "" : (VARIANTS[variant] ?? VARIANTS.ghost);
+  return cn(BASE, variantClass, active && ACTIVE, className);
 }
 
 type IconButtonOwnProps<E extends ElementType> = IconButtonStyleOptions & {

@@ -441,7 +441,7 @@ export function ChatInput({
               onClick={() => setAttachmentError("")}
               aria-label={t("common.dismiss")}
               title={t("common.dismiss")}
-              className="-mr-1 -mt-0.5 shrink-0 rounded p-0.5 text-[color-mix(in_srgb,var(--v2-danger-text)_80%,transparent)] transition hover:bg-[color-mix(in_srgb,var(--v2-danger-text)_14%,transparent)] hover:text-[var(--v2-danger-text)]"
+              className="-mr-1 -mt-0.5 shrink-0 rounded p-0.5 text-[color-mix(in_srgb,var(--v2-danger-text)_80%,transparent)] transition hover:bg-[color-mix(in_srgb,var(--v2-danger-text)_14%,transparent)] hover:text-[var(--v2-danger-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
             >
               <Icon name="close" className="h-3.5 w-3.5" strokeWidth={2} />
             </button>
@@ -479,7 +479,7 @@ export function ChatInput({
                     onClick={() => removeAttachment(att.id)}
                     aria-label={t("chat.attachmentRemove")}
                     title={t("chat.attachmentRemove")}
-                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-iron-400 hover:bg-iron-700 hover:text-white"
+                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-iron-400 transition-colors hover:bg-iron-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
                   >
                     <Icon name="close" className="h-3 w-3" />
                   </button>
@@ -527,7 +527,7 @@ export function ChatInput({
               disabled={disabled}
               aria-label={t("chat.attachFiles")}
               title={t("chat.attachFiles")}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--v2-text-muted)] transition-colors hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Icon name="plus" className="h-5 w-5" />
             </button>

@@ -119,7 +119,7 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         <button
           type="button"
           onClick={onClose}
-          className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+          className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 transition-colors hover:border-signal/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         >
           {t("common.close")}
         </button>

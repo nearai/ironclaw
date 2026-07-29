@@ -29,9 +29,10 @@ function NavItem({ route, label, onNavigate }) {
       className={({ isActive }) =>
         cn(
           "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] transition-colors duration-150",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
           isActive
             ? "bg-[var(--v2-accent-soft)] font-medium text-[var(--v2-accent-text)]"
-            : "font-normal text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)]"
+            : "font-normal text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)] active:bg-[var(--v2-surface-muted)]"
         )}
     >
       <Icon name={ROUTE_ICONS[route.id] || "bolt"} className="h-4 w-4 shrink-0" />
@@ -56,9 +57,10 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
         className={() =>
           cn(
             "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] transition-colors duration-150",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
             isExpanded
               ? "bg-[var(--v2-accent-soft)] font-medium text-[var(--v2-accent-text)]"
-              : "font-normal text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)]"
+              : "font-normal text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)] active:bg-[var(--v2-surface-muted)]"
           )}
       >
         <Icon
@@ -87,6 +89,7 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
                 className={({ isActive }) =>
                   cn(
                     "flex items-center gap-2.5 rounded-[8px] py-1.5 pl-7 pr-3 text-[12px] transition-colors duration-150",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                     isActive
                       ? "font-medium text-[var(--v2-accent-text)]"
                       : "font-normal text-[var(--v2-text-muted)] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_60%,transparent)] hover:text-[var(--v2-text-strong)]"
@@ -122,7 +125,9 @@ export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate 
           "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]",
           "hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))]",
           "hover:bg-[color-mix(in_srgb,var(--v2-accent)_14%,transparent)]",
-          "active:bg-[color-mix(in_srgb,var(--v2-accent)_20%,transparent)] disabled:opacity-50"
+          "active:bg-[color-mix(in_srgb,var(--v2-accent)_20%,transparent)]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
+          "disabled:cursor-not-allowed disabled:opacity-50"
         )}
       >
         <Icon name="plus" className="h-4 w-4 shrink-0" />

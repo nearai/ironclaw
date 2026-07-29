@@ -215,7 +215,8 @@ export function LogsPage() {
           <button
             onClick={togglePause}
             className={[
-              "h-8 rounded-[8px] px-3 text-xs font-medium",
+              "h-8 rounded-[8px] px-3 text-xs font-medium transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
               paused
                 ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
                 : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
@@ -229,7 +230,7 @@ export function LogsPage() {
             onClick={() => {
               if (confirm(t("logs.confirmClear"))) clearEntries();
             }}
-            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             {t("logs.clear")}
           </button>
@@ -247,7 +248,7 @@ export function LogsPage() {
             )}
             <a
               href="/logs"
-              className="ml-auto rounded-[6px] px-2 py-1 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+              className="ml-auto rounded-[6px] px-2 py-1 text-xs text-[var(--v2-text-muted)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
             >
               {t("logs.clearScope")}
             </a>

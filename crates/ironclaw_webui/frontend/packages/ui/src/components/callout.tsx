@@ -64,7 +64,8 @@ export function Callout({
         (<button
           type="button"
           onClick={onDismiss}
-          className="shrink-0 opacity-70 hover:opacity-100"
+          className="shrink-0 rounded-[6px] opacity-70 transition-opacity hover:opacity-100 active:opacity-100
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
         >
           {dismissLabel}
         </button>)}

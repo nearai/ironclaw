@@ -34,3 +34,13 @@ export const Multiple: Story = {
     </ToggleGroup>
   ),
 };
+
+export const Disabled: Story = {
+  render: () => (
+    <ToggleGroup type="single" defaultValue="list" aria-label="View (disabled)">
+      <ToggleGroupItem value="list" aria-label="List view">List</ToggleGroupItem>
+      <ToggleGroupItem value="grid" aria-label="Grid view" disabled>Grid</ToggleGroupItem>
+      <ToggleGroupItem value="board" aria-label="Board view">Board</ToggleGroupItem>
+    </ToggleGroup>
+  ),
+};

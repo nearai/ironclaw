@@ -59,7 +59,7 @@ export function ResizableHandle({
         orientation === "horizontal" ? "w-px" : "h-px",
         "hover:bg-[var(--v2-accent)] active:bg-[var(--v2-accent)]",
         "focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
         className
       )}
       {...props}

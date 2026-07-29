@@ -257,7 +257,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
                     type="button"
                     onClick={() => authorize.mutate(hold.submission_id)}
                     disabled={authorize.isPending}
-                    className="shrink-0 rounded-lg border border-[var(--v2-accent-soft)] px-2.5 py-1 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="shrink-0 rounded-lg border border-[var(--v2-accent-soft)] px-2.5 py-1 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {authorize.isPending
                       ? t("traceCommons.authorizing")
@@ -364,7 +364,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
             type="button"
             onClick={handleOpenAccount}
             disabled={openState === "pending"}
-            className="rounded-lg border border-[var(--v2-accent-soft)] px-3 py-1.5 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-lg border border-[var(--v2-accent-soft)] px-3 py-1.5 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {openState === "pending"
               ? t("traceCommons.openingAccount")

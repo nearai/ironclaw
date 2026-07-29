@@ -34,7 +34,7 @@ export function PopoverContent({
         sideOffset={sideOffset}
         className={cn(
           OVERLAY_SURFACE_CLASSES,
-          "w-72 p-4 text-ui text-[var(--v2-text)]",
+          "w-72 p-4 text-ui text-[var(--v2-text)] outline-none",
           className
         )}
         {...props}

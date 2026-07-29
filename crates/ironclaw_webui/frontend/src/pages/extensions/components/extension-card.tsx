@@ -29,8 +29,9 @@ const META = "mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] t
 const DESC = "mt-2 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-[var(--v2-text-muted)]";
 const FOOTER = "mt-3 flex items-center gap-2 border-t border-[var(--v2-panel-border)] pt-3";
 const DISCLOSURE =
-  "v2-button inline-flex items-center gap-1.5 border-0 bg-transparent p-0 " +
-  "font-mono text-[11px] text-[var(--v2-text-faint)] hover:text-[var(--v2-accent-text)]";
+  "v2-button inline-flex items-center gap-1.5 rounded border-0 bg-transparent p-0 " +
+  "font-mono text-[11px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-accent-text)] " +
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]";
 const CHIP =
   "rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] " +
   "px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-muted)]";
@@ -86,7 +87,7 @@ function OverflowMenu({ actions, isBusy }) {
         data-extension-return-focus="true"
         disabled={isBusy}
         onClick={() => setOpen((v) => !v)}
-        className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+        className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Icon name="more" className="h-4 w-4" strokeWidth={2.4} />
       </button>
@@ -108,7 +109,8 @@ function OverflowMenu({ actions, isBusy }) {
                   action.run(triggerRef.current || event.currentTarget);
                 }}
                 className={[
-                  "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] disabled:cursor-not-allowed disabled:opacity-50",
+                  "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
                   action.danger
                     ? "text-[var(--v2-danger-text)] hover:bg-[var(--v2-danger-soft)]"
                     : "text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)]",

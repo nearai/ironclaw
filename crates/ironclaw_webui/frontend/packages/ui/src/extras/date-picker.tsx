@@ -167,8 +167,10 @@ export function Calendar({
     "grid h-7 w-7 place-items-center rounded-[8px] border border-[var(--v2-panel-border)]",
     "bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] transition-colors",
     "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+    "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+    "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
     "focus-visible:outline-none focus-visible:ring-2",
-    "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]"
+    "focus-visible:ring-[var(--v2-focus-ring)]"
   );
 
   return (
@@ -234,13 +236,15 @@ export function Calendar({
                         "grid h-8 w-9 place-items-center rounded-[8px] text-ui transition-colors",
                         inMonth ? "text-[var(--v2-text)]" : "text-[var(--v2-text-faint)]",
                         "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+                        !selected &&
+                          "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
                         "focus-visible:outline-none focus-visible:ring-2",
-                        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+                        "focus-visible:ring-[var(--v2-focus-ring)]",
                         "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
                         isToday && !selected &&
                           "border border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]",
                         selected &&
-                          "bg-[var(--v2-accent)] font-semibold text-[var(--v2-inverse)] hover:bg-[var(--v2-accent-strong)] hover:text-[var(--v2-inverse)]"
+                          "bg-[var(--v2-accent)] font-semibold text-[var(--v2-inverse)] hover:bg-[var(--v2-accent-strong)] hover:text-[var(--v2-inverse)] active:bg-[var(--v2-accent-strong)]"
                       )}
                     >
                       {day.getDate()}
@@ -326,9 +330,12 @@ export function DatePicker({
           "border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] text-left transition-colors",
           value ? "text-[var(--v2-text-strong)]" : "text-[var(--v2-text-faint)]",
           "hover:bg-[var(--v2-surface-soft)]",
+          "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+          "active:bg-[var(--v2-surface-muted)]",
           "focus-visible:outline-none focus-visible:ring-2",
-          "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
-          "disabled:cursor-not-allowed disabled:opacity-60"
+          "focus-visible:ring-[var(--v2-focus-ring)]",
+          "disabled:cursor-not-allowed disabled:opacity-50",
+          "disabled:hover:border-[var(--v2-panel-border)] disabled:hover:bg-[var(--v2-input-bg)]"
         )}
       >
         <Icon name="calendar" className="h-4 w-4 shrink-0 text-[var(--v2-text-faint)]" />

@@ -58,9 +58,11 @@ export function MenubarTrigger({
         "select-none rounded-[7px] px-2.5 py-1 text-ui font-medium",
         "text-[var(--v2-text-muted)] outline-none transition-colors",
         "hover:text-[var(--v2-text-strong)]",
-        "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "active:bg-[var(--v2-surface-muted)] active:text-[var(--v2-text-strong)]",
+        "focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
         "data-[highlighted]:bg-[var(--v2-surface-muted)] data-[highlighted]:text-[var(--v2-text-strong)]",
         "data-[state=open]:bg-[var(--v2-surface-muted)] data-[state=open]:text-[var(--v2-text-strong)]",
+        "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         className
       )}
       {...props}

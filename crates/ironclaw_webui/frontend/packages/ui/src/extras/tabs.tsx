@@ -46,8 +46,9 @@ export function TabsTrigger({
         "inline-flex items-center gap-1.5 rounded-[7px] px-3 py-1.5 text-ui font-medium",
         "text-[var(--v2-text-muted)] transition-colors",
         "hover:text-[var(--v2-text-strong)]",
+        "data-[state=inactive]:active:bg-[var(--v2-surface-muted)]",
         "focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
         "disabled:pointer-events-none disabled:opacity-50",
         "data-[state=active]:bg-[var(--v2-canvas-strong)] data-[state=active]:text-[var(--v2-text-strong)]",
         "data-[state=active]:shadow-[0_1px_3px_rgba(0,0,0,0.12)]",
@@ -67,7 +68,7 @@ export function TabsContent({
       className={cn(
         "mt-3 text-ui text-[var(--v2-text)]",
         "focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
         className
       )}
       {...props}

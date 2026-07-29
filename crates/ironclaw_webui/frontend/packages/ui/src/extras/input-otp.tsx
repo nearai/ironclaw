@@ -133,9 +133,11 @@ export function InputOTP({
             "h-11 w-9 rounded-[10px] border text-center text-ui-lg font-medium",
             "border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] text-[var(--v2-text-strong)]",
             "outline-none transition-colors",
-            "focus:border-[var(--v2-accent)]",
-            "focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
-            "disabled:cursor-not-allowed disabled:opacity-50"
+            "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+            "focus-visible:border-[var(--v2-accent)]",
+            "focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+            "disabled:hover:border-[var(--v2-panel-border)]"
           )}
         />
       ))}

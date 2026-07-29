@@ -112,7 +112,8 @@ export function ToastAction({
         "bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)] transition-colors",
         "hover:bg-[var(--v2-surface-muted)]",
         "focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
+        "disabled:cursor-not-allowed disabled:opacity-50",
         className
       )}
       {...props}
@@ -130,6 +131,9 @@ export function ToastClose({
         "absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-[6px]",
         "text-[var(--v2-text-faint)] transition-colors",
         "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
+        "active:bg-[var(--v2-surface-muted)]",
+        "focus-visible:outline-none focus-visible:ring-2",
+        "focus-visible:ring-[var(--v2-focus-ring)]",
         className
       )}
       aria-label="Dismiss"
