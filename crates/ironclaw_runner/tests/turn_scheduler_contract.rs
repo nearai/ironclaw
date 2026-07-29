@@ -116,6 +116,12 @@ struct PreModelFailingExecutor {
     claims: Mutex<Vec<(TurnRunId, AcceptedMessageRef)>>,
 }
 
+struct BlockingRedriveExecutor {
+    started: AtomicUsize,
+    notify_started: Notify,
+    hold_second_attempt: Notify,
+}
+
 impl PreModelFailingExecutor {
     fn fail_once() -> Self {
         Self {
@@ -239,6 +245,27 @@ impl TurnRunExecutor for PreModelFailingExecutor {
             })
             .await
             .unwrap();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TurnRunExecutor for BlockingRedriveExecutor {
+    async fn execute_claimed_run(
+        &self,
+        _claimed: ClaimedTurnRun,
+        _transitions: Arc<dyn TurnRunTransitionPort>,
+    ) -> Result<(), TurnRunExecutorError> {
+        let attempt = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+        self.notify_started.notify_waiters();
+        if attempt == 1 {
+            return Err(TurnRunExecutorError::from_failure(
+                ironclaw_turns::SanitizedFailure::new("host_stage_unavailable_prompt")
+                    .unwrap()
+                    .with_detail("safe prompt construction detail"),
+            ));
+        }
+        self.hold_second_attempt.notified().await;
         Ok(())
     }
 }
@@ -1786,6 +1813,50 @@ async fn pre_model_transient_failure_redrives_same_run_from_accepted_message() {
         "redrive must preserve run identity and reconstruct from the same accepted message"
     );
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_relinquishes_the_active_lease_after_same_run_redrive() {
+    let store = Arc::new(in_memory_turn_state_store());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let executor = Arc::new(BlockingRedriveExecutor {
+        started: AtomicUsize::new(0),
+        notify_started: Notify::new(),
+        hold_second_attempt: Notify::new(),
+    });
+    let scheduler =
+        TurnRunScheduler::new(Arc::clone(&transitions), executor.clone(), fast_config());
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request(
+        "thread-pre-model-redrive-shutdown",
+        "idem-pre-model-redrive-shutdown",
+    );
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    timeout(Duration::from_secs(2), async {
+        while executor.started.load(Ordering::SeqCst) < 2 {
+            executor.notify_started.notified().await;
+        }
+    })
+    .await
+    .expect("same run was not re-driven");
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    handle.shutdown().await;
+
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.status,
+        TurnStatus::Queued,
+        "shutdown must relinquish the active redrive lease instead of stranding the run"
+    );
 }
 
 #[tokio::test]

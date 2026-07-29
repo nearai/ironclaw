@@ -27,6 +27,10 @@ use tracing::debug;
 mod executor_task;
 mod latency;
 use self::executor_task::ExecutorTaskOutcome;
+use crate::failure_categories::{
+    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
+};
 
 const MAX_CLAIMS_PER_DRAIN_BATCH: usize = 128;
 
@@ -398,6 +402,7 @@ enum SchedulerCommand {
 }
 
 /// Identity fields needed to relinquish a claimed run back to Queued.
+#[derive(Debug)]
 struct RelinquishIdentity {
     run_id: TurnRunId,
     runner_id: TurnRunnerId,
@@ -415,7 +420,7 @@ struct SchedulerDrainContext {
 
 async fn shutdown_scheduler(
     context: &SchedulerDrainContext,
-    executor_tasks: &mut JoinSet<TurnRunId>,
+    executor_tasks: &mut JoinSet<RelinquishIdentity>,
     active_runs: HashMap<TurnRunId, RelinquishIdentity>,
 ) {
     // Abort all in-flight tasks first so there is no race between them
@@ -452,7 +457,7 @@ async fn run_scheduler_loop(
     shutdown_token: CancellationToken,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_runs()));
-    let mut executor_tasks: JoinSet<TurnRunId> = JoinSet::new();
+    let mut executor_tasks: JoinSet<RelinquishIdentity> = JoinSet::new();
     // Tracks every in-flight run so we can relinquish on shutdown.
     let mut active_runs: HashMap<TurnRunId, RelinquishIdentity> = HashMap::new();
     let mut poll_tick = interval(config.poll_interval());
@@ -567,8 +572,13 @@ async fn run_scheduler_loop(
             }
             Some(result) = executor_tasks.join_next(), if !executor_tasks.is_empty() => {
                 match result {
-                    Ok(completed_run_id) => {
-                        active_runs.remove(&completed_run_id);
+                    Ok(completed) => {
+                        if active_runs.get(&completed.run_id).is_some_and(|active| {
+                            active.runner_id == completed.runner_id
+                                && active.lease_token == completed.lease_token
+                        }) {
+                            active_runs.remove(&completed.run_id);
+                        }
                     }
                     Err(error) => {
                         debug!(error = %error, "turn run scheduler executor supervisor task failed");
@@ -597,7 +607,7 @@ async fn run_scheduler_loop(
 async fn drain_queued_runs(
     context: &SchedulerDrainContext,
     scope_filter: Option<TurnScope>,
-    executor_tasks: &mut JoinSet<TurnRunId>,
+    executor_tasks: &mut JoinSet<RelinquishIdentity>,
     active_runs: &mut HashMap<TurnRunId, RelinquishIdentity>,
     shutdown_token: &CancellationToken,
 ) -> bool {
@@ -701,7 +711,7 @@ fn spawn_executor_task(
     command_tx: mpsc::Sender<SchedulerCommand>,
     permit: tokio::sync::OwnedSemaphorePermit,
     task_config: ExecutorTaskConfig,
-    executor_tasks: &mut JoinSet<TurnRunId>,
+    executor_tasks: &mut JoinSet<RelinquishIdentity>,
 ) {
     // Tag every tracing event emitted while this run executes with its
     // `thread_id` + `run_id` so the operator Logs panel's scoped (thread/run)
@@ -846,8 +856,13 @@ fn spawn_executor_task(
             if let Err(error) = command_tx.send(SchedulerCommand::Drain).await {
                 tracing::debug!(?error, "post-run drain command send failed; scheduler channel likely closed");
             }
-            // Return the run_id so the scheduler loop can remove it from active_runs.
-            recovery_run_id
+            // Return the exact lease identity so an older same-run attempt
+            // cannot remove a newer claim from shutdown tracking.
+            RelinquishIdentity {
+                run_id: recovery_run_id,
+                runner_id: recovery_runner_id,
+                lease_token: recovery_lease_token,
+            }
         }
         .instrument(run_span),
     );
@@ -998,9 +1013,9 @@ fn runner_failure_recovery(failure: &SanitizedFailure) -> RunnerFailureRecovery 
     // mislabeled or racing later failure cannot restart side effects.
     if matches!(
         failure.category(),
-        "host_stage_unavailable_input"
-            | "host_stage_unavailable_prompt"
-            | "host_stage_unavailable_capability"
+        HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY
+            | HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY
+            | HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY
     ) {
         RunnerFailureRecovery::RedriveIfCheckpointless
     } else {

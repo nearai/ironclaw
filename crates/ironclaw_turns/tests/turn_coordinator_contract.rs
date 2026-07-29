@@ -2485,6 +2485,63 @@ async fn lifecycle_publishing_store_publishes_record_runner_failure_as_failed_ev
 }
 
 #[tokio::test]
+async fn lifecycle_publishing_store_publishes_runner_failure_redrive_as_queued_event() {
+    let raw_store = Arc::new(in_memory_turn_state_store());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lifecycle-redrive",
+                "idem-lifecycle-redrive",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-lifecycle-redrive")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let state = transition_port
+        .record_runner_failure(RecordRunnerFailureRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            failure: SanitizedFailure::new("host_stage_unavailable_prompt")
+                .unwrap()
+                .with_detail("safe prompt construction detail"),
+            recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(state.status, TurnStatus::Queued);
+    assert!(sink.events().iter().any(|event| {
+        event.run_id == run_id
+            && event.kind == TurnEventKind::RunnerHeartbeat
+            && event.status == TurnStatus::Queued
+            && event.sanitized_reason.is_none()
+            && event.detail.is_none()
+    }));
+    assert!(
+        !sink
+            .events()
+            .iter()
+            .any(|event| event.run_id == run_id && event.kind == TurnEventKind::Failed),
+        "checkpointless redrive must not publish a terminal failure"
+    );
+}
+
+#[tokio::test]
 
 async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_raw_refs() {
     let (coordinator, store) = coordinator();

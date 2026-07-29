@@ -3,6 +3,7 @@
 use super::run_record::slot_info_for;
 use super::*;
 use async_trait::async_trait;
+use chrono::DateTime;
 
 /// Resolve the secret-scrubbed, model-visible detail to attach to a lifecycle
 /// event. Only `Failed` events carry the failure record's detail; every other
@@ -195,19 +196,8 @@ impl Inner {
                     // The same-thread active lock is KEPT (a `Queued` run holds its
                     // lock for active-run exclusivity); `claim_count` is preserved
                     // so the crash-retry bound still advances across cycles.
-                    let transition = record.status.set(TurnStatus::Queued);
-                    self.apply_status_transition(transition, &record);
-                    clear_runner_lease(&mut record);
-                    record.event_cursor = self.next_cursor();
-                    self.update_active_lock(&record, request.now);
-                    self.queued_runs.push_back(record.run_id);
+                    self.requeue_claimed_record(&mut record, request.now);
                     let state = record.state();
-                    // Running → Queued mirrors relinquish's lifecycle event
-                    // (`RunnerHeartbeat`); the `LifecyclePublishingTurnStateStore`
-                    // wrapper independently classifies the recovered `Queued`
-                    // state the same way (`event_kind_for_state`), so the internal
-                    // event log and the published stream agree.
-                    self.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
                     recovered.push(state);
                     self.records.insert(run_id, record);
                 }
@@ -898,19 +888,26 @@ impl Inner {
         }
     }
 
+    fn requeue_claimed_record(&mut self, record: &mut RunRecord, now: DateTime<Utc>) {
+        let transition = record.status.set(TurnStatus::Queued);
+        self.apply_status_transition(transition, record);
+        record.failure = None;
+        clear_runner_lease(record);
+        record.event_cursor = self.next_cursor();
+        self.update_active_lock(record, now);
+        self.queued_runs.push_back(record.run_id);
+        // Running → Queued uses the same lifecycle classification for graceful
+        // relinquish, checkpointless failure re-drive, and expired-lease
+        // recovery so the durable log and publishing wrapper stay aligned.
+        self.push_event(record, TurnEventKind::RunnerHeartbeat, None, None);
+    }
+
     fn requeue_checkpointless_runner_failure(
         &mut self,
         mut record: RunRecord,
     ) -> AppliedLoopTransition {
-        let transition = record.status.set(TurnStatus::Queued);
-        self.apply_status_transition(transition, &record);
-        record.failure = None;
-        clear_runner_lease(&mut record);
-        record.event_cursor = self.next_cursor();
-        self.update_active_lock(&record, Utc::now());
-        self.queued_runs.push_back(record.run_id);
+        self.requeue_claimed_record(&mut record, Utc::now());
         let state = record.state();
-        self.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
             state: Box::new(state),
@@ -957,53 +954,36 @@ impl Inner {
     ) -> Result<TurnRunState, TurnError> {
         let now = Utc::now();
         let mut record = self.take_record(run_id)?;
-        let mut requeue = false;
         let result = (|| {
             ensure_active_lease(&record, runner_id, lease_token, now)?;
-            if !matches!(
-                record.status.get(),
-                TurnStatus::Running | TurnStatus::CancelRequested
-            ) {
-                return Err(TurnError::InvalidTransition {
-                    from: record.status.get(),
-                    to: TurnStatus::Queued,
-                });
-            }
-            let (new_status, failure, event_kind) = match record.status.get() {
+            match record.status.get() {
                 TurnStatus::Running => {
                     // Running → Queued (relinquish): decrement per-user running counter.
-                    requeue = true;
-                    (TurnStatus::Queued, None, TurnEventKind::RunnerHeartbeat)
+                    self.requeue_claimed_record(&mut record, now);
+                    Ok(record.state())
                 }
                 TurnStatus::CancelRequested => {
                     // CancelRequested → Cancelled (relinquish): the run was Running when
                     // incremented at claim; decrement now.
-                    (TurnStatus::Cancelled, None, TurnEventKind::Cancelled)
+                    let transition = record.status.set(TurnStatus::Cancelled);
+                    self.apply_status_transition(transition, &record);
+                    record.failure = None;
+                    clear_runner_lease(&mut record);
+                    record.event_cursor = self.next_cursor();
+                    self.release_active_lock(&record);
+                    self.remove_queued_run(record.run_id);
+                    let state = record.state();
+                    self.push_event(&record, TurnEventKind::Cancelled, None, None);
+                    self.mark_terminal(record.run_id);
+                    Ok(state)
                 }
-                _ => unreachable!("status checked above"),
-            };
-            let transition = record.status.set(new_status);
-            self.apply_status_transition(transition, &record);
-            record.failure = failure;
-            clear_runner_lease(&mut record);
-            record.event_cursor = self.next_cursor();
-            if requeue {
-                self.update_active_lock(&record, now);
-            } else {
-                self.release_active_lock(&record);
-                self.remove_queued_run(record.run_id);
+                from => Err(TurnError::InvalidTransition {
+                    from,
+                    to: TurnStatus::Queued,
+                }),
             }
-            let state = record.state();
-            self.push_event(&record, event_kind, None, None);
-            if !requeue {
-                self.mark_terminal(record.run_id);
-            }
-            Ok(state)
         })();
         self.records.insert(record.run_id, record);
-        if requeue && result.is_ok() {
-            self.queued_runs.push_back(run_id);
-        }
         if result
             .as_ref()
             .is_ok_and(|state| state.status.is_terminal())
