@@ -755,12 +755,11 @@ where
         &self,
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
+        self.apply_run_state_transition_with_resolved_status(
             "record_runner_failure",
             request.run_id,
             request.runner_id,
             request.lease_token,
-            TurnStatus::Failed,
             |store| {
                 let request = request.clone();
                 async move { store.record_runner_failure(request).await }

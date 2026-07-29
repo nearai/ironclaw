@@ -74,7 +74,8 @@ use ironclaw_turns::{
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimRunsRequest, CompleteRunRequest, FailRunRequest,
-        HeartbeatRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        HeartbeatRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RunnerFailureRecovery, TurnRunTransitionPort,
     },
     test_support::{
         turn_state_row_store_snapshot_cache_is_initialized,
@@ -2201,6 +2202,228 @@ async fn lease_expiry_requeues_checkpointless_run_as_redrivable() {
         reclaimed.map(|claimed| claimed.state.run_id),
         Some(run_id),
         "a re-queued checkpoint-less run must be re-claimable so it re-drives"
+    );
+}
+
+/// A graceful executor failure before the first checkpoint must survive a
+/// graceful process restart as the same queued run. The durable runner-lease
+/// retirement and row-store replay together preserve the accepted input
+/// identity and claim counter that bound subsequent re-drives.
+#[tokio::test]
+async fn checkpointless_runner_failure_redrive_survives_reopen_with_same_identity_and_bound() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+
+    let (run_id, turn_id, accepted_message_ref) = {
+        let store = open_row_store(Arc::clone(&scoped));
+        let run_id = submit_one(&store, &scope, "idem-runner-failure-redrive").await;
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let claimed = store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(scope.clone()),
+            })
+            .await
+            .unwrap()
+            .expect("initial claim");
+        let state = store
+            .record_runner_failure(RecordRunnerFailureRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                failure: SanitizedFailure::new("host_stage_unavailable_input")
+                    .unwrap()
+                    .with_detail("safe input drain detail"),
+                recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+            })
+            .await
+            .expect("checkpointless redrive transition");
+        assert_eq!(state.status, TurnStatus::Queued);
+        store.drain().await.expect("flush redrive before restart");
+        (
+            run_id,
+            claimed.state.turn_id,
+            claimed.state.accepted_message_ref,
+        )
+    };
+
+    let reopened = open_row_store(Arc::clone(&scoped));
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("requeued run survives reopen");
+    assert_eq!(state.status, TurnStatus::Queued);
+    assert_eq!(state.turn_id, turn_id);
+    assert_eq!(state.accepted_message_ref, accepted_message_ref);
+    assert!(state.failure.is_none(), "transient requeue is not terminal");
+
+    let snapshot = reopened.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .expect("requeued run is durable");
+    assert_eq!(run.claim_count, 1, "restart must preserve the retry bound");
+
+    let reclaimed = reopened
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope),
+        })
+        .await
+        .unwrap()
+        .expect("requeued run remains claimable after restart");
+    assert_eq!(reclaimed.state.run_id, run_id);
+    assert_eq!(reclaimed.state.turn_id, turn_id);
+    assert_eq!(reclaimed.state.accepted_message_ref, accepted_message_ref);
+}
+
+#[tokio::test]
+async fn runner_failure_redrive_terminal_guards_survive_reopen() {
+    let checkpoint_backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let checkpoint_scoped = fault_scoped(Arc::clone(&checkpoint_backend));
+    let checkpoint_scope = only_scope();
+    let checkpoint_failure = SanitizedFailure::new("host_stage_unavailable_prompt")
+        .unwrap()
+        .with_detail("safe prompt construction detail");
+    let checkpoint_run_id = {
+        let store = open_row_store(Arc::clone(&checkpoint_scoped));
+        let run_id = submit_one(
+            &store,
+            &checkpoint_scope,
+            "idem-runner-failure-checkpoint-guard",
+        )
+        .await;
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let claimed = store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(checkpoint_scope.clone()),
+            })
+            .await
+            .unwrap()
+            .expect("checkpoint guard claim");
+        store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: checkpoint_scope.clone(),
+                turn_id: claimed.state.turn_id,
+                run_id,
+                state_ref: LoopCheckpointStateRef::new("checkpoint:redrive-guard").unwrap(),
+                schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+                schema_version: RunProfileVersion::new(1),
+                kind: LoopCheckpointKind::BeforeModel,
+                gate_ref: None,
+            })
+            .await
+            .expect("checkpoint guard persisted");
+        store
+            .drain()
+            .await
+            .expect("flush checkpoint before failure");
+        let state = store
+            .record_runner_failure(RecordRunnerFailureRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                failure: checkpoint_failure.clone(),
+                recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+            })
+            .await
+            .expect("checkpoint guard terminalizes");
+        assert_eq!(state.status, TurnStatus::Failed);
+        store.drain().await.expect("flush checkpoint-guard failure");
+        run_id
+    };
+    let checkpoint_reopened = open_row_store(checkpoint_scoped);
+    let checkpoint_state = checkpoint_reopened
+        .get_run_state(GetRunStateRequest {
+            scope: checkpoint_scope.clone(),
+            run_id: checkpoint_run_id,
+        })
+        .await
+        .expect("checkpoint-guarded failure survives reopen");
+    assert_eq!(checkpoint_state.status, TurnStatus::Failed);
+    assert_eq!(checkpoint_state.failure, Some(checkpoint_failure));
+    assert!(
+        checkpoint_reopened
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(checkpoint_scope),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "a durable checkpoint must prevent re-drive after reopen"
+    );
+
+    let bound_backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let bound_scoped = fault_scoped(Arc::clone(&bound_backend));
+    let bound_scope = only_scope();
+    let bound_failure = SanitizedFailure::new("host_stage_unavailable_input")
+        .unwrap()
+        .with_detail("safe input drain detail");
+    let open_bounded = |scoped: Arc<ScopedFilesystem<FaultBackend>>| {
+        TurnStateRowStore::new(scoped).with_limits(limits().set_max_crash_recovery_reclaims(1))
+    };
+    let bound_run_id = {
+        let store = open_bounded(Arc::clone(&bound_scoped));
+        let run_id = submit_one(&store, &bound_scope, "idem-runner-failure-bound-guard").await;
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(bound_scope.clone()),
+            })
+            .await
+            .unwrap()
+            .expect("bound guard claim");
+        let state = store
+            .record_runner_failure(RecordRunnerFailureRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                failure: bound_failure.clone(),
+                recovery: RunnerFailureRecovery::RedriveIfCheckpointless,
+            })
+            .await
+            .expect("claim bound terminalizes");
+        assert_eq!(state.status, TurnStatus::Failed);
+        store.drain().await.expect("flush bound-guard failure");
+        run_id
+    };
+    let bound_reopened = open_bounded(bound_scoped);
+    let bound_state = bound_reopened
+        .get_run_state(GetRunStateRequest {
+            scope: bound_scope.clone(),
+            run_id: bound_run_id,
+        })
+        .await
+        .expect("bound-guarded failure survives reopen");
+    assert_eq!(bound_state.status, TurnStatus::Failed);
+    assert_eq!(bound_state.failure, Some(bound_failure));
+    assert!(
+        bound_reopened
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(bound_scope),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "the durable claim bound must prevent re-drive after reopen"
     );
 }
 

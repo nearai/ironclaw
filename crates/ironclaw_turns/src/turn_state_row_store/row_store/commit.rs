@@ -526,6 +526,73 @@ where
         .await
     }
 
+    /// Apply a run transition whose terminal/queued outcome is resolved by the
+    /// engine rather than known from the request alone.
+    ///
+    /// The runner-failure recovery policy is conditional: checkpoint presence,
+    /// retry exhaustion, or cancellation can change a requested redrive into a
+    /// terminal state. Retire the external lease with that authoritative
+    /// resolved status before the durable row delta is committed.
+    pub(super) async fn apply_run_state_transition_with_resolved_status<A, Fut>(
+        &self,
+        operation: &'static str,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+        mut apply: A,
+    ) -> Result<TurnRunState, TurnError>
+    where
+        A: FnMut(Arc<TurnStateEngine>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<TurnRunState, TurnError>> + Send,
+    {
+        let span = turn_state_write_span(operation, None, Some(&run_id));
+        async move {
+            let run = self
+                .with_cached_snapshot(|snapshot| {
+                    snapshot
+                        .runs
+                        .iter()
+                        .find(|record| record.run_id == run_id)
+                        .cloned()
+                })
+                .await?
+                .ok_or(TurnError::ScopeNotFound)?;
+            let retirement = Arc::new(tokio::sync::Mutex::new(None));
+            let captured_retirement = Arc::clone(&retirement);
+            let result = self
+                .apply(RunnerLeaseOverlay::Run(run_id), |store| {
+                    let transition = apply(store);
+                    let captured_retirement = Arc::clone(&captured_retirement);
+                    let run = run.clone();
+                    async move {
+                        let state = transition.await?;
+                        let previous = self
+                            .runner_lease_store()
+                            .retire_runner_lease_from_run_record(
+                                run,
+                                runner_id,
+                                lease_token,
+                                state.status,
+                            )
+                            .await?;
+                        *captured_retirement.lock().await = Some((previous, state.status));
+                        Ok(state)
+                    }
+                })
+                .await;
+            if result.is_err()
+                && let Some((previous, retired_status)) = retirement.lock().await.take()
+            {
+                self.restore_runner_lease_after_failed_transition(previous, retired_status)
+                    .await;
+            }
+            self.cleanup_runner_lease_after_state(&result).await;
+            result
+        }
+        .instrument(span)
+        .await
+    }
+
     pub(super) async fn apply_run_state_transition_with_targeted_delta<A, Fut, D>(
         &self,
         operation: &'static str,

@@ -19,17 +19,49 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, InMemoryRunProfileResolver, ReplyTargetBindingRef,
     RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, TurnActor, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunWake, TurnRunnerId, TurnScope, TurnStatus,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnError, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunState, TurnRunWake, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        RelinquishRunRequest, TurnRunTransitionPort,
+        RelinquishRunRequest, RunnerFailureRecovery, TurnRunTransitionPort,
     },
 };
 
-use super::{TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler, TurnRunSchedulerConfig};
+use super::{
+    TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler, TurnRunSchedulerConfig,
+    runner_failure_recovery,
+};
+
+#[test]
+fn only_verified_pre_model_categories_opt_into_checkpointless_redrive() {
+    for category in [
+        "host_stage_unavailable_input",
+        "host_stage_unavailable_prompt",
+        "host_stage_unavailable_capability",
+    ] {
+        let failure = SanitizedFailure::new(category).unwrap();
+        assert_eq!(
+            runner_failure_recovery(&failure),
+            RunnerFailureRecovery::RedriveIfCheckpointless,
+            "{category} is emitted before BeforeModel and is safe to redrive only while checkpointless"
+        );
+    }
+
+    for category in [
+        "host_stage_unavailable_model",
+        "scheduler_heartbeat_failed",
+        "scheduler_executor_panic",
+    ] {
+        let failure = SanitizedFailure::new(category).unwrap();
+        assert_eq!(
+            runner_failure_recovery(&failure),
+            RunnerFailureRecovery::Terminal,
+            "{category} must not opt into a scratch redrive"
+        );
+    }
+}
 
 // ── Minimal fakes ────────────────────────────────────────────────────────
 

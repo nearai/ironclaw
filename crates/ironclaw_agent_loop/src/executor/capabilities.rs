@@ -952,7 +952,7 @@ impl CapabilityStage {
             let outcome = ctx
                 .planner
                 .recovery()
-                .on_capability_error(&state, &summary)
+                .on_capability_error(&state, &summary, model_observation.as_ref())
                 .await;
             let outcome = match outcome {
                 RecoveryOutcome::Retry { recovery, .. } if is_resume_origin => {
