@@ -545,7 +545,6 @@ fn build_harness(
 
 /// Same as `build_harness`, but with an explicit declared-command set for the
 /// observer's static help text (`build_harness` always enables `["status"]`).
-#[allow(clippy::too_many_arguments)]
 fn build_harness_with_commands(
     states: Vec<ScriptedRunState>,
     bind_fails: bool,

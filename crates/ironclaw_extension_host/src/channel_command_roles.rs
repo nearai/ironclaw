@@ -70,7 +70,14 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
             {
                 Ok(Some(user_id)) => user_id,
                 Ok(None) => return Ok(None),
-                Err(_) => return Err(Self::unavailable()),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        provider = %self.provider,
+                        "channel-command role resolver: identity lookup failed"
+                    );
+                    return Err(Self::unavailable());
+                }
             },
             // Composition paths without the durable identity store run under
             // the operator-actor policy: the operator IS the actor.
@@ -80,11 +87,17 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
             Ok(Some(record)) if record.status == AdminUserStatus::Active => Ok(Some(record.role)),
             Ok(_) => Ok(None),
             Err(AdminUserError::Unavailable) => Err(Self::unavailable()),
-            Err(_) => Err(ProductSurfaceError::from_status(
-                ironclaw_host_api::ProductSurfaceErrorCode::Internal,
-                500,
-                false,
-            )),
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "channel-command role resolver: admin-users lookup failed"
+                );
+                Err(ProductSurfaceError::from_status(
+                    ironclaw_host_api::ProductSurfaceErrorCode::Internal,
+                    500,
+                    false,
+                ))
+            }
         }
     }
 }
