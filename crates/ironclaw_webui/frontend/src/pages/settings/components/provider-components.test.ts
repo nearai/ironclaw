@@ -149,6 +149,7 @@ function renderProviderManagement({
   activeProviderId = "nearai",
   searchQuery = "",
   providerToDelete = null,
+  t = (key) => key,
 }) {
   const ProviderCard = "ProviderCard";
   const ConfirmDialog = "ConfirmDialog";
@@ -175,7 +176,7 @@ function renderProviderManagement({
       startNearai: () => {},
       startNearaiWallet: () => {},
     }),
-    useT: () => (key) => key,
+    useT: () => t,
   };
 
   const exports = runVmModuleForTest(
@@ -419,10 +420,12 @@ test("ProviderManagement hides empty buckets after search filtering", () => {
 });
 
 test("ProviderManagement renders provider deletion through the shared dialog", () => {
-  const provider = customProvider("legacy-local");
+  const provider = customProvider("legacy-local", { name: "Legacy Local" });
   const { ConfirmDialog, rendered, cardProps } = renderProviderManagement({
     providers: [provider],
     providerToDelete: provider,
+    t: (key, params) =>
+      key === "llm.confirmDelete" ? `${key}:${params.id}` : key,
   });
 
   assert.equal(cardProps[0].onDelete instanceof Function, true);
@@ -430,7 +433,7 @@ test("ProviderManagement renders provider deletion through the shared dialog", (
     componentProps(node, ConfirmDialog)
   );
   assert.equal(dialog.open, true);
-  assert.equal(dialog.title, "llm.confirmDelete");
+  assert.equal(dialog.title, "llm.confirmDelete:Legacy Local");
   assert.equal(dialog.confirmLabel, "common.delete");
 });
 

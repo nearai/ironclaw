@@ -84,3 +84,18 @@ test("provider deletion waits for the shared dialog confirmation", async () => {
   assert.equal(actions.message.tone, "success");
   assert.equal(actions.message.text, "llm.providerDeleted");
 });
+
+test("provider deletion can be canceled without invoking the delete action", () => {
+  const harness = createHarness();
+  const provider = { id: "legacy-local" };
+  let actions = harness.render();
+
+  actions.handleDelete(provider);
+  actions = harness.render();
+  assert.equal(actions.providerToDelete, provider);
+
+  actions.cancelDelete();
+  actions = harness.render();
+  assert.equal(actions.providerToDelete, null);
+  assert.deepEqual(harness.deleteCalls, []);
+});

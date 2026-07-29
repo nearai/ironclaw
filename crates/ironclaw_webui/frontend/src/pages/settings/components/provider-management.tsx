@@ -144,7 +144,9 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
       />
       <ConfirmDialog
         open={Boolean(actions.providerToDelete)}
-        title={t("llm.confirmDelete", { id: actions.providerToDelete?.id })}
+        title={t("llm.confirmDelete", {
+          id: actions.providerToDelete?.name || actions.providerToDelete?.id,
+        })}
         confirmLabel={t("common.delete")}
         isConfirming={state.isBusy}
         onConfirm={actions.confirmDelete}
