@@ -95,11 +95,8 @@ pub(super) async fn fetch_attachment(
             false,
         ));
     }
-    let expected_size = result
-        .file_size
-        .or(attachment.descriptor.size_bytes)
-        .ok_or_else(|| transfer_error("telegram attachment size metadata was missing", false))?;
-    if expected_size > max_file_bytes {
+    let expected_size = result.file_size.or(attachment.descriptor.size_bytes);
+    if expected_size.is_some_and(|size| size > max_file_bytes) {
         return Err(transfer_error(
             "telegram attachment exceeds the channel size limit",
             false,
@@ -120,7 +117,9 @@ pub(super) async fn fetch_attachment(
             false,
         ));
     }
-    if actual_size != expected_size {
+    if let Some(expected_size) = expected_size
+        && actual_size != expected_size
+    {
         return Err(transfer_error(
             "telegram attachment download size did not match provider metadata",
             actual_size < expected_size,

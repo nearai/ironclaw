@@ -105,6 +105,25 @@ async fn fetch_attachment_looks_up_then_downloads_through_restricted_egress() {
 }
 
 #[tokio::test]
+async fn fetch_attachment_downloads_when_optional_size_metadata_is_absent() {
+    let egress = ScriptedEgress::new(vec![
+        ScriptedEgress::response(
+            200,
+            br#"{"ok":true,"result":{"file_path":"documents/provider.txt"}}"#.to_vec(),
+        ),
+        ScriptedEgress::response(200, b"hello".to_vec()),
+    ]);
+
+    let fetched = TelegramChannelAdapter::default()
+        .fetch_attachment(&attachment(None), &egress)
+        .await
+        .expect("bounded download succeeds without optional size hints");
+
+    assert_eq!(fetched.bytes, b"hello");
+    assert_eq!(egress.requests.lock().expect("requests lock").len(), 2);
+}
+
+#[tokio::test]
 async fn fetch_attachment_rejects_missing_and_malformed_provider_paths() {
     for body in [
         br#"{"ok":true,"result":{}}"#.as_slice(),
@@ -114,7 +133,6 @@ async fn fetch_attachment_rejects_missing_and_malformed_provider_paths() {
         br#"{"ok":true,"result":{"file_path":"documents/x?token=y"}}"#.as_slice(),
         br#"{"ok":true,"result":{"file_path":"documents\\\\x"}}"#.as_slice(),
         br#"{"ok":true,"result":{"file_path":"documents//x"}}"#.as_slice(),
-        br#"{"ok":true,"result":{"file_path":"documents/x"}}"#.as_slice(),
     ] {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::response(200, body.to_vec())]);
         let error = TelegramChannelAdapter::default()
