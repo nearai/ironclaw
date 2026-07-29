@@ -144,6 +144,7 @@ export function ApprovalCard({
         <label className="mb-3 flex items-center gap-2 text-xs text-iron-200">
           <input
             type="checkbox"
+            data-testid="approval-always"
             checked={always}
             onChange={(event) => setAlways(event.currentTarget.checked)}
             disabled={isResolving}
@@ -164,7 +165,12 @@ export function ApprovalCard({
       )}
 
       <div className="flex flex-wrap gap-2">
-        <Button variant="primary" onClick={onPrimary} disabled={isResolving}>
+        <Button
+          variant="primary"
+          data-testid="approval-primary-action"
+          onClick={onPrimary}
+          disabled={isResolving}
+        >
           {always && allowAlways ? t("approval.approveAndAlways") : t("approval.approve")}
         </Button>
         <Button

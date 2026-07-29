@@ -247,12 +247,11 @@ async def test_reborn_legacy_always_allow_resets_when_gate_changes(
     try:
         await _emit_approval_gate(page, gate_ref="gate-tool-a")
         card = page.locator(SEL_V2["approval_card"]).first
-        always = card.get_by_label("Always allow builtin.shell without asking")
+        always = card.locator(SEL_V2["approval_always"])
+        primary_action = card.locator(SEL_V2["approval_primary_action"])
         await always.check()
         await expect(always).to_be_checked()
-        await expect(
-            card.get_by_role("button", name="Approve & always allow", exact=True)
-        ).to_be_visible()
+        await expect(primary_action).to_be_visible()
 
         await _emit_approval_gate(
             page,
@@ -260,9 +259,9 @@ async def test_reborn_legacy_always_allow_resets_when_gate_changes(
             invocation_id="invoke-tool-b",
             tool_name="builtin.http",
         )
-        always = card.get_by_label("Always allow builtin.http without asking")
+        always = card.locator(SEL_V2["approval_always"])
         await expect(always).not_to_be_checked()
-        await card.get_by_role("button", name="Approve", exact=True).click()
+        await primary_action.click()
         await expect(card).to_be_hidden(timeout=5000)
 
         assert len(resolve_requests) == 1

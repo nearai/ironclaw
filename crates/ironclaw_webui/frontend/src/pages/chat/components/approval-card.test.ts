@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import "../../../test/vm-tsx-setup";
 
 function approvalCardSourceForTest() {
   const source = readFileSync(new URL("./approval-card.tsx", import.meta.url), "utf8");
