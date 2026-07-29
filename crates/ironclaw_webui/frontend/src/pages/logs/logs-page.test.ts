@@ -151,14 +151,15 @@ function firstValueMatching(node, predicate) {
   return undefined;
 }
 
-function visit(node, fn) {
+function visit(node, fn, visited = new WeakSet()) {
+  if (!node || typeof node !== "object" || visited.has(node)) return;
+  visited.add(node);
   if (Array.isArray(node)) {
-    for (const item of node) visit(item, fn);
+    for (const item of node) visit(item, fn, visited);
     return;
   }
-  if (!node || typeof node !== "object") return;
   fn(node);
-  visit(node.values, fn);
+  visit(node.values, fn, visited);
 }
 
 function componentProps(root, component) {
@@ -220,6 +221,18 @@ const SAMPLE_ENTRY = {
   message: "selectable log message body",
   threadId: "thread-1",
 };
+
+test("template visitor ignores circular references", () => {
+  const node = { values: [] };
+  node.values.push(node);
+  let visits = 0;
+
+  visit(node, () => {
+    visits += 1;
+  });
+
+  assert.equal(visits, 1);
+});
 
 // A log line's text must be user-selectable so it can be copied. The clickable
 // row previously carried Tailwind's `select-none` (→ user-select: none), which
