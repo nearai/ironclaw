@@ -1235,40 +1235,39 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
     );
 }
 
-fn assert_slack_message(
-    messages: &[Value],
-    expected_text: &str,
-    expected_channel: &str,
-    scenario: &str,
-) {
+fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
+    let expected_conversation_id = "D-TRIGGER-DEFAULT";
+    let expected_thread_anchor: Option<&str> = None;
+    let expected_count = 1;
     let matching = messages.iter().filter(|message| {
-        message["channel"] == expected_channel
+        message["channel"] == expected_conversation_id
+            && message.get("thread_ts").and_then(Value::as_str) == expected_thread_anchor
             && message["text"]
                 .as_str()
-                .is_some_and(|text| text.contains(expected_text))
+                .is_some_and(|text| text.contains(QA_9B_RESULT))
     });
     assert_eq!(
         matching.count(),
-        1,
-        "{scenario} must create exactly one message in {expected_channel}: {messages:?}"
-    );
-}
-
-fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
-    assert_slack_message(
-        messages,
-        QA_9B_RESULT,
-        SLACK_DEFAULT_DM,
-        "QA-9B default DM delivery",
+        expected_count,
+        "QA-9B must create exactly one unthreaded message in D-TRIGGER-DEFAULT: {messages:?}"
     );
 }
 
 fn assert_slack_channel_delivery_evidence(messages: &[Value]) {
-    assert_slack_message(
-        messages,
-        QA_9D_RESULT,
-        SLACK_PER_TRIGGER_CHANNEL,
-        "QA-9D per-trigger channel delivery",
+    let expected_conversation_id = "C-TRIGGER-OVERRIDE";
+    let expected_thread_anchor: Option<&str> = None;
+    let expected_count = 1;
+    let matching = messages.iter().filter(|message| {
+        message["channel"] == expected_conversation_id
+            && message.get("thread_ts").and_then(Value::as_str) == expected_thread_anchor
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(QA_9D_RESULT))
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "QA-9D must create exactly one unthreaded message in C-TRIGGER-OVERRIDE: {messages:?}"
     );
 }
 

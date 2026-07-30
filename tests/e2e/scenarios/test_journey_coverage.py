@@ -319,8 +319,13 @@ def _assert_rust_evidence(case: JourneyCase, evidence: CargoEvidence) -> None:
     _assert_cargo_target(case.case_id, evidence, source_path)
 
 
-def _rust_function_body(source: str, function_name: str) -> str:
-    """Return one Rust function body after masking comments and strings."""
+def _rust_function_body(
+    source: str,
+    function_name: str,
+    *,
+    preserve_literals: bool = False,
+) -> str:
+    """Return one Rust body, optionally preserving strings and comments."""
     masked = _rust_code_without_comments_or_strings(source)
     declarations = list(
         re.finditer(
@@ -340,8 +345,36 @@ def _rust_function_body(source: str, function_name: str) -> str:
         elif masked[index] == "}":
             depth -= 1
             if depth == 0:
-                return masked[body_start + 1 : index]
+                body_source = source if preserve_literals else masked
+                return body_source[body_start + 1 : index]
     raise AssertionError(f"Rust function {function_name!r} has no closing brace")
+
+
+def _rust_value_pattern(value: str) -> str:
+    if value.lstrip("-").isdigit():
+        return rf"(?:{re.escape(json.dumps(value))}|{re.escape(value)})"
+    return re.escape(json.dumps(value))
+
+
+def _assert_rust_assignment(
+    case_id: str,
+    assertion: str,
+    variable: str,
+    value: str,
+    *,
+    optional: bool = False,
+) -> None:
+    value_pattern = _rust_value_pattern(value)
+    if optional:
+        value_pattern = rf"Some\s*\(\s*{value_pattern}\s*\)"
+    assert re.search(
+        rf"\blet\s+{re.escape(variable)}(?:\s*:[^=;]+)?\s*=\s*"
+        rf"{value_pattern}\s*;",
+        assertion,
+    ), (
+        f"{case_id}: declared delivery value {value!r} is not bound to "
+        f"{variable} by the cited helper"
+    )
 
 
 def _assert_delivery_address_is_citable(
@@ -364,7 +397,55 @@ def _assert_delivery_address_is_citable(
     assert ObservableAssertion.EXACT_MUTATION_COUNT in case.assertions
 
     source = (ROOT / case.evidence.source).read_text(encoding="utf-8")
-    _rust_function_body(source, address.assertion)
+    assertion_body = _rust_function_body(
+        source,
+        address.assertion,
+        preserve_literals=True,
+    )
+    _assert_rust_assignment(
+        case.case_id,
+        assertion_body,
+        "expected_conversation_id",
+        address.conversation_id,
+    )
+    assert re.search(r"==\s*expected_conversation_id\b", assertion_body), (
+        f"{case.case_id}: expected_conversation_id does not gate provider evidence"
+    )
+    if address.thread_anchor is None:
+        assert re.search(
+            r"\blet\s+expected_thread_anchor(?:\s*:[^=;]+)?\s*=\s*None\s*;",
+            assertion_body,
+        ), (
+            f"{case.case_id}: declared unthreaded delivery is not asserted "
+            "by the cited helper"
+        )
+    else:
+        _assert_rust_assignment(
+            case.case_id,
+            assertion_body,
+            "expected_thread_anchor",
+            address.thread_anchor,
+            optional=True,
+        )
+    assert re.search(
+        r"==\s*expected_thread_anchor\b",
+        assertion_body,
+    ), (
+        f"{case.case_id}: expected_thread_anchor does not gate provider evidence"
+    )
+    _assert_rust_assignment(
+        case.case_id,
+        assertion_body,
+        "expected_count",
+        str(address.exact_count),
+    )
+    assert re.search(
+        r"\bmatching\s*\.\s*count\s*\(\s*\)\s*,\s*expected_count\b",
+        assertion_body,
+    ), (
+        f"{case.case_id}: expected_count does not gate the provider mutation count"
+    )
+
     test_body = _rust_function_body(source, case.evidence.test)
     reachable_bodies = [test_body]
     for delegate in set(re.findall(r"\b([a-z][A-Za-z0-9_]*_impl)\s*\(", test_body)):

@@ -649,46 +649,62 @@ async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
 }
 
 fn assert_slack_thread_delivery_evidence(messages: &[serde_json::Value]) {
+    let expected_conversation_id = "C777";
+    let expected_thread_anchor = Some("1710000200.000050");
+    let expected_count = 1;
     let matching = messages.iter().filter(|message| {
-        message["channel"] == "C777"
-            && message["thread_ts"] == "1710000200.000050"
+        message["channel"] == expected_conversation_id
+            && message.get("thread_ts").and_then(serde_json::Value::as_str)
+                == expected_thread_anchor
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(SLACK_REPLY))
     });
     assert_eq!(
         matching.count(),
-        1,
+        expected_count,
         "the coordinated Slack reply must reach the exact channel thread once: {messages:?}"
     );
 }
 
 fn assert_telegram_topic_delivery_evidence(messages: &[serde_json::Value]) {
+    let expected_conversation_id = "-1008675309";
+    let expected_thread_anchor = Some(77);
+    let expected_count = 1;
     let matching = messages.iter().filter(|message| {
-        message["chat_id"] == "-1008675309"
-            && message["message_thread_id"] == 77
+        message["chat_id"] == expected_conversation_id
+            && message
+                .get("message_thread_id")
+                .and_then(serde_json::Value::as_i64)
+                == expected_thread_anchor
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(TELEGRAM_REPLY))
     });
     assert_eq!(
         matching.count(),
-        1,
+        expected_count,
         "the coordinated Telegram reply must reach the exact forum topic once: {messages:?}"
     );
 }
 
 fn assert_telegram_chat_delivery_evidence(messages: &[serde_json::Value]) {
+    let expected_conversation_id = "515151";
+    let expected_thread_anchor: Option<i64> = None;
+    let expected_count = 1;
     let matching = messages.iter().filter(|message| {
-        message["chat_id"] == "515151"
-            && message.get("message_thread_id").is_none()
+        message["chat_id"] == expected_conversation_id
+            && message
+                .get("message_thread_id")
+                .and_then(serde_json::Value::as_i64)
+                == expected_thread_anchor
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(TELEGRAM_REPLY))
     });
     assert_eq!(
         matching.count(),
-        1,
+        expected_count,
         "the coordinated Telegram reply must reach the exact unthreaded chat once: {messages:?}"
     );
 }
