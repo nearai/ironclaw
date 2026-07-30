@@ -212,10 +212,12 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Build ironclaw-reborn with WebChat v2 surface
-        run: >-
-          cargo build
-          -p ironclaw
-          --bin ironclaw
+        run: |
+          set -euo pipefail
+          cargo build -p ironclaw --bin ironclaw
+          cargo build -p ironclaw --bin ironclaw \
+            --features test-support \
+            --target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
@@ -272,7 +274,12 @@ jobs:
           retention-days: 14
 
       - name: Run Reborn WebUI v2 smoke
-        run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+          tests/e2e/scenarios/test_reborn_webui_v2_sso.py
+          -v
+          --timeout=120
 
       - name: Run harvested QA replay and provider contracts with Emulate
         env:
