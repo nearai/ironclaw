@@ -2058,7 +2058,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         }
     })
     .to_string();
-    let outbound_scope = preresolve_vendor_turn_scope(
+    let (outbound_scope, _) = preresolve_vendor_turn_scope(
         &telegram_binding_service,
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",

@@ -14,7 +14,10 @@
 mod programmable_surface;
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,8 +31,9 @@ use ironclaw_host_api::{
     ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
     LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, ProjectId, Resolution, ResultPreviewMeta, ResultProgress,
-    ResultRef, RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    ProductSurfaceEventSubscription, ProductSurfaceStreamResponse, ProductSurfaceValidationCode,
+    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind, SafeSummary,
+    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -114,7 +118,7 @@ use ironclaw_webui::webui_v2::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 use programmable_surface::ProgrammableProductSurface;
@@ -462,6 +466,9 @@ struct StubServices {
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    event_subscription_enabled: AtomicBool,
+    hold_event_subscription_open: AtomicBool,
     cancel_run_calls: Mutex<Vec<ProductCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<ProductResolveGateRequest>>,
     retry_run_calls: Mutex<Vec<ProductRetryRunRequest>>,
@@ -560,6 +567,16 @@ impl StubServices {
             .lock()
             .expect("lock")
             .push_back(response);
+    }
+
+    fn enable_event_subscription(&self) {
+        self.event_subscription_enabled
+            .store(true, Ordering::Release);
+    }
+
+    fn hold_event_subscription_open(&self) {
+        self.hold_event_subscription_open
+            .store(true, Ordering::Release);
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
@@ -1737,24 +1754,61 @@ impl ProductSurface for StubServices {
             .map(ProjectionCursor::new)
             .transpose()
             .map_err(ProductSurfaceError::internal_from)?;
-        let response = StubServices::stream_events(
-            self,
-            caller,
-            RebornStreamEventsRequest {
-                thread_id,
-                after_cursor,
-            },
-        )
-        .await?;
+        let stream_request = RebornStreamEventsRequest {
+            thread_id,
+            after_cursor,
+        };
+        let response = StubServices::stream_events(self, caller, stream_request.clone()).await?;
         let events = response
             .events
             .into_iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProductSurfaceError::internal_from)?;
+        let subscription = if self.event_subscription_enabled.load(Ordering::Acquire) {
+            self.subscribe_events_calls
+                .lock()
+                .expect("lock")
+                .push(stream_request);
+            let responses = self
+                .next_stream_events
+                .lock()
+                .expect("lock")
+                .drain(..)
+                .collect::<Vec<_>>();
+            let hold_open = self.hold_event_subscription_open.load(Ordering::Acquire);
+            let (sender, receiver) = mpsc::channel(1);
+            tokio::spawn(async move {
+                for response in responses {
+                    let response = response.and_then(|response| {
+                        let events = response
+                            .events
+                            .into_iter()
+                            .map(serde_json::to_value)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(ProductSurfaceError::internal_from)?;
+                        Ok(ProductSurfaceStreamResponse {
+                            events,
+                            next_cursor: None,
+                            subscription: None,
+                        })
+                    });
+                    if sender.send(response).await.is_err() {
+                        return;
+                    }
+                }
+                if hold_open {
+                    std::future::pending::<()>().await;
+                }
+            });
+            Some(ProductSurfaceEventSubscription::new(receiver))
+        } else {
+            None
+        };
         Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
             events,
             next_cursor: None,
+            subscription,
         })
     }
 }
@@ -6660,6 +6714,85 @@ async fn stream_events_continues_immediately_after_non_empty_batch() {
         Some(&expected_cursor),
         "follow-up call must still preserve cursor ordering"
     );
+}
+
+#[tokio::test]
+async fn stream_events_forwards_one_continuous_subscription_without_poll_gaps() {
+    let services = Arc::new(StubServices::default());
+    services.enable_event_subscription();
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![make_projection_update_envelope("cursor:sub-a")],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![make_projection_update_envelope("cursor:sub-b")],
+    }));
+
+    let response = router_with(services.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(250), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    assert_eq!(
+        parse_sse_events(&bytes).len(),
+        2,
+        "both back-to-back subscription events must reach one SSE connection"
+    );
+    assert_eq!(
+        services.subscribe_events_calls.lock().expect("lock").len(),
+        1,
+        "the SSE connection must open exactly one product subscription"
+    );
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        1,
+        "the SSE connection must enter the product stream method only once"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_events_emits_application_keep_alive_while_subscription_is_idle() {
+    let services = Arc::new(StubServices::default());
+    services.enable_event_subscription();
+    services.hold_event_subscription_open();
+
+    let response = router_with(services)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let mut body = response.into_body();
+    let body_task = tokio::spawn(async move {
+        collect_sse_until(&mut body, Duration::from_secs(30), |buffer| {
+            String::from_utf8_lossy(buffer).contains("event: keep_alive")
+        })
+        .await
+    });
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(15)).await;
+    tokio::task::yield_now().await;
+
+    let bytes = body_task.await.expect("SSE body task");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("event: keep_alive"), "{text}");
+    assert!(text.contains(r#"data: {"type":"keep_alive"}"#), "{text}");
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being

@@ -340,6 +340,78 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
   assert.equal(harness.isProcessing, false);
 });
 
+test("useChatEvents: final_reply preserves earlier assistant phases and replaces only the latest", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            text: {
+              id: "text:run-1:1",
+              run_id: "run-1",
+              body: "I’ll research this first.",
+            },
+          },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            text: {
+              id: "text:run-1:2",
+              run_id: "run-1",
+              body: "Here is the final",
+            },
+          },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "Here is the final answer.",
+        generated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => ({
+      id: message.id,
+      content: message.content,
+      isFinalReply: message.isFinalReply,
+      isStreaming: message.isStreaming,
+    })),
+    [
+      {
+        id: "text-text:run-1:1",
+        content: "I’ll research this first.",
+        isFinalReply: false,
+        isStreaming: false,
+      },
+      {
+        id: "reply-run-1",
+        content: "Here is the final answer.",
+        isFinalReply: true,
+        isStreaming: undefined,
+      },
+    ],
+  );
+  assert.equal(harness.isProcessing, false);
+});
+
 test("useChatEvents: replayed final_reply replaces existing same-run assistant in place", () => {
   const harness = createUseChatEventsHarness();
   harness.replaceMessages([
