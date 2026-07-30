@@ -51,7 +51,8 @@ env_args=()
 if [[ "${sabotage}" != "env" ]]; then
   while IFS='=' read -r key _; do
     case "${key}" in
-      IRONCLAW_EMULATE_CLI|IRONCLAW_GENERATED_SEQUENCE_DEPTH|IRONCLAW_JOURNEY_ORDER)
+      IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER|IRONCLAW_EMULATE_CLI|\
+      IRONCLAW_GENERATED_SEQUENCE_DEPTH|IRONCLAW_JOURNEY_ORDER)
         ;;
       IRONCLAW_*)
         env_args+=("-u" "${key}")

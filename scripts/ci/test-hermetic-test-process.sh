@@ -24,6 +24,7 @@ run_probe() {
     REBORN_TOOL_DISCLOSURE="Bridged" \
     COREPACK_HOME="${probe_dir}/corepack" \
     PLAYWRIGHT_BROWSERS_PATH="${probe_dir}/playwright-browsers" \
+    IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER="emulate-slack-channel-token" \
     IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
     "${runner}" -- bash -c '
       set -euo pipefail
@@ -72,6 +73,10 @@ run_probe() {
       if [[ "${PLAYWRIGHT_BROWSERS_PATH:-}" != */playwright-browsers ]]; then
         echo "explicit Playwright browser toolchain path was not preserved" >&2
         exit 35
+      fi
+      if [[ "${IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER:-}" != "emulate-slack-channel-token" ]]; then
+        echo "explicit Emulate Slack fixture bearer was not preserved" >&2
+        exit 37
       fi
       if [[ "${PYTHONHASHSEED:-}" != "0" ]]; then
         echo "deterministic Python hash seed is not injected" >&2
