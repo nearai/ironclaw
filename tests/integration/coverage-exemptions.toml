@@ -21,6 +21,25 @@
 # Three crates below are v1-only (consumed exclusively by root `ironclaw`, no
 # crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
 
+# These public facade modules contain declarations and re-exports only. Rust
+# coverage therefore emits no LCOV source record for them; executable behavior
+# remains accounted for in the owned implementation modules. Tracked by #6524.
+
+[[exemption]]
+module = "crates/ironclaw_product/src/lib.rs"
+reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable product behavior remains covered in the owned implementation modules."
+issue  = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[exemption]]
+module = "crates/ironclaw_threads/src/lib.rs"
+reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable thread behavior remains covered in the owned implementation modules."
+issue  = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[exemption]]
+module = "crates/ironclaw_webui/src/webui_v2/mod.rs"
+reason = "Declaration-only WebUI v2 facade with no executable Rust statements; rustc emits no LCOV source record. Executable route behavior remains covered in the owned implementation modules."
+issue  = "https://github.com/nearai/ironclaw/issues/6524"
+
 [[exemption]]
 crate  = "ironclaw_embeddings"
 reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
