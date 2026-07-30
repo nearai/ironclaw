@@ -21,6 +21,7 @@ import {
 
 export function useAdminUsers() {
   const queryClient = useQueryClient();
+  const requestedMoreRef = React.useRef(false);
 
   const query = useInfiniteQuery({
     queryKey: ["admin", "users"],
@@ -28,14 +29,17 @@ export function useAdminUsers() {
       fetchAdminUsers({ cursor: pageParam || undefined, signal }),
     initialPageParam: null,
     getNextPageParam: (lastPage) => lastPage?.nextCursor || undefined,
-    // Poll the initial bounded page, but stop once the administrator loads
-    // additional pages: TanStack refetches every retained infinite-query page,
-    // so a fixed interval would multiply traffic by the number of loaded pages.
-    // Also pause the timer during any active/paused fetch so it cannot cancel a
-    // slow fetchNextPage request. Mutations still invalidate the full query.
+    // Poll the initial bounded page, but stop once the administrator attempts
+    // to load additional pages, even if that request fails: TanStack refetches
+    // every retained infinite-query page, so a fixed interval would multiply
+    // traffic by the number of loaded pages. Also pause the timer during any
+    // active/paused fetch so it cannot cancel a slow fetchNextPage request.
+    // Mutations still invalidate the full query.
     refetchInterval: (currentQuery) => {
       const pageCount = currentQuery.state.data?.pages?.length || 0;
-      return currentQuery.state.fetchStatus === "idle" && pageCount <= 1
+      return currentQuery.state.fetchStatus === "idle" &&
+        pageCount <= 1 &&
+        !requestedMoreRef.current
         ? 10_000
         : false;
     },
@@ -55,6 +59,7 @@ export function useAdminUsers() {
   const loadMoreInFlightRef = React.useRef(null);
   const loadMore = React.useCallback(() => {
     if (!query.hasNextPage) return Promise.resolve();
+    requestedMoreRef.current = true;
     if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
 
     const request = query.fetchNextPage().finally(() => {

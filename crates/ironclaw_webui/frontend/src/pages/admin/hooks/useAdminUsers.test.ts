@@ -81,13 +81,13 @@ test("admin user hook exposes pending and error state for every management actio
   assert.deepEqual(resetCalls, [1, 2, 3, 1, 2, 3, 4]);
 });
 
-test("admin user hook consumes cursors, deduplicates pages, and collapses load-more requests", async () => {
+test("admin user hook consumes cursors, deduplicates pages, and keeps polling off after load-more failure", async () => {
   let infiniteQueryOptions;
   const fetchCalls = [];
-  let resolvePage;
+  let rejectPage;
   let fetchNextPageCalls = 0;
-  const pendingPage = new Promise((resolve) => {
-    resolvePage = resolve;
+  const pendingPage = new Promise((_resolve, reject) => {
+    rejectPage = reject;
   });
   const mutationState = {
     data: null,
@@ -131,7 +131,9 @@ test("admin user hook consumes cursors, deduplicates pages, and collapses load-m
           error: new Error("page failed"),
           fetchNextPage: () => {
             fetchNextPageCalls += 1;
-            return pendingPage;
+            return fetchNextPageCalls === 1
+              ? pendingPage
+              : Promise.resolve({ data: { pages: [] } });
           },
           hasNextPage: true,
           isFetchNextPageError: true,
@@ -211,9 +213,15 @@ test("admin user hook consumes cursors, deduplicates pages, and collapses load-m
   const duplicateRequest = state.loadMore();
   assert.equal(firstRequest, duplicateRequest);
   assert.equal(fetchNextPageCalls, 1);
-  resolvePage({ data: { pages: [] } });
-  await firstRequest;
+  rejectPage(new Error("next page failed"));
+  await assert.rejects(firstRequest, /next page failed/);
+  assert.equal(
+    infiniteQueryOptions.refetchInterval({
+      state: { data: { pages: [{ users: [] }] }, fetchStatus: "idle" },
+    }),
+    false,
+  );
 
-  state.loadMore();
+  await state.loadMore();
   assert.equal(fetchNextPageCalls, 2);
 });
