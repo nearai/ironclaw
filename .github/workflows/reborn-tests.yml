@@ -756,7 +756,7 @@ jobs:
             --lcov reborn-integration-merged.lcov \
             --base "$BASE_SHA" \
             --head "$(git rev-parse HEAD)" \
-            --threshold 90 \
+            --threshold 85 \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
 

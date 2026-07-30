@@ -1,7 +1,7 @@
 """Executable classification of the shipped provider capability surface."""
 
-from pathlib import Path
 import tomllib
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = ROOT / "tests/e2e/fixtures/provider_capability_coverage.toml"
@@ -63,19 +63,27 @@ def _production_extension_ids() -> set[str]:
 
 
 def _capability_operation_kinds() -> dict[str, str]:
-    """Read/write kind per capability, derived from shipped manifests.
+    """Provider operation kind per capability, derived from shipped manifests.
 
-    The manifests already declare `external_write` in each tool's `effects`,
-    so the kind is production-derived like the capability denominator itself
-    rather than a hand-maintained list that can drift from what ships.
+    `external_write` identifies mutations and `network` identifies provider
+    reads. Capabilities with neither effect are local operations, not provider
+    reads; requiring seeded provider outcomes for those would fabricate a
+    boundary that production never crosses.
     """
     kinds: dict[str, str] = {}
     for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
+        inherited_effects = manifest.get("mcp", {}).get("effects", [])
         for tool in manifest.get("tools", []):
-            effects = tool.get("effects", [])
-            kinds[tool["id"]] = "write" if "external_write" in effects else "read"
+            effects = [*inherited_effects, *tool.get("effects", [])]
+            if "external_write" in effects:
+                kind = "write"
+            elif "network" in effects:
+                kind = "read"
+            else:
+                kind = "local"
+            kinds[tool["id"]] = kind
     return kinds
 
 

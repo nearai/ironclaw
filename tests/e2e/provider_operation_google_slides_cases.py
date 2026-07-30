@@ -3,7 +3,11 @@
 import json
 
 from emulate_provider import google_json
-from provider_operation_types import ProviderOperationCase
+from provider_operation_types import (
+    ProviderOperationCase,
+    exact_output,
+    static_provider_json_response,
+)
 
 PRESENTATION_ID = "slides_reborn_launch"
 PRESENTATION_TITLE = "Reborn Launch Review"
@@ -224,6 +228,30 @@ GOOGLE_SLIDES_PROVIDER_OPERATION_CASES = (
         assert_outcome=_get_presentation_outcome,
     ),
     ProviderOperationCase(
+        case_id="google_slides_get_presentation_empty",
+        provider_service="google",
+        capability_id="google-slides.get_presentation",
+        arguments={"presentation_id": "slides_provider_contract_empty"},
+        assert_baseline=_baseline,
+        assert_outcome=exact_output(
+            {
+                "presentation_id": "",
+                "title": "",
+                "revision_id": "",
+                "slide_count": 0,
+                "slides": [],
+            }
+        ),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/v1/presentations/slides_provider_contract_empty",
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
         case_id="google_slides_get_thumbnail",
         provider_service="google",
         capability_id="google-slides.get_thumbnail",
@@ -233,6 +261,30 @@ GOOGLE_SLIDES_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_baseline,
         assert_outcome=_thumbnail_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_slides_get_thumbnail_empty",
+        provider_service="google",
+        capability_id="google-slides.get_thumbnail",
+        arguments={
+            "presentation_id": PRESENTATION_ID,
+            "slide_object_id": "slide_provider_contract_empty",
+        },
+        assert_baseline=_baseline,
+        assert_outcome=exact_output(
+            {"content_url": "", "width": 0, "height": 0}
+        ),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path=(
+                f"/v1/presentations/{PRESENTATION_ID}/pages/"
+                "slide_provider_contract_empty/thumbnail"
+            ),
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
     ),
     ProviderOperationCase(
         case_id="google_slides_create_slide",
