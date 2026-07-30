@@ -16212,3 +16212,74 @@ async fn list_commands_surfaces_directory_unavailable_as_retryable_503() {
     assert_eq!(err.status_code, 503);
     assert!(err.retryable);
 }
+
+// CI regression (PR-2 webui command palette): a review-driven change hoisted
+// `caller_is_command_admin` to run UNCONDITIONALLY at the top of
+// `execute_product_command`, so it read the admin directory even for a
+// User-audience command. With no admin directory wired — the same default
+// composition/test shape `list_commands_surfaces_directory_unavailable_as_retryable_503`
+// above pins for listing — that turned a plain `/status` or bare `/model`
+// into a retryable 503, even though neither command's execution path ever
+// needs the caller's admin standing. `execute_product_command` must resolve
+// `is_admin` LAZILY (`resolve_admin_standing`): a User-audience command that never
+// hits the Admin-audience gate or a role-filtered help-text render must never
+// query the admin directory at all, so a degraded/unwired directory cannot
+// break it — while an Admin-audience command (`/model set ...`) still needs
+// the directory and must keep failing closed with the identical retryable
+// 503, never a silent "not admin" `AccessDenied` and never a silent success.
+//
+// This test fails before the fix (both `/status` and bare `/model` 503) and
+// passes after it.
+#[tokio::test]
+async fn execute_user_audience_commands_succeed_without_admin_directory_but_admin_audience_still_fails_closed()
+ {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(Arc::new(SetupRecordingLlmConfigService::default()));
+
+    let status_response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/status",
+    )
+    .await
+    .expect("a User-audience /status must succeed with no admin directory wired");
+    assert!(status_response.rejection.is_none(), "{status_response:?}");
+    assert_eq!(
+        status_response
+            .result
+            .expect("status must return a view")
+            .title,
+        "Status"
+    );
+
+    let model_response =
+        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/model")
+            .await
+            .expect("a User-audience bare /model read must succeed with no admin directory wired");
+    assert!(model_response.rejection.is_none(), "{model_response:?}");
+    assert_eq!(
+        model_response
+            .result
+            .expect("model read must return a view")
+            .title,
+        "Model"
+    );
+
+    let admin_audience_error = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model set fake",
+    )
+    .await
+    .expect_err(
+        "an Admin-audience command must still fail closed on an unavailable admin \
+         directory (retryable 503) — never a silent AccessDenied and never a silent success",
+    );
+    assert_eq!(admin_audience_error.status_code, 503);
+    assert!(admin_audience_error.retryable);
+}

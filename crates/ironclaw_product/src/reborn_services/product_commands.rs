@@ -89,6 +89,22 @@ where
         Ok(RebornProductCommandListResponse { commands })
     }
 
+    /// Resolve (and memoize for this request) whether the caller clears the
+    /// admin boundary. Callers pass a per-request slot; the directory is read
+    /// at most once and only when a branch genuinely needs the answer.
+    async fn resolve_admin_standing(
+        &self,
+        caller: &ProductSurfaceCaller,
+        slot: &mut Option<bool>,
+    ) -> Result<bool, ProductSurfaceError> {
+        if let Some(known) = slot {
+            return Ok(*known);
+        }
+        let resolved = self.caller_is_command_admin(caller).await?;
+        *slot = Some(resolved);
+        Ok(resolved)
+    }
+
     /// Parse and execute one slash-command line on behalf of `caller`.
     ///
     /// Every parse-stage failure (ordinary text, an empty/malformed slash
@@ -107,16 +123,24 @@ where
     /// `ProductCommand::Unknown` keeps the fixed role-filtered help-text
     /// rejection — an unrecognized token is never executable.
     ///
-    /// `is_admin` is resolved once, here, and reused by every branch below
-    /// that needs the caller's admin standing — never re-queried per branch.
-    /// Still exactly one admin-directory lookup per request (never cached
-    /// across requests).
+    /// The caller's admin standing is resolved LAZILY and at most once per
+    /// request: only branches that actually need it (the audience gate for an
+    /// admin-audience command, and role-filtered help text) pay for the
+    /// directory lookup, and the first lookup memoizes for the rest of the
+    /// call. Never cached across requests.
+    ///
+    /// The laziness is load-bearing, not an optimization: `caller_is_command_admin`
+    /// surfaces a degraded directory as a retryable 503, so resolving it
+    /// unconditionally made user-audience commands (`/status`, bare `/model`)
+    /// fail wherever the admin directory is unwired or unhealthy — exactly the
+    /// `RejectingAdminUserService` default composition. User commands must not
+    /// depend on the admin directory being up.
     pub(super) async fn execute_product_command(
         &self,
         caller: ProductSurfaceCaller,
         request: RebornExecuteProductCommandRequest,
     ) -> Result<RebornExecuteProductCommandResponse, ProductSurfaceError> {
-        let is_admin = self.caller_is_command_admin(&caller).await?;
+        let mut admin_standing: Option<bool> = None;
 
         let payload =
             match parse_product_slash_command(&request.text, ProductTriggerReason::DirectChat) {
@@ -124,7 +148,10 @@ where
                 Ok(None) => {
                     return Ok(Self::invalid_request_response(
                         String::new(),
-                        Self::caller_command_help_text(is_admin),
+                        Self::caller_command_help_text(
+                            self.resolve_admin_standing(&caller, &mut admin_standing)
+                                .await?,
+                        ),
                     ));
                 }
                 Err(error) => {
@@ -134,7 +161,10 @@ where
                     );
                     return Ok(Self::invalid_request_response(
                         String::new(),
-                        Self::caller_command_help_text(is_admin),
+                        Self::caller_command_help_text(
+                            self.resolve_admin_standing(&caller, &mut admin_standing)
+                                .await?,
+                        ),
                     ));
                 }
             };
@@ -154,12 +184,19 @@ where
                 );
                 return Ok(Self::invalid_request_response(
                     command_name,
-                    Self::caller_command_help_text(is_admin),
+                    Self::caller_command_help_text(
+                        self.resolve_admin_standing(&caller, &mut admin_standing)
+                            .await?,
+                    ),
                 ));
             }
         };
 
-        if required_audience(&command) == CommandAudience::Admin && !is_admin {
+        if required_audience(&command) == CommandAudience::Admin
+            && !self
+                .resolve_admin_standing(&caller, &mut admin_standing)
+                .await?
+        {
             return Ok(RebornExecuteProductCommandResponse {
                 command: command_name,
                 result: None,
@@ -213,7 +250,10 @@ where
             // not — it keeps the fixed role-filtered help-text rejection.
             ProductCommand::Unknown { .. } => Ok(Self::invalid_request_response(
                 command_name,
-                Self::caller_command_help_text(is_admin),
+                Self::caller_command_help_text(
+                    self.resolve_admin_standing(&caller, &mut admin_standing)
+                        .await?,
+                ),
             )),
         }
     }
