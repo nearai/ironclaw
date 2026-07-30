@@ -750,12 +750,13 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           python3 scripts/ci/reborn_changed_coverage.py \
             --lcov reborn-integration-merged.lcov \
             --base "$BASE_SHA" \
-            --head "$(git rev-parse HEAD)" \
+            --head "$HEAD_SHA" \
             --threshold 90 \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"

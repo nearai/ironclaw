@@ -107,6 +107,9 @@ class ChangedCoverageTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci/test_reborn_changed_coverage.py", workflow)
         self.assertIn("python3 scripts/ci/reborn_changed_coverage.py", workflow)
         self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn('--head "$HEAD_SHA"', workflow)
+        self.assertNotIn('--head "$(git rev-parse HEAD)"', workflow)
         self.assertIn("reborn-changed-coverage.json", workflow)
         self.assertRegex(
             workflow,

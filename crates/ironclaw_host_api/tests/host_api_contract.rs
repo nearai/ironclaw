@@ -1712,3 +1712,18 @@ fn product_stream_continuation_is_process_local_not_wire_state() {
         serde_json::from_value(encoded).expect("wire response deserializes");
     assert!(decoded.subscription.is_none());
 }
+
+#[test]
+fn product_stream_continuation_debug_and_identity_are_stable() {
+    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let subscription = ProductSurfaceEventSubscription::new(receiver);
+    let (_other_sender, other_receiver) = tokio::sync::mpsc::channel(1);
+    let other_subscription = ProductSurfaceEventSubscription::new(other_receiver);
+
+    assert_eq!(subscription, subscription);
+    assert_ne!(subscription, other_subscription);
+    assert_eq!(
+        format!("{subscription:?}"),
+        "ProductSurfaceEventSubscription { .. }"
+    );
+}
