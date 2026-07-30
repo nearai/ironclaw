@@ -104,6 +104,17 @@ EOF
 expect_fail "Python self-comparison" \
   "no meaningful changed regression assertion" run_check "$self_comparison"
 
+unittest_tautology="$TMP_ROOT/unittest-tautology"
+init_repo "$unittest_tautology"
+mkdir -p "$unittest_tautology/tests"
+cat > "$unittest_tautology/tests/test_regression.py" <<'EOF'
+def test_regression(self):
+    result = run_regression()
+    self.assertEqual(result, result)
+EOF
+expect_fail "unittest self-comparison" \
+  "no meaningful changed regression assertion" run_check "$unittest_tautology"
+
 inherited_assertion="$TMP_ROOT/inherited-assertion"
 init_repo "$inherited_assertion"
 mkdir -p "$inherited_assertion/tests"

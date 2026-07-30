@@ -153,11 +153,27 @@ def has_meaningful_python_assertion(text: str) -> bool:
         if stripped.startswith("assert ") and len(stripped) > len("assert "):
             return True
         if re.search(
-            r"\b(pytest\.raises|assert_called|assert_awaited|assert_has_calls|"
-            r"self\.assert[A-Z]\w*)\b",
+            r"\b(pytest\.raises|assert_called|assert_awaited|assert_has_calls)\b",
             stripped,
         ):
             return True
+    for match in re.finditer(
+        r"\bself\.assert([A-Z]\w*)\s*\((.*?)\)",
+        text,
+        re.DOTALL,
+    ):
+        method, expression = match.groups()
+        operands = expression.split(",", 2)
+        if method in {"Equal", "NotEqual", "Is", "IsNot"}:
+            if len(operands) >= 2 and normalized(operands[0]) == normalized(
+                operands[1]
+            ):
+                continue
+        elif method == "True" and normalized(operands[0]) in {"True", "1"}:
+            continue
+        elif method == "False" and normalized(operands[0]) in {"False", "0"}:
+            continue
+        return True
     return False
 
 
