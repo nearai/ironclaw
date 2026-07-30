@@ -43,6 +43,8 @@ test("workspaceFilePathFromHref rejects non-file and unsafe link targets", () =>
     "/workspace",
     "/workspace/../secret.txt",
     "/workspace/%2e%2e/secret.txt",
+    "/workspace/%252e%252e/secret.txt",
+    "/workspace/reports%252Fsecret.txt",
     "/workspace/reports%2Fsecret.txt",
     "/workspace/reports%5Csecret.txt",
     "/workspace/reports//final.csv",

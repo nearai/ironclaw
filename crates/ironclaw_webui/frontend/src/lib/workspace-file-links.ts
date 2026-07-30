@@ -5,7 +5,10 @@
 
 const WORKSPACE_PREFIX = "/workspace/";
 const SANDBOX_SCHEME = /^sandbox:/i;
-const ENCODED_SEPARATOR = /%(?:2f|5c)/i;
+// Reject encoded percent signs as well as separators. A literal `%25` could
+// otherwise become another escape sequence if any downstream layer decoded the
+// already-validated path again.
+const AMBIGUOUS_PATH_ENCODING = /%(?:25|2f|5c)/i;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 function isSafeDecodedWorkspacePath(path: string): boolean {
@@ -38,7 +41,7 @@ export function workspaceFilePathFromHref(href: unknown): string | null {
     !encodedPath.startsWith(WORKSPACE_PREFIX) ||
     encodedPath.includes("?") ||
     encodedPath.includes("#") ||
-    ENCODED_SEPARATOR.test(encodedPath)
+    AMBIGUOUS_PATH_ENCODING.test(encodedPath)
   ) {
     return null;
   }

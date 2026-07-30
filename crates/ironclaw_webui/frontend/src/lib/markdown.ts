@@ -5,6 +5,8 @@ import {
   workspaceFilePathFromHref,
 } from "./workspace-file-links";
 
+// Module-lifetime cache, strictly bounded to the two boolean capability modes.
+// Keeping each instance avoids reinstalling hooks on every message render.
 const sanitizers = new Map<boolean, ReturnType<typeof DOMPurify>>();
 
 // Normalize the product's scoped `sandbox:/workspace/...` references before
@@ -18,6 +20,7 @@ function createSanitizer(workspaceFileLinks: boolean) {
   // Each capability mode owns an isolated DOMPurify instance. Hook behavior is
   // closure-captured and cannot be changed by another render.
   const sanitizer = DOMPurify(window);
+  const validatedWorkspacePaths = new WeakMap<Element, string>();
   sanitizer.addHook("uponSanitizeAttribute", (node, data) => {
     if (
       !workspaceFileLinks ||
@@ -28,7 +31,10 @@ function createSanitizer(workspaceFileLinks: boolean) {
     }
     const workspacePath = workspaceFilePathFromHref(data.attrValue);
     const canonicalHref = workspaceFileHrefFromPath(workspacePath);
-    if (canonicalHref) data.attrValue = canonicalHref;
+    if (canonicalHref && workspacePath) {
+      data.attrValue = canonicalHref;
+      validatedWorkspacePaths.set(node, workspacePath);
+    }
   });
   sanitizer.addHook("afterSanitizeAttributes", (node) => {
     if (node.tagName !== "A") return;
@@ -36,13 +42,17 @@ function createSanitizer(workspaceFileLinks: boolean) {
     // assistant-authored preview metadata before deriving the trusted value.
     node.removeAttribute("data-workspace-path");
     const href = node.getAttribute("href");
-    if (!href) return;
+    if (!href) {
+      validatedWorkspacePaths.delete(node);
+      return;
+    }
     if (workspaceFileLinks) {
-      const workspacePath = workspaceFilePathFromHref(href);
+      const workspacePath = validatedWorkspacePaths.get(node);
       if (workspacePath) {
         node.setAttribute("data-workspace-path", workspacePath);
       }
     }
+    validatedWorkspacePaths.delete(node);
     node.setAttribute("target", "_blank");
     node.setAttribute("rel", "noopener noreferrer");
   });
