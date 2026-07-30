@@ -819,7 +819,10 @@ jobs:
 
       - name: Run Reborn WebUI frontend tests
         run: |
-          pnpm --dir crates/ironclaw_webui/frontend install --frozen-lockfile
+          (
+            cd crates/ironclaw_webui/frontend
+            pnpm install --frozen-lockfile
+          )
           scripts/ci/run-hermetic-deterministic-suite.sh frontend
 
   qa-recorded-fixtures:
