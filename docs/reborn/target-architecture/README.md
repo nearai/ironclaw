@@ -67,8 +67,7 @@ crates/
 │   ├── auth                   product auth & the recipe engine
 │   ├── attachments            attachment landing & its ports
 │   ├── extractors             pure bytes → text extraction
-│   ├── projects               project entity & membership ACL
-│   ├── identity               external identity → stable UserId
+│   ├── identity               external identity → stable UserId · projects & ACL
 │   ├── llm                    provider contract & reliability stack
 │   ├── trace_commons          Trace Commons client & redaction
 │   └── outbound               outbound authority: sealed grants
@@ -134,7 +133,7 @@ tools/                         developer diagnostics & excluded helpers
 
 **[`events/`](families/events.md).** What already happened, kept in three deliberately separate contracts: canonical redacted evidence (vocabulary plus durable backends with fail-closed production profiles), rebuildable read models derived by replay, and transport-neutral streams with admission control. Projections and streams can never write state or become authority, and no transport framing lives here.
 
-**[`domains/`](families/domains.md).** The typed record and service domains behind the kernel — threads, conversations, triggers, memory, skills, auth, attachments, projects, identity, llm, traces, outbound, and friends — each owning its record grammar and invariants over a `ScopedFilesystem`. Domains never select storage backends, never decide authority, and never expose HTTP; vendor code appears only under the two chartered exceptions (llm providers, auth recipes-as-data).
+**[`domains/`](families/domains.md).** The typed record and service domains behind the kernel — threads, conversations, triggers, memory, skills, auth, attachments, identity (with its project records), llm, traces, outbound, and friends — each owning its record grammar and invariants over a `ScopedFilesystem`. Domains never select storage backends, never decide authority, and never expose HTTP; vendor code appears only under the two chartered exceptions (llm providers, auth recipes-as-data).
 
 **[`kernel/`](families/kernel.md).** The security perimeter, one crate per stage of the mediated effect pipeline: trust ceilings, grant matching and leases, exact-invocation approvals, resource reservation, runtime policy, the `CapabilityHost` membrane, the process lifecycle authority, turn admission, and the mediated host services. The kernel decides and mediates; it contains no product UX, no loop strategy, no vendor code, and no lane mechanics.
 

@@ -1,7 +1,7 @@
 
 # `crates/domains/` — typed record/service domains
 
-**Layer(s):** substrates · **Crates:** 13 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint trust narrowly (outbound — sealed constructors; triggers — ratchet-pinned minting), and one is a credential-custody domain (auth).
+**Layer(s):** substrates · **Crates:** 12 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint trust narrowly (outbound — sealed constructors; triggers — ratchet-pinned minting), and one is a credential-custody domain (auth).
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -15,7 +15,6 @@ crates/domains/
 ├── ironclaw_auth             product auth & the recipe engine
 ├── ironclaw_attachments      attachment landing & its ports
 ├── ironclaw_extractors       pure bytes→text extraction
-├── ironclaw_projects         project entity & membership ACL
 ├── ironclaw_identity         external identity → stable UserId
 ├── ironclaw_llm              provider contract, providers & decorators
 ├── ironclaw_trace_commons    Trace Commons client & redaction
@@ -63,13 +62,13 @@ Inside the family, dependency edges are shallow and few: `ironclaw_conversations
 
 ## Security & authority
 
-Most crates in this family hold no authority at all: a call into `ironclaw_threads` or `ironclaw_projects` is always downstream of a kernel admission decision, never a gate itself. Three crates are the named exceptions:
+Most crates in this family hold no authority at all: a call into `ironclaw_threads` or the identity crate's project module is always downstream of a kernel admission decision, never a gate itself. Three crates are the named exceptions:
 
 - **`ironclaw_outbound`** is the sole writer of delivery-attempt state and mints the sealed access-grant and delivery-binding types described above.
 - **`ironclaw_triggers`** is the one host-trusted inbound path outside the generic ingress verifier — its trusted-submission binding is the sealed evidence that a fire came from its own poller.
 - **`ironclaw_auth`** is a credential-custody domain: it holds durable token-lifecycle state, but never raw secret bytes, and it never makes an authorization decision itself.
 
-Every other crate — threads, conversations, memory, skills, attachments, extractors, projects, identity, llm, traces — is a pure record and service authority with no minting power. None of the thirteen can construct a kernel-sealed authorization witness, a trust ceiling, or a capability lease; those constructors are unreachable from this family's dependency set.
+Every other crate — threads, conversations, memory, skills, attachments, extractors, identity, llm, traces — is a pure record and service authority with no minting power. None of the twelve can construct a kernel-sealed authorization witness, a trust ceiling, or a capability lease; those constructors are unreachable from this family's dependency set.
 
 ## Crates
 
@@ -216,31 +215,15 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
 - **Security & authority role:** none — a pure transform; the bomb-safety caps are hardening, not an authorization decision.
 - **Why a separate crate:** a pure leaf with heavy document-parsing dependencies kept out of its consumers — the attachment landing routine, the kernel's tool-output mediation, and the first-party file tools all extract text without inheriting each other's surfaces or the parser cone.
 
-### `ironclaw_projects`
-
-- **Purpose:** the Project entity, project membership and access-control records, and the persistence contract that scopes threads, automations, and workspace memory to a project.
-- **Owns:**
-  - The `Project` entity and its membership and access-control-list types.
-  - A live authorization check: resolving access is never cached, so revoking a grant takes effect on the next request.
-  - A filesystem-backed repository implementation, with no SQL in this crate.
-  - A project-scoped access-gating service, implementing the port product calls, so the domain owns its own access rules end to end.
-- **Never contains:**
-  - The product-facing port declaration itself, which lives in the product contracts crate.
-  - Thread, automation, or memory content — those domains own their own records, scoped only by a project identifier.
-- **Public surface:** `ProjectRepository`; the access-gating service implementation.
-- **Depends on:** `ironclaw_filesystem`, `ironclaw_host_api`.
-- **Never depends on:** anything in kernel/ or product/.
-- **Security & authority role:** live access-control authority for project scope, enforced uncached on every request.
-- **Why a separate crate:** a self-contained entity and access-control domain with a real production path, deliberately kept independent of the domains it scopes rather than folded into any one of them.
-
 ### `ironclaw_identity`
 
-- **Purpose:** the canonical identity layer — mapping every external identity, whether a browser OAuth login or an external channel actor, to a stable user identifier, before any runtime state such as conversation binding or thread ownership is touched.
+- **Purpose:** the canonical identity layer — mapping every external identity, whether a browser OAuth login or an external channel actor, to a stable user identifier, before any runtime state such as conversation binding or thread ownership is touched — and, as its `projects` module, the Project entity with its membership and access-control records.
 - **Owns:**
   - A resolver that mints, links, or looks up a user identity, keyed by tenant, surface, provider, provider instance, and external subject — with channel actors explicitly barred from minting, so an unrecognized actor fails closed rather than auto-provisioning.
   - The durable home of the minimal user profile: email, display name, and verified-email linkage, gated to browser-OAuth surfaces only.
   - A separate user-directory surface for administrative enumeration and management, kept apart from the resolver so administrative mutation can never perturb minting invariants.
   - The identity-binding store ports that map a provider identity to a user identifier — a persistence concern, so it lives beside the store that implements it rather than in a neutral vocabulary crate.
+  - The `projects` module: the `Project` entity, membership and access-control-list records, `ProjectRepository`, and the project-scoped access-gating service implementing the port the product contracts declare — with access resolved live on every request, never cached, so revocation takes effect immediately.
 - **Never contains:**
   - Conversation binding — `ironclaw_conversations` consumes an already-resolved user identifier.
   - WebUI ingress logic.
