@@ -425,20 +425,36 @@ async def test_reborn_settings_switches_share_accessible_keyboard_behavior(
         checked_thumb_box = await appearance_thumb.bounding_box()
         assert appearance_box is not None
         assert checked_thumb_box is not None
-
-        await appearance_switch.focus()
-        await appearance_switch.press("Space")
-        await expect(appearance_switch).to_have_attribute("aria-checked", "false")
-        await appearance["page"].wait_for_timeout(200)
-        unchecked_thumb_box = await appearance_thumb.bounding_box()
-        assert unchecked_thumb_box is not None
-        unchecked_left_gap = unchecked_thumb_box["x"] - appearance_box["x"]
         checked_right_gap = (
             appearance_box["x"]
             + appearance_box["width"]
             - checked_thumb_box["x"]
             - checked_thumb_box["width"]
         )
+
+        await appearance_switch.focus()
+        await appearance_switch.press("Space")
+        await expect(appearance_switch).to_have_attribute("aria-checked", "false")
+        switch_handle = await appearance_switch.element_handle()
+        thumb_handle = await appearance_thumb.element_handle()
+        assert switch_handle is not None
+        assert thumb_handle is not None
+        await appearance["page"].wait_for_function(
+            """({ switchElement, thumbElement, checkedRightGap }) => {
+                const switchBox = switchElement.getBoundingClientRect();
+                const thumbBox = thumbElement.getBoundingClientRect();
+                const uncheckedLeftGap = thumbBox.x - switchBox.x;
+                return Math.abs(uncheckedLeftGap - checkedRightGap) < 0.5;
+            }""",
+            arg={
+                "switchElement": switch_handle,
+                "thumbElement": thumb_handle,
+                "checkedRightGap": checked_right_gap,
+            },
+        )
+        unchecked_thumb_box = await appearance_thumb.bounding_box()
+        assert unchecked_thumb_box is not None
+        unchecked_left_gap = unchecked_thumb_box["x"] - appearance_box["x"]
         assert abs(unchecked_left_gap - checked_right_gap) < 0.5
 
         await appearance_switch.press("Enter")
