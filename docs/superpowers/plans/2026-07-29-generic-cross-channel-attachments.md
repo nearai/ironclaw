@@ -252,15 +252,15 @@ Register `builtin.attach_workspace_file_to_reply` with input:
 
 ### Steps
 
-- [ ] Add a red first-party runtime test proving the builtin is discoverable but fails closed before composition injects a reply-intent port.
-- [ ] Add handler tests for missing run ID, missing mount view, path outside workspace, directory path, missing file, oversized file, unsafe filename, invalid MIME, success, duplicate success, and sealed-run failure.
-- [ ] Run `cargo test -p ironclaw_host_runtime reply_attachment` and confirm the builtin is absent.
-- [ ] Add the schema, manifest, default fail-closed handler, and production registration function following the existing outbound-delivery first-party pattern.
-- [ ] Declare read-filesystem and outbound side-effect metadata so authorization, approval, obligations, and auditing remain active.
-- [ ] Use `ScopedFilesystem::with_fixed_view`; do not mint a trusted request or bypass `InvocationServices`.
-- [ ] Inject the same `Arc<dyn ReplyAttachmentIntentPort>` backed by `OutboundStateStore` from production composition.
-- [ ] Add a composition test that invokes the real registry wrapper chain and reads the registered intent back.
-- [ ] Run:
+- [x] Add a red first-party runtime test proving the builtin is discoverable but fails closed before composition injects a reply-intent port.
+- [x] Add handler tests for missing run ID, missing mount view, path outside workspace, directory path, missing file, oversized file, unsafe filename, invalid MIME, success, duplicate success, and sealed-run failure.
+- [x] Run `cargo test -p ironclaw_host_runtime reply_attachment` and confirm the builtin is absent.
+- [x] Add the schema, manifest, default fail-closed handler, and production registration function following the existing outbound-delivery first-party pattern.
+- [x] Declare read-filesystem and outbound side-effect metadata so authorization, approval, obligations, and auditing remain active.
+- [x] Use `ScopedFilesystem::with_fixed_view`; do not mint a trusted request or bypass `InvocationServices`.
+- [x] Inject the same `Arc<dyn ReplyAttachmentIntentPort>` backed by `OutboundStateStore` from production composition.
+- [x] Add a composition test that invokes the real registry wrapper chain and reads the registered intent back.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_host_runtime reply_attachment --all-features
@@ -268,7 +268,7 @@ cargo test -p ironclaw_reborn_composition reply_attachment --all-features
 cargo test -p ironclaw_architecture
 ```
 
-- [ ] Run targeted clippy and commit:
+- [x] Run targeted clippy and commit:
 
 ```bash
 git add crates/ironclaw_host_runtime crates/ironclaw_reborn_composition
@@ -302,15 +302,15 @@ Drafts remain text-only. Idempotent finalization compares text and attachment re
 
 ### Steps
 
-- [ ] Add a red transcript contract test that registers two intents and expects both ordered refs on the finalized assistant message.
-- [ ] Add tests for no intents, seal failure, retry after a successful transcript write, retry with mismatched refs, and duplicate finalization.
-- [ ] Run `cargo test -p ironclaw_loop_host finalized_assistant_attachment` and confirm refs are missing.
-- [ ] Add an optional reply-attachment intent port to `ThreadBackedLoopTranscriptPort` constructors/builders without weakening existing call sites.
-- [ ] Convert `ThreadScope` plus the canonical run ID to the outbound store key without re-deriving identity from display strings or transport metadata.
-- [ ] Seal immediately before final append; preserve the sealed record for idempotent retries.
-- [ ] Compare complete `MessageContent`, not only `content.as_deref()`, when recovering an already-finalized message.
-- [ ] Wire the shared port through `ironclaw_runner` and production composition.
-- [ ] Run:
+- [x] Add a red transcript contract test that registers two intents and expects both ordered refs on the finalized assistant message.
+- [x] Add tests for no intents, seal failure, retry after a successful transcript write, retry with mismatched refs, and duplicate finalization.
+- [x] Run `cargo test -p ironclaw_loop_host finalized_assistant_attachment` and confirm refs are missing.
+- [x] Add an optional reply-attachment intent port to `ThreadBackedLoopTranscriptPort` constructors/builders without weakening existing call sites.
+- [x] Convert `ThreadScope` plus the canonical run ID to the outbound store key without re-deriving identity from display strings or transport metadata.
+- [x] Seal immediately before final append; preserve the sealed record for idempotent retries.
+- [x] Compare complete `MessageContent`, not only `content.as_deref()`, when recovering an already-finalized message.
+- [x] Wire the shared port through `ironclaw_runner` and production composition.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_loop_host finalized_assistant --all-features
@@ -318,7 +318,7 @@ cargo test -p ironclaw_runner reborn_driver --all-features
 cargo test -p ironclaw_architecture
 ```
 
-- [ ] Run targeted clippy and commit:
+- [x] Run targeted clippy and commit:
 
 ```bash
 git add crates/ironclaw_loop_host crates/ironclaw_runner crates/ironclaw_reborn_composition
@@ -351,16 +351,16 @@ WebUI renders attachment chips from message attachment refs. Legacy text-path pa
 
 ### Steps
 
-- [ ] Add red delivery tests proving a finalized attachment ref produces a file part and prose-only `/workspace/report.csv` does not.
-- [ ] Add tests for ref ordering, missing files, oversized files, aggregate limit, MIME preservation, filename sanitization, and caller-supplied bytes rejection.
-- [ ] Run `cargo test -p ironclaw_product delivery_attachment --all-features` and confirm current prose scanning violates the negative test.
-- [ ] Change the observer to load the final message record and pass its attachment refs into the coordinator.
-- [ ] Replace `extract_workspace_attachment_paths` in materialization with ref-driven scoped reads.
-- [ ] Keep bytes transient inside a single delivery attempt; persist only semantic refs and provider evidence.
-- [ ] Update React props so `ProjectFileChips` accepts attachment refs and does not infer current-message attachments from text.
-- [ ] Add frontend tests proving structured refs render and path-looking prose alone does not render a current-message file chip.
-- [ ] Update static-asset contract assertions to reflect structured attachment handling.
-- [ ] Run:
+- [x] Add red delivery tests proving a finalized attachment ref produces a file part and prose-only `/workspace/report.csv` does not.
+- [x] Add tests for ref ordering, missing files, oversized files, aggregate limit, MIME preservation, filename sanitization, and caller-supplied bytes rejection.
+- [x] Run `cargo test -p ironclaw_product delivery_attachment --all-features` and confirm current prose scanning violates the negative test.
+- [x] Change the observer to load the final message record and pass its attachment refs into the coordinator.
+- [x] Replace `extract_workspace_attachment_paths` in materialization with ref-driven scoped reads.
+- [x] Keep bytes transient inside a single delivery attempt; persist only semantic refs and provider evidence.
+- [x] Update React props so `ProjectFileChips` accepts attachment refs and does not infer current-message attachments from text.
+- [x] Add frontend tests proving structured refs render and path-looking prose alone does not render a current-message file chip.
+- [x] Update static-asset contract assertions to reflect structured attachment handling.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_product delivery --all-features
@@ -368,8 +368,8 @@ cd crates/ironclaw_webui/frontend && npm test -- --run
 cargo test -p ironclaw_webui static_assets --all-features
 ```
 
-- [ ] Run targeted clippy and frontend typecheck/lint.
-- [ ] Commit:
+- [x] Run targeted clippy and frontend typecheck/lint.
+- [x] Commit:
 
 ```bash
 git add crates/ironclaw_product crates/ironclaw_webui
@@ -404,21 +404,21 @@ The parser stores only stable Slack file IDs plus safe descriptor metadata. `Sla
 
 ### Steps
 
-- [ ] Add mock-provider tests for one file, multiple files, missing `files:read`, `files.info` error, private download redirect, oversized declared size, oversized streamed body, MIME mismatch, timeout, and mixed-success batch.
-- [ ] Run `cargo test -p ironclaw_slack_extension inbound_attachment` and confirm `fetch_attachment` is unsupported.
-- [ ] Implement Slack API response DTOs with `deny_unknown_fields` only where Slack response evolution permits it; keep token and private URLs out of debug/display output.
-- [ ] Use the shared HTTP/network mediation surface and exact allowlisted Slack hosts. Do not create an unrestricted `reqwest::Client`.
-- [ ] Preserve the Slack file ID as `vendor_ref`; do not persist `url_private` or `url_private_download`.
-- [ ] Add `files:read` and exact inbound-download egress requirements to manifest and setup documentation.
-- [ ] Add conformance coverage proving the shared product lander receives complete bytes and all-or-nothing behavior remains in the shared layer.
-- [ ] Run:
+- [x] Add mock-provider tests for one file, multiple files, missing `files:read`, `files.info` error, private download redirect, oversized declared size, oversized streamed body, MIME mismatch, timeout, and mixed-success batch.
+- [x] Run `cargo test -p ironclaw_slack_extension inbound_attachment` and confirm `fetch_attachment` is unsupported.
+- [x] Implement Slack API response DTOs with `deny_unknown_fields` only where Slack response evolution permits it; keep token and private URLs out of debug/display output.
+- [x] Use the shared HTTP/network mediation surface and exact allowlisted Slack hosts. Do not create an unrestricted `reqwest::Client`.
+- [x] Preserve the Slack file ID as `vendor_ref`; do not persist `url_private` or `url_private_download`.
+- [x] Add `files:read` and exact inbound-download egress requirements to manifest and setup documentation.
+- [x] Add conformance coverage proving the shared product lander receives complete bytes and all-or-nothing behavior remains in the shared layer.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_slack_extension --all-features
 cargo test -p ironclaw_reborn_composition slack --all-features
 ```
 
-- [ ] Run targeted clippy and commit:
+- [x] Run targeted clippy and commit:
 
 ```bash
 git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
@@ -452,21 +452,21 @@ An attempt is successful only when text and every file have authoritative provid
 
 ### Steps
 
-- [ ] Add red tests that reject the retired `files.upload` endpoint and expect the three-step external upload flow.
-- [ ] Add tests for upload URL failure, binary upload failure, completion failure, read-back mismatch, multiple ordered files, thread replies, zero-byte files, MIME/filename forwarding, token redaction, and partial success evidence.
-- [ ] Run `cargo test -p ironclaw_slack_extension outbound_attachment` and confirm file parts are currently rejected.
-- [ ] Add bounded binary upload support through the mediated network surface for only the provider-issued upload host.
-- [ ] Implement external upload request/response DTOs and evidence mapping.
-- [ ] Update `SlackChannelAdapter::deliver` to render text and transfer files from `OutboundContent.parts` without changing semantic state.
-- [ ] Add `files:write` and exact upload egress requirements to manifest and documentation.
-- [ ] Run:
+- [x] Add red tests that reject the retired `files.upload` endpoint and expect the three-step external upload flow.
+- [x] Add tests for upload URL failure, binary upload failure, completion failure, read-back mismatch, multiple ordered files, thread replies, zero-byte files, MIME/filename forwarding, token redaction, and partial success evidence.
+- [x] Run `cargo test -p ironclaw_slack_extension outbound_attachment` and confirm file parts are currently rejected.
+- [x] Add bounded binary upload support through the mediated network surface for only the provider-issued upload host.
+- [x] Implement external upload request/response DTOs and evidence mapping.
+- [x] Update `SlackChannelAdapter::deliver` to render text and transfer files from `OutboundContent.parts` without changing semantic state.
+- [x] Add `files:write` and exact upload egress requirements to manifest and documentation.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_slack_extension --all-features
 cargo test -p ironclaw_product outbound_delivery --all-features
 ```
 
-- [ ] Run targeted clippy and commit:
+- [x] Run targeted clippy and commit:
 
 ```bash
 git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
@@ -484,7 +484,7 @@ git commit -m "feat(slack): upload outbound attachments"
 - Modify: `crates/ironclaw_product/tests/run_delivery_contract.rs`
 - Modify: `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs`
 - Modify: `crates/ironclaw_webui/tests/session_round_trip.rs`
-- Add: `crates/ironclaw_reborn_composition/tests/cross_channel_attachment_e2e.rs`
+- Modify: `crates/ironclaw_reborn_composition/tests/product_live_adapters.rs`
 
 ### Scenarios
 
@@ -502,23 +502,23 @@ Run the same fixture matrix for WebUI, Telegram, and Slack:
 
 ### Steps
 
-- [ ] Add adapter-neutral product fixtures and a production composition harness using real registries, mount views, stores, runner, transcript finalizer, and delivery observer.
-- [ ] Keep provider HTTP deterministic with local mock servers; assert exact API requests and evidence.
-- [ ] Run the matrix against an in-memory filesystem, LibSQL, and PostgreSQL where the persistence contract differs.
-- [ ] Verify Telegram still uses `sendDocument`, shared budgets, and production read-write landing after the filesystem change.
-- [ ] Verify WebUI upload/history/file-read routes round-trip structured refs and enforce auth, ownership, body limits, and `nosniff`.
-- [ ] Run:
+- [x] Add adapter-neutral product fixtures and a production composition harness using real registries, mount views, stores, runner, transcript finalizer, and delivery observer.
+- [x] Keep provider HTTP deterministic with local mock servers; assert exact API requests and evidence.
+- [x] Run the matrix against an in-memory filesystem, LibSQL, and PostgreSQL where the persistence contract differs.
+- [x] Verify Telegram still uses `sendDocument`, shared budgets, and production read-write landing after the filesystem change.
+- [x] Verify WebUI upload/history/file-read routes round-trip structured refs and enforce auth, ownership, body limits, and `nosniff`.
+- [x] Run:
 
 ```bash
 cargo test -p ironclaw_telegram_extension --all-features
 cargo test -p ironclaw_slack_extension --all-features
 cargo test -p ironclaw_webui attachment --all-features
-cargo test -p ironclaw_reborn_composition --test cross_channel_attachment_e2e --all-features
+cargo test -p ironclaw_reborn_composition --test product_live_adapters --all-features
 ```
 
-- [ ] Run `cargo test -p ironclaw_architecture`.
-- [ ] Run clippy for every changed Rust package and frontend tests/typecheck.
-- [ ] Commit:
+- [x] Run `cargo test -p ironclaw_architecture`.
+- [x] Run clippy for every changed Rust package and frontend tests/typecheck.
+- [x] Commit:
 
 ```bash
 git add crates/ironclaw_telegram_extension crates/ironclaw_product crates/ironclaw_webui crates/ironclaw_reborn_composition
@@ -538,18 +538,18 @@ git commit -m "test(attachments): cover cross-channel end to end flow"
 
 ### Steps
 
-- [ ] Search all changed production files for `.unwrap()`, `.expect()`, suspicious byte slicing, hardcoded temporary paths, tokens, provider URLs, and lost error causes.
-- [ ] Search all `crates/` for sibling prose-path inference and unsupported attachment branches.
-- [ ] Review the full diff for authorization, actor scope, limits, redaction, rollback, compatibility, and provider side-effect evidence.
-- [ ] Run `git diff --check`.
-- [ ] Run the repository-prescribed narrow test tiers from `docs/internal/testing-playbook.md`, including architecture, changed-package clippy, backend parity, frontend tests, and the cross-channel E2E.
-- [ ] Boot the production stack with the existing secret-safe local access bundle. Verify health and authenticate without printing bearer tokens.
-- [ ] WebUI live test: upload multiple files, read them, create a file, explicitly attach it, download the returned ref, and verify path-looking prose alone has no chip/file delivery.
-- [ ] Telegram live test: send one and multiple files, verify the durable refs and agent reads, then explicitly attach a generated file and verify the received document.
-- [ ] Before changing Slack scopes or reinstalling the Slack app, obtain explicit user confirmation for the external workspace mutation.
-- [ ] Slack live test after confirmed scope update: receive one and multiple files, verify atomic landing and reads, then explicitly attach a generated file and verify provider read-back and received file.
-- [ ] Re-run the negative live tests for oversize, missing file, mixed-validity batch, and prose-only path.
-- [ ] Mark this plan’s completed checkboxes and update the design status to `Implemented and verified` only after all three surfaces pass.
+- [x] Search all changed production files for `.unwrap()`, `.expect()`, suspicious byte slicing, hardcoded temporary paths, tokens, provider URLs, and lost error causes.
+- [x] Search all `crates/` for sibling prose-path inference and unsupported attachment branches.
+- [x] Review the full diff for authorization, actor scope, limits, redaction, rollback, compatibility, and provider side-effect evidence.
+- [x] Run `git diff --check`.
+- [x] Run the repository-prescribed narrow test tiers from `docs/internal/testing-playbook.md`, including architecture, changed-package clippy, backend parity, frontend tests, and the cross-channel E2E.
+- [x] Boot the production stack with the existing secret-safe local access bundle. Verify health and authenticate without printing bearer tokens.
+- [x] WebUI live test: upload multiple files, read them, create a file, explicitly attach it, download the returned ref, and verify path-looking prose alone has no chip/file delivery.
+- [x] Telegram live test: send one and multiple files, verify the durable refs and agent reads, then explicitly attach a generated file and verify the received document.
+- [x] Before changing Slack scopes or reinstalling the Slack app, obtain explicit user confirmation for the external workspace mutation.
+- [x] Slack live test after confirmed scope update: receive one and multiple files, verify atomic landing and reads, then explicitly attach a generated file and verify provider read-back and received file.
+- [x] Re-run the negative live tests for oversize, missing file, mixed-validity batch, and prose-only path.
+- [x] Mark this plan’s completed checkboxes and update the design status to `Implemented and verified` only after all three surfaces pass.
 - [ ] Fetch the PR branch and confirm the remote head is still an ancestor of the local commit stack. Do not force-push.
 - [ ] Push `HEAD` to `origin/codex/telegram-slack-attachments`.
 - [ ] Update PR #6364’s title/body so every changed layer, compatibility behavior, rollback plan, risks, and complete `Test Strategy` evidence are represented.
@@ -560,6 +560,44 @@ git commit -m "test(attachments): cover cross-channel end to end flow"
 git add docs/superpowers/specs/2026-07-29-generic-cross-channel-attachments-design.md docs/superpowers/plans/2026-07-29-generic-cross-channel-attachments.md
 git commit -m "docs: record cross-channel attachment verification"
 ```
+
+## Verification Record — 2026-07-30
+
+Deterministic coverage passed for the atomic filesystem/landing contract,
+reply-intent persistence and sealing, mediated attachment capability, complete
+transcript finalization, ref-driven delivery, Slack and Telegram adapters,
+WebUI handlers and frontend presentation, production composition, LibSQL,
+PostgreSQL, manifest parity, and architecture boundaries. The final Slack fix
+also passed:
+
+```bash
+cargo test -p ironclaw_slack_extension --all-features
+cargo clippy -p ironclaw_slack_extension --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_product --test outbound_delivery_contract --all-features
+cargo test -p ironclaw_architecture
+cargo fmt --all --check
+git diff --check
+```
+
+Live production-stack canaries passed with the shared local access bundle:
+
+- WebUI: authenticated multi-file upload, durable refs, model read/reference,
+  generated-file explicit attachment, exact download, structured history, and
+  prose-only negative behavior.
+- Telegram: single and multi-document ingress, durable ordered refs, model
+  read/reference, generated-document explicit attachment, exact received
+  bytes, and negative batch/limit behavior.
+- Slack: explicit operator authorization added `files:write`; one- and
+  two-file ingress passed; single-file, ordered two-file, and threaded outbound
+  delivery passed; every received file matched exact bytes and provider
+  metadata; path-looking prose produced no file; zero-byte upload rejection,
+  upload-stage failures, delayed destination evidence, and exhausted read-back
+  behavior are deterministic regressions.
+
+The live two-file Slack canary exposed and then verified the repair for two
+provider realities: multiple files must be completed as one ordered batch, and
+destination metadata can lag successful completion briefly. Provider
+completion is never replayed during evidence polling.
 
 ## Completion Evidence
 

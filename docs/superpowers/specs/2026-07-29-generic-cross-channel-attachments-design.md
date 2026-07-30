@@ -1,7 +1,7 @@
 # Generic Cross-Channel Attachments Design
 
 **Date:** 2026-07-29
-**Status:** Approved for implementation
+**Status:** Implemented and verified
 **Target:** PR #6364 (`codex/telegram-slack-attachments`)
 
 ## Summary
@@ -312,10 +312,20 @@ opaque Slack file ID. `fetch_attachment`:
 
 Outbound `OutboundPart::File` uses Slack's supported external upload sequence:
 
-1. `files.getUploadURLExternal`;
-2. bounded byte upload to the returned allowlisted Slack upload URL;
-3. `files.completeUploadExternal` with the resolved channel and thread;
-4. `files.info` read-back before reporting verified success.
+1. pre-validate the complete ordered file batch;
+2. call `files.getUploadURLExternal` and upload bounded bytes for every file
+   without sharing any of them;
+3. call `files.completeUploadExternal` once with the complete ordered file-ID
+   array plus the resolved channel and thread;
+4. perform bounded `files.info` read-back for every file before reporting
+   verified success.
+
+Only the read-back step is retried after Slack accepts completion. This covers
+the provider's short destination-indexing delay without replaying tickets,
+bytes, or completion. Exhausted read-back remains terminal so a file-only
+envelope cannot duplicate an already accepted provider side effect. Slack does
+not accept a zero-byte external-upload ticket, so that provider-specific
+narrowing fails before egress with an explicit permanent outcome.
 
 The channel manifest declares the exact API/upload hosts, methods, path
 prefixes, body limits, and bot credential handle needed by those calls. The
