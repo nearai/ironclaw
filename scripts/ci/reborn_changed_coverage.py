@@ -58,6 +58,12 @@ def _lcov_lines(lcov_text: str) -> dict[str, dict[int, int]]:
     return files
 
 
+def _crate_of(path: str) -> str:
+    """`crates/<crate>/src/...` -> `<crate>` (empty when the shape doesn't match)."""
+    parts = path.split("/")
+    return parts[1] if len(parts) > 2 and parts[0] == "crates" else ""
+
+
 def _is_exempt(
     path: str,
     exempt_modules: set[str],
@@ -100,7 +106,19 @@ def evaluate(
         and not _is_exempt(path, module_exemptions, crate_exemptions)
     }
     coverage = _lcov_lines(lcov_text)
-    missing_files = sorted(path for path in changed if path not in coverage)
+    # A changed file with no LCOV record is only a real gap when its CRATE was
+    # never measured (the run didn't build/instrument it — the vacuous-pass
+    # hazard this gate exists to catch). When the crate IS in the report but
+    # this file isn't, the file simply has no instrumentable code: a
+    # re-export-only `lib.rs`/`mod.rs` (`pub use` + `mod` lines) emits no
+    # counters, so llvm-cov cannot produce a record and no test could ever
+    # cover it. Failing those would make every re-export edit unmergeable.
+    measured_crates = {_crate_of(path) for path in coverage}
+    missing_files = sorted(
+        path
+        for path in changed
+        if path not in coverage and _crate_of(path) not in measured_crates
+    )
     instrumented: list[tuple[str, int, int]] = []
     for path, lines in sorted(changed.items()):
         for line_number in sorted(lines):
