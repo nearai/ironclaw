@@ -12,8 +12,10 @@ import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 // Match a broad Unicode candidate, including spaces, then let
 // `isValidWorkspaceFilePath` remain the authority for safety and bounds. The
 // lazy body stops at the first extension followed by prose/link punctuation.
+// A sentence-final period is a delimiter only when it is itself followed by a
+// delimiter or end-of-input, preserving compound extensions such as `.tar.gz`.
 const WORKSPACE_FILE_PATH =
-  /\/workspace\/[^\u0000-\u001f\u007f<>"'`?#[\]{}()%]*?\.[\p{L}\p{N}]+(?=$|[\s,;:!?()[\]{}<>"'])/gu;
+  /\/workspace\/[^\u0000-\u001f\u007f<>"'`?#[\]{}()%]*?\.[\p{L}\p{N}]+(?=$|[\s,;:!?()[\]{}<>"']|\.(?=$|[\s,;:!?()[\]{}<>"']))/gu;
 
 // Strip fenced (```…```) and inline (`…`) code spans. A path that the assistant
 // only *displays* in a shell snippet (`cat /workspace/.env`) must not become a
@@ -30,7 +32,7 @@ export function extractWorkspaceFilePaths(content) {
   const seen = new Set();
   const paths = [];
   for (const match of stripCodeSpans(content).matchAll(WORKSPACE_FILE_PATH)) {
-    // The regex ends at `\.[A-Za-z0-9]+`, so a match always terminates on an
+    // The regex ends at `\.[\p{L}\p{N}]+`, so a match always terminates on an
     // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
     // is never captured and needs no stripping here.
     const path = match[0];

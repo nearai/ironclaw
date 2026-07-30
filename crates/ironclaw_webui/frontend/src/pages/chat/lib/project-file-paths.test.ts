@@ -37,6 +37,15 @@ test("extracts Unicode workspace paths containing spaces", () => {
   );
 });
 
+test("extracts sentence-final paths without truncating compound extensions", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      "Generated /workspace/report.csv. Archived /workspace/build.tar.gz.",
+    ),
+    ["/workspace/report.csv", "/workspace/build.tar.gz"],
+  );
+});
+
 test("de-duplicates repeated references, first-seen order", () => {
   assert.deepEqual(
     extractWorkspaceFilePaths(
