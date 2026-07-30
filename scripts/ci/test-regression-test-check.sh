@@ -83,6 +83,16 @@ EOF
 expect_fail "tautological Python assertion" \
   "no meaningful changed regression assertion" run_check "$tautology"
 
+script_python="$TMP_ROOT/script-python"
+init_repo "$script_python"
+mkdir -p "$script_python/scripts"
+cat > "$script_python/scripts/test-regression.py" <<'EOF'
+def test_regression():
+    assert run_regression() == 42
+EOF
+expect_pass "repository-native scripts/test-*.py assertion" \
+  run_check "$script_python"
+
 self_comparison="$TMP_ROOT/self-comparison"
 init_repo "$self_comparison"
 mkdir -p "$self_comparison/tests"

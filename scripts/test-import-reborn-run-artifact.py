@@ -141,6 +141,27 @@ class RunArtifactImporterTest(unittest.TestCase):
 
         self.assertNotIn(unsafe, str(ctx.exception))
 
+    def test_candidate_rejects_unsafe_metadata_without_logging_raw_match(self) -> None:
+        unsafe = "sk-proj-METADATA_SECRET_MUST_NOT_APPEAR_1234567890"
+        artifact = self.artifact(
+            [
+                {"sequence": 1, "kind": "user", "content": "safe input"},
+                {"sequence": 2, "kind": "assistant", "content": "safe output"},
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "fixture candidate failed independent scrub verification"
+        ) as ctx:
+            MODULE.trace_candidate(
+                artifact,
+                None,
+                source_url=f"https://example.invalid/incidents/{unsafe}",
+                owning_journey="journey-a",
+            )
+
+        self.assertNotIn(unsafe, str(ctx.exception))
+
     @staticmethod
     def artifact(messages: list[dict[str, object]]) -> dict[str, object]:
         return {

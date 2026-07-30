@@ -29,6 +29,19 @@ UNSAFE_PATTERNS = (
 )
 
 
+def verify_scrubbed(value: Any, subject: str) -> None:
+    serialized = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    unsafe_categories = sorted(
+        label for label, pattern in UNSAFE_PATTERNS if pattern.search(serialized)
+    )
+    if unsafe_categories:
+        categories = ", ".join(unsafe_categories)
+        raise ValueError(
+            f"{subject} failed independent scrub verification ({categories}); "
+            "raw matches are intentionally omitted"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -59,24 +72,15 @@ def load_artifact(path: pathlib.Path) -> dict[str, Any]:
     try:
         artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"could not read artifact {path}: {error}") from error
+        raise ValueError(f"could not read artifact: {error}") from error
     if artifact.get("schema") not in {SCHEMA, THREAD_SCHEMA}:
-        raise ValueError(f"unsupported artifact schema: {artifact.get('schema')!r}")
+        raise ValueError("unsupported artifact schema")
     if artifact.get("redaction", {}).get("pipeline") != "deterministic-trace-redactor-v1":
         raise ValueError("artifact does not declare the required deterministic redaction pipeline")
     messages = artifact.get("messages")
     if not isinstance(messages, list) or not messages:
         raise ValueError("artifact has no replayable messages")
-    serialized = json.dumps(artifact, sort_keys=True, separators=(",", ":"))
-    unsafe_categories = sorted(
-        label for label, pattern in UNSAFE_PATTERNS if pattern.search(serialized)
-    )
-    if unsafe_categories:
-        categories = ", ".join(unsafe_categories)
-        raise ValueError(
-            f"artifact failed independent scrub verification ({categories}); "
-            "raw matches are intentionally omitted"
-        )
+    verify_scrubbed(artifact, "artifact")
     return artifact
 
 
@@ -283,7 +287,7 @@ def trace_candidate(
         review["skipped_unscoped_messages"] = skipped_unscoped
     if skipped_incomplete_runs:
         review["skipped_incomplete_runs"] = skipped_incomplete_runs
-    return {
+    candidate = {
         "_review": review,
         "_promotion": {
             "schema_version": PROMOTION_SCHEMA_VERSION,
@@ -306,6 +310,8 @@ def trace_candidate(
         "model_name": model_name,
         "turns": turns,
     }
+    verify_scrubbed(candidate, "fixture candidate")
+    return candidate
 
 
 def main() -> int:

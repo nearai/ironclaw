@@ -93,6 +93,7 @@ def is_test_path(path: str) -> bool:
         or "/tests/" in path
         or re.search(r"(^|/)test_[^/]*\.py$", path) is not None
         or re.search(r"(^|/)[^/]*_test\.py$", path) is not None
+        or re.search(r"^scripts/(ci/)?test-[^/]*\.py$", path) is not None
         or re.search(r"\.(test|spec)\.(ts|tsx|mts|js|jsx)$", name) is not None
         or re.search(r"^scripts/(ci/)?test-[^/]*\.sh$", path) is not None
     )
