@@ -95,6 +95,14 @@ class ChangedCoverageTests(unittest.TestCase):
                 self.assertTrue(report["passed"])
                 self.assertEqual(report["changed_product_files"], [])
 
+    def test_production_module_named_test_support_remains_gated(self):
+        path = "crates/ironclaw_example/src/test_support.rs"
+
+        report = evaluate(_diff(path, 1, 1), "", 90.0)
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["missing_files"], [path])
+
     def test_owned_exemption_removes_file_from_changed_code_gate(self):
         path = "crates/ironclaw_example/src/generated.rs"
 

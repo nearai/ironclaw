@@ -29,7 +29,7 @@ use crate::{
     PartDeliveryOutcome,
 };
 use async_trait::async_trait;
-use ironclaw_host_api::RestrictedEgress;
+use ironclaw_host_api::tool_adapter::RestrictedEgress;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,

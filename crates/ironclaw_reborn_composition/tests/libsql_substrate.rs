@@ -2,10 +2,9 @@ mod support;
 
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{
+use ironclaw_host_api::runtime_policy::{
     AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
-    RuntimeProfile, SecretMode,
-    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+    RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest,

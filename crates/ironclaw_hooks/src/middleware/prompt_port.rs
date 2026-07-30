@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted};
 use ironclaw_turns::LoopMessageRef;
 use ironclaw_turns::run_profile::{

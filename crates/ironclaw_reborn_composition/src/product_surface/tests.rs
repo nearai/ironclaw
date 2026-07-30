@@ -19,9 +19,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ActivityId, Blocked, ExtensionId, FailureKind, HostPath, HostPortCatalog, MountAlias,
-    MountGrant, MountPermissions, MountView, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, Resolution, TenantId, UserId, VirtualPath,
+    host_port::HostPortCatalog,
+    ids::{ActivityId, ExtensionId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
+    resolution::{Blocked, Resolution},
+    result_meta::FailureKind,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
@@ -389,14 +393,15 @@ async fn runtime_product_surface_wires_lifecycle_owner_identity() {
         .product_surface(None)
         .expect("product surface build");
 
-    let surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), caller("bob"));
+    let surface =
+        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), caller("bob"));
     let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
         .invoke_on(
             &surface,
             ironclaw_product::RebornOperatorServiceLifecycleRequest {
                 action: ironclaw_product::RebornOperatorServiceLifecycleAction::Status,
             },
-            ironclaw_host_api::ActivityId::new(),
+            ironclaw_host_api::ids::ActivityId::new(),
         )
         .await
         .expect_err("non-owner caller is rejected before lifecycle dispatch");
@@ -757,7 +762,8 @@ async fn invoke_lifecycle_product_capability(
     capability: ProductCapabilityDescriptor,
     input: serde_json::Value,
 ) -> Result<Resolution, ProductSurfaceError> {
-    let surface = ironclaw_host_api::BoundProductSurface::new(Arc::clone(bundle), caller);
+    let surface =
+        ironclaw_host_api::product_surface::BoundProductSurface::new(Arc::clone(bundle), caller);
     capability
         .invoke_on(&surface, input, ActivityId::new())
         .await
@@ -825,7 +831,7 @@ fn caller_in_tenant(tenant_id: &str, user_id: &str) -> ProductSurfaceCaller {
 
 fn scoped_skill_mounts(
     scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     let user_skills = format!(
         "/projects/tenants/{}/users/{}/skills",
         scope.tenant_id.as_str(),
@@ -916,7 +922,10 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
-                &ironclaw_host_api::BoundProductSurface::new(Arc::clone(&bundle), caller.clone()),
+                &ironclaw_host_api::product_surface::BoundProductSurface::new(
+                    Arc::clone(&bundle),
+                    caller.clone(),
+                ),
                 serde_json::json!({}),
                 None,
             )

@@ -32,7 +32,7 @@ use crate::{
     CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackInput,
     OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
 };
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 
 /// Deterministic 64-hex digest for conformance hash newtypes.
 fn digest(tag: &str) -> String {

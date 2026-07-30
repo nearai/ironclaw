@@ -6,8 +6,11 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ChannelConnectionStrategy, ExtensionId, HostPortCatalog,
-    VendorId, VirtualPath,
+    channel::ChannelConnectionStrategy,
+    host_port::HostPortCatalog,
+    ids::{CapabilityId, ExtensionId, VendorId},
+    path::VirtualPath,
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
@@ -112,7 +115,7 @@ pub struct AvailableExtensionPackage {
     /// The channel surface's declared `[channel.presentation]` (markdown +
     /// message cap), cached at construction like `channel_directions`. Fed into
     /// prompt construction via the lifecycle summary (OUT-11).
-    pub channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
+    pub channel_presentation: Option<ironclaw_host_api::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
     /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
@@ -943,7 +946,7 @@ fn channel_directions_from_manifest_record(
 /// `channel_directions` and fed into prompt construction (OUT-11).
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
-) -> Option<ironclaw_host_api::ChannelPresentation> {
+) -> Option<ironclaw_host_api::channel::ChannelPresentation> {
     record
         .resolved()
         .channel
@@ -1223,9 +1226,11 @@ mod tests {
         FilesystemOperation, InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, OriginGatePolicy, PermissionMode,
-        RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-        UNGATED_LOOP_RUN_CAPABILITIES,
+        capability::{
+            EffectKind, OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
+            RuntimeCredentialRequirementSource, UNGATED_LOOP_RUN_CAPABILITIES,
+        },
+        host_port::HostPortCatalog,
     };
 
     use super::*;
@@ -1791,7 +1796,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
         assert_eq!(template.runtime_credentials.len(), 1);
         assert_eq!(
             template.runtime_credentials[0].handle,
-            ironclaw_host_api::SecretHandle::new("llm_nearai_api_key").unwrap()
+            ironclaw_host_api::ids::SecretHandle::new("llm_nearai_api_key").unwrap()
         );
     }
 
@@ -2127,6 +2132,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             Some(40_000),
             "slack declares max_message_chars = 40000"
         );
+        assert_eq!(
+            presentation.command_prefix.as_deref(),
+            Some("/ironclaw "),
+            "slack declares a command_prefix so channel help renders /ironclaw-namespaced"
+        );
         let directions = summary
             .channel_directions
             .expect("unified slack summary carries channel directions");
@@ -2164,6 +2174,17 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .commands,
             ["model", "status"],
             "shipping Telegram exposes exactly the model and status commands"
+        );
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("telegram channel descriptor")
+                .presentation
+                .command_prefix,
+            None,
+            "telegram stays prefix-free; its channel help renders bare /model, /status"
         );
     }
 

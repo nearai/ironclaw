@@ -4,7 +4,7 @@ use ironclaw_extensions::{
     ExtensionPackage, ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry,
     package_with_discovered_hosted_mcp_tools,
 };
-use ironclaw_host_api::{ResourceScope, RuntimeHttpEgress};
+use ironclaw_host_api::{http::RuntimeHttpEgress, resource::ResourceScope};
 use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHttpAdapter};
 
 use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};

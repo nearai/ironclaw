@@ -13,7 +13,7 @@
 //! provider-specific claim shapes.
 
 use async_trait::async_trait;
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use thiserror::Error;
 
 use super::profile::OAuthUserProfile;

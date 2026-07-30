@@ -4,7 +4,7 @@ use ironclaw_event_projections::{
     EventCursor, EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest,
     ProjectionScope, ProjectionSnapshot,
 };
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_outbound::{
     OutboundError, OutboundPushCandidate, OutboundPushTargetRequest, OutboundStateStorePort,
 };

@@ -140,12 +140,12 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
     let requirement = &state.credential_requirements[0];
     assert_eq!(
         requirement.provider,
-        ironclaw_host_api::VendorId::new("github").expect("valid provider id"),
+        ironclaw_host_api::ids::VendorId::new("github").expect("valid provider id"),
         "provider must be populated so AuthPromptView.provider is non-null"
     );
     assert_eq!(
         requirement.setup,
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         "expected the ManualToken setup GithubHarnessAuthorizer declares -- a \
          wrong setup kind would route the WebUI to the wrong re-auth UI"
     );

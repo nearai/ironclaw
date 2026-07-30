@@ -17,10 +17,17 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, InMemoryBackend, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    Action, CapabilityDescriptor, CapabilityId, CredentialStageError, Decision, ExecutionContext,
-    ExtensionHostAssemblyConfig, FailureKind, MountAlias, MountGrant, MountPermissions, MountView,
-    Obligation, Obligations, Principal, ResourceEstimate, ResourceScope, ResourceUsage, VendorId,
-    VirtualPath,
+    action::Action,
+    capability::CapabilityDescriptor,
+    decision::{Decision, Obligation, Obligations},
+    dispatch::CredentialStageError,
+    extension::ExtensionHostAssemblyConfig,
+    ids::{CapabilityId, VendorId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::FailureKind,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
@@ -146,7 +153,7 @@ async fn build_lifecycle_test_services_over_backing(
     filesystem: Arc<FaultInjecting<InMemoryBackend>>,
     secret_store: Arc<dyn SecretStorePort>,
 ) -> ExtensionLifecycleTestServices {
-    let owner_user_id = ironclaw_host_api::UserId::new(owner_id).expect("valid owner id");
+    let owner_user_id = ironclaw_host_api::ids::UserId::new(owner_id).expect("valid owner id");
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let auth_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), |scope| {
         MountView::new(vec![MountGrant::new(
@@ -363,7 +370,7 @@ async fn build_lifecycle_test_services_over_backing(
         .with_persistent_approval_policies(persistent_approval_policies);
 
     let skill_management = ironclaw_skills::build_scoped_skill_management_port(
-        ironclaw_host_api::UserId::new(owner_id).expect("valid owner id"),
+        ironclaw_host_api::ids::UserId::new(owner_id).expect("valid owner id"),
         Arc::clone(&filesystem),
     );
     let lifecycle_service =
@@ -482,16 +489,16 @@ pub fn lifecycle_product_context(
 
 pub fn webui_gate_resource_scope_for_owner(owner_id: &str) -> ResourceScope {
     ResourceScope {
-        tenant_id: ironclaw_host_api::TenantId::new("reborn-cli").expect("tenant"),
-        user_id: ironclaw_host_api::UserId::new(owner_id).expect("user"),
-        agent_id: Some(ironclaw_host_api::AgentId::new("reborn-cli-agent").expect("agent")),
+        tenant_id: ironclaw_host_api::ids::TenantId::new("reborn-cli").expect("tenant"),
+        user_id: ironclaw_host_api::ids::UserId::new(owner_id).expect("user"),
+        agent_id: Some(ironclaw_host_api::ids::AgentId::new("reborn-cli-agent").expect("agent")),
         project_id: None,
         mission_id: None,
         thread_id: Some(
-            ironclaw_host_api::ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7")
+            ironclaw_host_api::ids::ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7")
                 .expect("thread"),
         ),
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 
@@ -509,7 +516,7 @@ fn one_shot_lease_approval_from_context(
         .clone();
     LeaseApproval {
         issued_by: Principal::HostRuntime,
-        constraints: ironclaw_host_api::GrantConstraints {
+        constraints: ironclaw_host_api::capability::GrantConstraints {
             max_invocations: Some(1),
             ..constraints
         },
@@ -669,12 +676,12 @@ impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer
             .filter(|credential| credential.required)
         {
             match &credential.source {
-                ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle => {
+                ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle => {
                     obligations.push(Obligation::InjectSecretOnce {
                         handle: credential.handle.clone(),
                     });
                 }
-                ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
+                ironclaw_host_api::capability::RuntimeCredentialRequirementSource::ProductAuthAccount {
                     provider,
                     setup,
                 } => obligations.push(Obligation::InjectCredentialAccountOnce {
@@ -695,7 +702,7 @@ impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer
 
 fn register_bundled_first_party_handlers_for_lifecycle_tests(
     registry: &mut FirstPartyCapabilityRegistry,
-) -> Result<(), ironclaw_host_api::HostApiError> {
+) -> Result<(), ironclaw_host_api::error::HostApiError> {
     let handler = Arc::new(NoopFirstPartyHandler);
     registry.insert_handler(
         CapabilityId::new(ironclaw_first_party_extensions::FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID)?,

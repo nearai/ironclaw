@@ -5,7 +5,7 @@ use super::*;
 /// closed when no provider is registered or the id is unknown/foreign.
 pub(super) async fn validate_trigger_delivery_target_against_registry(
     registry: &crate::outbound::MutableOutboundDeliveryTargetRegistry,
-    scope: &ironclaw_host_api::ResourceScope,
+    scope: &ironclaw_host_api::resource::ResourceScope,
     target: &ironclaw_triggers::TriggerDeliveryTargetId,
 ) -> Result<(), TriggerError> {
     let invalid = |reason: String| TriggerError::InvalidRecord {
@@ -90,7 +90,7 @@ pub(super) struct TriggerCreatorPairingHook {
 impl TriggerCreateHook for TriggerCreatorPairingHook {
     async fn resolve_implicit_delivery_target(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         run_id: Option<RunId>,
     ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
         resolve_current_run_delivery_target(
@@ -104,7 +104,7 @@ impl TriggerCreateHook for TriggerCreatorPairingHook {
 
     async fn validate_delivery_target(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         target: &ironclaw_triggers::TriggerDeliveryTargetId,
     ) -> Result<(), TriggerError> {
         validate_trigger_delivery_target_against_registry(

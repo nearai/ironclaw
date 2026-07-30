@@ -1,6 +1,8 @@
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, EffectKind, PermissionMode,
-    RuntimeKind,
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    ids::CapabilityId,
+    runtime::RuntimeKind,
 };
 use serde_json::Value;
 
@@ -164,10 +166,10 @@ fn hosted_mcp_capability_template(
 
 struct HostedMcpCapabilityTemplate {
     provider_declares_external_write: bool,
-    required_host_ports: Vec<ironclaw_host_api::HostPortId>,
-    runtime_credentials: Vec<ironclaw_host_api::RuntimeCredentialRequirement>,
-    resource_profile: Option<ironclaw_host_api::ResourceProfile>,
-    origin_gate_matrix: Option<ironclaw_host_api::OriginGateMatrix>,
+    required_host_ports: Vec<ironclaw_host_api::host_port::HostPortId>,
+    runtime_credentials: Vec<ironclaw_host_api::capability::RuntimeCredentialRequirement>,
+    resource_profile: Option<ironclaw_host_api::resource::ResourceProfile>,
+    origin_gate_matrix: Option<ironclaw_host_api::capability::OriginGateMatrix>,
 }
 
 fn discovered_capability_manifest(
@@ -255,7 +257,7 @@ fn invalid_hosted_mcp_manifest(reason: String) -> ExtensionError {
 mod tests {
     use super::*;
     use crate::{ExtensionManifest, HostPortCatalog, ManifestSource};
-    use ironclaw_host_api::{EffectKind, RuntimeKind, VirtualPath};
+    use ironclaw_host_api::{capability::EffectKind, path::VirtualPath, runtime::RuntimeKind};
 
     const NOTION_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v2"

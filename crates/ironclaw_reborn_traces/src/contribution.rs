@@ -28,7 +28,7 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::redaction::redact_sensitive_json;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_llm::recording::{TraceFile, TraceResponse};
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";

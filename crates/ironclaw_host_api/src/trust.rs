@@ -5,7 +5,7 @@
 //! and [`RequestedTrustClass`]; the host policy engine in `ironclaw_trust`
 //! consumes them and produces an effective trust decision.
 //!
-//! The split is deliberate: [`crate::TrustClass`] (in `runtime`) is the
+//! The split is deliberate: [`crate::runtime::TrustClass`] (in `runtime`) is the
 //! *effective* ceiling that downstream authorization consumes, and its
 //! privileged variants (`FirstParty`, `System`) reject `serde` deserialization.
 //! [`RequestedTrustClass`] is the *declared* counterpart — it can be safely
@@ -27,13 +27,13 @@
 //!   identity reaches the extension registry / `CapabilityDescriptor.provider`,
 //!   `PackageId` when it reaches the trust policy. The two names describe
 //!   the same value at different layers.
-//! - [`crate::CapabilityDescriptor::trust_ceiling`] mirrors the manifest's
+//! - [`crate::capability::CapabilityDescriptor::trust_ceiling`] mirrors the manifest's
 //!   declared trust as `TrustClass` — it is *declarative metadata*, not the
 //!   policy-validated effective ceiling. The privileged variants of
 //!   `TrustClass` reject deserialization, so this field can only carry
 //!   `Sandbox` / `UserTrusted` from manifest input. Effective trust comes
 //!   from `ironclaw_trust::TrustPolicy::evaluate` and is attached to
-//!   [`crate::ExecutionContext::trust`] at dispatch time.
+//!   [`crate::scope::ExecutionContext::trust`] at dispatch time.
 //!
 //! See `ironclaw_trust::TrustPolicy` for the engine that bridges request to
 //! effective trust, `crates/ironclaw_trust/CONTRACT.md` for the full
@@ -138,7 +138,7 @@ pub enum PackageSource {
 /// package with the same id are distinct trust subjects.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PackageIdentity {
-    pub package_id: crate::PackageId,
+    pub package_id: crate::ids::PackageId,
     pub source: PackageSource,
     /// Hex-encoded sha256 of the artifact bytes when the source supplies one.
     pub digest: Option<String>,
@@ -149,7 +149,7 @@ pub struct PackageIdentity {
 
 impl PackageIdentity {
     pub fn new(
-        package_id: crate::PackageId,
+        package_id: crate::ids::PackageId,
         source: PackageSource,
         digest: Option<String>,
         signer: Option<String>,

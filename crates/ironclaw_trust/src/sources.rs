@@ -37,7 +37,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use ironclaw_host_api::{EffectKind, PackageId, PackageSource, ResourceCeiling};
+use ironclaw_host_api::{
+    capability::EffectKind, ids::PackageId, resource::ResourceCeiling, trust::PackageSource,
+};
 
 use crate::decision::{EffectiveTrustClass, HostTrustAssignment, TrustProvenance};
 use crate::error::TrustError;

@@ -1,7 +1,7 @@
 //! Coding-read domain tools profile (`coding_read_tools`) — reference example
 //! of the `ToolsProfile` pattern (see `harness/options.rs`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions};
+use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountPermissions};
 use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};

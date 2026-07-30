@@ -1,7 +1,8 @@
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, RuntimeCredentialRequirement,
+    action::NetworkTargetPattern,
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},
+    ids::{CapabilityId, ExtensionId},
 };
 
 #[derive(Debug, Clone, PartialEq)]

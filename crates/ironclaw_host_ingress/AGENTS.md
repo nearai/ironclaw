@@ -3,7 +3,7 @@
 ## What This Crate Owns
 
 - Host HTTP route mount carriers that bind concrete Axum routers to
-  `ironclaw_host_api::IngressRouteDescriptor` policy descriptors.
+  `ironclaw_host_api::ingress::IngressRouteDescriptor` policy descriptors.
 - Public/protected/split route mount structs and public-route drain hooks used
   by host ingress assembly.
 

@@ -6,12 +6,25 @@ use ironclaw_authorization::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    ActivityId, Actor, ApprovalRequestId, AuthorizeResult, Authorized, Blocked,
-    CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef, DispatchError,
-    EffectiveRuntimePolicy, ExecutionContext, GateRef, GateWaypoint, Invocation,
-    InvocationFingerprint, InvocationId, Obligation, PermissionMode, ProcessAuthorizedContinuation,
-    ProcessId, ResourceEstimate, ResourceScope, RuntimeKind, RuntimeLane, Timestamp,
+    Timestamp,
+    approval::InvocationFingerprint,
+    authorized::{
+        AuthorizeResult, Authorized, CapabilityAuthorizer, ProcessAuthorizedContinuation,
+    },
+    capability::{CapabilityDescriptor, PermissionMode},
+    decision::{Decision, DenyReason, Obligation},
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
+    ids::{
+        ActivityId, ApprovalRequestId, CapabilityGrantId, CapabilityId, DenyRef, GateRef,
+        InvocationId, ProcessId,
+    },
+    invocation::{Actor, Invocation},
+    lane::RuntimeLane,
+    resolution::{Blocked, GateWaypoint},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    scope::ExecutionContext,
 };
 use ironclaw_processes::{
     ProcessInvocationError, ProcessInvocationStart, ProcessInvocationStatePort,
@@ -3217,7 +3230,7 @@ where
         &self,
         phase: CapabilityObligationPhase,
         context: &ExecutionContext,
-        capability_id: &ironclaw_host_api::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
         estimate: &ResourceEstimate,
         obligations: Vec<Obligation>,
     ) -> Result<CapabilityObligationOutcome, CapabilityInvocationError> {
@@ -3255,7 +3268,7 @@ where
         &self,
         phase: CapabilityObligationPhase,
         context: &ExecutionContext,
-        capability_id: &ironclaw_host_api::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
         estimate: &ResourceEstimate,
         obligations: &[Obligation],
         dispatch: &CapabilityDispatchResult,
@@ -3290,7 +3303,7 @@ where
         &self,
         phase: CapabilityObligationPhase,
         context: &ExecutionContext,
-        capability_id: &ironclaw_host_api::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
         estimate: &ResourceEstimate,
         obligations: &[Obligation],
         outcome: &CapabilityObligationOutcome,
@@ -3533,7 +3546,7 @@ fn is_block_auth_transition(error: &CapabilityInvocationError) -> bool {
 }
 
 fn prepare_obligation_error_to_invocation(
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
     match error {
@@ -3558,7 +3571,7 @@ fn prepare_obligation_error_to_invocation(
 }
 
 fn completion_obligation_error_to_invocation(
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
     match error {
@@ -3646,8 +3659,9 @@ fn enrich_dispatch_error_credential_requirements(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, Obligation, RuntimeCredentialAccountSetup, SecretHandle,
-        VendorId,
+        capability::RuntimeCredentialAccountSetup,
+        decision::Obligation,
+        ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
     };
 
     fn auth_required_empty(cap: &str) -> DispatchError {
@@ -3667,7 +3681,7 @@ mod tests {
     }
 
     fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
-        use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+        use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
         DispatchError::AuthRequired {
             capability: CapabilityId::new(cap).unwrap(),
             required_secrets: Vec::new(),
@@ -3838,7 +3852,7 @@ mod tests {
             _trust_decision: &TrustDecision,
         ) -> Decision {
             Decision::Allow {
-                obligations: ironclaw_host_api::Obligations::empty(),
+                obligations: ironclaw_host_api::decision::Obligations::empty(),
             }
         }
     }
@@ -3862,7 +3876,7 @@ mod tests {
             _capability_id: &CapabilityId,
             _context: &ExecutionContext,
             _action: crate::ports::PolicyAction,
-        ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+        ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
             Vec::new()
         }
     }
@@ -3889,10 +3903,13 @@ mod tests {
             capability_id: &CapabilityId,
             context: &ExecutionContext,
             _action: crate::ports::PolicyAction,
-        ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+        ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
             use ironclaw_host_api::{
-                CapabilityGrant, CapabilityGrantId, GrantConstraints, MountView, NetworkPolicy,
-                Principal,
+                action::NetworkPolicy,
+                capability::{CapabilityGrant, GrantConstraints},
+                ids::CapabilityGrantId,
+                mount::MountView,
+                scope::Principal,
             };
             vec![CapabilityGrant {
                 id: CapabilityGrantId::new(),
@@ -3947,7 +3964,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
             HostApiContractRegistry, ManifestSource,
         };
-        use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+        use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
         let mut contracts = HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
@@ -3972,7 +3989,12 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     }
 
     fn allow_request() -> InvocationInput {
-        use ironclaw_host_api::{CapabilitySet, MountView, RuntimeKind, TrustClass, UserId};
+        use ironclaw_host_api::{
+            capability::CapabilitySet,
+            ids::UserId,
+            mount::MountView,
+            runtime::{RuntimeKind, TrustClass},
+        };
         let mut context = ExecutionContext::local_default(
             UserId::new("user").unwrap(),
             ExtensionId::new("caller").unwrap(),
@@ -3985,8 +4007,8 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         // A membrane-sealed actor and a real ingress origin are what make the
         // invocation seal-able. This models a direct product-surface action.
         context.authenticated_actor_user_id = Some(UserId::new("actor").unwrap());
-        context.origin = Some(ironclaw_host_api::InvocationOrigin::Product(
-            ironclaw_host_api::ProductKind::new("settings").unwrap(),
+        context.origin = Some(ironclaw_host_api::invocation::InvocationOrigin::Product(
+            ironclaw_host_api::ids::ProductKind::new("settings").unwrap(),
         ));
         InvocationInput {
             context,
@@ -4048,7 +4070,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     // the bounded default TTL (§5.3.2).
     #[tokio::test]
     async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
-        use ironclaw_host_api::UserId;
+        use ironclaw_host_api::ids::UserId;
 
         let registry = echo_registry();
         // Never dispatched on this authorize-only path; errors if it ever is.
@@ -4094,8 +4116,8 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         );
         assert_eq!(
             invocation.origin,
-            ironclaw_host_api::InvocationOrigin::Product(
-                ironclaw_host_api::ProductKind::new("settings").unwrap()
+            ironclaw_host_api::invocation::InvocationOrigin::Product(
+                ironclaw_host_api::ids::ProductKind::new("settings").unwrap()
             )
         );
         assert_eq!(invocation.input, serde_json::json!({"message": "hi"}));
@@ -4154,7 +4176,10 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 
     #[tokio::test]
     async fn authorize_seals_system_actor_and_real_origin_across_ingresses() {
-        use ironclaw_host_api::{InvocationOrigin, ProductKind, RoutineId, RunId, UserId};
+        use ironclaw_host_api::{
+            ids::{ProductKind, RoutineId, RunId, UserId},
+            invocation::InvocationOrigin,
+        };
 
         let registry = echo_registry();
         // Never dispatched on this authorize-only path; errors if it ever is.
@@ -4447,13 +4472,13 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
                     runtime: RuntimeKind::Wasm,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
-                    usage: ironclaw_host_api::ResourceUsage::default(),
-                    receipt: ironclaw_host_api::ResourceReceipt {
-                        id: ironclaw_host_api::ResourceReservationId::new(),
+                    usage: ironclaw_host_api::resource::ResourceUsage::default(),
+                    receipt: ironclaw_host_api::resource::ResourceReceipt {
+                        id: ironclaw_host_api::ids::ResourceReservationId::new(),
                         scope: request.invocation.scope.clone(),
-                        status: ironclaw_host_api::ReservationStatus::Reconciled,
+                        status: ironclaw_host_api::resource::ReservationStatus::Reconciled,
                         estimate: request.invocation.estimate.clone(),
-                        actual: Some(ironclaw_host_api::ResourceUsage::default()),
+                        actual: Some(ironclaw_host_api::resource::ResourceUsage::default()),
                     },
                 })
             });
@@ -4487,15 +4512,15 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let leases = PendingClaimLeaseStore {
             lease: CapabilityLease {
                 scope: scope.clone(),
-                grant: ironclaw_host_api::CapabilityGrant {
+                grant: ironclaw_host_api::capability::CapabilityGrant {
                     id: grant_id,
                     capability: capability_id.clone(),
-                    grantee: ironclaw_host_api::Principal::User(scope.user_id.clone()),
-                    issued_by: ironclaw_host_api::Principal::HostRuntime,
-                    constraints: ironclaw_host_api::GrantConstraints {
+                    grantee: ironclaw_host_api::scope::Principal::User(scope.user_id.clone()),
+                    issued_by: ironclaw_host_api::scope::Principal::HostRuntime,
+                    constraints: ironclaw_host_api::capability::GrantConstraints {
                         allowed_effects: Vec::new(),
-                        mounts: ironclaw_host_api::MountView::default(),
-                        network: ironclaw_host_api::NetworkPolicy::default(),
+                        mounts: ironclaw_host_api::mount::MountView::default(),
+                        network: ironclaw_host_api::action::NetworkPolicy::default(),
                         secrets: Vec::new(),
                         resource_ceiling: None,
                         expires_at: Some(lease_expiry),

@@ -63,8 +63,10 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        ResourceScope, SecretHandle, UserId, VirtualPath,
+        ids::{ExtensionId, InvocationId, SecretHandle, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use ironclaw_reborn_composition::{
         RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
@@ -106,7 +108,7 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,
-            user_id: &ironclaw_host_api::UserId,
+            user_id: &ironclaw_host_api::ids::UserId,
             provider_user_id_prefix: Option<&str>,
         ) -> Result<usize, RebornUserIdentityBindingError> {
             let mut bindings = self.bindings.lock().unwrap();

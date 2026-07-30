@@ -5,7 +5,7 @@
 //! the product surface that produced the command.
 
 use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
-use ironclaw_host_api::{HostApiError, RegisterHostedMcpRequest};
+use ironclaw_host_api::{error::HostApiError, hosted_mcp::RegisterHostedMcpRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -136,6 +136,22 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    declared_command_help_text_with_prefix(commands, None)
+}
+
+/// Same rendering as [`declared_command_help_text`], but renders each name
+/// as `{prefix}{name}` instead of the bare `/{name}` form when `prefix` is
+/// set — the manifest-declared `[channel.presentation].command_prefix` a
+/// channel adapter whose native command namespace requires an app-scoped
+/// dispatcher prefix (e.g. a `/ironclaw` slash dispatcher) uses to
+/// namespace its commands. `prefix` is rendered exactly as declared,
+/// including any trailing separator (a manifest `command_prefix` of
+/// `"/ironclaw "` plus `model` yields `/ironclaw model`).
+pub fn declared_command_help_text_with_prefix<I, S>(commands: I, prefix: Option<&str>) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let names = commands
         .into_iter()
         .map(|command| command.as_ref().to_string())
@@ -145,7 +161,10 @@ where
     }
     let names = names
         .into_iter()
-        .map(|name| format!("/{name}"))
+        .map(|name| match prefix {
+            Some(prefix) => format!("{prefix}{name}"),
+            None => format!("/{name}"),
+        })
         .collect::<Vec<_>>();
     format!("Available commands:\n{}", names.join("\n"))
 }

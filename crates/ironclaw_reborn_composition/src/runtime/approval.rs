@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_host_api::{EffectKind, MountView, Principal};
+use ironclaw_host_api::{capability::EffectKind, mount::MountView, scope::Principal};
 use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
     ProductSurfaceFailure,
@@ -223,9 +223,14 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_host_api::{
-        Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-        ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
-        TenantId, ThreadId, UserId,
+        action::Action,
+        approval::ApprovalRequest,
+        capability::{EffectKind, PermissionMode},
+        ids::{
+            ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+            SecretHandle, TenantId, ThreadId, UserId,
+        },
+        resource::{ResourceEstimate, ResourceScope},
     };
     use ironclaw_product::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
@@ -308,16 +313,16 @@ mod tests {
                     EffectKind::UseSecret,
                 ],
                 default_permission: PermissionMode::Allow,
-                runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
+                runtime_credentials: vec![ironclaw_host_api::capability::RuntimeCredentialRequirement {
                     handle: secret.clone(),
-                    source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
+                    source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
                     provider_scopes: Vec::new(),
-                    audience: ironclaw_host_api::NetworkTargetPattern {
-                        scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                    audience: ironclaw_host_api::action::NetworkTargetPattern {
+                        scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
                         host_pattern: "gmail.googleapis.com".to_string(),
                         port: None,
                     },
-                    target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                    target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
                         name: "authorization".to_string(),
                         prefix: Some("Bearer ".to_string()),
                     },

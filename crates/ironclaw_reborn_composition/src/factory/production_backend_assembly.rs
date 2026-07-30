@@ -527,11 +527,12 @@ pub(super) async fn build_backend_production(
             Arc::clone(&stores.filesystem),
             Arc::clone(&stores.secret_credentials.crypto),
         ));
-    let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("invalid project agent id: {error}"),
-        }
-    })?;
+    let project_agent_id =
+        ironclaw_host_api::ids::AgentId::new("reborn-projects").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("invalid project agent id: {error}"),
+            }
+        })?;
     let project_repository: Arc<dyn ProjectRepository> =
         Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
             Arc::clone(&stores.scoped_filesystem),
@@ -825,7 +826,7 @@ pub(super) async fn build_backend_production(
     let mut admin_configuration_consumers = std::collections::BTreeMap::new();
     for usage in &admin_configuration_uses {
         let extension_id =
-            ironclaw_host_api::ExtensionId::new(usage.package_id.clone()).map_err(|error| {
+            ironclaw_host_api::ids::ExtensionId::new(usage.package_id.clone()).map_err(|error| {
                 RebornBuildError::InvalidConfig {
                     reason: format!(
                         "administrator configuration consumer `{}` has an invalid extension id: {error}",

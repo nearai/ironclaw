@@ -10,7 +10,9 @@ use ironclaw_capabilities::{
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{
-    ActivityId, Actor, Authorized, CorrelationId, Invocation, InvocationOrigin, ProductKind,
+    authorized::Authorized,
+    ids::{ActivityId, CorrelationId, ProductKind},
+    invocation::{Actor, Invocation, InvocationOrigin},
 };
 use ironclaw_resources::{ResourceLimits, ResourceReservation};
 

@@ -7,7 +7,9 @@ use crate::{
 use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_approvals::ApprovalStoreError;
 use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+    action::{Action, NetworkMethod, NetworkScheme},
+    approval::ApprovalRequest,
+    ids::{InvocationId, UserId},
 };
 use ironclaw_turns::{GateRef, TurnActor, TurnScope};
 use thiserror::Error;

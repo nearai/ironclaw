@@ -11,8 +11,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 use crate::{
-    CapabilitySurfaceKind, ChannelPresentation, HostApiError, InstallationState,
-    LifecyclePublicState, RegisterHostedMcpRequest,
+    channel::ChannelPresentation,
+    error::HostApiError,
+    hosted_mcp::RegisterHostedMcpRequest,
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
 };
 
 pub const LIFECYCLE_ID_MAX_BYTES: usize = 256;

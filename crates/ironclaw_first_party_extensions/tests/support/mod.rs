@@ -15,8 +15,12 @@ use ironclaw_first_party_extensions::{
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, UserId,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
 };
 use serde_json::json;
 

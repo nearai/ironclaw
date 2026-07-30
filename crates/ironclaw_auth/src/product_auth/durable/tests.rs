@@ -3,8 +3,11 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ResourceScope, SecretHandle, ThreadId, UserId, VendorId, VirtualPath,
+    error::HostApiError,
+    ids::{ExtensionId, InvocationId, SecretHandle, ThreadId, UserId, VendorId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use secrecy::SecretString;
@@ -34,7 +37,7 @@ fn test_scope() -> AuthProductScope {
 }
 
 fn test_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
-    let mounts = ironclaw_host_api::MountView::new(vec![MountGrant::new(
+    let mounts = ironclaw_host_api::mount::MountView::new(vec![MountGrant::new(
         MountAlias::new("/secrets").unwrap(),
         VirtualPath::new("/tenants/test/users/alice/secrets").unwrap(),
         MountPermissions::read_write_list_delete(),
@@ -219,7 +222,9 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                scopes: Vec::new(),
+            },
             Vec::new(),
         ))
         .await
@@ -262,7 +267,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
     let request = runtime_credential_account_selection_request(
         &runtime_scope.resource,
         &VendorId::new("google").unwrap(),
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         &[],
         &ExtensionId::new("google-calendar").unwrap(),
     )
@@ -884,7 +889,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_session_account_roo
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["drive.readonly".to_string()],
             },
             vec![ProviderScope::new("drive.readonly").unwrap()],
@@ -931,7 +936,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_account_records_per
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["drive.readonly".to_string()],
             },
             vec![ProviderScope::new("drive.readonly").unwrap()],
@@ -1110,7 +1115,7 @@ async fn filesystem_manual_token_submit_allows_only_one_concurrent_consumer() {
 fn fs_error_maps_version_mismatch_to_backend_conflict() {
     use super::paths::fs_error;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-    use ironclaw_host_api::VirtualPath;
+    use ironclaw_host_api::path::VirtualPath;
 
     let version_mismatch = FilesystemError::VersionMismatch {
         path: VirtualPath::new("/secrets/test").unwrap(),
@@ -1453,7 +1458,7 @@ async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_differ
 #[tokio::test]
 async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_uninstall() {
     use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let concrete_secret_store = Arc::new(SecretStore::ephemeral());
@@ -1564,7 +1569,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
 #[tokio::test]
 async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
     use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let concrete_secret_store = Arc::new(SecretStore::ephemeral());
@@ -2150,7 +2155,8 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
     let mut reauth_resource = setup_scope.resource.clone();
     reauth_resource.invocation_id = InvocationId::new();
     reauth_resource.thread_id = Some(ThreadId::new("thread-reauth").unwrap());
-    reauth_resource.mission_id = Some(ironclaw_host_api::MissionId::new("mission-reauth").unwrap());
+    reauth_resource.mission_id =
+        Some(ironclaw_host_api::ids::MissionId::new("mission-reauth").unwrap());
     let reauth_scope = AuthProductScope::new(reauth_resource, setup_scope.surface);
 
     let flow2 = service
@@ -2434,7 +2440,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
 #[tokio::test]
 async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
     use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
@@ -3353,7 +3359,9 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
 /// Builds an `AuthProductScope` for `resource` using the Web surface (the
 /// surface used by most fixture helpers). This is only for scope construction;
 /// the surface does not affect the keepalive candidate filter.
-fn scope_for_resource(resource: ironclaw_host_api::ResourceScope) -> crate::AuthProductScope {
+fn scope_for_resource(
+    resource: ironclaw_host_api::resource::ResourceScope,
+) -> crate::AuthProductScope {
     crate::AuthProductScope::new(resource, AuthSurface::Web)
 }
 
@@ -3364,9 +3372,9 @@ fn resource_scope(
     user_id: &str,
     agent_id: Option<&str>,
     project_id: Option<&str>,
-) -> ironclaw_host_api::ResourceScope {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-    ironclaw_host_api::ResourceScope {
+) -> ironclaw_host_api::resource::ResourceScope {
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+    ironclaw_host_api::resource::ResourceScope {
         tenant_id: TenantId::new(tenant_id).unwrap(),
         user_id: UserId::new(user_id).unwrap(),
         agent_id: agent_id.map(|a| AgentId::new(a).unwrap()),
@@ -4594,7 +4602,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         AuthErrorCode, AuthGateRef, OAuthCallbackFailureInput, SecretCleanupAction,
         SecretCleanupRequest, SecretCleanupService, TurnRunRef,
     };
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());

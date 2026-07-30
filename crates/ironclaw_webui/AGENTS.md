@@ -22,7 +22,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, folded from the former
    `ironclaw_webui_v2` crate): axum handlers dispatching to
-   `ironclaw_host_api::ProductSurface`, the `webui_v2_router` builder,
+   `ironclaw_host_api::product_surface::ProductSurface`, the `webui_v2_router` builder,
    the `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE + WebSocket streaming with a shared `SseCapacity` budget, and the
    Vite SPA under `frontend/` (built by `build.rs`, served from

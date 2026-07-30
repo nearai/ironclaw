@@ -22,9 +22,34 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
-use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::ApprovalRequest,
+    capability::{
+        CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, CapabilitySet,
+        EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligations},
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
+    host_port::HostPortCatalog,
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
+        ResourceReservationId, SecretHandle, UserId,
+    },
+    mount::MountView,
+    path::{HostPath, VirtualPath},
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
     HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, SurfaceKind,

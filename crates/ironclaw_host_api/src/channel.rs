@@ -8,12 +8,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HostApiError, IngressVerificationRecipe, NetworkScheme, RecipeValidationError, SecretHandle,
-    VendorId,
+    action::NetworkScheme,
+    error::HostApiError,
+    ids::{SecretHandle, VendorId},
+    recipe::{IngressVerificationRecipe, RecipeValidationError},
 };
 
 const MAX_CHANNEL_COMMANDS: usize = 32;
 const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
+const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
 /// How external conversations map to IronClaw conversations
 /// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
@@ -144,6 +147,14 @@ impl ChannelDescriptor {
             }
             seen_commands.push(command);
         }
+        if let Some(prefix) = &self.presentation.command_prefix
+            && (prefix.is_empty()
+                || !prefix.starts_with('/')
+                || prefix.len() > MAX_CHANNEL_COMMAND_PREFIX_BYTES
+                || prefix.chars().any(char::is_control))
+        {
+            return Err(ChannelDescriptorError::InvalidCommandPrefix);
+        }
         if self.inbound && self.ingress.is_none() {
             return Err(ChannelDescriptorError::InboundWithoutIngress);
         }
@@ -172,19 +183,19 @@ impl ChannelDescriptor {
                     });
                 }
                 let well_formed = match injection {
-                    crate::RuntimeCredentialTarget::Header { name, .. } => {
-                        crate::valid_http_field_name(name)
+                    crate::http::RuntimeCredentialTarget::Header { name, .. } => {
+                        crate::http::valid_http_field_name(name)
                     }
-                    crate::RuntimeCredentialTarget::QueryParam { name } => {
+                    crate::http::RuntimeCredentialTarget::QueryParam { name } => {
                         !name.trim().is_empty() && !name.contains(char::is_whitespace)
                     }
-                    crate::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+                    crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
                         !placeholder.is_empty()
                             && placeholder
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
-                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+                    crate::http::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
                         pointer.starts_with('/')
                     }
                 };
@@ -356,7 +367,7 @@ pub struct ChannelEgressDescriptor {
     #[serde(default = "default_https")]
     pub scheme: NetworkScheme,
     pub host: String,
-    pub methods: Vec<crate::NetworkMethod>,
+    pub methods: Vec<crate::action::NetworkMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_handle: Option<SecretHandle>,
     /// How the host injects the declared credential into vendor requests.
@@ -365,7 +376,7 @@ pub struct ChannelEgressDescriptor {
     /// path (the adapter writes `{placeholder}` into the path; the host
     /// substitutes the secret — bytes never reach the adapter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub injection: Option<crate::RuntimeCredentialTarget>,
+    pub injection: Option<crate::http::RuntimeCredentialTarget>,
     /// Body credentials the host may inject for this target: each entry binds
     /// a secret handle to the RFC 6901 JSON pointer where its resolved value
     /// is inserted in the request's JSON body (e.g. a vendor
@@ -402,6 +413,13 @@ pub struct ChannelPresentation {
     pub supports_threads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_chars: Option<u32>,
+    /// Optional per-command display prefix a channel adapter renders before
+    /// each declared command name in user-visible help text (e.g. a channel
+    /// whose native command namespace requires an app-scoped dispatcher
+    /// prefix: `"/ironclaw "` + `model` -> `/ironclaw model`). `None`
+    /// renders the bare `/{name}` form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_prefix: Option<String>,
 }
 
 /// Structural channel-descriptor failures (path context added by the
@@ -416,6 +434,10 @@ pub enum ChannelDescriptorError {
         "channel commands must contain at most 32 unique tokens of at most 64 bytes using lowercase ASCII letters, digits, '-', or '_'"
     )]
     InvalidCommands,
+    #[error(
+        "channel presentation command_prefix must be non-empty, start with '/', contain no control characters, and be at most 32 bytes"
+    )]
+    InvalidCommandPrefix,
     #[error("an inbound channel must declare [channel.ingress]")]
     InboundWithoutIngress,
     #[error("[channel.connection] requires inbound = true")]
@@ -547,6 +569,60 @@ max_message_chars = 40000
         }
     }
 
+    fn channel_toml_with_command_prefix(prefix_toml_value: &str) -> String {
+        documented_channel_toml().replace(
+            "max_message_chars = 40000\n",
+            &format!("max_message_chars = 40000\ncommand_prefix = {prefix_toml_value}\n"),
+        )
+    }
+
+    #[test]
+    fn command_prefix_is_optional_and_round_trips() {
+        let absent: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        assert_eq!(absent.presentation.command_prefix, None);
+        absent.validate().unwrap();
+
+        let declared: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_command_prefix("\"/ironclaw \"")).unwrap();
+        assert_eq!(
+            declared.presentation.command_prefix.as_deref(),
+            Some("/ironclaw ")
+        );
+        declared.validate().unwrap();
+
+        let json = serde_json::to_string(&declared).unwrap();
+        let round_trip: ChannelDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round_trip.presentation.command_prefix.as_deref(),
+            Some("/ironclaw ")
+        );
+
+        // Unset stays unset on the wire too (skip_serializing_if).
+        let absent_json = serde_json::to_string(&absent).unwrap();
+        assert!(
+            !absent_json.contains("command_prefix"),
+            "unset command_prefix must not appear on the wire: {absent_json}"
+        );
+    }
+
+    #[test]
+    fn command_prefix_validation_rejects_malformed_shapes() {
+        for bad in [
+            "\"\"".to_string(),
+            "\"ironclaw \"".to_string(),
+            "\"/control\t\"".to_string(),
+            format!("\"/{}\"", "a".repeat(32)),
+        ] {
+            let channel: ChannelDescriptor =
+                toml::from_str(&channel_toml_with_command_prefix(&bad)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidCommandPrefix,
+                "expected invalid command_prefix: {bad}"
+            );
+        }
+    }
+
     #[test]
     fn channel_descriptor_parses_the_documented_shape() {
         let channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
@@ -639,7 +715,7 @@ max_message_chars = 40000
         channel.validate().unwrap();
         assert!(matches!(
             channel.egress[0].injection,
-            Some(crate::RuntimeCredentialTarget::PathPlaceholder { .. })
+            Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { .. })
         ));
 
         // Header injection stays expressible explicitly too.

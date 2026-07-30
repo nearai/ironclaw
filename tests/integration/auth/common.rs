@@ -14,7 +14,10 @@ use ironclaw_auth::{
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_auth::{RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest};
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resource::ResourceScope,
+};
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.

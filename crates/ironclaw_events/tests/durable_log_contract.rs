@@ -13,10 +13,18 @@ use ironclaw_events::{
     RuntimeEventKind, parse_jsonl, replay_jsonl, sanitize_error_kind,
 };
 use ironclaw_host_api::{
-    Action, ActionSummary, AgentId, ApprovalDecisionKind, ApprovalRequest, ApprovalRequestId,
-    AuditEnvelope, CapabilityId, CorrelationId, DenyReason, ExecutionContext, ExtensionId,
-    InvocationId, MountView, Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind,
-    TenantId, UserId,
+    action::Action,
+    approval::ApprovalRequest,
+    audit::{ActionSummary, ApprovalDecisionKind, AuditEnvelope},
+    decision::DenyReason,
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        ProjectId, TenantId, UserId,
+    },
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    scope::{ExecutionContext, Principal},
 };
 
 fn capability_id() -> CapabilityId {
@@ -590,7 +598,7 @@ async fn durable_audit_log_appends_and_replays() {
         scope.user_id.clone(),
         extension_id(),
         RuntimeKind::Wasm,
-        ironclaw_host_api::TrustClass::FirstParty,
+        ironclaw_host_api::runtime::TrustClass::FirstParty,
         Default::default(),
         MountView::default(),
     )
@@ -598,7 +606,7 @@ async fn durable_audit_log_appends_and_replays() {
 
     let denied = AuditEnvelope::denied(
         &ctx,
-        ironclaw_host_api::AuditStage::Denied,
+        ironclaw_host_api::audit::AuditStage::Denied,
         ActionSummary::from_action(&Action::Dispatch {
             capability: capability_id(),
             estimated_resources: ResourceEstimate::default(),
@@ -742,14 +750,14 @@ async fn best_effort_audit_sink_captures_records() {
         scope.user_id.clone(),
         extension_id(),
         RuntimeKind::Wasm,
-        ironclaw_host_api::TrustClass::FirstParty,
+        ironclaw_host_api::runtime::TrustClass::FirstParty,
         Default::default(),
         MountView::default(),
     )
     .expect("local default execution context");
     let record = AuditEnvelope::denied(
         &ctx,
-        ironclaw_host_api::AuditStage::Denied,
+        ironclaw_host_api::audit::AuditStage::Denied,
         ActionSummary::from_action(&Action::Dispatch {
             capability: capability_id(),
             estimated_resources: ResourceEstimate::default(),
@@ -770,14 +778,14 @@ async fn durable_audit_sink_appends_records_to_durable_log() {
         scope.user_id.clone(),
         extension_id(),
         RuntimeKind::Wasm,
-        ironclaw_host_api::TrustClass::FirstParty,
+        ironclaw_host_api::runtime::TrustClass::FirstParty,
         Default::default(),
         MountView::default(),
     )
     .expect("local default execution context");
     let record = AuditEnvelope::denied(
         &ctx,
-        ironclaw_host_api::AuditStage::Denied,
+        ironclaw_host_api::audit::AuditStage::Denied,
         ActionSummary::from_action(&Action::Dispatch {
             capability: capability_id(),
             estimated_resources: ResourceEstimate::default(),

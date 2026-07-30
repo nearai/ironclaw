@@ -1,7 +1,7 @@
 // arch-exempt: large_file, checkpoint evidence integration coverage, plan #6168
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,

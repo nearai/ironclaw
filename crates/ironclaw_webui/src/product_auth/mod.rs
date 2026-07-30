@@ -43,16 +43,19 @@ use ironclaw_auth::{
     ProviderScope, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp,
     TurnRunRef, binding_scope_owns_account,
 };
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, BoundProductSurface, ExtensionId, InvocationId, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    product_surface::{
+        BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+        ProductSurfaceQueryRequest,
+    },
+    resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
 use ironclaw_product::{
@@ -744,7 +747,7 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
             max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
         },
@@ -768,7 +771,7 @@ pub(super) fn flow_status_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         // Read-only status probe: no request body is read, so reject any.
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
@@ -791,7 +794,7 @@ pub(super) fn flow_reconcile_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         // The command carries no browser-selected lifecycle inputs. Its only
         // authority is the caller-scoped durable flow id plus invocation id.
         body_limit: BodyLimitPolicy::NoBody,
@@ -815,7 +818,7 @@ pub(super) fn accounts_refresh_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
             max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
         },
@@ -839,7 +842,7 @@ pub(super) fn callback_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::OAuthState],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::HostResolved,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::HostResolved,
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerIp,
@@ -1724,8 +1727,10 @@ mod tests {
         ProviderCallbackOutcome, SecretCleanupService,
     };
     use ironclaw_host_api::{
-        NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
+        action::NetworkMethod,
+        decision::RuntimeCredentialAuthRequirement,
+        http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{SecretHandle, VendorId},
     };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use ironclaw_turns::{TurnRunId, TurnScope};
@@ -1764,7 +1769,7 @@ mod tests {
         );
         assert_eq!(
             policy.scope_source(),
-            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+            ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller
         );
         // Per-caller rate limit for the poll cadence; never per-IP/public.
         assert!(
@@ -1798,7 +1803,7 @@ mod tests {
         ));
         assert_eq!(
             policy.scope_source(),
-            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+            ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller
         );
         assert!(matches!(
             policy.rate_limit(),
@@ -2176,7 +2181,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
                 client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
@@ -2920,7 +2925,8 @@ mod tests {
         async fn execute(
             &self,
             _request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             panic!("this test must not perform vendor HTTP egress")
         }
     }
@@ -2935,7 +2941,8 @@ mod tests {
         async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             let body = match request.url.as_str() {
                 "https://mcp.vendorco.example/mcp/.well-known/oauth-protected-resource" => {
                     br#"{"resource":"https://mcp.vendorco.example/mcp","authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
@@ -2969,7 +2976,8 @@ mod tests {
         async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             assert_eq!(request.url, "https://auth.vendorco.example/token");
             let body = br#"{"access_token":"vendor-access-token","scope":"items:read"}"#.to_vec();
             Ok(RuntimeHttpEgressResponse {

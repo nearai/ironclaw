@@ -18,7 +18,11 @@ use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath};
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle, UserId},
+    path::VirtualPath,
+};
 
 fn extension_id(value: &str) -> ExtensionId {
     ExtensionId::new(value).unwrap()

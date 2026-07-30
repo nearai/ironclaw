@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 
-use crate::RestrictedEgress;
+use crate::tool_adapter::RestrictedEgress;
 
 use crate::product_adapter::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -182,7 +182,7 @@ pub enum OutboundPart {
     /// unchanged; each channel adapter owns native rendering while preserving
     /// the same recipe materialization WebUI consumes.
     AuthPrompt {
-        view: Box<crate::AuthPromptView>,
+        view: Box<crate::product_adapter::AuthPromptView>,
         direct_message: bool,
     },
     /// Remove an earlier delivery in the target conversation (the `Cleanup`

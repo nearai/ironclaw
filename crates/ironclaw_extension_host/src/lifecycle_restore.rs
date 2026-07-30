@@ -7,7 +7,7 @@ use ironclaw_extensions::{
     ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{UserId, sha256_digest_token};
+use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 use tokio::sync::Mutex;
 

@@ -41,12 +41,20 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
-    OriginGateMatrix, PermissionMode, RequestedTrustClass, ResourceProfile,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    },
+    capability_profile::CapabilityProfileSchemaRef,
+    error::HostApiError,
+    host_port::{HostPortCatalog, HostPortId},
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+    resource::ResourceProfile,
+    runtime::{RuntimeKind, TrustClass},
+    surface::CapabilitySurfaceKind,
+    trust::RequestedTrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -1946,8 +1954,8 @@ mod tests {
 
     fn product_auth_source() -> RuntimeCredentialRequirementSource {
         RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: ironclaw_host_api::VendorId::new("google").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+            provider: ironclaw_host_api::ids::VendorId::new("google").unwrap(),
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         }
     }
 

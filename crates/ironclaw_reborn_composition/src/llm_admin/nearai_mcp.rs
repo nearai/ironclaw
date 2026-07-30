@@ -5,8 +5,10 @@ use ironclaw_auth::{
     CredentialAccountUpdateBinding,
 };
 use ironclaw_host_api::{
-    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ResourceScope,
+    ids::{ExtensionId, InvocationId},
+    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+    resource::ResourceScope,
+    state::InstallationState,
 };
 use ironclaw_operator::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapOutcome, durable_product_auth_storage_enabled,
@@ -245,7 +247,7 @@ fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &ProductSurfaceErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, UserId};
+    use ironclaw_host_api::ids::{InvocationId, UserId};
 
     fn account_for_bootstrap_decision(
         requester_extension: &ExtensionId,
@@ -266,8 +268,9 @@ mod tests {
             ownership: ironclaw_auth::CredentialOwnership::ExtensionOwned,
             owner_extension: Some(requester_extension.clone()),
             granted_extensions: Vec::new(),
-            access_secret: access_secret
-                .map(|handle| ironclaw_host_api::SecretHandle::new(handle).expect("secret handle")),
+            access_secret: access_secret.map(|handle| {
+                ironclaw_host_api::ids::SecretHandle::new(handle).expect("secret handle")
+            }),
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,

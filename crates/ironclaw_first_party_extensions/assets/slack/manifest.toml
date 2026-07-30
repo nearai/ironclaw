@@ -228,6 +228,7 @@ credential_handle = "slack_bot_token"
 supports_markdown = true
 supports_threads = true
 max_message_chars = 40000
+command_prefix = "/ironclaw "
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 

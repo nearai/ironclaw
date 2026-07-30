@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn every_flavor_capability_surface_equals_allowlist() {
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use std::collections::BTreeSet;
 
         // Attenuation invariant: the capability surface derived for each flavor
@@ -422,7 +422,11 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
-        use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch, RuntimeKind};
+        use ironclaw_host_api::{
+            ids::CapabilityId,
+            resolution::{Resolution, ResolutionBatch},
+            runtime::RuntimeKind,
+        };
         use ironclaw_loop_host::{
             CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
@@ -472,11 +476,13 @@ mod tests {
             let system = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
             let mut scope = context.scope.to_resource_scope();
             scope.invocation_id =
-                ironclaw_host_api::InvocationId::from_uuid(context.run_id.as_uuid());
+                ironclaw_host_api::ids::InvocationId::from_uuid(context.run_id.as_uuid());
             system
                 .submission()
                 .submit_process(SubmitProcessRequest {
-                    process_id: ironclaw_host_api::ProcessId::from_uuid(context.run_id.as_uuid()),
+                    process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        context.run_id.as_uuid(),
+                    ),
                     process_kind: ProcessKind::AgentTurn,
                     scope,
                     exclusive_within_scope: false,
@@ -536,7 +542,7 @@ mod tests {
                     .iter()
                     .map(|id| ProviderToolDefinition {
                         capability_id: cap(id),
-                        name: ironclaw_host_api::ProviderToolName::new(id.replace('.', "__"))
+                        name: ironclaw_host_api::ids::ProviderToolName::new(id.replace('.', "__"))
                             .expect("provider tool name"),
                         description: format!("{id} description"),
                         parameters: serde_json::json!({"type":"object"}),

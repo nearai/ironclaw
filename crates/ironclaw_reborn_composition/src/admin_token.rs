@@ -4,7 +4,7 @@
 //! signature. The trait carries no WebUI/ingress types — just the canonical
 //! identifiers and a `SecretString` — so it is dependency-free.
 
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use secrecy::SecretString;
 
 /// Mints a one-time API bearer for a newly created user. Implemented at the

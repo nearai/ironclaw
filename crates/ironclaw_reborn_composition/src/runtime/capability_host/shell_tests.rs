@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
+    ids::{AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId},
+    resolution::Resolution,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_host::{
@@ -138,7 +139,7 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         ironclaw_approvals::AutoApproveSettingStorePort::set(
             runtime_surfaces.auto_approve_settings_for_test().as_ref(),
             ironclaw_approvals::AutoApproveSettingInput {
-                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                updated_by: ironclaw_host_api::scope::Principal::User(scope.user_id.clone()),
                 scope,
                 enabled: true,
             },

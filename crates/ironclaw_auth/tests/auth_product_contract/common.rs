@@ -19,7 +19,8 @@ pub use ironclaw_auth::{
     TurnRunRef,
 };
 pub use ironclaw_host_api::{
-    ExtensionId, InvocationId, ResourceScope, SecretHandle, ThreadId, UserId,
+    ids::{ExtensionId, InvocationId, SecretHandle, ThreadId, UserId},
+    resource::ResourceScope,
 };
 pub use secrecy::SecretString;
 

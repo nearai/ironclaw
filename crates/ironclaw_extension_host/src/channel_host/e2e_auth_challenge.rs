@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
-use ironclaw_host_api::{AgentId, ProjectId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, UserId};
 use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
@@ -15,7 +15,7 @@ type AuthChallengeCall = (
     UserId,
     TurnRunId,
     String,
-    Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 );
 
 #[derive(Debug, Default)]
@@ -58,7 +58,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
         owner_user_id: &UserId,
         run_id: TurnRunId,
         gate_ref: &str,
-        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+        credential_requirements: &[ironclaw_host_api::decision::RuntimeCredentialAuthRequirement],
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
         self.calls
             .lock()

@@ -4,7 +4,7 @@
 //! that the runner synthesizes. The definitions and string literals remain
 //! owned by the private disclosure implementation.
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 
 /// The canonical synthetic bridge capability ids used by the runner.
 pub fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {

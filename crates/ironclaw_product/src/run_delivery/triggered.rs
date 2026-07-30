@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::OutboundPart;
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, UserId};
+use ironclaw_host_api::ids::{AgentId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,

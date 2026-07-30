@@ -8,8 +8,12 @@ use async_trait::async_trait;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{
-    InvocationId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
+    ids::InvocationId,
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind,
+    },
+    resource::ResourceScope,
 };
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;

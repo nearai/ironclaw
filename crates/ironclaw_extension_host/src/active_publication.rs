@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_extensions::{
     ExtensionError, ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry,
 };
-use ironclaw_host_api::{EffectKind, PackageSource};
+use ironclaw_host_api::{capability::EffectKind, trust::PackageSource};
 use ironclaw_product::ProductSurfaceFailure;
 use ironclaw_trust::{
     AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus, TrustError,

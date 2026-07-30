@@ -13,7 +13,10 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::RwLock;
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, PackageId, PackageIdentity, RequestedTrustClass, ResourceCeiling,
+    capability::EffectKind,
+    ids::{CapabilityId, PackageId},
+    resource::ResourceCeiling,
+    trust::{PackageIdentity, RequestedTrustClass},
 };
 
 use crate::clock::{Clock, SystemClock};
@@ -338,7 +341,7 @@ enum SourceMutation {
     AdminUpsert(AdminEntry),
     AdminRemove {
         package_id: PackageId,
-        source: ironclaw_host_api::PackageSource,
+        source: ironclaw_host_api::trust::PackageSource,
     },
     SignedUpsert(SignerEntry),
     SignedRemove(String),
@@ -416,7 +419,7 @@ impl<'a> SourceMutators<'a> {
     pub fn admin_remove(
         &self,
         package_id: &PackageId,
-        source: &ironclaw_host_api::PackageSource,
+        source: &ironclaw_host_api::trust::PackageSource,
     ) -> Result<Option<AdminEntry>, TrustError> {
         let admin = self.find::<AdminConfig>()?;
         let previous = admin.get(package_id, source);

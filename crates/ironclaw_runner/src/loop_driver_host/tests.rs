@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use super::port_adapters::{HostManagedLoopCheckpointPort, HostManagedLoopProgressPort};
 
-use ironclaw_host_api::{AgentId, FailureKind, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    result_meta::FailureKind,
+};
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
 use ironclaw_turns::{

@@ -183,7 +183,7 @@ Recommended package layout:
 Rules:
 
 - `<extension_id>` must match the manifest `id`.
-- extension IDs use `ironclaw_host_api::ExtensionId` validation.
+- extension IDs use `ironclaw_host_api::ids::ExtensionId` validation.
 - manifest-local paths are relative package asset paths.
 - manifest-local paths must not be absolute, scoped aliases, URLs, raw host paths, contain `..`, contain backslashes, or contain control characters.
 - resolved assets become `VirtualPath`s under `/system/extensions/<extension_id>/...`.
@@ -497,7 +497,7 @@ Tests: `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
 
 ## 5. Runtime declarations
 
-Manifest runtime kinds map to `ironclaw_host_api::RuntimeKind`:
+Manifest runtime kinds map to `ironclaw_host_api::runtime::RuntimeKind`:
 
 | Manifest `kind` | RuntimeKind | Meaning |
 |---|---|---|

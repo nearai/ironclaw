@@ -1,6 +1,9 @@
 use std::net::IpAddr;
 
-use ironclaw_host_api::{NetworkPolicy, NetworkTarget, NetworkTargetPattern, ResourceScope};
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkTarget, NetworkTargetPattern},
+    resource::ResourceScope,
+};
 use thiserror::Error;
 
 use crate::types::{NetworkPermit, NetworkRequest};

@@ -7,9 +7,12 @@ use std::{
 
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
-    CapabilityId, CredentialStageError, ExtensionId, NetworkTargetPattern,
-    RuntimeCredentialInjection, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    action::NetworkTargetPattern,
+    capability::RuntimeCredentialRequirementSource,
+    dispatch::CredentialStageError,
+    http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget},
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    runtime::RuntimeKind,
 };
 use ironclaw_network::{network_target_for_url, target_matches_pattern};
 use ironclaw_secrets::SecretStorePort;
@@ -356,9 +359,12 @@ static WASM_CREDENTIAL_RESTAGE_RUNTIME: LazyLock<
 mod tests {
     use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_host_api::{
-        ExtensionId, HostPortCatalog, InvocationId, NetworkMethod, NetworkScheme,
-        NetworkTargetPattern, ProjectId, ResourceScope, RuntimeCredentialTarget, TenantId, UserId,
-        VirtualPath,
+        action::{NetworkMethod, NetworkScheme, NetworkTargetPattern},
+        host_port::HostPortCatalog,
+        http::RuntimeCredentialTarget,
+        ids::{ExtensionId, InvocationId, ProjectId, TenantId, UserId},
+        path::VirtualPath,
+        resource::ResourceScope,
     };
 
     use super::*;

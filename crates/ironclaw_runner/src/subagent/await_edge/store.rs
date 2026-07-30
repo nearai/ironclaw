@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_host_api::ProcessId;
+use ironclaw_host_api::ids::ProcessId;
 use ironclaw_processes::{
     CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
@@ -311,7 +311,7 @@ fn map_process_error(error: ironclaw_processes::ProcessJournalStoreError) -> Awa
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
     use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
     use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
     use ironclaw_turns::{

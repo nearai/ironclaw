@@ -17,9 +17,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
-    ProductSurfaceError, RegisterHostedMcpRequest, ResourceScope, RuntimeCredentialAuthRequirement,
-    UserId, VendorId,
+    decision::RuntimeCredentialAuthRequirement,
+    hosted_mcp::RegisterHostedMcpRequest,
+    ids::{ExtensionId, UserId, VendorId},
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
+    resource::ResourceScope,
+    state::InstallationState,
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
@@ -1491,7 +1495,7 @@ impl ExtensionLifecycleManager {
         }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
-        let account_setup = ironclaw_host_api::ExtensionId::new(package_ref.id.as_str())
+        let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
             .and_then(|id| self.account_setups.descriptor(&id));
         let message = activation_success_message(
@@ -1550,7 +1554,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         scope: &ResourceScope,
-        authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
+        authenticated_actor_user_id: Option<&ironclaw_host_api::ids::UserId>,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         let (removed_extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
         // Record only whether this invocation began while local removal state
@@ -3141,8 +3145,11 @@ mod tests {
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, InvocationId, PermissionMode, ResourceScope, UserId,
-        VirtualPath,
+        capability::{EffectKind, PermissionMode},
+        host_port::HostPortCatalog,
+        ids::{InvocationId, UserId},
+        path::VirtualPath,
+        resource::ResourceScope,
     };
     use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
@@ -3624,13 +3631,13 @@ output_schema_ref = "schemas/run.output.json"
             },
         ));
 
-        let register_request = ironclaw_host_api::RegisterHostedMcpRequest {
-            desired_id: ironclaw_host_api::LifecyclePackageId::new("lock-order-register")
+        let register_request = ironclaw_host_api::hosted_mcp::RegisterHostedMcpRequest {
+            desired_id: ironclaw_host_api::package_lifecycle::LifecyclePackageId::new("lock-order-register")
                 .expect("package id"),
             desired_name: "Lock order register fixture".to_string(),
-            endpoint: ironclaw_host_api::HostedMcpEndpoint::new("https://mcp.example.test/mcp")
+            endpoint: ironclaw_host_api::hosted_mcp::HostedMcpEndpoint::new("https://mcp.example.test/mcp")
                 .expect("public fixture endpoint"),
-            auth_selection: Some(ironclaw_host_api::HostedMcpAuthSelection::Auto),
+            auth_selection: Some(ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::Auto),
         };
         let register_manager = Arc::clone(&manager);
         let register_task =
@@ -3691,7 +3698,7 @@ output_schema_ref = "schemas/run.output.json"
             effects: vec![EffectKind::Network],
             credential_handles: Vec::new(),
             dynamic_input_schemas: Default::default(),
-            registration_auth: ironclaw_host_api::HostedMcpAuthSelection::NoAuth,
+            registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::NoAuth,
         });
         package.resolved_manifest = Arc::new(resolved);
         let catalog = AvailableExtensionCatalog::from_packages(vec![package]);

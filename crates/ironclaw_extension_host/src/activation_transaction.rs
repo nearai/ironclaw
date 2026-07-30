@@ -14,8 +14,8 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
-    ExtensionId, NetworkPolicy, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    UserId,
+    action::NetworkPolicy, decision::RuntimeCredentialAuthRequirement, http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId}, resource::ResourceScope,
 };
 use tokio::sync::Mutex;
 
@@ -386,9 +386,14 @@ mod tests {
         ExtensionPackage, HostApiContractRegistry, InstallationOwner, ManifestSource,
     };
     use ironclaw_host_api::{
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-        InvocationId, NetworkPolicy, RuntimeCredentialAccountSetup, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId, VirtualPath,
+        action::NetworkPolicy,
+        capability::RuntimeCredentialAccountSetup,
+        host_port::{
+            HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+        },
+        http::{RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{InvocationId, SecretHandle, VendorId},
+        path::VirtualPath,
     };
     use tokio::sync::Notify;
 

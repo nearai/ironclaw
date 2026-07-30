@@ -2,8 +2,11 @@ use std::{sync::Arc, time::Instant};
 
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle,
-    VirtualPath,
+    error::HostApiError,
+    ids::SecretHandle,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{
     SecretError, SecretMaterial, SecretStore, SecretStoreError, SecretStorePort, SecretsCrypto,

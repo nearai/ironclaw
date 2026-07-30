@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::InboundAttachment;
 #[cfg(test)]
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadService, ThreadMessageId,
@@ -974,7 +974,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
     use ironclaw_threads::{
         AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
         AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -1093,7 +1093,7 @@ mod tests {
         async fn mark_message_submitted(
             &self,
             _scope: &ThreadScope,
-            _thread_id: &ironclaw_host_api::ThreadId,
+            _thread_id: &ironclaw_host_api::ids::ThreadId,
             _message_id: ThreadMessageId,
             _turn_id: String,
             _turn_run_id: String,
@@ -1104,7 +1104,7 @@ mod tests {
         async fn mark_message_rejected_busy(
             &self,
             _scope: &ThreadScope,
-            _thread_id: &ironclaw_host_api::ThreadId,
+            _thread_id: &ironclaw_host_api::ids::ThreadId,
             _message_id: ThreadMessageId,
         ) -> Result<ThreadMessageRecord, SessionThreadError> {
             unimplemented!("not used in submit path tests")
@@ -1148,7 +1148,7 @@ mod tests {
         async fn finalize_assistant_message(
             &self,
             _scope: &ThreadScope,
-            _thread_id: &ironclaw_host_api::ThreadId,
+            _thread_id: &ironclaw_host_api::ids::ThreadId,
             _message_id: ThreadMessageId,
             _content: MessageContent,
         ) -> Result<ThreadMessageRecord, SessionThreadError> {
@@ -1608,7 +1608,7 @@ mod tests {
     use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
 
     use crate::binding::ResolveBindingRequest;
-    use ironclaw_host_api::ProductSurfaceError;
+    use ironclaw_host_api::product_surface::ProductSurfaceError;
 
     struct LandingBindingStub;
 

@@ -9,8 +9,9 @@ use ironclaw_events::{
     DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog, RuntimeEvent,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ResourceScope, RuntimeKind, TenantId,
-    ThreadId, UserId,
+    ids::{AgentId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 
 fn scope_for_thread(thread_id: ThreadId, invocation_id: InvocationId) -> ResourceScope {

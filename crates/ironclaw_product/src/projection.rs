@@ -33,8 +33,11 @@ use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, UserId,
-    VirtualPath,
+    error::HostApiError,
+    ids::UserId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_outbound::OutboundStateStore;
 use ironclaw_turns::{
@@ -267,7 +270,7 @@ fn outbound_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError>
 }
 
 fn outbound_scope_path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+    if value == ironclaw_host_api::resource::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value

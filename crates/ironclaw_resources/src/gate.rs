@@ -16,7 +16,7 @@
 //! in-memory map.
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{ResourceScope, UserId};
+use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 
 use crate::{ResourceApprovalNeeded, ResourceLimits};
@@ -229,7 +229,7 @@ pub trait BudgetGateStorePort: Send + Sync + std::fmt::Debug {
 mod tests {
     use super::*;
     use crate::{ResourceAccount, ResourceDimension, ResourceValue};
-    use ironclaw_host_api::TenantId;
+    use ironclaw_host_api::ids::TenantId;
     use rust_decimal::Decimal;
 
     fn sample_needed() -> ResourceApprovalNeeded {

@@ -16,10 +16,18 @@ mod tests {
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, DispatchInputIssueCode, EffectKind, FailureKind, GrantConstraints,
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-        Principal, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
-        VirtualPath,
+        action::NetworkPolicy,
+        capability::{EffectKind, GrantConstraints},
+        dispatch::DispatchInputIssueCode,
+        ids::{
+            AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
+            UserId,
+        },
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resolution::Resolution,
+        result_meta::FailureKind,
+        scope::Principal,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -74,7 +82,7 @@ mod tests {
     /// under is preserved on `refs.origin`. Tests look results up by that
     /// preserved loop ref, exactly as they did with the old
     /// `CapabilityResultMessage::result_ref`.
-    fn completed_loop_result_ref(done: &ironclaw_host_api::Outcome) -> String {
+    fn completed_loop_result_ref(done: &ironclaw_host_api::resolution::Outcome) -> String {
         done.refs
             .origin
             .as_ref()
@@ -153,7 +161,7 @@ mod tests {
         ironclaw_approvals::AutoApproveSettingStorePort::set(
             runtime_surfaces.auto_approve_settings_for_test().as_ref(),
             ironclaw_approvals::AutoApproveSettingInput {
-                updated_by: ironclaw_host_api::Principal::User(user_id.clone()),
+                updated_by: ironclaw_host_api::scope::Principal::User(user_id.clone()),
                 scope,
                 enabled: true,
             },
@@ -674,7 +682,7 @@ mod tests {
     /// requires the manifest-declared credentials to resolve.
     async fn seed_configured_account_and_secret_with_scopes(
         services: &crate::factory::RebornRuntimeStores,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         provider: &str,
         scopes: &[&str],
     ) {
@@ -694,7 +702,7 @@ mod tests {
                 owner_extension: None,
                 granted_extensions: Vec::new(),
                 access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                    ironclaw_host_api::ids::SecretHandle::new(format!("{provider}-test-token"))
                         .expect("secret handle"),
                 ),
                 refresh_secret: None,
@@ -710,7 +718,7 @@ mod tests {
             .secret_store()
             .put(
                 owner_scope.resource,
-                ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                ironclaw_host_api::ids::SecretHandle::new(format!("{provider}-test-token"))
                     .expect("secret handle"),
                 ironclaw_secrets::SecretMaterial::from(format!("{provider}-access-token")),
                 None,
@@ -721,7 +729,7 @@ mod tests {
 
     async fn seed_configured_account_and_secret(
         services: &crate::factory::RebornRuntimeStores,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         provider: &str,
     ) {
         seed_configured_account_and_secret_with_scopes(services, scope, provider, &[]).await;
@@ -732,7 +740,7 @@ mod tests {
     /// gate for the missing secret.
     async fn seed_configured_account_without_secret_with_scopes(
         services: &crate::factory::RebornRuntimeStores,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         provider: &str,
         scopes: &[&str],
     ) {
@@ -752,7 +760,7 @@ mod tests {
                 owner_extension: None,
                 granted_extensions: Vec::new(),
                 access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                    ironclaw_host_api::ids::SecretHandle::new(format!("{provider}-test-token"))
                         .expect("secret handle"),
                 ),
                 refresh_secret: None,
@@ -844,9 +852,9 @@ mod tests {
             Ok(ironclaw_auth::CredentialAccount {
                 id: ironclaw_auth::CredentialAccountId::new(),
                 scope: ironclaw_auth::AuthProductScope::new(
-                    ironclaw_host_api::ResourceScope::local_default(
+                    ironclaw_host_api::resource::ResourceScope::local_default(
                         UserId::new("configured-credential-user").expect("user id"),
-                        ironclaw_host_api::InvocationId::new(),
+                        ironclaw_host_api::ids::InvocationId::new(),
                     )
                     .expect("resource scope"),
                     ironclaw_auth::AuthSurface::Api,
@@ -859,7 +867,8 @@ mod tests {
                 owner_extension: None,
                 granted_extensions: Vec::new(),
                 access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                    ironclaw_host_api::ids::SecretHandle::new("test-secret")
+                        .expect("secret handle"),
                 ),
                 refresh_secret: None,
                 scopes: Vec::new(),
@@ -4030,7 +4039,7 @@ mod tests {
             ironclaw_approvals::AutoApproveSettingStorePort::set(
                 runtime_surfaces.auto_approve_settings_for_test().as_ref(),
                 ironclaw_approvals::AutoApproveSettingInput {
-                    updated_by: ironclaw_host_api::Principal::User(owner_user_id.clone()),
+                    updated_by: ironclaw_host_api::scope::Principal::User(owner_user_id.clone()),
                     scope: disable_scope,
                     enabled: false,
                 },
@@ -4282,7 +4291,7 @@ mod tests {
             // The host persists the GateRecord under `GateRef::for_approval_request`
             // (a host_api::GateRef), the canonical key the read model derives from
             // the recovered id — proving both encodings agree.
-            let record_key = ironclaw_host_api::GateRef::for_approval_request(recovered_id);
+            let record_key = ironclaw_host_api::ids::GateRef::for_approval_request(recovered_id);
             let record_scope = crate::runtime::capability_host::resource_scope_for_run(
                 &run_context,
                 &fallback_user_id,
@@ -4293,7 +4302,10 @@ mod tests {
                 .expect("gate record load succeeds")
                 .expect("standalone approval gate persisted a durable gate record");
             assert!(
-                matches!(persisted, ironclaw_host_api::GateRecord::Approval { .. }),
+                matches!(
+                    persisted,
+                    ironclaw_host_api::gate_record::GateRecord::Approval { .. }
+                ),
                 "persisted gate record is an approval record, got {persisted:?}"
             );
         }

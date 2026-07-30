@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use serde_json::{Map, Value, json};
 
 // The host-facing operation shapes + the `MemoryService` trait moved to

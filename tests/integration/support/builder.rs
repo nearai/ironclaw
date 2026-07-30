@@ -29,8 +29,11 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, UserId, VirtualPath,
+    http::RuntimeHttpEgressRequest,
+    ids::{CapabilityId, InvocationId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -188,6 +191,11 @@ pub struct RebornIntegrationHarnessBuilder {
     lease_recovery_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_append_finalized_assistant_message: bool,
+    fail_append_tool_result_reference: bool,
+    /// Additive raw-provider call recording for terminal side-effect assertions.
+    record_model_calls: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -337,6 +345,14 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Record provider calls while otherwise delegating normal scripted
+    /// playback. Used by terminal-path tests that need to prove no second model
+    /// call happens after a non-model persistence boundary fails.
+    pub fn record_model_calls_for_test(mut self) -> Self {
+        self.record_model_calls = true;
+        self
+    }
+
     /// Park this harness's tool/capability dispatch until released
     /// (tool-path analog of `park_model`, issue #5476 lease-wedge coverage).
     /// Only the `BuiltinHttpTools` backend wires this today. See
@@ -368,6 +384,19 @@ impl RebornIntegrationHarnessBuilder {
     /// this harness so terminal recovery can be reached without a long script.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject the runtime's final assistant transcript write while retaining
+    /// the real scheduler, loop host, turn store, and thread read path.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript persistence after a capability completes.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
         self
     }
 
@@ -689,6 +718,12 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
         }
+        if self.fail_append_finalized_assistant_message {
+            group_builder = group_builder.fail_append_finalized_assistant_message_for_test();
+        }
+        if self.fail_append_tool_result_reference {
+            group_builder = group_builder.fail_append_tool_result_reference_for_test();
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -696,6 +731,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .model_mode(self.model_mode)
+            .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
     }
@@ -808,6 +844,9 @@ impl RebornIntegrationHarness {
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             planned_default_iteration_limit: None,
+            fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
+            record_model_calls: false,
         }
     }
 

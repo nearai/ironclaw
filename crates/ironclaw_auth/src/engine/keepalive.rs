@@ -491,7 +491,10 @@ mod tests {
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
         CredentialOwnership,
     };
-    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, SecretHandle, UserId},
+        resource::ResourceScope,
+    };
 
     /// A `Configured`/has-refresh candidate for `vendor` with a given
     /// `updated_at`.

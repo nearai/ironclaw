@@ -16,7 +16,7 @@ use async_trait::async_trait;
 // resulting `RebornProductAuthServices` bundle exercises the full OAuth
 // claim→exchange→complete→credential-account path with no network.
 
-/// Scripted [`ironclaw_host_api::RuntimeHttpEgress`] for OAuth token-exchange
+/// Scripted [`ironclaw_host_api::http::RuntimeHttpEgress`] for OAuth token-exchange
 /// tests.
 ///
 /// Returns a configurable HTTP status and JSON body on every call, records
@@ -39,7 +39,7 @@ pub struct ScriptedOAuthTokenEgress {
     /// set this to `200`; `with_error_response` sets it to the supplied code.
     status: u16,
     body: Vec<u8>,
-    captured: Arc<Mutex<Vec<ironclaw_host_api::RuntimeHttpEgressRequest>>>,
+    captured: Arc<Mutex<Vec<ironclaw_host_api::http::RuntimeHttpEgressRequest>>>,
     /// Pre-scripted sequential response overrides consumed FIFO on each
     /// `execute()` call.  While the queue is non-empty the front entry is
     /// popped and used instead of `(status, body)`.  Use `push_response` to
@@ -215,13 +215,13 @@ impl std::fmt::Debug for ScriptedOAuthTokenEgress {
 }
 
 #[async_trait]
-impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
+impl ironclaw_host_api::http::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
     async fn execute(
         &self,
-        request: ironclaw_host_api::RuntimeHttpEgressRequest,
+        request: ironclaw_host_api::http::RuntimeHttpEgressRequest,
     ) -> Result<
-        ironclaw_host_api::RuntimeHttpEgressResponse,
-        ironclaw_host_api::RuntimeHttpEgressError,
+        ironclaw_host_api::http::RuntimeHttpEgressResponse,
+        ironclaw_host_api::http::RuntimeHttpEgressError,
     > {
         let request_bytes = request.body.len() as u64;
         self.captured
@@ -240,7 +240,7 @@ impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
                 .unwrap_or_else(|| (self.status, self.body.clone()))
         };
         let response_bytes = body.len() as u64;
-        Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
+        Ok(ironclaw_host_api::http::RuntimeHttpEgressResponse {
             status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body,
@@ -261,24 +261,25 @@ fn engine_provider_client_for_test(
     egress: Arc<ScriptedOAuthTokenEgress>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 ) -> Arc<ironclaw_auth::AuthEngine> {
-    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
-        "method": "oauth2_code",
-        "display_name": format!("{vendor} account"),
-        "authorization_endpoint": "https://oauth.test.example.com/authorize",
-        "token_endpoint": token_endpoint,
-        "scopes": scopes,
-        "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
-        "token_response": {
-            "access_token": "/access_token",
-            "refresh_token": "/refresh_token",
-            "expires_in": "/expires_in",
-            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
-        },
-        // Test vendors declare a 7-day idle lifetime so sweep tests exercise
-        // the engine keepalive path (accounts become due at half-life).
-        "refresh": { "keepalive_idle_seconds": 604_800 },
-    }))
-    .expect("test vendor recipe parses");
+    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+        serde_json::from_value(serde_json::json!({
+            "method": "oauth2_code",
+            "display_name": format!("{vendor} account"),
+            "authorization_endpoint": "https://oauth.test.example.com/authorize",
+            "token_endpoint": token_endpoint,
+            "scopes": scopes,
+            "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+            "token_response": {
+                "access_token": "/access_token",
+                "refresh_token": "/refresh_token",
+                "expires_in": "/expires_in",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+            // Test vendors declare a 7-day idle lifetime so sweep tests exercise
+            // the engine keepalive path (accounts become due at half-life).
+            "refresh": { "keepalive_idle_seconds": 604_800 },
+        }))
+        .expect("test vendor recipe parses");
     Arc::new(ironclaw_auth::AuthEngine::new(
         ironclaw_auth::AuthEngineDeps {
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
@@ -290,7 +291,7 @@ fn engine_provider_client_for_test(
                 },
             ])),
             client_credentials: Arc::new(TestStaticClientCredentials),
-            egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            egress: egress as Arc<dyn ironclaw_host_api::http::RuntimeHttpEgress>,
             secret_store,
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "https://localhost/api/reborn/product-auth/oauth",
@@ -309,7 +310,7 @@ impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredential
     async fn resolve(
         &self,
         _vendor: &str,
-        _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
     ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError> {
         Ok(ironclaw_auth::EngineOAuthClientMaterial {
             client_id: ironclaw_auth::OAuthClientId::new("test-client-id")?,
@@ -379,7 +380,10 @@ struct OAuthProductAuthInfra {
 /// `.with_provider_client()` call.
 fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
     use ironclaw_secrets::SecretStore;
 
     // Fixed-view scoped filesystem: the product-auth durable layer writes
@@ -473,7 +477,10 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
     db_path: &std::path::Path,
 ) -> OAuthProductAuthTestBundle {
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
     use ironclaw_secrets::SecretStore;
 
     let db = Arc::new(
@@ -550,7 +557,10 @@ where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {
     use ironclaw_filesystem::ScopedFilesystem;
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
     use ironclaw_secrets::SecretStore;
 
     let mounts = MountView::new(vec![MountGrant::new(
@@ -757,24 +767,25 @@ fn engine_provider_client_with_identity_for_test(
     egress: Arc<ScriptedOAuthTokenEgress>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 ) -> Arc<ironclaw_auth::AuthEngine> {
-    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
-        "method": "oauth2_code",
-        "display_name": format!("{vendor} account"),
-        "authorization_endpoint": "https://oauth.test.example.com/authorize",
-        "token_endpoint": "https://oauth.test.example.com/token",
-        "scopes": scopes,
-        "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
-        "token_response": {
-            "access_token": "/access_token",
-            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
-        },
-        "identity": {
-            "account_id": "/authed_user/id",
-            "team_id": "/team/id",
-            "app_id": "/app_id"
-        },
-    }))
-    .expect("identity test vendor recipe parses");
+    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+        serde_json::from_value(serde_json::json!({
+            "method": "oauth2_code",
+            "display_name": format!("{vendor} account"),
+            "authorization_endpoint": "https://oauth.test.example.com/authorize",
+            "token_endpoint": "https://oauth.test.example.com/token",
+            "scopes": scopes,
+            "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+            "token_response": {
+                "access_token": "/access_token",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+            "identity": {
+                "account_id": "/authed_user/id",
+                "team_id": "/team/id",
+                "app_id": "/app_id"
+            },
+        }))
+        .expect("identity test vendor recipe parses");
     Arc::new(ironclaw_auth::AuthEngine::new(
         ironclaw_auth::AuthEngineDeps {
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
@@ -786,7 +797,7 @@ fn engine_provider_client_with_identity_for_test(
                 },
             ])),
             client_credentials: Arc::new(TestStaticClientCredentials),
-            egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            egress: egress as Arc<dyn ironclaw_host_api::http::RuntimeHttpEgress>,
             secret_store,
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "https://localhost/api/reborn/product-auth/oauth",

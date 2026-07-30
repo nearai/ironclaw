@@ -13,9 +13,13 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, GrantConstraints, HostApiError,
-    OriginGateMatrix, PermissionMode, Principal, ResourceEstimate, ResourceProfile, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, UserId,
+    capability::{EffectKind, GrantConstraints, OriginGateMatrix, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::{CapabilityId, UserId},
+    resource::{ResourceEstimate, ResourceProfile, ResourceScope, ResourceUsage},
+    scope::Principal,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -512,7 +516,10 @@ mod tests {
         ToolPermissionOverrideStore,
     };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{AgentId, ExtensionId, InvocationId, ResourceScope, TenantId};
+    use ironclaw_host_api::{
+        ids::{AgentId, ExtensionId, InvocationId, TenantId},
+        resource::ResourceScope,
+    };
 
     use super::*;
 
@@ -561,13 +568,15 @@ mod tests {
     async fn tool_permission_handler_writes_persistent_policy_and_override() {
         let scoped = Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
             Arc::new(InMemoryBackend::new()),
-            ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
-                ironclaw_host_api::MountAlias::new("/approvals")
-                    .expect("test approvals mount alias"),
-                ironclaw_host_api::VirtualPath::new("/projects/approvals")
-                    .expect("test approvals mount target"),
-                ironclaw_host_api::MountPermissions::read_write_list_delete(),
-            )])
+            ironclaw_host_api::mount::MountView::new(vec![
+                ironclaw_host_api::mount::MountGrant::new(
+                    ironclaw_host_api::path::MountAlias::new("/approvals")
+                        .expect("test approvals mount alias"),
+                    ironclaw_host_api::path::VirtualPath::new("/projects/approvals")
+                        .expect("test approvals mount target"),
+                    ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+                ),
+            ])
             .expect("test mount view"),
         ));
         let overrides = Arc::new(ToolPermissionOverrideStore::new(Arc::clone(&scoped)));

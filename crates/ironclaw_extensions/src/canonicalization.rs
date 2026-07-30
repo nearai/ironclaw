@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ironclaw_host_api::{ExtensionId, SecretHandle};
+use ironclaw_host_api::ids::{ExtensionId, SecretHandle};
 
 use crate::installations::{
     ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,

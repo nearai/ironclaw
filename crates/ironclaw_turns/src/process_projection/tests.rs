@@ -1,5 +1,8 @@
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage, ProcessSnapshotSource};
 use std::sync::Arc;
 
@@ -181,7 +184,7 @@ async fn fail_agent_process_with_category<F>(
 ) where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
 {
-    use ironclaw_host_api::SanitizedFailure;
+    use ironclaw_host_api::turn::SanitizedFailure;
     use ironclaw_processes::{
         ClaimProcessesRequest, FailProcessRequest, ProcessKind, ProcessTransitionPort,
         ProcessWorkerId,
@@ -333,7 +336,8 @@ async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
             suspension: ProcessSuspension {
                 kind: ProcessSuspensionKind::Approval,
                 gate_ref: Some(
-                    ironclaw_host_api::TurnGateRef::new(gate_ref.as_str()).expect("turn gate"),
+                    ironclaw_host_api::turn::TurnGateRef::new(gate_ref.as_str())
+                        .expect("turn gate"),
                 ),
                 activity_id: None,
                 credential_requirements: Vec::new(),
@@ -834,7 +838,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
 
 #[tokio::test]
 async fn retry_rebinds_checkpoint_through_the_real_process_store() {
-    use ironclaw_host_api::SanitizedFailure;
+    use ironclaw_host_api::turn::SanitizedFailure;
     use ironclaw_processes::{
         ClaimProcessesRequest, FailProcessRequest, GetProcessCheckpointRequest,
         ProcessCheckpointId, ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRef,
@@ -1288,7 +1292,7 @@ impl ProcessJournalSource for FakeProcessJournalSource {
     async fn read_process_journal_after(
         &self,
         _scope: &ResourceScope,
-        _owner_user_id: Option<&ironclaw_host_api::UserId>,
+        _owner_user_id: Option<&ironclaw_host_api::ids::UserId>,
         _after: Option<ProcessJournalCursor>,
         _limit: usize,
     ) -> Result<ProcessJournalPage, Self::Error> {

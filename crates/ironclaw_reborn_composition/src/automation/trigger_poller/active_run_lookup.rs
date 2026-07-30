@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProcessId;
+use ironclaw_host_api::ids::ProcessId;
 use ironclaw_processes::{
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
@@ -165,7 +165,7 @@ fn trigger_backend_error(error: impl std::fmt::Display) -> TriggerError {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_host_api::TenantId;
+    use ironclaw_host_api::ids::TenantId;
     use ironclaw_processes::ProcessSuspension;
     use ironclaw_triggers::TriggerId;
     use ironclaw_turns::TurnRunId;

@@ -20,7 +20,10 @@ use ironclaw_auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
+};
 use secrecy::SecretString;
 use tokio::sync::Semaphore;
 

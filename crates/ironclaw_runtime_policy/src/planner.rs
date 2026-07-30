@@ -54,7 +54,11 @@ use ironclaw_host_api::runtime_policy::{
     DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind, RuntimeKind};
+use ironclaw_host_api::{
+    capability::{CapabilityDescriptor, EffectKind},
+    ids::CapabilityId,
+    runtime::RuntimeKind,
+};
 use thiserror::Error;
 
 /// Concrete plan derived from an `EffectiveRuntimePolicy` for a single
@@ -177,7 +181,11 @@ mod tests {
     use ironclaw_host_api::runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, RuntimeProfile,
     };
-    use ironclaw_host_api::{ExtensionId, PermissionMode, RuntimeKind, TrustClass};
+    use ironclaw_host_api::{
+        capability::PermissionMode,
+        ids::ExtensionId,
+        runtime::{RuntimeKind, TrustClass},
+    };
 
     fn descriptor(effects: Vec<EffectKind>) -> CapabilityDescriptor {
         descriptor_with_runtime(RuntimeKind::Script, effects)

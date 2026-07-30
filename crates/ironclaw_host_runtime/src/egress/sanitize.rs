@@ -1,6 +1,7 @@
-use ironclaw_host_api::{
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, extract_mcp_auth_metadata_locations,
-    is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
+use ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations;
+use ironclaw_host_api::http::{
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, is_sensitive_runtime_request_header,
+    is_sensitive_runtime_response_header,
 };
 use ironclaw_network::{NetworkHttpResponse, percent_decode_url_component_lossy};
 use ironclaw_safety::{LeakDetector, http_parts_contain_manual_credentials, redact_exact_values};
@@ -228,8 +229,10 @@ pub(super) fn sanitize_runtime_response(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind,
-        UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{CapabilityId, InvocationId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
 
     fn request_with_header(runtime: RuntimeKind, header: (&str, &str)) -> RuntimeHttpEgressRequest {

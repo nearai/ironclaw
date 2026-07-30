@@ -5,7 +5,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, VirtualPath,
+    capability::CapabilityDescriptor, capability_profile::CapabilityProfileSchemaRef,
+    ids::CapabilityId, path::VirtualPath,
 };
 use serde_json::Value;
 

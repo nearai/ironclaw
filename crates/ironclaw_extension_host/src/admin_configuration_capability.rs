@@ -14,9 +14,12 @@ use ironclaw_extensions::{
     ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, SecretHandle, UserId,
+    capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::{CapabilityId, ExtensionId, SecretHandle, UserId},
+    resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -267,7 +270,10 @@ fn resource_usage(started: Instant) -> ResourceUsage {
 #[cfg(test)]
 mod tests {
     use ironclaw_extension_host::{AdminConfigurationFieldState, AdminConfigurationGroupState};
-    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId};
+    use ironclaw_host_api::{
+        ids::{AgentId, InvocationId, TenantId},
+        resource::ResourceScope,
+    };
 
     use super::*;
 

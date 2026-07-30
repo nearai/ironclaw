@@ -28,12 +28,22 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
-    LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceEventSubscription, ProductSurfaceStreamResponse, ProductSurfaceValidationCode,
-    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind, SafeSummary,
-    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
+        ResultRef, TenantId, ThreadId, UserId,
+    },
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
+        ProductSurfaceValidationCode,
+    },
+    resolution::{
+        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
+    },
+    result_meta::{ResultProgress, TerminateHint},
+    runtime::RuntimeKind,
+    safe_summary::SafeSummary,
+    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -627,7 +637,7 @@ impl StubServices {
         }
         Ok(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new("thread:fake").expect("thread id"),
+                thread_id: ironclaw_host_api::ids::ThreadId::new("thread:fake").expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
                     tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
                     agent_id: AgentId::new("agent-alpha").expect("agent"),
@@ -661,7 +671,7 @@ impl StubServices {
             return Ok(next);
         }
         Ok(RebornSubmitTurnResponse::Submitted {
-            thread_id: ironclaw_host_api::ThreadId::new(
+            thread_id: ironclaw_host_api::ids::ThreadId::new(
                 request.thread_id.clone().unwrap_or_default(),
             )
             .expect("thread id"),
@@ -686,7 +696,7 @@ impl StubServices {
             .push(request.clone());
         Ok(RebornTimelineResponse {
             thread: SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new(request.thread_id.clone())
+                thread_id: ironclaw_host_api::ids::ThreadId::new(request.thread_id.clone())
                     .expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
                     tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
@@ -1696,8 +1706,9 @@ impl ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -1706,7 +1717,7 @@ impl ProductSurface for StubServices {
                 )
                 .await?
                 .into_value()?;
-            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
         }
 
         let output = StubServices::invoke(
@@ -1718,14 +1729,15 @@ impl ProductSurface for StubServices {
         )
         .await?;
         let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         let page = StubServices::query(
             self,
             caller,
@@ -1736,17 +1748,20 @@ impl ProductSurface for StubServices {
             },
         )
         .await?;
-        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-            items: vec![page.payload],
-            next_cursor: page.next_cursor,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                items: vec![page.payload],
+                next_cursor: page.next_cursor,
+            },
+        )
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         let thread_id = request.stream_id.ok_or_else(|| {
             ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
         })?;
@@ -1806,11 +1821,13 @@ impl ProductSurface for StubServices {
         } else {
             None
         };
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-            subscription,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                events,
+                next_cursor: None,
+                subscription,
+            },
+        )
     }
 }
 

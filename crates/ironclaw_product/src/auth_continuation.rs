@@ -435,8 +435,9 @@ mod tests {
         LifecyclePackageRef, TurnRunRef,
     };
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProcessId, ProjectId, ResourceScope, TenantId, ThreadId,
-        TurnGateRef, UserId,
+        ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
+        turn::TurnGateRef,
     };
     use ironclaw_processes::{
         ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,

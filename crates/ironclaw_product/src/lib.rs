@@ -205,10 +205,10 @@ pub use ironclaw_turns::product_adapter::{
 };
 
 pub mod auth {
-    pub use ironclaw_host_api::ProtocolAuthFailure;
     pub use ironclaw_host_api::product_adapter::auth::{
         AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim,
     };
+    pub use ironclaw_host_api::product_adapter_error::ProtocolAuthFailure;
 
     #[cfg(feature = "host-auth-mint")]
     pub use ironclaw_host_api::product_adapter::auth::{
@@ -222,7 +222,7 @@ pub mod auth {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     pub use ironclaw_host_api::product_adapter::test_support::*;
-    pub use ironclaw_host_api::{
+    pub use ironclaw_host_api::product_surface::{
         RecordedProductSurfaceInvoke, RecordedProductSurfaceQuery, RecordedProductSurfaceStream,
         RecordingProductSurface,
     };

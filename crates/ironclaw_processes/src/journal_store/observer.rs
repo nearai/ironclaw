@@ -7,7 +7,7 @@ use std::{
 };
 
 use ironclaw_filesystem::{CasExpectation, Entry, RootFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use tokio::sync::Mutex;
 
 use super::{JOURNAL_READ_BATCH, ProcessJournalStore, ProcessJournalStoreError};

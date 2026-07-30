@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
 use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
-use ironclaw_host_api::{ExtensionId, VendorAuthRecipe};
+use ironclaw_host_api::{ids::ExtensionId, recipe::VendorAuthRecipe};
 
 use crate::SnapshotWatch;
 
@@ -205,7 +205,7 @@ impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
 mod tests {
     use super::*;
     use ironclaw_extensions::ResolvedAuthSurface;
-    use ironclaw_host_api::{ExtensionId, RuntimeCredentialAccountSetup};
+    use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::ExtensionId};
 
     fn oauth_recipe(scopes: &[&str], token_endpoint: &str) -> VendorAuthRecipe {
         serde_json::from_value(serde_json::json!({
@@ -230,7 +230,7 @@ mod tests {
             name: extension.to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::ThirdParty,
             runtime: ironclaw_extensions::ExtensionRuntimeV2::FirstParty {
                 service: format!("{extension}/v1"),
             },
@@ -242,7 +242,7 @@ mod tests {
             memory: None,
             admin_configuration: Vec::new(),
             auth: vec![ResolvedAuthSurface {
-                vendor: ironclaw_host_api::VendorId::new(vendor).expect("vendor id"),
+                vendor: ironclaw_host_api::ids::VendorId::new(vendor).expect("vendor id"),
                 setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
                 recipe: Some(recipe),
                 protected_resource_metadata_url: None,

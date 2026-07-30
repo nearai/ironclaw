@@ -3,7 +3,15 @@ use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::NetworkPolicy,
+    approval::InvocationFingerprint,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    ids::{ApprovalRequestId, CapabilityGrantId, InvocationId, SecretHandle},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_processes::*;
 use serde_json::json;
 

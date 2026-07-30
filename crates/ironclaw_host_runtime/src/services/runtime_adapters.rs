@@ -10,8 +10,12 @@ use futures_util::FutureExt;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityDescriptor, InvocationOrigin, MountView, ResourceEstimate, ResourceReservation,
-    UserId, runtime_policy::EffectiveRuntimePolicy,
+    capability::CapabilityDescriptor,
+    ids::UserId,
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceReservation},
+    runtime_policy::EffectiveRuntimePolicy,
 };
 use serde_json::Value;
 
@@ -64,7 +68,7 @@ where
     pub authenticated_actor_user_id: Option<UserId>,
     /// Loop turn-run identity forwarded from the dispatch request. `None`
     /// for non-loop callers.
-    pub run_id: Option<ironclaw_host_api::RunId>,
+    pub run_id: Option<ironclaw_host_api::ids::RunId>,
     /// Host-sealed origin used by capability-boundary policy.
     pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,

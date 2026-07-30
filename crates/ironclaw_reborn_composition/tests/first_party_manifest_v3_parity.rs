@@ -19,7 +19,9 @@ use ironclaw_extensions::{
     CapabilitySurfaceDeclV2, ExtensionManifestRecord, ExtensionRuntimeV2, MANIFEST_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
 };
-use ironclaw_host_api::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource};
+use ironclaw_host_api::capability::{
+    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+};
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 fn parse(toml: &str) -> ExtensionManifestRecord {
@@ -128,13 +130,13 @@ fn assert_static_projection_parity(dir: &str) {
             .collect::<Vec<_>>()
     };
     assert!(
-        !kinds(&v2).contains(&ironclaw_host_api::CapabilitySurfaceKind::Channel),
+        !kinds(&v2).contains(&ironclaw_host_api::surface::CapabilitySurfaceKind::Channel),
         "{dir}: v2 fixtures cannot attest channel surfaces post-DEL-5"
     );
     let non_channel_kinds = |record: &ExtensionManifestRecord| {
         kinds(record)
             .into_iter()
-            .filter(|kind| *kind != ironclaw_host_api::CapabilitySurfaceKind::Channel)
+            .filter(|kind| *kind != ironclaw_host_api::surface::CapabilitySurfaceKind::Channel)
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -154,11 +156,13 @@ fn assert_static_projection_parity(dir: &str) {
         // vocabulary), while v2 declared it inconsistently (24 of github's
         // 48 tools). It gates nothing downstream; MAN-3's parity list is
         // surfaces / capability ids / scopes / credentials.
-        let observable = |effects: &[ironclaw_host_api::EffectKind]| {
+        let observable = |effects: &[ironclaw_host_api::capability::EffectKind]| {
             effects
                 .iter()
                 .copied()
-                .filter(|effect| *effect != ironclaw_host_api::EffectKind::DispatchCapability)
+                .filter(|effect| {
+                    *effect != ironclaw_host_api::capability::EffectKind::DispatchCapability
+                })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -168,7 +172,7 @@ fn assert_static_projection_parity(dir: &str) {
         );
         assert!(
             b.effects
-                .contains(&ironclaw_host_api::EffectKind::DispatchCapability),
+                .contains(&ironclaw_host_api::capability::EffectKind::DispatchCapability),
             "{dir}/{id}: v3 normalization always includes the dispatch effect"
         );
         assert_eq!(
@@ -360,7 +364,7 @@ fn assert_hosted_mcp_projection(dir: &str, expected_namespace: &str) {
         for effect in &capability.effects {
             assert!(
                 mcp.effects.contains(effect)
-                    || *effect == ironclaw_host_api::EffectKind::DispatchCapability,
+                    || *effect == ironclaw_host_api::capability::EffectKind::DispatchCapability,
                 "{dir}: ceiling must cover static effect {effect:?}"
             );
         }
@@ -418,7 +422,7 @@ fn slack_v3_still_declares_the_channel_surface() {
     assert_eq!(
         kinds
             .iter()
-            .filter(|kind| **kind == ironclaw_host_api::CapabilitySurfaceKind::Channel)
+            .filter(|kind| **kind == ironclaw_host_api::surface::CapabilitySurfaceKind::Channel)
             .count(),
         1,
         "live slack manifest must declare exactly one channel surface; got {kinds:?}"

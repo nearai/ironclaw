@@ -25,8 +25,11 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionManifestRecord, InstallationOwner, PackageRootBinding,
 };
 use ironclaw_filesystem::{Filter, Page};
-use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_host_api::{ProductSurface, ProductSurfaceCaller, VirtualPath};
+use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{
+    path::VirtualPath,
+    product_surface::{ProductSurface, ProductSurfaceCaller},
+};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
@@ -376,7 +379,8 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
         .assert_user_phase(fixture.operator(), "active")
         .await;
 
-    let extension_id = ironclaw_host_api::ExtensionId::new(EXTENSION_ID).expect("extension id");
+    let extension_id =
+        ironclaw_host_api::ids::ExtensionId::new(EXTENSION_ID).expect("extension id");
     let fabricated_root =
         VirtualPath::new(format!("/system/extensions/{EXTENSION_ID}")).expect("fabricated root");
 
@@ -524,7 +528,8 @@ async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root(
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let extension_id = ironclaw_host_api::ExtensionId::new(EXTENSION_ID).expect("extension id");
+    let extension_id =
+        ironclaw_host_api::ids::ExtensionId::new(EXTENSION_ID).expect("extension id");
     let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
         &storage_root,
     )

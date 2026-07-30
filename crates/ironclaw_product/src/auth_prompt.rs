@@ -13,9 +13,13 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
-use ironclaw_host_api::{ChannelConnectionRequirement, PairingPromptView};
 use ironclaw_host_api::{
-    InvocationId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{InvocationId, UserId},
+};
+use ironclaw_host_api::{
+    package_lifecycle::ChannelConnectionRequirement, product_adapter::PairingPromptView,
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
 
@@ -274,13 +278,17 @@ fn auth_prompt_from_credential_requirement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ChannelConnectStrategy, RuntimeCredentialAccountSetup, VendorId};
+    use ironclaw_host_api::{
+        capability::RuntimeCredentialAccountSetup, ids::VendorId,
+        package_lifecycle::ChannelConnectStrategy,
+    };
 
     fn requirement(setup: RuntimeCredentialAccountSetup) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("acme").expect("vendor"),
             setup,
-            requester_extension: ironclaw_host_api::ExtensionId::new("acme").expect("extension id"),
+            requester_extension: ironclaw_host_api::ids::ExtensionId::new("acme")
+                .expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ResourceScope, UserId,
+    ids::{ExtensionId, InvocationId, UserId},
+    product_surface::ProductSurfaceError,
+    resource::ResourceScope,
+    state::InstallationState,
 };
 use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
@@ -679,8 +682,9 @@ mod tests {
     use super::*;
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{
-        AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-        TenantId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{HostPath, MountAlias, VirtualPath},
     };
     use ironclaw_product::LifecycleProductSurfaceContext;
 

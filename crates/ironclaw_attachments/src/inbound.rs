@@ -10,7 +10,7 @@
 
 use ironclaw_common::{AttachmentKind, AttachmentRef, canonical_extension, kind_for_mime};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 
 use crate::landing::{AttachmentLanding, AttachmentLandingError, land_attachment};
 
@@ -49,7 +49,7 @@ pub struct InboundAttachment {
 /// already have landed are left in place (the filesystem authority makes them
 /// addressable, and a retry re-lands at the same deterministic paths).
 ///
-/// [`ScopedPath`]: ironclaw_host_api::ScopedPath
+/// [`ScopedPath`]: ironclaw_host_api::path::ScopedPath
 pub async fn land_inbound_attachments<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -163,8 +163,10 @@ mod tests {
     use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        ScopedPath, TenantId, UserId, VirtualPath,
+        ids::{InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, ScopedPath, VirtualPath},
+        resource::ResourceScope,
     };
 
     // The crate no longer exports a default alias (the host composition owns

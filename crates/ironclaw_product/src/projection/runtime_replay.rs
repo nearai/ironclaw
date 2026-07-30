@@ -6,7 +6,7 @@ use ironclaw_event_projections::{
     RunStatusProjection,
 };
 use ironclaw_events::EventCursor;
-use ironclaw_host_api::InvocationId;
+use ironclaw_host_api::ids::InvocationId;
 
 use super::PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS;
 

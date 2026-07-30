@@ -25,7 +25,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -949,7 +949,7 @@ impl RebornProductAuthServices {
     pub async fn cancel_blocked_auth_flow(
         &self,
         scope: &TurnScope,
-        owner_user_id: &ironclaw_host_api::UserId,
+        owner_user_id: &ironclaw_host_api::ids::UserId,
         run_id: TurnRunId,
         gate_ref: &str,
     ) -> Result<(), AuthProductError> {
@@ -1471,17 +1471,16 @@ impl RebornProductAuthServices {
 
     fn setup_pkce_secret_handle(
         flow_id: AuthFlowId,
-    ) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
-        ironclaw_host_api::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}")).map_err(
-            |error| {
+    ) -> Result<ironclaw_host_api::ids::SecretHandle, AuthProductError> {
+        ironclaw_host_api::ids::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}"))
+            .map_err(|error| {
                 tracing::warn!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to build setup PKCE secret handle"
                 );
                 AuthProductError::BackendUnavailable
-            },
-        )
+            })
     }
 
     /// Durably store a setup flow's raw PKCE verifier under its per-flow

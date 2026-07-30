@@ -1,6 +1,6 @@
 //! Shared credential-redaction primitives for the model-visible result
-//! vocabulary — the single definition used by both [`crate::SafeSummary`] (the
-//! bounded caption) and [`crate::ModelResultPreview`] (the bounded tool-result
+//! vocabulary — the single definition used by both [`crate::safe_summary::SafeSummary`] (the
+//! bounded caption) and [`crate::model_result_preview::ModelResultPreview`] (the bounded tool-result
 //! CONTENT preview).
 //!
 //! Two independent scans:

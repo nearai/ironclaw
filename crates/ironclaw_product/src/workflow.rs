@@ -18,8 +18,11 @@ use chrono::Utc;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_host_api::{
-    ActivityId, CapabilityId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceInvokeRequest, ThreadId, UserId,
+    ids::{ActivityId, CapabilityId, ThreadId, UserId},
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceInvokeRequest,
+    },
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
@@ -1040,7 +1043,7 @@ fn is_stale_auth_error(error: &ProductSurfaceFailure) -> bool {
 fn projection_thread_id_from_binding(
     binding: &ResolvedBinding,
     thread_id_hint: Option<&str>,
-) -> Result<ironclaw_host_api::ThreadId, ProductAdapterError> {
+) -> Result<ironclaw_host_api::ids::ThreadId, ProductAdapterError> {
     validate_projection_thread_hint(&binding.thread_id, thread_id_hint)?;
     Ok(binding.thread_id.clone())
 }

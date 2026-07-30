@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ironclaw_host_api::{
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkTargetPattern, ResourceScope, TenantId,
-    UserId,
+    action::{NetworkMethod, NetworkPolicy, NetworkTargetPattern},
+    ids::{InvocationId, TenantId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_network::{
     DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest,

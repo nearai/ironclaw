@@ -22,7 +22,9 @@ use super::{
     RebornViewDescriptor, RebornViewProvider, bounded_log_query, map_thread_error,
     parse_run_id_field, parse_thread_id_field,
 };
-use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_host_api::product_surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+};
 
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -337,7 +339,7 @@ fn redact_json_strings(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
+    use ironclaw_host_api::ids::{CapabilityId, ProviderToolName, ThreadId};
     use ironclaw_threads::ProviderToolCallReferenceEnvelope;
     use serde_json::json;
 

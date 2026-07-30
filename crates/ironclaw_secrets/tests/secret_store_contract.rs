@@ -1,6 +1,6 @@
 use ironclaw_host_api::{
-    AgentId, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId,
-    UserId,
+    ids::{AgentId, InvocationId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretLeaseStatus, SecretMaterial, SecretStore, SecretStorePort};
 use secrecy::ExposeSecret;
