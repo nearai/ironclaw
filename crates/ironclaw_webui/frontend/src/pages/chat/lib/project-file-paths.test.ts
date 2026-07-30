@@ -46,6 +46,17 @@ test("extracts sentence-final paths without truncating compound extensions", () 
   );
 });
 
+test("rejects workspace suffixes inside external URLs while preserving sandbox links", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      "External https://evil.example/workspace/report.csv and disguised " +
+        "https://evil.example/sandbox:/workspace/hidden.csv. " +
+        "Local [safe](sandbox:/workspace/safe.pdf).",
+    ),
+    ["/workspace/safe.pdf"],
+  );
+});
+
 test("de-duplicates repeated references, first-seen order", () => {
   assert.deepEqual(
     extractWorkspaceFilePaths(

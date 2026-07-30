@@ -5,17 +5,18 @@
 
 import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 
-// Match scoped workspace paths with a file extension. These are the paths the
-// `/files/content` endpoint serves and that the agent's file tools emit. Both a
-// bare mention (`/workspace/report.csv`) and a markdown link href
-// (`[report.csv](/workspace/report.csv)`) are caught by the same scan.
+// Match token-bounded scoped workspace paths with a file extension. These are
+// the paths the `/files/content` endpoint serves and that the agent's file
+// tools emit. Both a bare mention (`/workspace/report.csv`) and a Markdown link
+// href (`[report.csv](sandbox:/workspace/report.csv)`) are caught by the scan,
+// while `/workspace/` suffixes inside external URLs are not.
 // Match a broad Unicode candidate, including spaces, then let
 // `isValidWorkspaceFilePath` remain the authority for safety and bounds. The
 // lazy body stops at the first extension followed by prose/link punctuation.
 // A sentence-final period is a delimiter only when it is itself followed by a
 // delimiter or end-of-input, preserving compound extensions such as `.tar.gz`.
 const WORKSPACE_FILE_PATH =
-  /\/workspace\/[^\u0000-\u001f\u007f<>"'`?#[\]{}()%]*?\.[\p{L}\p{N}]+(?=$|[\s,;:!?()[\]{}<>"']|\.(?=$|[\s,;:!?()[\]{}<>"']))/gu;
+  /(?:^|[\s(\[{"'<])(?:sandbox:)?(\/workspace\/[^\u0000-\u001f\u007f<>"'`?#[\]{}()%]*?\.[\p{L}\p{N}]+(?=$|[\s,;:!?()[\]{}<>"']|\.(?=$|[\s,;:!?()[\]{}<>"'])))/gu;
 
 // Strip fenced (```…```) and inline (`…`) code spans. A path that the assistant
 // only *displays* in a shell snippet (`cat /workspace/.env`) must not become a
@@ -35,7 +36,7 @@ export function extractWorkspaceFilePaths(content) {
     // The regex ends at `\.[\p{L}\p{N}]+`, so a match always terminates on an
     // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
     // is never captured and needs no stripping here.
-    const path = match[0];
+    const path = match[1];
     if (!isValidWorkspaceFilePath(path)) continue;
     if (!seen.has(path)) {
       seen.add(path);
