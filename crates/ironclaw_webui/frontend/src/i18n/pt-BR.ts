@@ -102,6 +102,7 @@ registerPack("pt-BR", {
   "chat.commandFailed": "Não foi possível executar esse comando.",
   "chat.commandMenuHintRun": "Execução",
   "chat.commandMenuHintComplete": "Completar",
+  "chat.commandListTitle": "Comandos disponíveis",
   "chat.attachmentTooMany": "Você pode anexar no máximo {max} arquivos por mensagem.",
   "chat.attachmentTooLarge": "{name} é muito grande (máximo {max} por arquivo).",
   "chat.attachmentTotalTooLarge": "Os anexos excedem o limite total de {max}.",

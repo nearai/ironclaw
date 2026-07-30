@@ -102,6 +102,7 @@ registerPack("uk", {
   "chat.commandFailed": "Не вдалося виконати цю команду.",
   "chat.commandMenuHintRun": "Запуск",
   "chat.commandMenuHintComplete": "Завершити",
+  "chat.commandListTitle": "Доступні команди",
   "chat.attachmentTooMany": "Можна додати щонайбільше {max} файлів на повідомлення.",
   "chat.attachmentTooLarge": "{name} завеликий (максимум {max} на файл).",
   "chat.attachmentTotalTooLarge": "Вкладення перевищують загальний ліміт {max}.",

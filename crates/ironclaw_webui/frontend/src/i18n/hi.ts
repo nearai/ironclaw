@@ -102,6 +102,7 @@ registerPack("hi", {
   "chat.commandFailed": "वह कमांड चलाई नहीं जा सकी।",
   "chat.commandMenuHintRun": "रन",
   "chat.commandMenuHintComplete": "पूर्ण करें",
+  "chat.commandListTitle": "उपलब्ध कमांड",
   "chat.attachmentTooMany": "आप प्रति संदेश अधिकतम {max} फ़ाइलें संलग्न कर सकते हैं।",
   "chat.attachmentTooLarge": "{name} बहुत बड़ी है (प्रति फ़ाइल अधिकतम {max})।",
   "chat.attachmentTotalTooLarge": "अनुलग्नक कुल {max} सीमा से अधिक हैं।",

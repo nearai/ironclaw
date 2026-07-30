@@ -5794,6 +5794,11 @@ test("useChat.runCommand: shows the localized chat.commandFailed notice on a cli
   assert.equal(renderedMessages[0].role, CHAT_MESSAGE_ROLES.SYSTEM);
   assert.equal(renderedMessages[0].content, t("chat.commandFailed"));
   assert.equal(renderedMessages[0].content, "Couldn't run that command.");
+  assert.equal(
+    renderedMessages[0].commandResult,
+    undefined,
+    "a client-side/network failure has no server response to render richly — MessageBubble must fall back to the plain markdown notice, not an empty CommandResult",
+  );
 });
 
 test("useChat.runCommand: creates a thread from the landing composer and reports it for selection", async () => {
@@ -5882,6 +5887,11 @@ test("useChat.runCommand: creates a thread from the landing composer and reports
   assert.equal(renderedMessages.length, 1);
   assert.equal(renderedMessages[0].role, CHAT_MESSAGE_ROLES.SYSTEM);
   assert.equal(renderedMessages[0].content, "**Status**");
+  assert.deepEqual(
+    renderedMessages[0].commandResult,
+    { command: "status", result: { title: "Status", fields: [], lines: [] } },
+    "the notice should also carry the raw structured response for CommandResult's rich rendering",
+  );
 });
 
 test("useChat.runCommand: fences the success notice to the thread it executed against", async () => {

@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COMMAND_RESULT_KIND,
   INITIAL_COMMAND_MENU_SELECTION,
+  classifyCommandResponse,
   commandMenuMatches,
   commandMenuSelectionReducer,
   commandMenuToken,
+  isIdentifierValue,
+  isIsoTimestampValue,
   matchCommand,
   renderCommandResultMarkdown,
 } from "./chat-commands";
@@ -155,5 +159,116 @@ describe("renderCommandResultMarkdown", () => {
         rejection: { kind: "invalid_request", message: "Available commands:" },
       }),
     ).toBe("Available commands:");
+  });
+});
+
+// Classification driving command-result.tsx's dispatch (success card /
+// dropdown-echoing command list / calm denial notice). See
+// `ironclaw_product/src/reborn_services/product_commands.rs`:
+// `execute_product_command` always answers with exactly one of
+// `result`/`rejection`, and the only rejection `kind` it emits for the
+// unknown/malformed-command help text is `invalid_request` — every other
+// kind reachable from command execution (in practice `access_denied`, the
+// admin-only gate) is a genuine denial.
+describe("classifyCommandResponse", () => {
+  it("classifies a populated result as success", () => {
+    expect(
+      classifyCommandResponse({
+        command: "status",
+        result: { title: "Status", fields: [], lines: [] },
+      }),
+    ).toBe(COMMAND_RESULT_KIND.SUCCESS);
+  });
+
+  it("classifies an invalid_request rejection as the command list", () => {
+    expect(
+      classifyCommandResponse({
+        command: "",
+        rejection: { kind: "invalid_request", message: "Available commands:\n/status" },
+      }),
+    ).toBe(COMMAND_RESULT_KIND.COMMAND_LIST);
+  });
+
+  it("classifies any other rejection kind as a denial", () => {
+    expect(
+      classifyCommandResponse({
+        command: "lifecycle_install",
+        rejection: {
+          kind: "access_denied",
+          message: "This command requires an admin account.",
+        },
+      }),
+    ).toBe(COMMAND_RESULT_KIND.DENIAL);
+  });
+
+  it("classifies a response with neither result nor rejection as empty", () => {
+    expect(classifyCommandResponse({ command: "status" })).toBe(
+      COMMAND_RESULT_KIND.EMPTY,
+    );
+    expect(classifyCommandResponse(null)).toBe(COMMAND_RESULT_KIND.EMPTY);
+  });
+});
+
+describe("isIsoTimestampValue", () => {
+  it("accepts the RFC3339-with-seconds, Z-suffixed shape the backend emits", () => {
+    // Matches `DateTime::to_rfc3339_opts(SecondsFormat::Secs, true)` from
+    // `execute_product_status_command`.
+    expect(isIsoTimestampValue("2026-07-30T13:18:49Z")).toBe(true);
+  });
+
+  it("accepts a fractional-seconds timestamp with an explicit offset", () => {
+    expect(isIsoTimestampValue("2026-07-30T13:18:49.123+00:00")).toBe(true);
+  });
+
+  it("rejects plain words, bare numbers, and non-timestamp text", () => {
+    expect(isIsoTimestampValue("idle")).toBe(false);
+    expect(isIsoTimestampValue("12")).toBe(false);
+    expect(isIsoTimestampValue("2026-07-30")).toBe(false);
+    expect(isIsoTimestampValue("")).toBe(false);
+    expect(isIsoTimestampValue(undefined)).toBe(false);
+  });
+});
+
+describe("isIdentifierValue", () => {
+  it("accepts a run-id-shaped UUID", () => {
+    expect(isIdentifierValue("1b9894d9-3f21-4a10-9abc-def012345678")).toBe(true);
+  });
+
+  it("accepts a dotted/hyphenated/slashed package id", () => {
+    expect(isIdentifierValue("acme-tools/foo-bar@2.1.0")).toBe(true);
+  });
+
+  it("rejects short plain words even when a label might suggest an id", () => {
+    expect(isIdentifierValue("idle")).toBe(false);
+    expect(isIdentifierValue("yes")).toBe(false);
+    expect(isIdentifierValue("no")).toBe(false);
+  });
+
+  it("rejects a long plain English word with no structural punctuation", () => {
+    // e.g. LifecyclePublicState::as_str() -> "uninstalled" — a state WORD,
+    // not an opaque identifier.
+    expect(isIdentifierValue("uninstalled")).toBe(false);
+  });
+
+  it("rejects a snake_case state label even though it clears the length bar", () => {
+    // "setup_needed" — underscore is deliberately excluded from the
+    // identifier charset so backend State values never get monospaced.
+    expect(isIdentifierValue("setup_needed")).toBe(false);
+  });
+
+  it("rejects a bare short number (e.g. a Count field)", () => {
+    expect(isIdentifierValue("12")).toBe(false);
+  });
+
+  it("rejects prose containing whitespace", () => {
+    expect(isIdentifierValue("No assistant activity in this conversation yet.")).toBe(
+      false,
+    );
+  });
+
+  it("rejects non-string values", () => {
+    expect(isIdentifierValue(12)).toBe(false);
+    expect(isIdentifierValue(null)).toBe(false);
+    expect(isIdentifierValue(undefined)).toBe(false);
   });
 });

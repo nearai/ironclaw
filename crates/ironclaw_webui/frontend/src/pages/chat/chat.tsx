@@ -391,6 +391,7 @@ export function Chat({
             activeRunId={activeRunId}
             logsPath={logsPath}
             pending={activeThreadIsProcessing}
+            commands={chatCommands}
           >
             {recoveryNotice &&
             (

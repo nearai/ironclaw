@@ -69,7 +69,10 @@ export function commandMenuSelectionReducer(state, action) {
 
 // Render an executed command's response as markdown for the SYSTEM notice
 // bubble: one generic shape for every command (title, label/value fields,
-// plain lines) or the rejection message.
+// plain lines) or the rejection message. Kept as the plain-text fallback
+// content on every notice message (see useChat.ts's `runCommand`) — the rich
+// `CommandResult` presentation (components/command-result.tsx) is additive,
+// driven by the structured response stashed alongside it.
 export function renderCommandResultMarkdown(response) {
   if (response?.rejection?.message) return response.rejection.message;
   const view = response?.result;
@@ -83,4 +86,85 @@ export function renderCommandResultMarkdown(response) {
     parts.push(line);
   }
   return parts.join("\n");
+}
+
+// --- Command-result presentation (pure classification/formatting) ---------
+// `components/command-result.tsx` is the presentation layer; everything it
+// needs to DECIDE what to render (as opposed to how to render it) lives here
+// so it's unit-testable without React or the DOM.
+
+export const COMMAND_RESULT_KIND = Object.freeze({
+  SUCCESS: "success",
+  COMMAND_LIST: "commandList",
+  DENIAL: "denial",
+  // Defensive only: `product.commands.execute` always answers with exactly
+  // one of `result`/`rejection` (see `execute_product_command` in
+  // `ironclaw_product/src/reborn_services/product_commands.rs`) — this never
+  // fires against a real backend. `CommandResult` renders nothing for it so a
+  // response shaped like neither falls back to the legacy markdown notice
+  // instead of an empty card.
+  EMPTY: "empty",
+});
+
+// The wire's `rejection.kind` (`ProductRejectionKind`, backend enum) is a
+// small fixed protocol taxonomy, not per-command metadata — this is the one
+// value `product.commands.execute` uses for "unknown/malformed command, here
+// is the help text" (see the same file). Every other kind reachable from
+// command execution (in practice just `access_denied`, the admin-only gate)
+// is a genuine denial.
+const COMMAND_LIST_REJECTION_KIND = "invalid_request";
+
+// Classify an executed command's response into the shape its presentation
+// should take. `result` wins if present (defensive: the two are meant to be
+// mutually exclusive on the wire).
+export function classifyCommandResponse(response) {
+  if (response?.result) return COMMAND_RESULT_KIND.SUCCESS;
+  const rejection = response?.rejection;
+  if (!rejection) return COMMAND_RESULT_KIND.EMPTY;
+  return rejection.kind === COMMAND_LIST_REJECTION_KIND
+    ? COMMAND_RESULT_KIND.COMMAND_LIST
+    : COMMAND_RESULT_KIND.DENIAL;
+}
+
+// ISO 8601 timestamp shape the backend actually emits for time-valued fields
+// (e.g. `/status`'s "Since": `DateTime::to_rfc3339_opts(SecondsFormat::Secs,
+// true)` — always `Z`-suffixed UTC, never a bare offset-less string).
+const ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
+
+// Whether a field VALUE (never the label) is an ISO timestamp that should
+// render through the app's existing human-readable date formatting instead
+// of as raw text.
+export function isIsoTimestampValue(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!ISO_TIMESTAMP_RE.test(trimmed)) return false;
+  return Number.isFinite(Date.parse(trimmed));
+}
+
+const MIN_IDENTIFIER_LENGTH = 8;
+// Opaque-token charset: letters, digits, and the punctuation that shows up
+// in run ids (UUIDs), package ids (dotted/slashed/hyphenated names), and
+// hashes. Deliberately excludes "_" — backend `State` values are snake_case
+// WORDS (e.g. `setup_needed`, `LifecyclePublicState::as_str()`), not opaque
+// identifiers, and must keep rendering as plain prose, not monospace.
+const IDENTIFIER_CHARSET_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.:@/-]*[A-Za-z0-9])?$/;
+
+// Whether a field VALUE looks like an identifier (run id, package id, hash)
+// rather than prose — a value-shape heuristic, not a label allowlist, so it
+// stays correct for any command's fields without hardcoding that command's
+// name or field labels here. Short plain words ("idle", "yes") and
+// underscored state labels ("setup_needed") are deliberately excluded; see
+// the constants above for why. This means a short human-chosen slug (e.g. a
+// 5-letter package id) will not get the identifier treatment — an accepted
+// trade-off given a value-only heuristic cannot otherwise distinguish it from
+// an ordinary short word (see the design report).
+export function isIdentifierValue(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (trimmed.length < MIN_IDENTIFIER_LENGTH) return false;
+  if (/\s/.test(trimmed)) return false;
+  if (!IDENTIFIER_CHARSET_RE.test(trimmed)) return false;
+  if (!/[A-Za-z]/.test(trimmed)) return false;
+  return /[0-9._:@/-]/.test(trimmed);
 }

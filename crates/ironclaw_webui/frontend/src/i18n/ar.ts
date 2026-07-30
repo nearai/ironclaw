@@ -102,6 +102,7 @@ registerPack("ar", {
   "chat.commandFailed": "تعذّر تشغيل هذا الأمر.",
   "chat.commandMenuHintRun": "تشغيل",
   "chat.commandMenuHintComplete": "إكمال",
+  "chat.commandListTitle": "الأوامر المتاحة",
   "chat.attachmentTooMany": "يمكنك إرفاق {max} ملفات كحد أقصى لكل رسالة.",
   "chat.attachmentTooLarge": "{name} كبير جدًا (الحد الأقصى {max} لكل ملف).",
   "chat.attachmentTotalTooLarge": "تتجاوز المرفقات الحد الإجمالي {max}.",

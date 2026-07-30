@@ -1113,13 +1113,14 @@ export function useChat(threadId) {
   //    lost, exactly like `send`'s busy-notice handling below.
   const runCommand = React.useCallback(
     async (text) => {
-      const appendNotice = (content, executedThreadId) => {
+      const appendNotice = (content, executedThreadId, meta) => {
         const notice = {
           id: `system-command-${pendingSeqRef.current++}`,
           role: CHAT_MESSAGE_ROLES.SYSTEM,
           content,
           timestamp: new Date().toISOString(),
           isOptimistic: false,
+          ...meta,
         };
         const appendToPrev = (prev) => [...prev, notice];
         // No thread was ever created (thread creation itself failed) —
@@ -1152,7 +1153,15 @@ export function useChat(threadId) {
           threadId: executeThreadId,
           text,
         });
-        appendNotice(renderCommandResultMarkdown(response), executeThreadId);
+        // `commandResult` is the raw server response — the ephemeral,
+        // client-only structured payload `CommandResult`
+        // (components/command-result.tsx) reads to render the rich
+        // title/fields/lines (or command-list/denial) presentation.
+        // `content` keeps rendering the legacy markdown string, unchanged, as
+        // the fallback for any consumer that only reads plain text.
+        appendNotice(renderCommandResultMarkdown(response), executeThreadId, {
+          commandResult: response,
+        });
         return { ...response, thread_id: executeThreadId };
       } catch {
         // A thrown error here has no server-shaped `result`/`rejection` to

@@ -1,6 +1,7 @@
 import React from "react";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
+import { CommandResult } from "./command-result";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
@@ -9,6 +10,7 @@ import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
 import { fetchRunArtifact } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { COMMAND_RESULT_KIND, classifyCommandResponse } from "../lib/chat-commands";
 import {
   CHAT_MESSAGE_ROLES,
   messageBelongsToActiveRun,
@@ -30,11 +32,23 @@ const ROLE_STYLES = {
     "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
+type CommandDescriptor = {
+  name: string;
+  title: string;
+  description: string;
+  usage: string;
+};
+
 type MessageBubbleProps = {
   message: ChatMessage;
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
   activeRunId?: string | null;
+  // The server command inventory (`useChatCommands()`, threaded down from
+  // chat.tsx through MessageList) — only read for a SYSTEM message carrying a
+  // `commandResult` whose rejection is the "available commands" help case;
+  // see command-result.tsx.
+  commands?: CommandDescriptor[];
 };
 
 function formatTimestamp(value?: string) {
@@ -94,9 +108,10 @@ function MessageBubbleImpl({
   onRetry,
   threadId,
   activeRunId,
+  commands,
 }: MessageBubbleProps) {
   const t = useT();
-  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
+  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp, commandResult } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
   const finalReplyState =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
@@ -187,6 +202,22 @@ function MessageBubbleImpl({
         streaming={isStreamingThinking}
       />
     );
+  }
+
+  // A command-execute response stashed structured data on the notice (see
+  // useChat.ts's `runCommand`) — render the rich, left-aligned presentation
+  // instead of the plain markdown notice bubble below. `commandResult` is
+  // absent on every other SYSTEM notice (e.g. the busy/rejected notice from
+  // `send()`), which keeps rendering through the legacy path unchanged; the
+  // EMPTY classification (defensive only — never hit against a real backend,
+  // see chat-commands.ts) also falls through to that legacy path rather than
+  // rendering nothing.
+  if (
+    role === CHAT_MESSAGE_ROLES.SYSTEM &&
+    commandResult &&
+    classifyCommandResponse(commandResult) !== COMMAND_RESULT_KIND.EMPTY
+  ) {
+    return (<CommandResult response={commandResult} commands={commands} />);
   }
 
   if (role === CHAT_MESSAGE_ROLES.IMAGE) {

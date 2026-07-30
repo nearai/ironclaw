@@ -106,6 +106,7 @@ registerPack("en", {
   "chat.commandFailed": "Couldn't run that command.",
   "chat.commandMenuHintRun": "Run",
   "chat.commandMenuHintComplete": "Complete",
+  "chat.commandListTitle": "Available commands",
   "chat.attachmentTooMany": "You can attach at most {max} files per message.",
   "chat.attachmentTooLarge": "{name} is too large (max {max} per file).",
   "chat.attachmentTotalTooLarge": "Attachments exceed the {max} total limit.",

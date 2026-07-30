@@ -278,6 +278,22 @@ test("locale packs include composer command menu and command failure copy", () =
   }
 });
 
+test("locale packs include the command-result presentation's list heading", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(
+      typeof pack["chat.commandListTitle"],
+      "string",
+      `${locale} missing chat.commandListTitle`,
+    );
+    assert.notEqual(
+      pack["chat.commandListTitle"].trim(),
+      "",
+      `${locale} chat.commandListTitle should not be empty`,
+    );
+  }
+});
+
 test("locale packs include lazy-route loading and recovery copy", () => {
   const requiredKeys = [
     "app.loadingPage",

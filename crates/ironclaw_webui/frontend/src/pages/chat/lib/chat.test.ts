@@ -870,6 +870,48 @@ test("Chat hides the floating thread logs shortcut when the preference is off", 
   assert.equal(componentProps(messageList, components.MessageList).logsPath, null);
 });
 
+test("Chat threads the server command inventory down to MessageList so a command-result system message can render the dropdown-echoing list", () => {
+  // The "available commands" rejection (chat-commands.ts's
+  // classifyCommandResponse -> COMMAND_LIST) renders the SAME inventory the
+  // composer's dropdown uses (see command-result.tsx), not a re-hardcoded
+  // copy — MessageList (and, in turn, MessageBubble) must receive it.
+  const commands = [
+    { name: "status", title: "Status", description: "d", usage: "/status" },
+    { name: "model", title: "Model", description: "d", usage: "/model" },
+  ];
+  const { tree, components } = renderChat({
+    activeThreadId: "thread-1",
+    contextOverrides: { useChatCommands: () => commands },
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    componentProps(messageList, components.MessageList).commands,
+    commands,
+    "MessageList should receive the same command inventory the composer uses",
+  );
+});
+
 test("Chat deny gate callback routes through approve compatibility path", () => {
   const approveCalls = [];
   const pendingGate = {

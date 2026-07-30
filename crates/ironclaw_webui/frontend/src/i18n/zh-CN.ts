@@ -102,6 +102,7 @@ registerPack("zh-CN", {
   "chat.commandFailed": "无法执行该命令。",
   "chat.commandMenuHintRun": "运行",
   "chat.commandMenuHintComplete": "补全",
+  "chat.commandListTitle": "可用命令",
   "chat.attachmentTooMany": "每条消息最多可附加 {max} 个文件。",
   "chat.attachmentTooLarge": "{name} 太大（每个文件最大 {max}）。",
   "chat.attachmentTotalTooLarge": "附件超过 {max} 的总限制。",
