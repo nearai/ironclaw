@@ -249,6 +249,7 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
     hasLoadedOlderRef.current = false;
     loadMoreInFlightRef.current = null;
     setEntries([]);
+    setIsLoading(false);
     setNextCursor(null);
     setIsLoadingMore(false);
     setLoadMoreError(null);

@@ -375,6 +375,50 @@ test("useLogs exposes pagination errors and retries the same cursor", async () =
   );
 });
 
+test("useLogs clears loading when paused during an in-flight refresh", async () => {
+  let resolveRefresh;
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (_request, callCount) => {
+      if (callCount === 1) {
+        return { entries: [{ id: "latest" }], next_cursor: "cursor-1" };
+      }
+      return new Promise((resolve) => {
+        resolveRefresh = resolve;
+      });
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  assert.equal(result.entries.length, 1);
+
+  const refresh = harness.intervals[0].fn();
+  result = harness.render();
+  assert.equal(result.isLoading, true);
+
+  result.togglePause();
+  result = harness.render();
+  assert.equal(result.paused, true);
+
+  result.clearEntries();
+  result = harness.render();
+  assert.equal(result.entries.length, 0);
+  assert.equal(result.isLoading, false);
+  assert.equal(result.status, "ready");
+
+  resolveRefresh({
+    entries: [{ id: "late-refresh" }],
+    next_cursor: null,
+  });
+  await refresh;
+  result = harness.render();
+  assert.equal(result.entries.length, 0);
+  assert.equal(result.isLoading, false);
+});
+
 test("useLogs surfaces the fallback error when caller-scoped logs also fail", async () => {
   const harness = createHookHarness({
     search: "?thread_id=thread-a",
