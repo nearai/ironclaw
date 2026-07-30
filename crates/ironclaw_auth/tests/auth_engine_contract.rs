@@ -1720,12 +1720,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ironclaw_auth::keepalive::{sweep_once, tick_once};
 use ironclaw_auth::{
-    AlwaysLeaderKeepaliveLock, CredentialAccount, CredentialAccountLookupRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    KeepaliveCandidateSource, KeepaliveLeaderLock, KeepaliveSweepDeps, KeepaliveSweepFuture,
-    KeepaliveSweepSettings, LeaderOutcome, NewCredentialAccount,
+    AlwaysLeaderKeepaliveLock, AuthRecipeResolver, CredentialAccount,
+    CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, KeepaliveCandidateSource, KeepaliveLeaderLock, KeepaliveSweepDeps,
+    KeepaliveSweepFuture, KeepaliveSweepSettings, LeaderOutcome, NewCredentialAccount,
     ProviderBackedCredentialAccountService,
 };
+use ironclaw_host_api::ExtensionId;
 use tokio_util::sync::CancellationToken;
 
 fn keepalive_recipe_toml(vendor: &str, keepalive_idle_seconds: Option<u32>) -> String {
@@ -1848,6 +1849,19 @@ impl SweepFixture {
     }
 
     async fn seed_account(&self, vendor: &str) -> CredentialAccount {
+        self.seed_account_with_ownership(vendor, CredentialOwnership::UserReusable, None)
+            .await
+    }
+
+    /// Sibling of [`Self::seed_account`] that lets a test control ownership
+    /// and `owner_extension`, e.g. to seed an `ExtensionOwned` candidate for
+    /// the sweep's extension-recipe-resolution branch.
+    async fn seed_account_with_ownership(
+        &self,
+        vendor: &str,
+        ownership: CredentialOwnership,
+        owner_extension: Option<ExtensionId>,
+    ) -> CredentialAccount {
         let refresh_handle = SecretHandle::new(format!("{vendor}-seeded-refresh")).unwrap();
         self.secrets
             .put(
@@ -1865,8 +1879,8 @@ impl SweepFixture {
                 provider: AuthProviderId::new(vendor).unwrap(),
                 label: CredentialAccountLabel::new(vendor).unwrap(),
                 status: CredentialAccountStatus::Configured,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
+                ownership,
+                owner_extension,
                 granted_extensions: Vec::new(),
                 access_secret: None,
                 refresh_secret: Some(refresh_handle),
@@ -2077,6 +2091,176 @@ async fn keepalive_refresh_failure_follows_engine_account_state_rules() {
             .len(),
         1,
         "a revoked account is never re-swept"
+    );
+}
+
+/// Requester-aware recipe resolver test double, keyed by requesting
+/// extension. `StaticAuthRecipeResolver` (used everywhere else in this suite)
+/// ignores `requester_extension` entirely, so it can never prove that
+/// `sweep_once`'s `ExtensionOwned` branch (`keepalive.rs:308-318`) actually
+/// carries `account.owner_extension` into `deps.recipes.resolve`.
+#[derive(Debug, Default)]
+struct RequesterAwareRecipeResolver {
+    by_extension: HashMap<String, ResolvedVendorAuthRecipe>,
+}
+
+impl RequesterAwareRecipeResolver {
+    fn new(entries: Vec<(ExtensionId, ResolvedVendorAuthRecipe)>) -> Self {
+        Self {
+            by_extension: entries
+                .into_iter()
+                .map(|(extension, recipe)| (extension.into_string(), recipe))
+                .collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl AuthRecipeResolver for RequesterAwareRecipeResolver {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
+        let extension = requester_extension?;
+        self.by_extension
+            .get(extension.as_str())
+            .filter(|recipe| recipe.vendor == vendor)
+            .cloned()
+    }
+}
+
+/// An `ExtensionOwned` account whose owner_extension resolves no recipe in
+/// this requester-aware resolver is skipped before any vendor traffic,
+/// proving the branch's early-continue when `resolve()` returns `None`.
+///
+/// The success leg of this branch — an `ExtensionOwned` account whose
+/// `owner_extension` DOES resolve a recipe, and is then actually refreshed —
+/// is covered by
+/// [`keepalive_sweep_refreshes_extension_owned_account_with_resolvable_recipe`]
+/// below, which asserts real vendor traffic and an advanced `updated_at`.
+#[tokio::test]
+async fn keepalive_sweep_skips_extension_owned_account_with_no_resolvable_recipe() {
+    let beta_recipe = synthetic_recipe("beta", &keepalive_recipe_toml("beta", Some(WEEK_SECONDS)));
+    let fixture = SweepFixture::new(vec![beta_recipe]);
+
+    let alpha_extension_with_recipe = ExtensionId::new("alpha-extension").unwrap();
+    let beta_extension_without_recipe = ExtensionId::new("beta-extension-no-recipe").unwrap();
+
+    // The resolver only has a (mismatched-vendor) entry for
+    // `alpha_extension_with_recipe`; `beta`'s owner_extension is entirely
+    // absent from it.
+    let mut deps = fixture.deps.clone();
+    deps.recipes = Arc::new(RequesterAwareRecipeResolver::new(vec![(
+        alpha_extension_with_recipe,
+        synthetic_recipe("alpha", &keepalive_recipe_toml("alpha", Some(WEEK_SECONDS))),
+    )]));
+
+    let beta = fixture
+        .seed_account_with_ownership(
+            "beta",
+            CredentialOwnership::ExtensionOwned,
+            Some(beta_extension_without_recipe.clone()),
+        )
+        .await;
+
+    let now = Utc::now() + Duration::days(4);
+    sweep_once(
+        &deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+
+    assert_eq!(
+        fixture.server.request_count(),
+        0,
+        "an ExtensionOwned account whose owner_extension resolves no recipe generates zero vendor traffic"
+    );
+    // `stored_account` looks up with no requester identity, which
+    // `ExtensionOwned` accounts reject (CrossScopeDenied) regardless of
+    // sweep outcome; look up as the owning extension instead.
+    let refetched = fixture
+        .services
+        .get_account(
+            CredentialAccountLookupRequest::new(fixture.scope.clone(), beta.id)
+                .for_extension(beta_extension_without_recipe),
+        )
+        .await
+        .expect("lookup as owning extension")
+        .expect("account exists");
+    assert_eq!(
+        refetched.updated_at, beta.updated_at,
+        "the unresolved extension-owned account is skipped, never refreshed"
+    );
+}
+
+/// Success leg of the `ExtensionOwned` branch: when `owner_extension` DOES
+/// resolve a recipe, the sweep must actually refresh the account through the
+/// engine-owned refresh path — proving the resolved extension identity is
+/// carried from resolution all the way into the refresh request (not just
+/// into `deps.recipes.resolve`, which the skip-case test above already
+/// covers).
+#[tokio::test]
+async fn keepalive_sweep_refreshes_extension_owned_account_with_resolvable_recipe() {
+    let beta_recipe = synthetic_recipe("beta", &keepalive_recipe_toml("beta", Some(WEEK_SECONDS)));
+    let fixture = SweepFixture::new(vec![beta_recipe.clone()]);
+
+    let beta_extension = ExtensionId::new("beta-extension").unwrap();
+
+    let mut deps = fixture.deps.clone();
+    deps.recipes = Arc::new(RequesterAwareRecipeResolver::new(vec![(
+        beta_extension.clone(),
+        beta_recipe,
+    )]));
+
+    let beta = fixture
+        .seed_account_with_ownership(
+            "beta",
+            CredentialOwnership::ExtensionOwned,
+            Some(beta_extension.clone()),
+        )
+        .await;
+
+    fixture.server.script(
+        &SweepFixture::token_url("beta"),
+        200,
+        serde_json::json!({ "access_token": "beta-access", "expires_in": 3600 }),
+    );
+
+    let now = Utc::now() + Duration::days(4);
+    sweep_once(
+        &deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+
+    let beta_requests = fixture
+        .server
+        .requests_for(&SweepFixture::token_url("beta"));
+    assert_eq!(
+        beta_requests.len(),
+        1,
+        "an ExtensionOwned account whose owner_extension resolves a recipe is actually refreshed"
+    );
+
+    // `ExtensionOwned` accounts reject a no-requester lookup (CrossScopeDenied);
+    // look up as the owning extension, as the skip-case test above does.
+    let refetched = fixture
+        .services
+        .get_account(
+            CredentialAccountLookupRequest::new(fixture.scope.clone(), beta.id)
+                .for_extension(beta_extension),
+        )
+        .await
+        .expect("lookup as owning extension")
+        .expect("account exists");
+    assert!(
+        refetched.updated_at > beta.updated_at,
+        "a successful keepalive refresh advances the account's idle clock"
     );
 }
 

@@ -48,6 +48,7 @@ use crate::credential::{
 };
 use crate::engine::AuthRecipeResolver;
 use crate::error::AuthProductError;
+use ironclaw_host_api::ExtensionId;
 
 /// How long shutdown waits for an in-flight sweep before aborting the task.
 pub const KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -300,7 +301,7 @@ pub async fn sweep_once(
 
     // Keep accounts whose vendor's active recipe declares an idle lifetime;
     // everything else opts out of the sweep entirely.
-    let mut declaring: Vec<(CredentialAccount, chrono::Duration)> = Vec::new();
+    let mut declaring: Vec<(CredentialAccount, chrono::Duration, Option<ExtensionId>)> = Vec::new();
     for account in candidates {
         if !is_refreshable(&account) {
             continue;
@@ -309,7 +310,7 @@ pub async fn sweep_once(
             CredentialOwnership::ExtensionOwned => {
                 // An extension-owned account cannot outlive the installed
                 // manifest that declared its recipe.
-                let Some(extension) = account.owner_extension.as_ref() else {
+                let Some(extension) = account.owner_extension.clone() else {
                     continue;
                 };
                 Some(extension)
@@ -318,7 +319,7 @@ pub async fn sweep_once(
         };
         let Some(resolved) = deps
             .recipes
-            .resolve(requester_extension, account.provider.as_str())
+            .resolve(requester_extension.as_ref(), account.provider.as_str())
             .await
         else {
             continue;
@@ -331,7 +332,7 @@ pub async fn sweep_once(
             // skip rather than panic if a resolver hands back raw data.
             continue;
         };
-        declaring.push((account, lifetime));
+        declaring.push((account, lifetime, requester_extension));
     }
 
     let (due, dropped) = select_due_candidates(declaring, now, settings.max_per_tick);
@@ -355,12 +356,15 @@ pub async fn sweep_once(
     let mut skipped = 0usize;
     let mut failed = 0usize;
 
-    for account in due {
-        let request = CredentialRefreshRequest::new(
+    for (account, requester_extension) in due {
+        let mut request = CredentialRefreshRequest::new(
             account.scope.clone(),
             account.provider.clone(),
             account.id,
         );
+        if let Some(extension) = requester_extension {
+            request = request.for_extension(extension);
+        }
         // Race each refresh against cancellation so shutdown never waits on a
         // slow token endpoint. `biased` checks cancellation first.
         let outcome = tokio::select! {
@@ -416,26 +420,28 @@ pub async fn sweep_once(
 /// (`updated_at + lifetime`, ascending), capped at `max_per_tick`. Returns
 /// the selected accounts and the number dropped by the cap.
 fn select_due_candidates(
-    candidates: Vec<(CredentialAccount, chrono::Duration)>,
+    candidates: Vec<(CredentialAccount, chrono::Duration, Option<ExtensionId>)>,
     now: DateTime<Utc>,
     max_per_tick: usize,
-) -> (Vec<CredentialAccount>, usize) {
+) -> (Vec<(CredentialAccount, Option<ExtensionId>)>, usize) {
     // Due at half the declared lifetime: sweeping only past the full lifetime
     // would refresh tokens the vendor already killed; half-life leaves
     // headroom for downtime while staying derived from the vendor constraint.
     let mut due: Vec<_> = candidates
         .into_iter()
-        .filter(|(account, lifetime)| {
+        .filter(|(account, lifetime, _)| {
             now.signed_duration_since(account.updated_at) >= *lifetime / 2
         })
         .collect();
     // Soonest projected death first, so the cap cannot starve the accounts
     // closest to expiry.
-    due.sort_by_key(|(account, lifetime)| account.updated_at + *lifetime);
+    due.sort_by_key(|(account, lifetime, _)| account.updated_at + *lifetime);
     let dropped = due.len().saturating_sub(max_per_tick);
     due.truncate(max_per_tick);
     (
-        due.into_iter().map(|(account, _)| account).collect(),
+        due.into_iter()
+            .map(|(account, _, requester_extension)| (account, requester_extension))
+            .collect(),
         dropped,
     )
 }
@@ -527,14 +533,14 @@ mod tests {
         let gamma = candidate("gamma", now - chrono::Duration::days(3));
 
         let candidates = vec![
-            (beta.clone(), month),
-            (gamma.clone(), week),
-            (alpha.clone(), week),
+            (beta.clone(), month, None),
+            (gamma.clone(), week, None),
+            (alpha.clone(), week, None),
         ];
 
         let (selected, dropped) = select_due_candidates(candidates.clone(), now, 10);
         assert_eq!(
-            selected.iter().map(|a| a.id).collect::<Vec<_>>(),
+            selected.iter().map(|(a, _)| a.id).collect::<Vec<_>>(),
             vec![alpha.id, beta.id],
             "due accounts only, soonest projected death first"
         );
@@ -543,7 +549,7 @@ mod tests {
         // Cap below the due count: the account dying soonest wins the slot.
         let (selected, dropped) = select_due_candidates(candidates, now, 1);
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].id, alpha.id, "cap keeps the soonest death");
+        assert_eq!(selected[0].0.id, alpha.id, "cap keeps the soonest death");
         assert_eq!(dropped, 1);
     }
 
@@ -552,8 +558,12 @@ mod tests {
         let now = Utc::now();
         let week = chrono::Duration::days(7);
         let candidates = vec![
-            (candidate("alpha", now), week),
-            (candidate("alpha", now - chrono::Duration::days(1)), week),
+            (candidate("alpha", now), week, None),
+            (
+                candidate("alpha", now - chrono::Duration::days(1)),
+                week,
+                None,
+            ),
         ];
         let (selected, dropped) = select_due_candidates(candidates, now, 5);
         assert!(selected.is_empty());
