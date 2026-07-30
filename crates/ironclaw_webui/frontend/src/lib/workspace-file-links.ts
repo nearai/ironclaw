@@ -4,6 +4,9 @@
 // root after decoding.
 
 const WORKSPACE_PREFIX = "/workspace/";
+const MAX_RAW_WORKSPACE_HREF_LENGTH = 8_192;
+const MAX_DECODED_WORKSPACE_PATH_LENGTH = 4_096;
+const MAX_WORKSPACE_PATH_SEGMENTS = 64;
 const SANDBOX_SCHEME = /^sandbox:/i;
 // Reject encoded percent signs as well as separators. A literal `%25` could
 // otherwise become another escape sequence if any downstream layer decoded the
@@ -12,8 +15,14 @@ const AMBIGUOUS_PATH_ENCODING = /%(?:25|2f|5c)/i;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 function isSafeDecodedWorkspacePath(path: string): boolean {
-  if (!path.startsWith(WORKSPACE_PREFIX)) return false;
+  if (
+    path.length > MAX_DECODED_WORKSPACE_PATH_LENGTH ||
+    !path.startsWith(WORKSPACE_PREFIX)
+  ) {
+    return false;
+  }
   const segments = path.slice(WORKSPACE_PREFIX.length).split("/");
+  if (segments.length > MAX_WORKSPACE_PATH_SEGMENTS) return false;
   return !segments.some(
     (segment) =>
       !segment ||
@@ -29,7 +38,12 @@ export function isValidWorkspaceFilePath(path: unknown): path is string {
 }
 
 export function workspaceFilePathFromHref(href: unknown): string | null {
-  if (typeof href !== "string") return null;
+  if (
+    typeof href !== "string" ||
+    href.length > MAX_RAW_WORKSPACE_HREF_LENGTH
+  ) {
+    return null;
+  }
   const trimmed = href.trim();
   const encodedPath = SANDBOX_SCHEME.test(trimmed)
     ? trimmed.replace(SANDBOX_SCHEME, "")
@@ -58,7 +72,9 @@ export function workspaceFilePathFromHref(href: unknown): string | null {
 export function workspaceFileHrefFromPath(path: unknown): string | null {
   if (!isValidWorkspaceFilePath(path)) return null;
   const segments = path.slice(WORKSPACE_PREFIX.length).split("/");
-  return `${WORKSPACE_PREFIX}${segments.map(encodeURIComponent).join("/")}`;
+  const href =
+    `${WORKSPACE_PREFIX}${segments.map(encodeURIComponent).join("/")}`;
+  return href.length <= MAX_RAW_WORKSPACE_HREF_LENGTH ? href : null;
 }
 
 export function workspaceViewerRouteFromFilePath(

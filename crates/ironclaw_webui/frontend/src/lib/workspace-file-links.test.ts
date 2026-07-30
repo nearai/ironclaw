@@ -11,6 +11,16 @@ test("isValidWorkspaceFilePath rejects paths outside the scoped root", () => {
   assert.equal(isValidWorkspaceFilePath("/workspace/reports/final.csv"), true);
   assert.equal(isValidWorkspaceFilePath("/workspace/reports/../secret.txt"), false);
   assert.equal(isValidWorkspaceFilePath("/project/reports/final.csv"), false);
+  assert.equal(
+    isValidWorkspaceFilePath(`/workspace/${"a".repeat(4_097)}.txt`),
+    false,
+  );
+  assert.equal(
+    isValidWorkspaceFilePath(
+      `/workspace/${Array.from({ length: 65 }, () => "dir").join("/")}/file.txt`,
+    ),
+    false,
+  );
 });
 
 test("workspaceFilePathFromHref recognizes scoped and sandbox workspace files", () => {
@@ -52,6 +62,7 @@ test("workspaceFilePathFromHref rejects non-file and unsafe link targets", () =>
     "/workspace/report.csv?download=1",
     "/workspace/report.csv#preview",
     "/workspace/bad%encoding.txt",
+    `/workspace/${"a".repeat(8_193)}.txt`,
     "/project/report.csv",
     "",
     null,
@@ -66,6 +77,10 @@ test("workspaceFileHrefFromPath encodes each validated path segment", () => {
     "/workspace/%E6%8A%A5%E5%91%8A/my%20report.md",
   );
   assert.equal(workspaceFileHrefFromPath("/workspace/../secret.txt"), null);
+  assert.equal(
+    workspaceFileHrefFromPath(`/workspace/${"报告".repeat(1_500)}.md`),
+    null,
+  );
 });
 
 test("workspaceViewerRouteFromFilePath builds a selected-file SPA route", () => {

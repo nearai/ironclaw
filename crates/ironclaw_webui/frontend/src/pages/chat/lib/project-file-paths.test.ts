@@ -28,6 +28,15 @@ test("extracts a markdown link href without the closing paren", () => {
   );
 });
 
+test("extracts Unicode workspace paths containing spaces", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      "Generated /workspace/报告 final.pdf for review.",
+    ),
+    ["/workspace/报告 final.pdf"],
+  );
+});
+
 test("de-duplicates repeated references, first-seen order", () => {
   assert.deepEqual(
     extractWorkspaceFilePaths(
@@ -75,6 +84,21 @@ test("rejects bare paths containing traversal segments", () => {
   assert.deepEqual(
     extractWorkspaceFilePaths(
       "Do not expose /workspace/reports/../secret.txt as a file chip.",
+    ),
+    [],
+  );
+});
+
+test("rejects bare paths exceeding workspace bounds", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      `Generated /workspace/${"a".repeat(4_097)}.txt for review.`,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      `Generated /workspace/${Array.from({ length: 65 }, () => "dir").join("/")}/file.txt.`,
     ),
     [],
   );

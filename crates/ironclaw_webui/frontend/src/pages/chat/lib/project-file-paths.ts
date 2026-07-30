@@ -9,8 +9,11 @@ import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 // `/files/content` endpoint serves and that the agent's file tools emit. Both a
 // bare mention (`/workspace/report.csv`) and a markdown link href
 // (`[report.csv](/workspace/report.csv)`) are caught by the same scan.
+// Match a broad Unicode candidate, including spaces, then let
+// `isValidWorkspaceFilePath` remain the authority for safety and bounds. The
+// lazy body stops at the first extension followed by prose/link punctuation.
 const WORKSPACE_FILE_PATH =
-  /\/workspace\/[A-Za-z0-9._\-/]+\.[A-Za-z0-9]+/g;
+  /\/workspace\/[^\u0000-\u001f\u007f<>"'`?#[\]{}()%]*?\.[\p{L}\p{N}]+(?=$|[\s,;:!?()[\]{}<>"'])/gu;
 
 // Strip fenced (```…```) and inline (`…`) code spans. A path that the assistant
 // only *displays* in a shell snippet (`cat /workspace/.env`) must not become a
