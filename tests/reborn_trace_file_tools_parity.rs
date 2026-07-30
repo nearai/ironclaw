@@ -101,7 +101,7 @@ async fn reborn_trace_file_tools_parity() {
 }
 
 #[tokio::test]
-async fn reborn_trace_file_write_local_dev_approval_gate_bubbles() {
+async fn reborn_trace_file_write_standalone_approval_gate_bubbles() {
     let write_file = CapabilityId::new(WRITE_FILE_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -144,7 +144,7 @@ async fn reborn_trace_file_write_local_dev_approval_gate_bubbles() {
     );
 
     let resolved = harness
-        .approve_and_resume_local_dev_gate(submitted.run_id)
+        .approve_and_resume_standalone_gate(submitted.run_id)
         .await
         .expect("approve local-dev file write gate");
     assert_eq!(resolved, gate_ref);

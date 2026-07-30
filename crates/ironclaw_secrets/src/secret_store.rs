@@ -5,7 +5,7 @@
 //! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) surface so secrets,
 //! credential accounts, and credential sessions all share the same dispatch
 //! fabric as the rest of Reborn (`ironclaw_processes`, `ironclaw_authorization`,
-//! `ironclaw_outbound`, `ironclaw_run_state`).
+//! `ironclaw_outbound`, `ironclaw_approvals`).
 //!
 //! All paths are alias-relative [`ScopedPath`] strings under the `/secrets`
 //! mount alias. Tenant and user isolation are enforced structurally by the

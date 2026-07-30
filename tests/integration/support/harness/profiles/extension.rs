@@ -17,7 +17,7 @@ use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
-    bundled_extension_provider_trust, capability_ids_from_strs, local_dev_all_effects,
+    bundled_extension_provider_trust, capability_ids_from_strs, standalone_all_effects,
     wildcard_test_policy,
 };
 
@@ -54,12 +54,10 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     );
     Ok(ToolsProfile {
         capability_ids,
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
@@ -231,18 +229,16 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
             VISIBILITY_PROBE_MODEL_CAPABILITY_ID,
             VISIBILITY_PROBE_HOST_INTERNAL_CAPABILITY_ID,
         ])?,
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![(
             ironclaw_host_api::ExtensionId::new("visprobe")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         )]),
         // Surface resolution reads each advertised capability's
         // `input_schema_ref` off the mounted filesystem under the package
@@ -626,11 +622,11 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ExtensionId::new("acme-messenger")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         ));
         trust.push((
             ironclaw_host_api::ExtensionId::new("slack")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         ));
     }
     profile.options = profile
@@ -746,7 +742,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ExtensionId::new("telegram")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         ));
     }
     let network_egress = Arc::new(

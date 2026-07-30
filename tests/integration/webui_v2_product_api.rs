@@ -37,7 +37,7 @@ use ironclaw_product::{
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    local_dev_runtime_policy,
+    standalone_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -82,7 +82,7 @@ async fn thread_history_cold_get_and_libsql_reopen() {
         .await
         .expect("migrations on fresh libsql reopen are idempotent");
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+    ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )
@@ -253,7 +253,7 @@ async fn settings_tool_permission_post_then_cold_read() {
         .service_instance()
         .expect("fresh thread service instance");
     let (fresh_overrides, fresh_auto_approve, fresh_persistent_policies) =
-        ironclaw_reborn_composition::test_support::open_local_dev_approval_settings_stores_for_test(
+        ironclaw_reborn_composition::test_support::open_standalone_approval_settings_stores_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await
@@ -293,14 +293,16 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-import-agent").expect("agent id");
     let user_id = UserId::new("webui-import-operator").expect("user id");
-    let input =
-        ironclaw_reborn_composition::local_dev_build_input(user_id.as_str(), storage_root.clone())
-            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-            .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-            .with_bundled_first_party_for_test()
-            .with_network_http_egress_for_test(Arc::new(
-                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-            ));
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+        user_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
@@ -398,12 +400,12 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     let tenant_id = TenantId::new("webui-legacy-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-legacy-agent").expect("agent id");
     let operator_id = UserId::new("webui-legacy-operator").expect("operator id");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         operator_id.as_str(),
         storage_root.clone(),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -468,7 +470,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
         &storage_root,
     )
     .await
@@ -510,12 +512,12 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     }
     drop(store);
 
-    let rebuilt_input = ironclaw_reborn_composition::local_dev_build_input(
+    let rebuilt_input = ironclaw_reborn_composition::local_filesystem_build_input(
         "webui-legacy-operator",
         storage_root.clone(),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -538,7 +540,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         .product_surface(None)
         .expect("rebuilt product surface builds");
 
-    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
         &storage_root,
     )
     .await
@@ -626,12 +628,12 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     let tenant_id = TenantId::new("webui-orphan-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-orphan-agent").expect("agent id");
     let operator_id = UserId::new("webui-orphan-operator").expect("operator id");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         operator_id.as_str(),
         storage_root.clone(),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -697,7 +699,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     // materialized catalog package (no `/system/extensions/<id>/` files were
     // written for it), simulating a migration that has not yet materialized
     // catalog packages.
-    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
         &storage_root,
     )
     .await
@@ -754,12 +756,12 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .expect("write orphan manifest and installation rows");
     drop(store);
 
-    let rebuilt_input = ironclaw_reborn_composition::local_dev_build_input(
+    let rebuilt_input = ironclaw_reborn_composition::local_filesystem_build_input(
         "webui-orphan-operator",
         storage_root.clone(),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -785,7 +787,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     // The orphan row is preserved untouched (never deleted or rewritten) so
     // it can restore once the migration tool later materializes its catalog
     // package.
-    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
         &storage_root,
     )
     .await
@@ -846,12 +848,12 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-eviction-agent").expect("agent id");
     let operator_id = UserId::new("webui-eviction-operator").expect("operator id");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         operator_id.as_str(),
         storage_root.clone(),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -1103,12 +1105,12 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     let tenant_id = TenantId::new("webui-admin-config-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-admin-config-agent").expect("agent id");
     let user_id = UserId::new("webui-admin-config-operator").expect("user id");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         user_id.as_str(),
         root.path().join("local-dev"),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -1178,12 +1180,12 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     let tenant_id = TenantId::new("webui-admin-save-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-admin-save-agent").expect("agent id");
     let user_id = UserId::new("webui-admin-save-operator").expect("user id");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         user_id.as_str(),
         root.path().join("local-dev"),
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -1602,12 +1604,12 @@ impl AdminConfigurationFixture {
         let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
         let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
         let user_id = UserId::new(format!("webui-admin-{name}-user")).expect("user id");
-        let input = ironclaw_reborn_composition::local_dev_build_input(
+        let input = ironclaw_reborn_composition::local_filesystem_build_input(
             user_id.as_str(),
             root.path().join("local-dev"),
         )
         .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
         .with_bundled_first_party_for_test()
         .with_network_http_egress_for_test(Arc::new(
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
@@ -1827,7 +1829,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api-1-test").expect("valid reply target binding ref");
-    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
     let event_stream =
         ironclaw_reborn_composition::test_support::build_product_event_stream_for_test(
             event_log,
@@ -1896,7 +1898,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
 /// and resolve a pending approval gate. Mounts the real `webui_v2` router
 /// over a hand-built `RebornServices` facade wired with the harness's own
 /// turn-state-converged `ApprovalInteractionService`
-/// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
+/// (`standalone_approval_interaction_service_with_turn_state_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`
 /// wires into `DefaultProductSurface`) and the production event-stream
 /// recipe `sse_activity_stream_replay_and_reconnect` above already pins.
@@ -1941,9 +1943,9 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         .reborn_services_for_test()
         .expect("live_approvals harness is built via new_with_options");
     let approval_interactions = reborn_services
-        .local_dev_approval_interaction_service_with_turn_state_for_test(
+        .standalone_approval_interaction_service_with_turn_state_for_test(
             h.coordinator.clone(),
-            h.turn_store.clone(),
+            h.process_gates_for_test(),
         )
         .expect("local-dev capability policy is valid")
         .expect("harness has a local-dev runtime");
@@ -1951,7 +1953,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api2-test").expect("valid reply target binding ref");
-    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
     let event_stream =
         ironclaw_reborn_composition::test_support::build_product_event_stream_for_test(
             event_log,

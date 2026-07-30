@@ -209,7 +209,7 @@ async fn product_event_stream_offers_always_for_typed_approval_gate() {
     );
     let approval_request_id = ApprovalRequestId::new();
     let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability = CapabilityId::new("builtin.http").unwrap();
     let blocked_invocation = InvocationId::new();
     approval_requests
@@ -236,7 +236,7 @@ async fn product_event_stream_offers_always_for_typed_approval_gate() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests_dyn: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
@@ -346,7 +346,7 @@ async fn product_event_stream_projects_network_approval_context() {
     let network_run = TurnRunId::new();
     let network_request_id = ApprovalRequestId::new();
     let network_gate_ref = GateRef::new(format!("gate:approval-{network_request_id}")).unwrap();
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let approval_scope = resource_scope(
         &tenant_id,
         &user_id,
@@ -379,7 +379,7 @@ async fn product_event_stream_projects_network_approval_context() {
         .await
         .unwrap();
 
-    let approval_requests_dyn: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests_dyn: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
@@ -472,7 +472,7 @@ async fn product_event_stream_projects_spawn_approval_context() {
     );
     let approval_request_id = ApprovalRequestId::new();
     let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approval_requests
         .save_pending(
             resource_scope(
@@ -497,7 +497,7 @@ async fn product_event_stream_projects_spawn_approval_context() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests_dyn: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());

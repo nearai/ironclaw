@@ -23,24 +23,30 @@ mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
+mod backend_store_assembly;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
+mod capability_authorization;
 #[cfg(test)]
 #[path = "extension_lifecycle_capabilities_auth_tests.rs"]
 mod composition_extension_lifecycle_auth_tests;
 pub mod deployment;
 mod error;
+mod extension_host_assembly;
 mod factory;
+mod filesystem_assembly;
 mod google_oauth_secret_store;
+mod host_access_assembly;
 mod input;
 mod llm_admin;
-mod local_dev_authorization;
-mod local_dev_mounts;
 mod memory_binding;
 mod memory_provider_factory;
+mod model_gateway_assembly;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
+mod outbound_store_assembly;
+mod process_gate_turn_view;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
@@ -49,37 +55,38 @@ mod readiness;
 mod root;
 mod runtime;
 mod runtime_input;
+mod runtime_mounts;
 mod runtime_profile_approval_policy;
+mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_fire_access;
-mod turn_run_snapshot;
+mod trigger_poller_assembly;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::ChannelHostAssemblyTestWiring;
-pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+pub use factory::STANDALONE_SECRETS_MASTER_KEY_PATH;
 /// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
 /// modules that build a production trust policy from the concrete inventory).
 #[cfg(test)]
 pub(crate) use factory::builtin_first_party_trust_policy;
-pub use factory::local_dev_db_path;
-pub use factory::open_local_dev_secret_store;
+pub use factory::open_standalone_secret_store;
 /// Production first-party trust-policy builder over the neutral injected bundle
 /// set. Public so integration tests (which convert the concrete first-party
 /// inventory via the dev-dependency) can build the same trust policy the
 /// production binary composes at build time.
 pub use factory::production_first_party_trust_policy;
-pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
+pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
+pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
@@ -147,12 +154,12 @@ pub use memory_provider_factory::{
 // it reaches this helper through composition's facade.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
+    hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options, standalone_runtime_policy,
+    standalone_unrestricted_runtime_policy,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
 pub use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
@@ -177,6 +184,7 @@ pub use readiness::{
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
     RebornServiceReadiness, RebornWorkerReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -347,6 +355,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     }
 }
 
+use ironclaw_approvals::ApprovalStoreError;
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
@@ -356,12 +365,10 @@ use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_resources::ResourceError;
-use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 use ironclaw_secrets::SecretMaterial;
 use ironclaw_trust::TrustPolicy;
@@ -369,19 +376,11 @@ use ironclaw_turns::TurnError;
 use ironclaw_turns::TurnRunWakeNotifier;
 use thiserror::Error;
 
-pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
-    LibSqlRootFilesystem,
-    FilesystemResourceGovernor<LibSqlRootFilesystem>,
-    ProcessStore<LibSqlRootFilesystem>,
-    ProcessResultStore<LibSqlRootFilesystem>,
->;
+pub type LibSqlProductionHostRuntimeServices =
+    HostRuntimeServices<LibSqlRootFilesystem, FilesystemResourceGovernor<LibSqlRootFilesystem>>;
 
-pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
-    PostgresRootFilesystem,
-    FilesystemResourceGovernor<PostgresRootFilesystem>,
-    ProcessStore<PostgresRootFilesystem>,
-    ProcessResultStore<PostgresRootFilesystem>,
->;
+pub type PostgresProductionHostRuntimeServices =
+    HostRuntimeServices<PostgresRootFilesystem, FilesystemResourceGovernor<PostgresRootFilesystem>>;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
 /// [`invocation_mount_view`]. Each alias resolves to
@@ -395,13 +394,13 @@ const PER_USER_ALIASES: &[&str] = &[
     "/authorization",
     "/outbound",
     "/run-state",
+    "/checkpoint-state",
     "/approvals",
     "/gate-records",
     "/replay-payloads",
     "/threads",
     "/conversations",
     "/turns",
-    "/checkpoint-state",
     "/resources",
     "/engine",
     "/skills",
@@ -507,6 +506,30 @@ where
     Arc::new(ScopedFilesystem::new(root, invocation_mount_view))
 }
 
+/// Process-journal filesystem handle with read-only access to deployed
+/// per-user legacy authorities during the explicit one-time migration.
+///
+/// The extra alias exists only for the system sentinel and only on this
+/// process-store-specific handle. Ordinary consumers cannot enumerate another
+/// tenant's filesystem tree.
+pub(crate) fn wrap_process_journal_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(root, |scope| {
+        let mut view = invocation_mount_view(scope)?;
+        if scope.is_system() {
+            view.mounts.push(MountGrant::new(
+                MountAlias::new("/legacy-tenants")?,
+                VirtualPath::new("/tenants")?,
+                MountPermissions::read_only(),
+            ));
+            view.validate()?;
+        }
+        Ok(view)
+    }))
+}
+
 /// libSQL substrate handles needed to build production host-runtime services.
 ///
 /// State, event, and audit persistence all use `runtime`. A second libSQL
@@ -569,8 +592,8 @@ pub enum RebornCompositionError {
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
-    #[error("reborn run-state substrate failed: {0}")]
-    RunState(#[from] RunStateError),
+    #[error("reborn approval store substrate failed: {0}")]
+    ApprovalStore(#[from] ApprovalStoreError),
     #[error("reborn capability lease substrate failed: {0}")]
     CapabilityLease(#[from] CapabilityLeaseError),
     #[error("reborn secret substrate failed: {0}")]
@@ -693,6 +716,32 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[tokio::test]
+    async fn process_journal_migration_mount_is_system_only_and_read_only() {
+        let root = Arc::new(InMemoryBackend::new());
+        let scoped = wrap_process_journal_scoped(root);
+        let legacy = ScopedPath::new("/legacy-tenants/tenant-a/users/user-a/run-state")
+            .expect("legacy path");
+        assert!(
+            scoped.resolve(&sample_scope(), &legacy).is_err(),
+            "ordinary user scopes must not enumerate other tenant roots"
+        );
+        assert_eq!(
+            scoped
+                .resolve(&ResourceScope::system(), &legacy)
+                .expect("system migration mount")
+                .as_str(),
+            "/tenants/tenant-a/users/user-a/run-state"
+        );
+        assert!(matches!(
+            scoped
+                .write_bytes(&ResourceScope::system(), &legacy, b"forbidden".to_vec())
+                .await
+                .expect_err("migration mount must not mutate legacy authorities"),
+            FilesystemError::PermissionDenied { .. }
+        ));
     }
 
     #[test]
@@ -945,11 +994,11 @@ mod gate_record_production_mount_tests {
     //! per-tenant path rewriting keeps identically-shaped refs from colliding
     //! across tenants.
     use super::*;
+    use ironclaw_approvals::{GateRecordStore, GateRecordStorePort};
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
     };
-    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {

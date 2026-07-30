@@ -34,8 +34,8 @@ pub enum RebornBuildError {
     LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor build failed")]
     Resource(#[from] ironclaw_resources::ResourceError),
-    #[error("reborn run state build failed")]
-    RunState(#[from] ironclaw_run_state::RunStateError),
+    #[error("reborn approval store build failed")]
+    ApprovalStore(#[from] ironclaw_approvals::ApprovalStoreError),
     #[error("reborn capability lease store build failed")]
     CapabilityLease(#[from] ironclaw_authorization::CapabilityLeaseError),
     #[error("reborn turn state build failed")]
@@ -82,7 +82,7 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::Mount(error) => Self::Mount(error),
             crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
             crate::RebornCompositionError::Resource(error) => Self::Resource(error),
-            crate::RebornCompositionError::RunState(error) => Self::RunState(error),
+            crate::RebornCompositionError::ApprovalStore(error) => Self::ApprovalStore(error),
             crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
             crate::RebornCompositionError::Secret(error) => Self::Secret(error),
             crate::RebornCompositionError::EventStore(error) => Self::EventStore(error),

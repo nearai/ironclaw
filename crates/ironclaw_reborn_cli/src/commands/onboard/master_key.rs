@@ -1,4 +1,4 @@
-//! Onboarding's OS-keychain local-dev secrets master-key provisioning step.
+//! Onboarding's OS-keychain standalone secrets master-key provisioning step.
 
 use ironclaw_reborn_config::RebornBootConfig;
 
@@ -7,7 +7,7 @@ use ironclaw_reborn_config::RebornBootConfig;
 /// - Status enum, not an error type: every variant is a successful `execute()`.
 /// - `Suppressed` is expected/normal (headless CI via `IRONCLAW_DISABLE_OS_KEYCHAIN`,
 ///   or the OS denies the prompt) — the resolver
-///   (`ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key_with_env`)
+///   (`ironclaw_reborn_composition::factory::resolve_standalone_secret_master_key_with_env`)
 ///   still falls back to dotfile auto-generation, so this must never fail onboarding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MasterKeyProvisionOutcome {
@@ -35,7 +35,7 @@ impl MasterKeyProvisionOutcome {
     }
 }
 
-/// Provisions a local-dev master key in the OS keychain if absent (no cached
+/// Provisions a standalone master key in the OS keychain if absent (no cached
 /// dotfile, no keychain key); no-op if either already exists. Never fails
 /// `execute()` — an unavailable/denied keychain reports
 /// [`MasterKeyProvisionOutcome::Suppressed`], matching the resolver's own
@@ -43,10 +43,10 @@ impl MasterKeyProvisionOutcome {
 ///
 /// Accepted risk (TOCTOU): the `dotfile_path.exists()` check below and the
 /// keychain's own internal `has_master_key()` check
-/// (`provision_local_dev_keychain_master_key`) are two separate
+/// (`provision_standalone_keychain_master_key`) are two separate
 /// check-then-act steps with no lock between them, so two concurrent
 /// `onboard` runs against the same home could both observe "absent" and
-/// both provision. This is accepted for LocalDev: onboarding is a
+/// both provision. This is accepted for Standalone: onboarding is a
 /// single-operator, run-once-by-hand flow (never invoked concurrently by
 /// `serve`, which only reads keys, never writes the keychain), so the
 /// realistic worst case is a wrongly-regenerated key from running `onboard`
@@ -54,19 +54,19 @@ impl MasterKeyProvisionOutcome {
 pub(crate) fn provision_master_key(
     boot: &RebornBootConfig,
 ) -> anyhow::Result<MasterKeyProvisionOutcome> {
-    // Must match the root `resolve_local_dev_secret_master_key_with_env`
-    // actually reads/writes (`<home>/local-dev/…`, not the bare home) — see
+    // Must match the root `resolve_standalone_secret_master_key_with_env`
+    // actually reads/writes (`<home>/standalone/…`, not the bare home) — see
     // `crate::runtime::local_runtime_storage_root`. Checking the bare home
     // here always misses the cached dotfile, so onboarding would
     // re-attempt keychain provisioning on every rerun (PR #6174 item D).
     let dotfile_path = crate::runtime::local_runtime_storage_root(boot, boot.profile())
-        .join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+        .join(ironclaw_reborn_composition::STANDALONE_SECRETS_MASTER_KEY_PATH);
     if dotfile_path.exists() {
         return Ok(MasterKeyProvisionOutcome::DotfileAlreadyPresent);
     }
 
     crate::runtime::block_on_cli(async move {
-        let outcome = ironclaw_reborn_composition::provision_local_dev_keychain_master_key().await;
+        let outcome = ironclaw_reborn_composition::provision_standalone_keychain_master_key().await;
         Ok::<_, anyhow::Error>(match outcome {
             ironclaw_reborn_composition::KeychainMasterKeyOutcome::AlreadyPresent => {
                 MasterKeyProvisionOutcome::KeychainAlreadyPresent

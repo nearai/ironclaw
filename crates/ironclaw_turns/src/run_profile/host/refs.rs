@@ -96,10 +96,6 @@ impl LoopCheckpointStateRef {
 impl_bounded_ref_traits!(LoopCheckpointStateRef);
 
 impl LoopCheckpointStateRef {
-    pub(crate) fn legacy_unknown() -> Self {
-        Self("checkpoint:unknown".to_string())
-    }
-
     pub fn for_run(context: &LoopRunContext, token: impl Into<String>) -> Result<Self, String> {
         let token = validate_loop_opaque_token(token.into(), "loop checkpoint state token", 96)?;
         Self::new(format!("checkpoint:{}:{token}", context.run_id))

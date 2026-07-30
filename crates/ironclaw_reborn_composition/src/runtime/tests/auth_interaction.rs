@@ -39,13 +39,13 @@ impl HostManagedModelGateway for UnusedModelGateway {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_auth_interactions_are_unavailable_without_flow_record_source() {
+async fn standalone_runtime_auth_interactions_are_unavailable_without_flow_record_source() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let ports = RebornProductAuthServicePorts::from_shared(auth);
     let root = tempfile::tempdir().expect("tempdir");
     let runtime = build_runtime(
         "auth-read-model-absent",
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         Some(ports),
     )
     .await
@@ -86,8 +86,8 @@ async fn build_runtime(
     storage_root: PathBuf,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
 ) -> Result<RebornRuntime, super::RebornRuntimeError> {
-    let mut services = crate::deployment::local_dev_build_input(owner, storage_root)
-        .with_runtime_policy(local_dev_runtime_policy())
+    let mut services = crate::deployment::local_filesystem_build_input(owner, storage_root)
+        .with_runtime_policy(standalone_runtime_policy())
         .with_runtime_process_binding(RebornRuntimeProcessBinding::None);
     if let Some(ports) = product_auth_ports {
         services = services.with_product_auth_ports(ports);
@@ -112,11 +112,11 @@ async fn build_runtime(
     Ok(runtime)
 }
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

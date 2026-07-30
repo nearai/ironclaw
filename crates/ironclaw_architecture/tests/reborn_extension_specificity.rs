@@ -1153,11 +1153,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // (Google API hosts) and web-access (Exa MCP) egress it no longer
     // special-cases — the code routes purely on manifest-declared targets.
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_extension_host/src/capability_surface.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_extension_host/src/capability_surface.rs",
         "web-access",
     ),
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
@@ -1190,8 +1190,24 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "crates/ironclaw_reborn_composition/src/factory/auth_engine_assembly.rs",
         "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "nearaimcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+        "nearaimcp",
     ),
     (
         "crates/ironclaw_reborn_composition/src/input.rs",
@@ -1242,11 +1258,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearai_mcp",
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
-    ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "nearaimcp",
-    ),
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
     ("crates/ironclaw_host_api/src/capability.rs", "slack"),
@@ -1278,7 +1289,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "google",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/runtime_lane_assembly.rs",
         "notion",
     ),
     (
@@ -1310,7 +1325,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/root/communication_context.rs",
+        "crates/ironclaw_product/src/communication_context.rs",
         "slack",
     ),
     ("crates/ironclaw_skills/src/selector.rs", "github"),

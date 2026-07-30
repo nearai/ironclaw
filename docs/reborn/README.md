@@ -30,7 +30,8 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Resource governor substrate | `crates/ironclaw_resources/` |
 | Authorization substrate | `crates/ironclaw_authorization/` |
 | Approval substrate | `crates/ironclaw_approvals/` |
-| Run-state substrate | `crates/ironclaw_run_state/` |
+| Process lifecycle state | `crates/ironclaw_processes/` |
+| Approval and gate state | `crates/ironclaw_approvals/` |
 | WASM runtime lane and WIT HTTP adapter | `crates/ironclaw_wasm/` |
 | Script runtime lane and host HTTP adapter | `crates/ironclaw_scripts/` |
 | MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/ironclaw_mcp/` |

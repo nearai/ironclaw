@@ -21,10 +21,10 @@ use ironclaw_host_runtime::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     RuntimeCapabilityOutcome,
 };
+use ironclaw_processes::{ProcessInvocationStatePort, ProcessInvocationStatus};
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
-        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalHost,
     ))
     .unwrap()
 }
@@ -45,7 +45,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let expected_mounts = representative_mounts();
     let authorizer = Arc::new(MountingAuthorizer::new(expected_mounts.clone()));
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
         dispatcher,
@@ -54,7 +54,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
         local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(run_state.clone())
+    .with_invocation_state(run_state.clone())
     .with_obligation_handler(Arc::new(BuiltinObligationHandler::new()));
     let mut context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -87,7 +87,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     assert_eq!(recorded.input, input);
 
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.status, ProcessInvocationStatus::Completed);
 
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
     assert_eq!(
@@ -110,7 +110,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
     let (registry, dispatcher, governor, events, adapter) =
         runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
         dispatcher,
@@ -118,7 +118,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone());
+    .with_invocation_state(run_state.clone());
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -149,7 +149,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
     assert!(events.events().is_empty());
 
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("UnsupportedObligations"));
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
     assert_eq!(

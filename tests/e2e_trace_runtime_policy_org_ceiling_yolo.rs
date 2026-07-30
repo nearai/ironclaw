@@ -42,42 +42,42 @@ fn local_yolo_with_local_safe_ceiling_narrows_to_local_safe_with_ask_writes_and_
 }
 
 #[test]
-fn local_yolo_with_local_dev_ceiling_narrows_to_local_dev_with_ask_destructive() {
+fn local_yolo_with_local_host_ceiling_narrows_to_local_host_with_ask_destructive() {
     let policy = resolve(ResolveRequest {
         deployment: DeploymentMode::LocalSingleUser,
         requested_profile: RuntimeProfile::LocalYolo,
         org_policy: OrgPolicyConstraints {
-            max_profile: Some(RuntimeProfile::LocalDev),
+            max_profile: Some(RuntimeProfile::LocalHost),
             ..OrgPolicyConstraints::default()
         },
         yolo_disclosure_acknowledged: true,
     })
-    .expect("LocalYolo + LocalDev ceiling resolves with disclosure");
+    .expect("LocalYolo + LocalHost ceiling resolves with disclosure");
 
-    assert_eq!(policy.resolved_profile, RuntimeProfile::LocalDev);
+    assert_eq!(policy.resolved_profile, RuntimeProfile::LocalHost);
     assert_eq!(policy.approval_policy, ApprovalPolicy::AskDestructive);
     assert!(policy.was_reduced());
 }
 
 #[test]
 fn wider_within_family_ceiling_does_not_widen_resolved_profile() {
-    // LocalDev request + LocalYolo ceiling: ceiling is wider than the
+    // LocalHost request + LocalYolo ceiling: ceiling is wider than the
     // request, so it must not widen authority. Resolved == requested,
     // was_reduced() == false. Belt-and-suspenders against an inverted
     // narrowing check.
     let policy = resolve(ResolveRequest {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
         org_policy: OrgPolicyConstraints {
             max_profile: Some(RuntimeProfile::LocalYolo),
             ..OrgPolicyConstraints::default()
         },
         yolo_disclosure_acknowledged: false,
     })
-    .expect("LocalDev with wider LocalYolo ceiling resolves");
+    .expect("LocalHost with wider LocalYolo ceiling resolves");
 
-    assert_eq!(policy.requested_profile, RuntimeProfile::LocalDev);
-    assert_eq!(policy.resolved_profile, RuntimeProfile::LocalDev);
+    assert_eq!(policy.requested_profile, RuntimeProfile::LocalHost);
+    assert_eq!(policy.resolved_profile, RuntimeProfile::LocalHost);
     assert!(
         !policy.was_reduced(),
         "wider ceiling must not narrow the resolved profile",
@@ -131,12 +131,12 @@ fn enterprise_yolo_dedicated_with_admin_approval_and_disclosure_keeps_direct_log
 
 #[test]
 fn cross_family_ceiling_rejects_with_typed_error_variant() {
-    // LocalDev request + HostedSafe ceiling: ceiling lives in a different
+    // LocalHost request + HostedSafe ceiling: ceiling lives in a different
     // family — settings/blueprint layer should have caught this; resolver
     // surfaces the typed family-mismatch error as a fail-closed safety net.
     let err = resolve(ResolveRequest {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
         org_policy: OrgPolicyConstraints {
             max_profile: Some(RuntimeProfile::HostedSafe),
             ..OrgPolicyConstraints::default()
@@ -147,7 +147,7 @@ fn cross_family_ceiling_rejects_with_typed_error_variant() {
 
     match err {
         ResolveError::OrgPolicyCeilingFamilyMismatch { requested, ceiling } => {
-            assert_eq!(requested, RuntimeProfile::LocalDev);
+            assert_eq!(requested, RuntimeProfile::LocalHost);
             assert_eq!(ceiling, RuntimeProfile::HostedSafe);
         }
         other => panic!("expected OrgPolicyCeilingFamilyMismatch, got {other:?}"),
@@ -200,11 +200,11 @@ fn every_yolo_profile_without_disclosure_fails_closed_with_typed_error() {
 fn local_profile_under_hosted_deployment_fails_closed_with_typed_error() {
     let err = resolve(ResolveRequest {
         deployment: DeploymentMode::HostedMultiTenant,
-        requested_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
         org_policy: OrgPolicyConstraints::default(),
         yolo_disclosure_acknowledged: false,
     })
-    .expect_err("LocalDev under HostedMultiTenant must fail closed");
+    .expect_err("LocalHost under HostedMultiTenant must fail closed");
 
     match err {
         ResolveError::IncompatibleDeployment {
@@ -212,7 +212,7 @@ fn local_profile_under_hosted_deployment_fails_closed_with_typed_error() {
             profile,
         } => {
             assert_eq!(deployment, DeploymentMode::HostedMultiTenant);
-            assert_eq!(profile, RuntimeProfile::LocalDev);
+            assert_eq!(profile, RuntimeProfile::LocalHost);
         }
         other => panic!("expected IncompatibleDeployment, got {other:?}"),
     }

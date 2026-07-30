@@ -35,7 +35,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 - `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
 - `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership
-- `ironclaw_run_state` — approval request store contract surfaced through approval resolution/read-model ports
+- `ironclaw_approvals` — approval request store contract surfaced through approval resolution/read-model ports
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract
 - `ironclaw_host_api` — canonical identifiers (TenantId, UserId, etc.)

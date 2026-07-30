@@ -58,8 +58,8 @@ fn provider_name(value: &str) -> ProviderToolName {
     ProviderToolName::new(value).expect("provider tool name")
 }
 
-fn local_development_safety_context() -> InstructionSafetyContext {
-    InstructionSafetyContext::local_development_noop()
+fn non_production_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::non_production_noop()
 }
 
 #[tokio::test]
@@ -2504,7 +2504,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2568,7 +2568,7 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2630,7 +2630,7 @@ async fn production_loop_model_request_includes_runtime_context() {
         context_port,
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     )
-    .with_safety_context(local_development_safety_context())
+    .with_safety_context(non_production_safety_context())
     .with_instruction_materialization_store(store_for_port)
     .with_runtime_context(LoopRuntimeContext {
         loop_started_at_utc,
@@ -2691,7 +2691,7 @@ async fn production_loop_model_gateway_keeps_instruction_stores_isolated_across_
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
 
     let request = production_loop_request(&fixture, None).await;
@@ -2798,7 +2798,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2852,7 +2852,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
             fixture.thread_scope.clone(),
             provider_gateway,
             16,
-            local_development_safety_context(),
+            non_production_safety_context(),
         ));
         let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopModelPort::new(
@@ -2893,7 +2893,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2938,7 +2938,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2988,7 +2988,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -3035,7 +3035,7 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         fixture.thread_scope.clone(),
         invalid_summary_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port =
@@ -3729,7 +3729,7 @@ async fn production_loop_request(
     production_loop_request_with_safety(
         fixture,
         model_preference,
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
     )
     .await
 }
@@ -3756,7 +3756,7 @@ async fn production_loop_request_with_inline_messages(
     production_loop_request_with_safety_and_inline_messages(
         fixture,
         model_preference,
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
         inline_messages,
     )
     .await

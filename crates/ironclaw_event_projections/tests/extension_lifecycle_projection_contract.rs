@@ -25,7 +25,7 @@ async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,

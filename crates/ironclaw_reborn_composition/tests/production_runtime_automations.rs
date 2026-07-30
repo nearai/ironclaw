@@ -4,7 +4,7 @@
 //!
 //! This test lives in its own integration-test binary so cargo executes it
 //! sequentially with respect to lib unit tests.  The lib unit tests include
-//! `local_dev_runtime_*` tests with hard 3-second `RunTimeout` budgets; if
+//! `standalone_runtime_*` tests with hard 3-second `RunTimeout` budgets; if
 //! this production-runtime build runs in the same binary it starves those
 //! tests on parallel CPU-heavy builds.
 //!

@@ -299,16 +299,17 @@ fn mem0_binding_in_production_requires_an_admin_override() {
 }
 
 #[tokio::test]
-async fn local_dev_swaps_to_mem0_without_an_override() {
-    // In local-dev the third-party binding is permitted without an override, so
+async fn standalone_swaps_to_mem0_without_an_override() {
+    // In standalone the third-party binding is permitted without an override, so
     // the same factory registration yields the mem0 provider.
     let section = MemorySection {
         provider: Some(MEM0_MEMORY_EXTENSION_ID.to_string()),
         admin_overrides: Vec::new(),
         ..Default::default()
     };
-    let policy = resolve_memory_binding_policy(Some(&section), RebornCompositionProfile::LocalDev)
-        .expect("local-dev allows the third-party binding without an override");
+    let policy =
+        resolve_memory_binding_policy(Some(&section), RebornCompositionProfile::Standalone)
+            .expect("standalone allows the third-party binding without an override");
     let transport = Arc::new(MockMem0Transport::always_ok(json!({ "id": "m-1" })));
     let resolved = resolve_memory_provider(Some(policy), &deps_over_mock(Arc::clone(&transport)))
         .expect("local-dev mem0 binding resolves");
