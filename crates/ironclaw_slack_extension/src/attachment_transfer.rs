@@ -85,6 +85,18 @@ struct SlackCompletedFile {
     id: String,
 }
 
+struct ValidatedSlackUpload<'a> {
+    filename: String,
+    mime_type: String,
+    file: &'a WorkspaceFile,
+}
+
+struct StagedSlackUpload<'a> {
+    file_id: String,
+    filename: String,
+    file: &'a WorkspaceFile,
+}
+
 pub(super) async fn fetch_attachment(
     attachment: &ChannelAttachmentRef,
     egress: &dyn RestrictedEgress,
@@ -187,173 +199,281 @@ pub(super) async fn fetch_attachment(
     })
 }
 
-pub(super) async fn send_file(
+pub(super) async fn send_files(
     egress: &dyn RestrictedEgress,
     credential: &SecretHandle,
     channel: &str,
     thread_ts: Option<&str>,
-    file: &WorkspaceFile,
-) -> PartDeliveryOutcome {
+    files: &[&WorkspaceFile],
+) -> Vec<PartDeliveryOutcome> {
     let max_file_bytes = max_transfer_bytes();
-    if file.bytes.len() as u64 > max_file_bytes {
-        return PartDeliveryOutcome::Permanent {
-            reason: "slack attachment exceeds the channel size limit".to_string(),
-        };
-    }
-    let filename = match outbound_filename(file) {
-        Ok(filename) => filename,
-        Err(reason) => return PartDeliveryOutcome::Permanent { reason },
-    };
-    let mime_type = match outbound_mime_type(&file.mime_type) {
-        Ok(mime_type) => mime_type,
-        Err(reason) => return PartDeliveryOutcome::Permanent { reason },
-    };
-
-    let ticket_request = match upload_ticket_request(&filename, file.bytes.len(), credential) {
-        Ok(request) => request,
-        Err(reason) => return PartDeliveryOutcome::Permanent { reason },
-    };
-    let ticket_response = match egress.send(ticket_request).await {
-        Ok(response) => response,
-        Err(error) => return part_outcome_for_egress_error(&error),
-    };
-    if !(200..300).contains(&ticket_response.status) {
-        return part_outcome_for_kind(
-            SlackDeliveryFailureKind::from_http_status(ticket_response.status),
-            format!(
-                "slack files.getUploadURLExternal returned status {}",
-                ticket_response.status
-            ),
-        );
-    }
-    let ticket: SlackGetUploadUrlResponse = match serde_json::from_slice(&ticket_response.body) {
-        Ok(ticket) => ticket,
-        Err(_) => {
-            return PartDeliveryOutcome::Retryable {
-                reason: "slack files.getUploadURLExternal returned an invalid response".to_string(),
-            };
+    // Validate the whole batch before acquiring provider tickets. Slack only
+    // receives bytes after every local filename, MIME, and size is safe.
+    let mut validated = Vec::with_capacity(files.len());
+    for file in files {
+        if file.bytes.is_empty() {
+            return vec![PartDeliveryOutcome::Permanent {
+                reason: "slack does not accept empty attachments".to_string(),
+            }];
         }
-    };
-    if !ticket.ok {
-        return outbound_api_error("files.getUploadURLExternal", ticket.error.as_deref());
+        if file.bytes.len() as u64 > max_file_bytes {
+            return vec![PartDeliveryOutcome::Permanent {
+                reason: "slack attachment exceeds the channel size limit".to_string(),
+            }];
+        }
+        let filename = match outbound_filename(file) {
+            Ok(filename) => filename,
+            Err(reason) => return vec![PartDeliveryOutcome::Permanent { reason }],
+        };
+        let mime_type = match outbound_mime_type(&file.mime_type) {
+            Ok(mime_type) => mime_type,
+            Err(reason) => return vec![PartDeliveryOutcome::Permanent { reason }],
+        };
+        validated.push(ValidatedSlackUpload {
+            filename,
+            mime_type,
+            file,
+        });
     }
-    let Some(upload_url) = ticket.upload_url else {
-        return PartDeliveryOutcome::Permanent {
-            reason: "slack upload ticket omitted the upload URL".to_string(),
-        };
-    };
-    let Some(file_id) = ticket.file_id.filter(|id| valid_slack_file_id(id)) else {
-        return PartDeliveryOutcome::Permanent {
-            reason: "slack upload ticket omitted a valid file ID".to_string(),
-        };
-    };
 
-    let upload_request = match upload_file_request(upload_url, mime_type, &file.bytes) {
+    // Upload every file to its private ticket before sharing any file into
+    // the destination. The single completion below is the provider-visible
+    // batch boundary and preserves the finalized attachment order.
+    let mut staged = Vec::with_capacity(validated.len());
+    for upload in validated {
+        let ticket_request =
+            match upload_ticket_request(&upload.filename, upload.file.bytes.len(), credential) {
+                Ok(request) => request,
+                Err(reason) => return vec![PartDeliveryOutcome::Permanent { reason }],
+            };
+        let ticket_response = match egress.send(ticket_request).await {
+            Ok(response) => response,
+            Err(error) => return vec![part_outcome_for_egress_error(&error)],
+        };
+        if !(200..300).contains(&ticket_response.status) {
+            return vec![part_outcome_for_kind(
+                SlackDeliveryFailureKind::from_http_status(ticket_response.status),
+                format!(
+                    "slack files.getUploadURLExternal returned status {}",
+                    ticket_response.status
+                ),
+            )];
+        }
+        let ticket: SlackGetUploadUrlResponse = match serde_json::from_slice(&ticket_response.body)
+        {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                return vec![PartDeliveryOutcome::Retryable {
+                    reason: "slack files.getUploadURLExternal returned an invalid response"
+                        .to_string(),
+                }];
+            }
+        };
+        if !ticket.ok {
+            return vec![outbound_api_error(
+                "files.getUploadURLExternal",
+                ticket.error.as_deref(),
+            )];
+        }
+        let Some(upload_url) = ticket.upload_url else {
+            return vec![PartDeliveryOutcome::Permanent {
+                reason: "slack upload ticket omitted the upload URL".to_string(),
+            }];
+        };
+        let Some(file_id) = ticket.file_id.filter(|id| valid_slack_file_id(id)) else {
+            return vec![PartDeliveryOutcome::Permanent {
+                reason: "slack upload ticket omitted a valid file ID".to_string(),
+            }];
+        };
+
+        let upload_request =
+            match upload_file_request(upload_url, upload.mime_type, &upload.file.bytes) {
+                Ok(request) => request,
+                Err(reason) => return vec![PartDeliveryOutcome::Permanent { reason }],
+            };
+        let upload_response = match egress.send(upload_request).await {
+            Ok(response) => response,
+            Err(error) => return vec![part_outcome_for_egress_error(&error)],
+        };
+        if !(200..300).contains(&upload_response.status) {
+            return vec![part_outcome_for_kind(
+                SlackDeliveryFailureKind::from_http_status(upload_response.status),
+                format!(
+                    "slack external file upload returned status {}",
+                    upload_response.status
+                ),
+            )];
+        }
+        staged.push(StagedSlackUpload {
+            file_id,
+            filename: upload.filename,
+            file: upload.file,
+        });
+    }
+
+    let complete_request = match complete_upload_request(&staged, channel, thread_ts, credential) {
         Ok(request) => request,
-        Err(reason) => return PartDeliveryOutcome::Permanent { reason },
+        Err(reason) => return vec![PartDeliveryOutcome::Permanent { reason }],
     };
-    let upload_response = match egress.send(upload_request).await {
-        Ok(response) => response,
-        Err(error) => return part_outcome_for_egress_error(&error),
-    };
-    if !(200..300).contains(&upload_response.status) {
-        return part_outcome_for_kind(
-            SlackDeliveryFailureKind::from_http_status(upload_response.status),
-            format!(
-                "slack external file upload returned status {}",
-                upload_response.status
-            ),
-        );
-    }
-
-    let complete_request =
-        match complete_upload_request(&file_id, &filename, channel, thread_ts, credential) {
-            Ok(request) => request,
-            Err(reason) => return PartDeliveryOutcome::Permanent { reason },
-        };
     let complete_response = match egress.send(complete_request).await {
         Ok(response) => response,
-        Err(error) => return part_outcome_for_egress_error(&error),
+        Err(error) => return vec![part_outcome_for_egress_error(&error)],
     };
     if !(200..300).contains(&complete_response.status) {
-        return part_outcome_for_kind(
+        return vec![part_outcome_for_kind(
             SlackDeliveryFailureKind::from_http_status(complete_response.status),
             format!(
                 "slack files.completeUploadExternal returned status {}",
                 complete_response.status
             ),
-        );
+        )];
     }
     let completed: SlackCompleteUploadResponse =
         match serde_json::from_slice(&complete_response.body) {
             Ok(completed) => completed,
             Err(_) => {
-                return PartDeliveryOutcome::Retryable {
+                return vec![PartDeliveryOutcome::Retryable {
                     reason: "slack files.completeUploadExternal returned an invalid response"
                         .to_string(),
-                };
+                }];
             }
         };
     if !completed.ok {
-        return outbound_api_error("files.completeUploadExternal", completed.error.as_deref());
-    }
-    if !completed.files.iter().any(|file| file.id == file_id) {
-        return PartDeliveryOutcome::Permanent {
-            reason: "slack upload completion did not confirm the file ID".to_string(),
-        };
+        return vec![outbound_api_error(
+            "files.completeUploadExternal",
+            completed.error.as_deref(),
+        )];
     }
 
-    let info_response = match egress
-        .send(match files_info_request(&file_id) {
+    let mut outcomes = Vec::with_capacity(staged.len());
+    for upload in staged {
+        if !completed.files.iter().any(|file| file.id == upload.file_id) {
+            outcomes.push(PartDeliveryOutcome::Permanent {
+                reason: "slack upload completion did not confirm the file ID".to_string(),
+            });
+            continue;
+        }
+        outcomes.push(read_back_staged_upload(egress, channel, thread_ts, &upload).await);
+    }
+    outcomes
+}
+
+const SLACK_FILE_READBACK_MAX_ATTEMPTS: u8 = 6;
+const SLACK_FILE_READBACK_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+// Slack can acknowledge completion before destination indexes become visible
+// through files.info. Only this read-back is retried: tickets, byte uploads,
+// and completion are never replayed after provider acceptance.
+async fn read_back_staged_upload(
+    egress: &dyn RestrictedEgress,
+    channel: &str,
+    thread_ts: Option<&str>,
+    upload: &StagedSlackUpload<'_>,
+) -> PartDeliveryOutcome {
+    for attempt in 1..=SLACK_FILE_READBACK_MAX_ATTEMPTS {
+        let info_request = match files_info_request(&upload.file_id) {
             Ok(request) => request,
             Err(_) => {
                 return PartDeliveryOutcome::Permanent {
                     reason: "slack file read-back request was invalid".to_string(),
                 };
             }
-        })
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => return part_outcome_for_egress_error(&error),
-    };
-    if !(200..300).contains(&info_response.status) {
-        return part_outcome_for_kind(
-            SlackDeliveryFailureKind::from_http_status(info_response.status),
-            format!(
-                "slack files.info read-back returned status {}",
-                info_response.status
-            ),
-        );
-    }
-    let info: SlackFilesInfoResponse = match serde_json::from_slice(&info_response.body) {
-        Ok(info) => info,
-        Err(_) => {
-            return PartDeliveryOutcome::Retryable {
-                reason: "slack files.info read-back returned an invalid response".to_string(),
+        };
+        let info_response = match egress.send(info_request).await {
+            Ok(response) => response,
+            Err(error) => {
+                let outcome = part_outcome_for_egress_error(&error);
+                if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS
+                    && matches!(outcome, PartDeliveryOutcome::Retryable { .. })
+                {
+                    tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                    continue;
+                }
+                return terminal_readback_outcome(outcome);
+            }
+        };
+        if !(200..300).contains(&info_response.status) {
+            let outcome = part_outcome_for_kind(
+                SlackDeliveryFailureKind::from_http_status(info_response.status),
+                format!(
+                    "slack files.info read-back returned status {}",
+                    info_response.status
+                ),
+            );
+            if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS
+                && matches!(outcome, PartDeliveryOutcome::Retryable { .. })
+            {
+                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                continue;
+            }
+            return terminal_readback_outcome(outcome);
+        }
+        let info: SlackFilesInfoResponse = match serde_json::from_slice(&info_response.body) {
+            Ok(info) => info,
+            Err(_) if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS => {
+                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                continue;
+            }
+            Err(_) => {
+                return PartDeliveryOutcome::Permanent {
+                    reason: "slack file read-back remained unavailable after upload completion"
+                        .to_string(),
+                };
+            }
+        };
+        if !info.ok {
+            if info.error.as_deref() == Some("file_not_found")
+                && attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS
+            {
+                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                continue;
+            }
+            return outbound_api_error("files.info", info.error.as_deref());
+        }
+        let Some(info) = info.file else {
+            if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS {
+                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                continue;
+            }
+            return PartDeliveryOutcome::Permanent {
+                reason: "slack file read-back remained unavailable after upload completion"
+                    .to_string(),
+            };
+        };
+        if info.id != upload.file_id
+            || info.size != Some(upload.file.bytes.len() as u64)
+            || info.name.as_deref() != Some(upload.filename.as_str())
+        {
+            return PartDeliveryOutcome::Permanent {
+                reason: "slack file read-back did not match the requested delivery".to_string(),
             };
         }
-    };
-    if !info.ok {
-        return outbound_api_error("files.info", info.error.as_deref());
-    }
-    let Some(info) = info.file else {
-        return PartDeliveryOutcome::Permanent {
-            reason: "slack files.info read-back omitted the file".to_string(),
-        };
-    };
-    if info.id != file_id
-        || info.size != Some(file.bytes.len() as u64)
-        || info.name.as_deref() != Some(filename.as_str())
-        || !destination_matches(&info, channel, thread_ts)
-    {
+        if destination_matches(&info, channel, thread_ts) {
+            return PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(upload.file_id.clone()),
+            };
+        }
+        if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS {
+            tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+            continue;
+        }
         return PartDeliveryOutcome::Permanent {
             reason: "slack file read-back did not match the requested delivery".to_string(),
         };
     }
 
-    PartDeliveryOutcome::Sent {
-        vendor_message_ref: Some(file_id),
+    PartDeliveryOutcome::Permanent {
+        reason: "slack file read-back remained unavailable after upload completion".to_string(),
+    }
+}
+
+fn terminal_readback_outcome(outcome: PartDeliveryOutcome) -> PartDeliveryOutcome {
+    if matches!(outcome, PartDeliveryOutcome::Retryable { .. }) {
+        PartDeliveryOutcome::Permanent {
+            reason: "slack file read-back remained unavailable after upload completion".to_string(),
+        }
+    } else {
+        outcome
     }
 }
 
@@ -400,14 +520,17 @@ fn upload_file_request(
 }
 
 fn complete_upload_request(
-    file_id: &str,
-    filename: &str,
+    files: &[StagedSlackUpload<'_>],
     channel: &str,
     thread_ts: Option<&str>,
     credential: &SecretHandle,
 ) -> Result<RestrictedEgressRequest, String> {
+    let files: Vec<_> = files
+        .iter()
+        .map(|file| serde_json::json!({"id": file.file_id, "title": file.filename}))
+        .collect();
     let mut body = serde_json::json!({
-        "files": [{"id": file_id, "title": filename}],
+        "files": files,
         "channel_id": channel,
     });
     if let Some(thread_ts) = thread_ts {
