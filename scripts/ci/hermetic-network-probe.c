@@ -27,7 +27,8 @@ int main(int argc, char **argv) {
         use_udp
         || strcmp(mode, "udp-write") == 0
         || strcmp(mode, "udp-writev") == 0;
-    int fd = socket(AF_INET, use_udp ? SOCK_DGRAM : SOCK_STREAM, 0);
+    int family = strchr(argv[1], ':') == NULL ? AF_INET : AF_INET6;
+    int fd = socket(family, use_udp ? SOCK_DGRAM : SOCK_STREAM, 0);
     if (fd < 0) {
         return 3;
     }
@@ -36,13 +37,27 @@ int main(int argc, char **argv) {
         close(fd);
         return 5;
     }
-    struct sockaddr_in address;
+    struct sockaddr_storage address;
     memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_port = htons(9);
-    if (inet_pton(AF_INET, argv[1], &address.sin_addr) != 1) {
-        close(fd);
-        return 4;
+    socklen_t address_length;
+    if (family == AF_INET) {
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)&address;
+        ipv4->sin_family = AF_INET;
+        ipv4->sin_port = htons(9);
+        address_length = sizeof(*ipv4);
+        if (inet_pton(AF_INET, argv[1], &ipv4->sin_addr) != 1) {
+            close(fd);
+            return 4;
+        }
+    } else {
+        struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)&address;
+        ipv6->sin6_family = AF_INET6;
+        ipv6->sin6_port = htons(9);
+        address_length = sizeof(*ipv6);
+        if (inet_pton(AF_INET6, argv[1], &ipv6->sin6_addr) != 1) {
+            close(fd);
+            return 4;
+        }
     }
     int network_status;
     if (strcmp(mode, "udp") == 0) {
@@ -53,10 +68,11 @@ int main(int argc, char **argv) {
             sizeof(byte),
             0,
             (const struct sockaddr *)&address,
-            sizeof(address)
+            address_length
         );
     } else {
-        network_status = connect(fd, (const struct sockaddr *)&address, sizeof(address));
+        network_status =
+            connect(fd, (const struct sockaddr *)&address, address_length);
         if (network_status == 0 && strcmp(mode, "udp-connected") == 0) {
             const char byte = 'x';
             network_status = (int)send(fd, &byte, sizeof(byte), 0);

@@ -184,6 +184,19 @@ done
 # Deliberate localhost fakes remain usable. A refused port is sufficient: the
 # guard must allow the connect syscall to reach the kernel rather than report it.
 "${runner}" -- "${network_probe}" 127.0.0.1
+if [[ "$(uname -s)" == "Linux" ]]; then
+  "${runner}" -- "${network_probe}" ::ffff:127.0.0.1
+else
+  # sandbox-exec may reject IPv4-mapped IPv6 before the interposer observes it.
+  set +e
+  "${runner}" -- "${network_probe}" ::ffff:127.0.0.1 >/dev/null 2>&1
+  mapped_loopback_status=$?
+  set -e
+  if [[ "${mapped_loopback_status}" -ne 0 && "${mapped_loopback_status}" -ne 90 ]]; then
+    echo "unexpected macOS IPv4-mapped loopback result: ${mapped_loopback_status}" >&2
+    exit 1
+  fi
+fi
 
 "${runner}" -- python3 - "${repo_root}/tests/e2e" <<'PY'
 import sys

@@ -61,7 +61,11 @@ static int is_loopback(const struct sockaddr *address) {
     }
     if (address->sa_family == AF_INET6) {
         const struct sockaddr_in6 *ipv6 = (const struct sockaddr_in6 *)address;
-        return IN6_IS_ADDR_LOOPBACK(&ipv6->sin6_addr);
+        return IN6_IS_ADDR_LOOPBACK(&ipv6->sin6_addr)
+            || (
+                IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr)
+                && ipv6->sin6_addr.s6_addr[12] == 127
+            );
     }
     /* Unix sockets and non-IP kernel transports are local by definition. */
     return 1;
