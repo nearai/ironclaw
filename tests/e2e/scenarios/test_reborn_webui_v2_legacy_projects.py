@@ -91,7 +91,15 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
             if path == "/api/webchat/v2/projects" and request.method == "GET":
                 project_requests.append(path)
                 project_list_queries.append(parse_qs(parsed.query))
-                await fulfill_json(route, {"projects": MOCK_PROJECTS})
+                await fulfill_json(
+                    route,
+                    {
+                        "projects": MOCK_PROJECTS,
+                        "total_projects": 503,
+                        "active_projects": 502,
+                        "archived_projects": 1,
+                    },
+                )
                 return
 
             prefix = "/api/webchat/v2/projects/"
@@ -310,10 +318,10 @@ async def test_reborn_projects_overview_shows_only_api_backed_fields(
 
         await expect(
             page.locator(SEL_V2["projects_summary_value_for"].format(kind="projects"))
-        ).to_have_text("3")
+        ).to_have_text("503")
         await expect(
             page.locator(SEL_V2["projects_summary_value_for"].format(kind="active"))
-        ).to_have_text("2")
+        ).to_have_text("502")
         await expect(
             page.locator(SEL_V2["projects_summary_value_for"].format(kind="archived"))
         ).to_have_text("1")
