@@ -98,7 +98,7 @@ impl PromptTextSurface {
 
 #[derive(Debug)]
 pub(super) struct PromptTextValidationError {
-    host_error: AgentLoopHostError,
+    host_error: Box<AgentLoopHostError>,
     matched_pattern: Option<&'static str>,
 }
 
@@ -113,14 +113,14 @@ impl PromptTextValidationError {
 
     fn structural(host_error: AgentLoopHostError) -> Self {
         Self {
-            host_error,
+            host_error: Box::new(host_error),
             matched_pattern: None,
         }
     }
 
     fn content(host_error: AgentLoopHostError, matched_pattern: &'static str) -> Self {
         Self {
-            host_error,
+            host_error: Box::new(host_error),
             matched_pattern: Some(matched_pattern),
         }
     }
@@ -128,7 +128,7 @@ impl PromptTextValidationError {
 
 impl From<PromptTextValidationError> for AgentLoopHostError {
     fn from(error: PromptTextValidationError) -> Self {
-        error.host_error
+        *error.host_error
     }
 }
 
@@ -381,6 +381,14 @@ mod tests {
         "Read /Users/alice/.config/token first.",                   // host path
         "here is my key sk-abc123def456ghi789",                     // sk- token
     ];
+
+    #[test]
+    fn prompt_text_validation_error_stays_below_large_error_threshold() {
+        assert!(
+            std::mem::size_of::<PromptTextValidationError>() <= 128,
+            "prompt validation errors are returned by value and must stay below Clippy's large-error threshold"
+        );
+    }
 
     /// #5169: trusted/certified skill instruction content bypasses content
     /// denylisting (security vocabulary, host paths, credential-shaped values).
