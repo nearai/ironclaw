@@ -3554,6 +3554,25 @@ struct LayerMatrixException {
     reason: &'static str,
 }
 
+/// WS0 baseline for the §11.2.2 exception ratchet (target-architecture epic
+/// #3773, workstream #6920): the number of standing layer-matrix exceptions
+/// measured **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` by counting the
+/// entries of `LAYER_MATRIX_EXCEPTIONS` below — the recount agreed with the 20
+/// the target-architecture PROPOSAL/CHECKLIST document:
+///
+/// ```text
+/// rg -c "^    LayerMatrixException \{" \
+///   crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
+/// ```
+///
+/// The target is the empty list (PROPOSAL §11.2.2, CHECKLIST WS12). This
+/// number is therefore a ceiling that only ever moves **down**: when a wave
+/// deletes exceptions, lower it in the same PR so the new floor is locked in.
+/// The ratchet below refuses growth; it cannot make the list shrink on its own.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 20;
+
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
         crate_name: "ironclaw_host_runtime",
@@ -3696,6 +3715,120 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
     },
 ];
+
+/// The tracking metadata every exception must carry to be removable: the edge
+/// it names, when it was taken on, the milestone that deletes it, and why it
+/// exists. Returns the first missing field, or `None` when the entry is fully
+/// tracked. Placeholders are treated as missing — "TBD" is not a milestone.
+fn exception_tracking_defect(exception: &LayerMatrixException) -> Option<&'static str> {
+    const PLACEHOLDERS: &[&str] = &["tbd", "todo", "unknown", "n/a", "na", "none", "?", "-"];
+    let untracked = |value: &str| {
+        let trimmed = value.trim();
+        trimmed.is_empty() || PLACEHOLDERS.contains(&trimmed.to_ascii_lowercase().as_str())
+    };
+    [
+        ("crate_name", exception.crate_name),
+        ("dependency_name", exception.dependency_name),
+        ("introduced", exception.introduced),
+        ("removes_in", exception.removes_in),
+        ("reason", exception.reason),
+    ]
+    .into_iter()
+    .find_map(|(field, value)| untracked(value).then_some(field))
+}
+
+/// §11.2.2 exception ratchet (PROPOSAL §11.2 item 2, CHECKLIST WS10), armed at
+/// the WS0 baseline. Two properties hold on every commit from here to WS12's
+/// empty list:
+///
+/// 1. **Shrink-only.** The list cannot grow past the recorded baseline, so a
+///    new exception cannot land untracked by quietly appending one more entry.
+/// 2. **Every entry is removable.** Each carries a `removes_in` milestone plus
+///    the edge/date/reason a reviewer needs — §11.2.2's "adding one requires
+///    `removes_in` + an owning issue". The owning-issue half arrives with
+///    WS10's §11.2.2 row, which adds the field once the list is short enough
+///    for exceptions to be genuinely exceptional.
+///
+/// The complementary staleness half — an exception whose edge no longer exists
+/// must be deleted — is enforced by
+/// `reborn_workspace_crates_declare_layers_and_follow_layer_matrix` above, so
+/// the two together mean the list can only move toward empty.
+#[test]
+fn reborn_layer_matrix_exceptions_ratchet_down_only() {
+    assert!(
+        LAYER_MATRIX_EXCEPTIONS.len() <= WS0_LAYER_MATRIX_EXCEPTION_BASELINE,
+        "layer-matrix exceptions grew to {} (WS0 baseline {}): the restructure's exception \
+         list is shrink-only on its way to empty (PROPOSAL §11.2.2). Remove the edge instead \
+         of allowlisting it — or, if the owner has approved a genuinely new exception, raise \
+         WS0_LAYER_MATRIX_EXCEPTION_BASELINE in the same PR with the rationale in the PR body.",
+        LAYER_MATRIX_EXCEPTIONS.len(),
+        WS0_LAYER_MATRIX_EXCEPTION_BASELINE
+    );
+
+    let untracked = LAYER_MATRIX_EXCEPTIONS
+        .iter()
+        .filter_map(|exception| {
+            exception_tracking_defect(exception).map(|field| {
+                format!(
+                    "    {} -> {}: missing `{}`",
+                    exception.crate_name, exception.dependency_name, field
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        untracked.is_empty(),
+        "layer-matrix exceptions without tracking metadata (every entry needs a `removes_in` \
+         milestone and a stated reason so it can be retired — PROPOSAL §11.2.2):\n{}",
+        untracked.join("\n")
+    );
+}
+
+/// Positive + negative fixtures for the tracking predicate above (WS10: every
+/// new ratchet lands with regression fixtures, so the guardrail fails loudly on
+/// its own regressions rather than silently passing everything).
+#[test]
+fn reborn_layer_matrix_exception_tracking_self_test() {
+    let tracked = LayerMatrixException {
+        crate_name: "ironclaw_example",
+        dependency_name: "ironclaw_other",
+        introduced: "2026-07-30",
+        removes_in: "W7",
+        reason: "fixture",
+    };
+    assert_eq!(exception_tracking_defect(&tracked), None);
+
+    let blank_milestone = LayerMatrixException {
+        removes_in: "   ",
+        ..tracked
+    };
+    assert_eq!(
+        exception_tracking_defect(&blank_milestone),
+        Some("removes_in"),
+        "a blank milestone must be reported as untracked"
+    );
+
+    let placeholder_milestone = LayerMatrixException {
+        removes_in: "TBD",
+        ..tracked
+    };
+    assert_eq!(
+        exception_tracking_defect(&placeholder_milestone),
+        Some("removes_in"),
+        "a placeholder milestone must be reported as untracked"
+    );
+
+    let blank_reason = LayerMatrixException {
+        reason: "",
+        ..tracked
+    };
+    assert_eq!(
+        exception_tracking_defect(&blank_reason),
+        Some("reason"),
+        "a blank reason must be reported as untracked"
+    );
+}
 
 fn layer_matrix_exception(
     crate_name: &str,

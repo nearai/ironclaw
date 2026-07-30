@@ -27,6 +27,25 @@ struct FrozenPathCount {
     count: usize,
 }
 
+/// WS0 baselines for the production-struct dead-code ratchet (target-
+/// architecture epic #3773, workstream #6920): the frozen inventory's size
+/// measured **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` from
+/// `FROZEN_PATH_COUNTS` below — 82 frozen `(category, kind, path)` entries
+/// totalling 283 suppressed members (both printed by the assertion at the end
+/// of the gate below on failure).
+///
+/// The per-path checks already refuse growth *within* a listed file and refuse
+/// staleness. These two totals close the remaining door: adding a **new** path
+/// entry to the frozen list — the one way debt can legitimately grow — now has
+/// to move a recorded number, so it is a reviewed decision rather than one
+/// more line in a long list. Both only ever move down; lower them in the same
+/// PR that deletes debt (CHECKLIST WS8 flips `dead_code`/`unreachable_pub` on
+/// workspace-wide once this inventory is gone).
+const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 82;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 283;
+
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
@@ -784,6 +803,23 @@ fn reborn_production_struct_test_support_and_dead_code_members_do_not_grow() {
         "FROZEN_PATH_COUNTS contains production struct test-support/dead-code debt that \
          no longer exists. Shrink the matching baseline entries in this test:\n{}",
         removed.join("\n")
+    );
+
+    // WS0 totals ratchet: the per-path checks above cannot see a *new* path
+    // entry being appended to the frozen list, which is the one way this debt
+    // can grow without any single path count rising.
+    let frozen_members: usize = FROZEN_PATH_COUNTS.iter().map(|entry| entry.count).sum();
+    assert!(
+        FROZEN_PATH_COUNTS.len() <= WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE
+            && frozen_members <= WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE,
+        "production-struct debt inventory grew to {} paths / {} members (WS0 baseline {} / {}): \
+         this list is shrink-only. Put the seam in a test module or delete the unused member \
+         instead of freezing a new path; if the owner has approved new debt, raise the matching \
+         WS0_PRODUCTION_STRUCT_DEBT_* baseline in the same PR with the rationale in the PR body.",
+        FROZEN_PATH_COUNTS.len(),
+        frozen_members,
+        WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE,
+        WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE
     );
 }
 
