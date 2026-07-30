@@ -204,54 +204,115 @@ async def _wait_for_automation_named(
         ) from None
 
 
-async def _install_fake_v2_event_source(page) -> None:
+async def _install_fake_v2_event_stream(page) -> None:
     await page.add_init_script(
         """
         (() => {
+          const nativeFetch = window.fetch.bind(window);
+          const encoder = new TextEncoder();
           let activeStream = null;
+          let holdNextConnection = false;
+
           const currentStream = () => {
-            if (!activeStream || activeStream.readyState === 2) {
-              throw new Error("no EventSource stream is open");
+            if (!activeStream || activeStream.closed) {
+              throw new Error("no event stream is open");
             }
             return activeStream;
           };
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              if (activeStream && activeStream.readyState !== 2) {
-                activeStream.close();
+
+          const closeStream = (stream, error = null) => {
+            if (!stream || stream.closed) return;
+            stream.closed = true;
+            if (stream.controller) {
+              if (error) {
+                stream.controller.error(error);
+              } else {
+                stream.controller.close();
               }
-              activeStream = this;
-              setTimeout(() => {
-                if (activeStream !== this || this.readyState === 2) return;
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
             }
-            close() {
-              this.readyState = 2;
-              if (activeStream === this) activeStream = null;
+            if (activeStream === stream) activeStream = null;
+          };
+
+          const openStreamResponse = (signal) => {
+            const stream = { closed: false, controller: null };
+            const body = new ReadableStream({
+              start(controller) {
+                stream.controller = controller;
+              },
+              cancel() {
+                stream.closed = true;
+                if (activeStream === stream) activeStream = null;
+              },
+            });
+            if (activeStream && !activeStream.closed) {
+              closeStream(activeStream);
             }
-          }
-          window.EventSource = FakeEventSource;
+            activeStream = stream;
+            signal?.addEventListener(
+              "abort",
+              () => closeStream(stream),
+              { once: true },
+            );
+            return new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          };
+
+          window.fetch = async (input, init = {}) => {
+            const url = input instanceof Request ? input.url : String(input);
+            if (!new URL(url, window.location.href).pathname.endsWith("/events")) {
+              return nativeFetch(input, init);
+            }
+            if (!holdNextConnection) {
+              return openStreamResponse(init.signal);
+            }
+            return new Promise((resolve, reject) => {
+              const stream = {
+                closed: false,
+                controller: null,
+                resolve,
+                reject,
+              };
+              activeStream = stream;
+              init.signal?.addEventListener(
+                "abort",
+                () => {
+                  if (stream.closed) return;
+                  stream.closed = true;
+                  if (activeStream === stream) activeStream = null;
+                  reject(new DOMException("Aborted", "AbortError"));
+                },
+                { once: true },
+              );
+            });
+          };
+
           window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
             const stream = currentStream();
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
+            if (!stream.controller) throw new Error("event stream is reconnecting");
+            stream.controller.enqueue(encoder.encode(
+              `id: ${id}\\nevent: ${type}\\ndata: ${
+                JSON.stringify({ type, ...frame })
+              }\\n\\n`
+            ));
           };
+
           window.__failLatestV2Sse = (readyState = 2) => {
             const stream = currentStream();
-            stream.readyState = readyState;
-            if (readyState === 2 && activeStream === stream) activeStream = null;
-            if (typeof stream.onerror !== "function") {
-              throw new Error("EventSource has no error handler");
+            if (readyState === 0) {
+              holdNextConnection = true;
+              closeStream(stream, new TypeError("event stream interrupted"));
+              return;
             }
-            stream.onerror(new Event("error"));
+            holdNextConnection = false;
+            if (stream.resolve) {
+              stream.closed = true;
+              if (activeStream === stream) activeStream = null;
+              stream.resolve(new Response("", { status: 401 }));
+              return;
+            }
+            closeStream(stream, new TypeError("event stream interrupted"));
           };
         })();
         """
@@ -1512,7 +1573,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1638,7 +1699,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     send_requests: list[dict] = []
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1766,7 +1827,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     release_second_send = asyncio.Event()
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -2447,7 +2508,7 @@ async def test_reborn_v2_loading_older_messages_preserves_viewport(
         viewport={"width": 1280, "height": 720}
     )
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body) -> None:
         await route.fulfill(
