@@ -24,6 +24,7 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
         "tests/e2e/scenarios/test_provider_fault_proxy.py",
         "tests/e2e/product_surface_coverage.py",
+        "uses: ./.github/actions/setup-sccache-dist",
     ),
     ".github/workflows/nightly-deep-ci.yml": (
         "schedule:",
