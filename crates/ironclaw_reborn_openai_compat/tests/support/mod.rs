@@ -381,6 +381,7 @@ impl ProductSurface for FakeProductSurface {
         Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
             events,
             next_cursor: None,
+            subscription: None,
         })
     }
 }

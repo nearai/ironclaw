@@ -396,12 +396,13 @@ runtime state stores sit behind the composed standalone root filesystem
 files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than WebUI ingress.
 
-Live cumulative assistant-text projections are producer-coalesced: the first
-update is published immediately, rapid replacements publish the latest value
-at most once per 75 ms, and any non-text milestone flushes the pending value
-before that milestone is projected. Reasoning, capability, and lifecycle
-milestones remain ordered and uncoalesced. The in-memory source still records
-the latest projection for replay when no browser subscriber is active.
+Live cumulative assistant-text projections are published at provider cadence.
+The live-text publisher conflates only sub-frame microbursts within a 16 ms
+window before they reach the event-stream manager's bounded subscriber.
+Ordinary provider cadence remains incremental, while each microburst retains
+its latest cumulative snapshot. Reasoning, capability, and lifecycle milestones
+remain ordered. The in-memory source still records the latest projection for
+replay when no browser subscriber is active.
 
 The opaque WebUI projection cursor stamps its process-local live position with
 the projection-services epoch. On an epoch mismatch, resume preserves durable
@@ -439,13 +440,11 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   — regression guard that the product projection adapter uses the service
   request actor when selecting the runtime event stream, rather than a
   hidden runtime owner actor.
-- `src/projection/tests/live_progress_stream.rs::live_assistant_text_coalescer_flushes_latest_update_on_timer`
-  — regression guard that rapid cumulative text still advances while the
-  model continues streaming.
-- `src/projection/tests/live_progress_stream.rs::live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity`
-  — caller-level regression guard that a provider-rate text burst does not
-  terminate the bounded WebUI subscription and that the latest text is
-  published before the next capability milestone.
+- `src/projection/tests/live_progress_stream.rs::provider_rate_live_text_stays_smooth_and_precedes_tool_activity`
+  — caller-level regression guard that provider-rate cumulative text remains
+  smooth without terminating the bounded WebUI subscription, provider-cadence
+  snapshots precede the next capability milestone, and a sub-frame microburst
+  retains its latest cumulative snapshot before that milestone.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,

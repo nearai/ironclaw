@@ -13,9 +13,23 @@ const { renderMarkdownMock } = vi.hoisted(() => ({
 
 vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
 vi.mock("../../../lib/markdown", () => ({ renderMarkdown: renderMarkdownMock }));
+vi.mock("streamdown", async () => {
+  const { createElement } = await import("react");
+  return {
+    Streamdown: ({ children, isAnimating, mode }) =>
+      createElement(
+        "div",
+        {
+          "data-animating": String(Boolean(isAnimating)),
+          "data-mode": mode,
+          "data-testid": "streamdown",
+        },
+        children,
+      ),
+  };
+});
 
-test("streaming Markdown throttles snapshots and stops after a load failure", async () => {
-  vi.useFakeTimers();
+test("streaming Markdown updates immediately and finalizes through the sanitizer", async () => {
   renderMarkdownMock.mockReset();
   renderMarkdownMock.mockImplementation((content) => `<p>${content}</p>`);
   const { MarkdownRenderer } = await import("./markdown-renderer");
@@ -31,9 +45,22 @@ test("streaming Markdown throttles snapshots and stops after a load failure", as
       }));
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
     });
-    assert.equal(renderMarkdownMock.mock.calls.length, 1);
+    assert.equal(container.textContent, "**first**");
+    assert.equal(
+      container.querySelector('[data-testid="streamdown"]')?.getAttribute(
+        "data-mode",
+      ),
+      "streaming",
+    );
+    assert.equal(
+      container.querySelector('[data-testid="streamdown"]')?.getAttribute(
+        "data-animating",
+      ),
+      "true",
+    );
+    assert.equal(renderMarkdownMock.mock.calls.length, 0);
 
     act(() => {
       root.render(React.createElement(MarkdownRenderer, {
@@ -41,36 +68,39 @@ test("streaming Markdown throttles snapshots and stops after a load failure", as
         streaming: true,
       }));
     });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(149);
-    });
-    assert.equal(renderMarkdownMock.mock.calls.length, 1);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
-    });
-    assert.equal(renderMarkdownMock.mock.calls.length, 2);
+    assert.equal(
+      container.textContent,
+      "**second**",
+      "a committed stream snapshot should not wait for a fixed timer",
+    );
+    assert.equal(renderMarkdownMock.mock.calls.length, 0);
 
-    renderMarkdownMock.mockImplementation(() => {
-      throw new Error("markdown chunk failed");
-    });
     act(() => {
       root.render(React.createElement(MarkdownRenderer, {
-        content: "**failure**",
-        streaming: true,
+        content: "**final**",
+        streaming: false,
       }));
     });
+    assert.equal(
+      container.querySelector('[data-testid="streamdown"]')?.getAttribute(
+        "data-mode",
+      ),
+      "static",
+      "the already-mounted stream renderer should hold the final snapshot while sanitization loads",
+    );
+    assert.equal(container.textContent, "**final**");
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(150);
+      await Promise.resolve();
     });
-    assert.equal(renderMarkdownMock.mock.calls.length, 3);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    assert.equal(renderMarkdownMock.mock.calls.length, 3);
+    assert.equal(renderMarkdownMock.mock.calls.length, 1);
+    assert.deepEqual(renderMarkdownMock.mock.calls[0], [
+      "**final**",
+      { workspaceFileLinks: false },
+    ]);
+    assert.equal(container.innerHTML.includes("<p>**final**</p>"), true);
   } finally {
     act(() => root.unmount());
     container.remove();
-    vi.useRealTimers();
   }
 });
 
@@ -94,6 +124,10 @@ test("workspace links delegate to the in-app file preview", async () => {
       }));
     });
 
+    assert.deepEqual(renderMarkdownMock.mock.calls[0], [
+      "[report.csv](/workspace/report.csv)",
+      { workspaceFileLinks: true },
+    ]);
     const linkLabel = container.querySelector("a span");
     assert.ok(linkLabel);
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });

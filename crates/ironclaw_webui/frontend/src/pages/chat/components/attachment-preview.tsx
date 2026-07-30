@@ -42,7 +42,11 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
     // Optimistic (just-sent) image: the local data URL is already renderable
     // and there is nothing landed to fetch yet.
     if (!attachment.fetch_url && attachment.preview_url) {
-      setView({ dataUrl: attachment.preview_url, downloadUrl: attachment.preview_url });
+      setView({
+        dataUrl: attachment.preview_url,
+        downloadUrl: attachment.preview_url,
+        mode,
+      });
       setStatus("ready");
       return undefined;
     }
@@ -111,7 +115,7 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         {status === "error" &&
         (<div className="text-sm text-iron-400">{t("chat.attachmentLoadFailed")}</div>)}
         {status === "ready" &&
-        (<PreviewBody mode={view.mode || mode} view={view} filename={filename} t={t} />)}
+        (<PreviewBody mode={view.mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
         {view.downloadUrl &&
