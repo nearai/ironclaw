@@ -239,31 +239,26 @@ def meaningful_test_changed(
                 or "#[tokio::test]" in full_text
                 or "#[cfg(test)]" in full_text
             )
-            if inline_test_file and has_meaningful_rust_assertion(text):
-                return True, path
             if (
-                is_test_path(path)
+                (inline_test_file or is_test_path(path))
                 and has_substantive_test_change(text, suffix)
-                and has_meaningful_rust_assertion(full_text)
+                and has_meaningful_rust_assertion(text)
             ):
                 return True, path
         elif suffix == ".py" and is_test_path(path):
-            full_text = (repo / path).read_text(encoding="utf-8")
             if has_substantive_test_change(
                 text, suffix
-            ) and has_meaningful_python_assertion(full_text):
+            ) and has_meaningful_python_assertion(text):
                 return True, path
         elif suffix in {".ts", ".tsx", ".mts", ".js", ".jsx"} and is_test_path(path):
-            full_text = (repo / path).read_text(encoding="utf-8")
             if has_substantive_test_change(
                 text, suffix
-            ) and has_meaningful_typescript_assertion(full_text):
+            ) and has_meaningful_typescript_assertion(text):
                 return True, path
         elif suffix == ".sh" and is_test_path(path):
-            full_text = (repo / path).read_text(encoding="utf-8")
             if has_substantive_test_change(
                 text, suffix
-            ) and has_meaningful_shell_assertion(full_text):
+            ) and has_meaningful_shell_assertion(text):
                 return True, path
     return False, None
 

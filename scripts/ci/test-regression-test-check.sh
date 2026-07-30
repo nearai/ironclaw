@@ -94,6 +94,26 @@ EOF
 expect_fail "Python self-comparison" \
   "no meaningful changed regression assertion" run_check "$self_comparison"
 
+inherited_assertion="$TMP_ROOT/inherited-assertion"
+init_repo "$inherited_assertion"
+mkdir -p "$inherited_assertion/tests"
+cat > "$inherited_assertion/tests/regression.rs" <<'EOF'
+#[test]
+fn existing_contract() {
+    assert_eq!(crate_under_test(), 42);
+}
+EOF
+git -C "$inherited_assertion" add tests/regression.rs
+git -C "$inherited_assertion" commit -qm "test: add existing contract"
+cat >> "$inherited_assertion/tests/regression.rs" <<'EOF'
+
+fn new_setup_without_an_assertion() -> i32 {
+    42
+}
+EOF
+expect_fail "setup-only change cannot inherit an old assertion" \
+  "no meaningful changed regression assertion" run_check "$inherited_assertion"
+
 comment_only="$TMP_ROOT/comment-only"
 init_repo "$comment_only"
 mkdir -p "$comment_only/scripts/ci"
