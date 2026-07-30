@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -2159,6 +2159,71 @@ async fn filesystem_explicit_migration_rebuilds_missing_thread_index_rows() {
     );
 }
 
+/// Break caught: a message updated after the migration query but before the
+/// migration transaction starts must not make conversation history unavailable.
+#[tokio::test]
+async fn filesystem_history_survives_transcript_migration_racing_a_message_update() {
+    let backend = Arc::new(MigrationRaceBackend::new());
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-transcript-migration-race",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("transcript-migration-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-transcript-migration-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-transcript-migration-race".into()),
+            content: MessageContent::text("hello from the migration race"),
+        })
+        .await
+        .unwrap();
+
+    let migration_marker = transcript_index_migration_marker_path_for_test(&scope);
+    if scoped
+        .get(&scope.to_resource_scope(), &migration_marker)
+        .await
+        .expect("test setup reads the migration marker")
+        .is_some()
+    {
+        scoped
+            .delete(&scope.to_resource_scope(), &migration_marker)
+            .await
+            .expect("test setup removes the completed migration marker");
+    }
+    backend.arm();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .expect("a concurrent current-code update must not fail history migration");
+
+    assert_eq!(backend.race_count(), 1, "the test must inject one race");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("hello from the migration race")
+    );
+}
+
 #[tokio::test]
 async fn optional_index_write_cache_does_not_skip_required_migration_marker() {
     use ironclaw_threads::ListThreadsForScopeRequest;
@@ -3126,6 +3191,24 @@ fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPat
     .unwrap()
 }
 
+fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v1.complete",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
 fn thread_root_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
     ScopedPath::new(format!(
         "/threads/agents/{}/projects/{}/owners/{}/threads/{thread_id}",
@@ -3233,6 +3316,32 @@ struct QueryCountingBackend {
     inner: InMemoryBackend,
     query_count: AtomicUsize,
     get_count: AtomicUsize,
+}
+
+struct MigrationRaceBackend {
+    inner: InMemoryBackend,
+    armed: AtomicBool,
+    pending_message_path: Mutex<Option<VirtualPath>>,
+    race_count: AtomicUsize,
+}
+
+impl MigrationRaceBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            armed: AtomicBool::new(false),
+            pending_message_path: Mutex::new(None),
+            race_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn race_count(&self) -> usize {
+        self.race_count.load(Ordering::SeqCst)
+    }
 }
 
 impl QueryCountingBackend {
@@ -3415,6 +3524,95 @@ impl RootFilesystem for QueryCountingBackend {
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for MigrationRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let rows = self.inner.query(path, filter, page).await?;
+        if self.armed.load(Ordering::SeqCst)
+            && self.race_count.load(Ordering::SeqCst) == 0
+            && let Some(message) = rows
+                .iter()
+                .find(|row| row.path.as_str().contains("/messages/"))
+        {
+            *self.pending_message_path.lock().await = Some(message.path.clone());
+        }
+        Ok(rows)
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        if let Some(message_path) = self.pending_message_path.lock().await.take() {
+            let versioned =
+                self.inner
+                    .get(&message_path)
+                    .await?
+                    .ok_or_else(|| FilesystemError::NotFound {
+                        path: message_path.clone(),
+                        operation: FilesystemOperation::ReadFile,
+                    })?;
+            self.inner
+                .put(&message_path, versioned.entry, CasExpectation::Any)
+                .await?;
+            self.race_count.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.begin(path).await
     }
 

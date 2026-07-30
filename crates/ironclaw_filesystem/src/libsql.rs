@@ -1487,13 +1487,14 @@ impl StorageTxn for LibSqlStorageTxn {
 
 impl Drop for LibSqlStorageTxn {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        if let Some(conn) = self.conn.take() {
-            tokio::spawn(async move {
-                let _ = conn.execute("ROLLBACK", ()).await;
-            });
+        if self.active
+            && let Some(conn) = self.conn.take()
+        {
+            // A destructor cannot await ROLLBACK. Discard the connection so
+            // SQLite rolls back while closing it and the pool can create a
+            // clean replacement without a detached task retaining its only
+            // writer lease.
+            conn.discard();
         }
     }
 }
@@ -3699,5 +3700,74 @@ mod tests {
         .await
         .expect("independent writer must not hang behind a cancelled pooled transaction")
         .expect("independent writer must acquire the SQLite writer lock");
+    }
+
+    /// Break caught: dropping the filesystem transaction must release the
+    /// size-one writer lane before the same task performs its next write.
+    #[tokio::test]
+    async fn dropping_storage_transaction_releases_writer_lane_synchronously() {
+        let (fs, _dir) = fresh_backend().await;
+        let fs = Arc::new(fs);
+        let prefix = VirtualPath::new("/resources").unwrap();
+        let abandoned_path = VirtualPath::new("/resources/abandoned").unwrap();
+        let next_path = VirtualPath::new("/resources/next").unwrap();
+        let task_fs = Arc::clone(&fs);
+        let task_prefix = prefix.clone();
+        let task_abandoned_path = abandoned_path.clone();
+        let task_next_path = next_path.clone();
+        tokio::spawn(async move {
+            let mut transaction = task_fs.begin(&task_prefix).await.unwrap();
+            transaction
+                .put(
+                    &task_abandoned_path,
+                    Entry::bytes(b"uncommitted".to_vec()),
+                    CasExpectation::Absent,
+                )
+                .await
+                .unwrap();
+            drop(transaction);
+
+            let mut writer_checkout = Box::pin(task_fs.runtime.write());
+            let first_poll = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(std::future::Future::poll(writer_checkout.as_mut(), context))
+            })
+            .await;
+            match first_poll {
+                std::task::Poll::Ready(Ok(writer)) => drop(writer),
+                std::task::Poll::Ready(Err(error)) => {
+                    panic!("dropping the transaction must clear writer ownership: {error}")
+                }
+                std::task::Poll::Pending => {
+                    drop(
+                        writer_checkout
+                            .await
+                            .expect("a recycled writer connection must become available"),
+                    );
+                }
+            }
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                task_fs.put(
+                    &task_next_path,
+                    Entry::bytes(b"committed".to_vec()),
+                    CasExpectation::Absent,
+                ),
+            )
+            .await
+            .expect("the next write must not wait behind a detached rollback")
+            .expect("the same task must reacquire the writer lane after dropping a transaction");
+        })
+        .await
+        .expect("writer task");
+
+        assert!(
+            fs.get(&abandoned_path).await.unwrap().is_none(),
+            "dropping an active transaction must roll back its staged write"
+        );
+        assert!(
+            fs.get(&next_path).await.unwrap().is_some(),
+            "the writer lane must remain usable after cancellation cleanup"
+        );
     }
 }
