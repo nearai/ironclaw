@@ -2,6 +2,7 @@
 import React from "react";
 import { toast } from "../../../lib/toast";
 import { useT } from "../../../lib/i18n";
+import { workspaceFilePathFromHref } from "../../../lib/workspace-file-links";
 
 const COLLAPSE_PX = 360;
 const STREAMING_RENDER_INTERVAL_MS = 150;
@@ -165,7 +166,8 @@ function MarkdownRendererImpl({
           ? target.closest("a[data-workspace-path]")
           : null;
       const path = anchor?.getAttribute("data-workspace-path");
-      if (!path) return;
+      const hrefPath = workspaceFilePathFromHref(anchor?.getAttribute("href"));
+      if (!path || hrefPath !== path) return;
       event.preventDefault();
       onWorkspaceFileOpen(path);
     },
@@ -195,7 +197,10 @@ function MarkdownRendererImpl({
         lastRenderedSourceRef.current = currentContent;
         setRendered({
           source: currentContent,
-          html: renderMarkdown(currentContent),
+          html: renderMarkdown(currentContent, {
+            workspaceFileLinks:
+              typeof onWorkspaceFileOpen === "function",
+          }),
         });
       })
       .catch(() => {

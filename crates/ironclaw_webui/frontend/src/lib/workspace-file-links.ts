@@ -1,29 +1,61 @@
 // Shared recognition for assistant-authored links to thread-scoped workspace
-// files. Keep this deliberately narrower than a general URL parser: only the
-// scoped file paths already surfaced by project-file chips are eligible for the
-// authenticated in-app preview.
+// files. This is deliberately narrower than a general URL parser: workspace
+// paths have no query/fragment, decode exactly once, and stay below the scoped
+// root after decoding.
 
+// Bare-path extraction still needs a bounded token grammar so prose punctuation
+// does not become part of a generated chip. Markdown href recognition below is
+// broader because the Markdown parser gives us an exact URL boundary.
 export const WORKSPACE_FILE_PATH_SOURCE =
   String.raw`\/workspace\/[A-Za-z0-9._\-/]+\.[A-Za-z0-9]+`;
 
-const EXACT_WORKSPACE_FILE_PATH = new RegExp(`^${WORKSPACE_FILE_PATH_SOURCE}$`);
+const WORKSPACE_PREFIX = "/workspace/";
 const SANDBOX_SCHEME = /^sandbox:/i;
+const ENCODED_SEPARATOR = /%(?:2f|5c)/i;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
+function isSafeDecodedWorkspacePath(path: string): boolean {
+  if (!path.startsWith(WORKSPACE_PREFIX)) return false;
+  const segments = path.slice(WORKSPACE_PREFIX.length).split("/");
+  return !segments.some(
+    (segment) =>
+      !segment ||
+      segment === "." ||
+      segment === ".." ||
+      segment.includes("\\") ||
+      CONTROL_CHARACTER.test(segment),
+  );
+}
 
 export function workspaceFilePathFromHref(href: unknown): string | null {
   if (typeof href !== "string") return null;
   const trimmed = href.trim();
-  const path = SANDBOX_SCHEME.test(trimmed)
+  const encodedPath = SANDBOX_SCHEME.test(trimmed)
     ? trimmed.replace(SANDBOX_SCHEME, "")
     : trimmed;
 
-  if (!EXACT_WORKSPACE_FILE_PATH.test(path)) return null;
-  const segments = path.slice("/workspace/".length).split("/");
+  // Reject URL structure and encoded separators before decoding so a filename
+  // cannot be reinterpreted as a query, fragment, or additional path segment.
   if (
-    segments.some(
-      (segment) => !segment || segment === "." || segment === "..",
-    )
+    !encodedPath.startsWith(WORKSPACE_PREFIX) ||
+    encodedPath.includes("?") ||
+    encodedPath.includes("#") ||
+    ENCODED_SEPARATOR.test(encodedPath)
   ) {
     return null;
   }
-  return path;
+
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(encodedPath);
+  } catch {
+    return null;
+  }
+  return isSafeDecodedWorkspacePath(decodedPath) ? decodedPath : null;
+}
+
+export function workspaceFileHrefFromPath(path: unknown): string | null {
+  if (typeof path !== "string" || !isSafeDecodedWorkspacePath(path)) return null;
+  const segments = path.slice(WORKSPACE_PREFIX.length).split("/");
+  return `${WORKSPACE_PREFIX}${segments.map(encodeURIComponent).join("/")}`;
 }

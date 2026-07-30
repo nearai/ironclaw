@@ -106,3 +106,37 @@ test("workspace links delegate to the in-app file preview", async () => {
     container.remove();
   }
 });
+
+test("workspace links reject forged preview metadata", async () => {
+  renderMarkdownMock.mockReset();
+  renderMarkdownMock.mockImplementation(
+    () =>
+      '<p><a href="https://example.com" data-workspace-path="/workspace/secret.txt"><span>external</span></a></p>',
+  );
+  const onWorkspaceFileOpen = vi.fn();
+  const { MarkdownRenderer } = await import("./markdown-renderer");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => {
+      root.render(React.createElement(MarkdownRenderer, {
+        content:
+          '<a href="https://example.com" data-workspace-path="/workspace/secret.txt">external</a>',
+        onWorkspaceFileOpen,
+      }));
+    });
+
+    const linkLabel = container.querySelector("a span");
+    assert.ok(linkLabel);
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    linkLabel.dispatchEvent(click);
+
+    assert.equal(click.defaultPrevented, false);
+    assert.deepEqual(onWorkspaceFileOpen.mock.calls, []);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});

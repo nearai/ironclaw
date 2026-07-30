@@ -203,7 +203,7 @@ test("streaming markdown renders sanitized snapshots at a bounded cadence", () =
   );
   assert.match(
     rendererSource,
-    /html: renderMarkdown\(currentContent\)/,
+    /html: renderMarkdown\(currentContent,\s*\{\s*workspaceFileLinks:\s*typeof onWorkspaceFileOpen === "function",?\s*\}\)/,
     "every streamed snapshot must still pass through the markdown sanitizer",
   );
   assert.match(
