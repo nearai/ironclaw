@@ -72,6 +72,16 @@ class CargoEvidence:
 
 
 @dataclass(frozen=True)
+class LiveEvidence:
+    """One scheduled live case and the artifact that carries its result."""
+
+    workflow: str
+    job: str
+    case_id: str
+    artifact: str
+
+
+@dataclass(frozen=True)
 class JourneyCaseBase:
     """Shared metadata for one declarative whole-path proof."""
 
@@ -90,12 +100,15 @@ class ProviderJourneyCase(JourneyCaseBase):
     """A harvested provider journey whose full-path runner requires a trace."""
 
     trace: str
+    live_evidence: LiveEvidence
     repeat_after_reset: bool = False
 
 
 @dataclass(frozen=True)
 class ProductJourneyCase(JourneyCaseBase):
     """A trace-less product journey proved by its owning executable test."""
+
+    browser_evidence: PytestEvidence | None = None
 
 
 JourneyCase: TypeAlias = ProviderJourneyCase | ProductJourneyCase

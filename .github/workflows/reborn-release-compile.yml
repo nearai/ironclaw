@@ -63,6 +63,11 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Install Python for release smoke
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
       - name: Install Rust target
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -138,16 +143,14 @@ jobs:
           file "$binary_path"
 
       - id: smoke
-        name: Smoke compiled binary
+        name: Smoke exact release binary
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           BINARY: ${{ matrix.binary }}
         run: |
           binary_path="target/$TARGET/dist/$BINARY"
-          "$binary_path" --version
-          "$binary_path" --help > /dev/null
-          "$binary_path" profile list --json > /dev/null
+          python scripts/ci/smoke-release-binary.py --binary "$binary_path"
 
       # These are preflight evidence only. The reborn-compile-* prefix keeps the
       # existing release host's artifacts-* download pattern from publishing them.
@@ -181,6 +184,6 @@ jobs:
             echo "- Binary: \`target/$TARGET/dist/$BINARY\`"
             echo "- Build result: \`$BUILD_RESULT\`"
             echo "- musl portability: \`$LINKAGE_RESULT\`"
-            echo "- Native CLI smoke: \`$SMOKE_RESULT\`"
+            echo "- Exact release-binary smoke: \`$SMOKE_RESULT\`"
             echo "- Preflight evidence upload: \`$UPLOAD_RESULT\`"
           } >> "$GITHUB_STEP_SUMMARY"

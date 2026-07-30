@@ -2,6 +2,7 @@
 import React from "react";
 import { Card } from "../../../design-system/card";
 import { Button } from "../../../design-system/button";
+import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { useT } from "../../../lib/i18n";
 import { useSkills } from "../hooks/useSkills";
 import { matchesSearch } from "../lib/settings-search";
@@ -29,22 +30,25 @@ export function SkillsTab({ searchQuery = "" }) {
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
+  const [skillToRemove, setSkillToRemove] = React.useState(null);
 
-  const handleRemove = React.useCallback(async (name) => {
-    if (!window.confirm(t("skills.confirmDelete", { name }))) return;
+  const handleConfirmRemove = React.useCallback(async () => {
+    if (!skillToRemove) return;
     setActionError("");
     setActionResult("");
     try {
-      const response = await removeSkill(name);
+      const response = await removeSkill(skillToRemove);
       if (!response?.success) {
         setActionError(response?.message || t("skills.removeFailed"));
         return;
       }
-      setActionResult(response.message || t("skills.removed", { name }));
+      setActionResult(response.message || t("skills.removed", { name: skillToRemove }));
     } catch (err) {
       setActionError(err.message || t("skills.removeFailed"));
+    } finally {
+      setSkillToRemove(null);
     }
-  }, [removeSkill, t]);
+  }, [removeSkill, skillToRemove, t]);
 
   const handleUpdate = React.useCallback(async (name, content) => {
     if (!content.trim()) {
@@ -157,7 +161,7 @@ export function SkillsTab({ searchQuery = "" }) {
                 title={t(group.labelKey)}
                 skills={group.skills}
                 onEdit={fetchSkillContent}
-                onRemove={handleRemove}
+                onRemove={setSkillToRemove}
                 onUpdate={handleUpdate}
                 onSetAutoActivate={handleSetAutoActivate}
                 isRemoving={isRemoving}
@@ -181,6 +185,14 @@ export function SkillsTab({ searchQuery = "" }) {
       <SkillInstallPanel onInstall={installSkill} isInstalling={isInstalling} />
       <SkillActionResult error={actionError} result={actionResult} />
       {body}
+      <ConfirmDialog
+        open={Boolean(skillToRemove)}
+        title={t("skills.confirmDelete", { name: skillToRemove })}
+        confirmLabel={t("skills.delete")}
+        isConfirming={isRemoving}
+        onConfirm={handleConfirmRemove}
+        onCancel={() => setSkillToRemove(null)}
+      />
     </div>
   );
 }

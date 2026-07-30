@@ -37,6 +37,7 @@ class _CaseExplanation:
     name: str
     mode: str
     success: bool
+    flake: bool
     blocked: bool
     required_text: list[str]
     text_excerpt_present: bool
@@ -64,6 +65,7 @@ class _CaseExplanation:
             "case": self.name,
             "mode": self.mode,
             "success": self.success,
+            "flake": self.flake,
             "blocked": self.blocked,
             "required_text": self.required_text,
             "text_excerpt_present": self.text_excerpt_present,
@@ -80,6 +82,7 @@ class _GreenRunSummary:
     total_cases: int = 0
     successful_cases: int = 0
     failed_cases: int = 0
+    flaky_cases: int = 0
     successful_cases_matching_required_text_literally: int = 0
     successful_cases_using_semantic_judge: int = 0
 
@@ -89,6 +92,8 @@ class _GreenRunSummary:
             self.failed_cases += 1
             return
         self.successful_cases += 1
+        if case.flake:
+            self.flaky_cases += 1
         if case.literal_required_text_matched:
             self.successful_cases_matching_required_text_literally += 1
         if case.semantic_judge_used:
@@ -102,6 +107,11 @@ class _GreenRunSummary:
             )
         else:
             status = f"All {self.total_cases} cases were green."
+        flake = (
+            f"{self.flaky_cases} recovered only after retry and is classified as a flake."
+            if self.flaky_cases == 1
+            else f"{self.flaky_cases} recovered only after retry and are classified as flakes."
+        )
         literal = (
             f"{self.successful_cases_matching_required_text_literally} successful cases "
             "matched their required text literally."
@@ -113,13 +123,14 @@ class _GreenRunSummary:
             )
         else:
             judge = "No successful cases used the semantic judge fallback."
-        return f"{status} {literal} {judge}"
+        return f"{status} {flake} {literal} {judge}"
 
     def to_json(self) -> dict[str, int]:
         return {
             "total_cases": self.total_cases,
             "successful_cases": self.successful_cases,
             "failed_cases": self.failed_cases,
+            "flaky_cases": self.flaky_cases,
             "successful_cases_matching_required_text_literally": (
                 self.successful_cases_matching_required_text_literally
             ),
@@ -138,6 +149,7 @@ def _explain_case(result: ProbeResult) -> _CaseExplanation:
         name=str(details.get("case") or result.mode.rsplit(":", 1)[-1]),
         mode=result.mode,
         success=result.success,
+        flake=bool(details.get("flake")),
         blocked=bool(details.get("blocked")),
         required_text=required_text,
         text_excerpt_present=bool(text_excerpt),
