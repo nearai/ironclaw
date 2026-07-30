@@ -78,7 +78,6 @@ pub use display_preview::{SANITIZE_JSON_MAX_DEPTH, sanitize_json_value, sanitize
 mod tests;
 
 const PRODUCT_PROJECTION_PAGE_LIMIT: usize = 256;
-const PRODUCT_PROJECTION_SUBSCRIPTION_BUFFER: usize = 128;
 const PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS: usize = PRODUCT_PROJECTION_PAGE_LIMIT + 1;
 const PRODUCT_PROJECTION_ADAPTER_ID: &str = "webui_v2";
 const PRODUCT_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
@@ -455,9 +454,7 @@ impl ProductRuntimeProjectionStream {
                 },
                 after_cursor: origin_cursor.runtime.clone(),
                 limit: PRODUCT_PROJECTION_PAGE_LIMIT,
-                capabilities: SubscriberCapabilities {
-                    buffer_capacity: PRODUCT_PROJECTION_SUBSCRIPTION_BUFFER,
-                },
+                capabilities: SubscriberCapabilities::default(),
             })
             .await
             .map_err(map_event_stream_error)?;

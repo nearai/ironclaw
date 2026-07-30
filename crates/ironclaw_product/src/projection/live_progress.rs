@@ -1,7 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use crate::{
@@ -37,6 +40,11 @@ use ironclaw_turns::{
 // same live broadcast would put low append-log cursors and high synthetic
 // cursors behind the same `last_delivered_cursor` ordering gate.
 const LIVE_PROGRESS_CURSOR_BASE: u64 = 1 << 62;
+// Cumulative model text is replaceable state, not a lossless event log. Bound
+// publication to one browser paint interval so provider bursts cannot overrun
+// projection subscribers while ordinary 20-50 ms provider cadence passes
+// through unchanged.
+const LIVE_TEXT_COALESCE_WINDOW: Duration = Duration::from_millis(16);
 // The runtime's concurrent-run limit is substantially lower. Keep this
 // defensive ceiling so a missing terminal milestone cannot turn phase
 // bookkeeping into unbounded process memory.
@@ -45,6 +53,7 @@ const MAX_TRACKED_TEXT_PHASE_RUNS: usize = 1_024;
 pub(super) struct LiveProgressMilestoneSink {
     inner: Arc<dyn LoopHostMilestoneSink>,
     publisher: Arc<LiveProjectionPublisher>,
+    text_coalescer: Arc<LiveTextProjectionCoalescer>,
     text_phase_by_run: Mutex<HashMap<TurnRunId, u64>>,
 }
 
@@ -60,6 +69,28 @@ pub struct LiveProjectionPublisher {
     // stay monotonic across progress, skill, and other projection updates.
     next_sequence: Arc<AtomicU64>,
     no_active_subscriber_logged: AtomicBool,
+}
+
+struct LiveTextProjectionCoalescer {
+    publisher: Arc<LiveProjectionPublisher>,
+    next_generation: AtomicU64,
+    publication_order: Mutex<()>,
+    states: Mutex<HashMap<TurnRunId, LiveTextProjectionState>>,
+}
+
+struct LiveTextProjectionState {
+    generation: u64,
+    last_published_at: tokio::time::Instant,
+    pending: Option<PendingTextProjection>,
+    timer_scheduled: bool,
+}
+
+struct PendingTextProjection {
+    owner: Option<UserId>,
+    scope: TurnScope,
+    run_id: TurnRunId,
+    id: String,
+    body: String,
 }
 
 impl std::fmt::Debug for LiveProjectionPublisher {
@@ -78,6 +109,7 @@ impl LiveProgressMilestoneSink {
     ) -> Self {
         Self {
             inner,
+            text_coalescer: Arc::new(LiveTextProjectionCoalescer::new(Arc::clone(&publisher))),
             publisher,
             text_phase_by_run: Mutex::new(HashMap::new()),
         }
@@ -120,6 +152,131 @@ impl LiveProgressMilestoneSink {
             Err(poisoned) => poisoned.into_inner(),
         };
         phases.remove(&run_id);
+    }
+}
+
+impl LiveTextProjectionCoalescer {
+    fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
+        Self {
+            publisher,
+            next_generation: AtomicU64::new(0),
+            publication_order: Mutex::new(()),
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn submit(self: &Arc<Self>, projection: PendingTextProjection) {
+        let run_id = projection.run_id;
+        let mut timer = None;
+        let mut publish_projection = None;
+        {
+            let _publication_order = self.lock_publication_order();
+            {
+                let mut states = self.lock_states();
+                match states.get_mut(&run_id) {
+                    Some(state) => {
+                        state.pending = Some(projection);
+                        if !state.timer_scheduled {
+                            state.timer_scheduled = true;
+                            timer = Some((
+                                state.generation,
+                                state.last_published_at + LIVE_TEXT_COALESCE_WINDOW,
+                            ));
+                        }
+                    }
+                    None => {
+                        if states.len() >= MAX_TRACKED_TEXT_PHASE_RUNS {
+                            drop(states);
+                            self.publish(projection);
+                            return;
+                        }
+                        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                        states.insert(
+                            run_id,
+                            LiveTextProjectionState {
+                                generation,
+                                last_published_at: tokio::time::Instant::now(),
+                                pending: None,
+                                timer_scheduled: false,
+                            },
+                        );
+                        publish_projection = Some(projection);
+                    }
+                }
+            }
+            if let Some(projection) = publish_projection.take() {
+                self.publish(projection);
+            }
+        }
+
+        if let Some((generation, deadline)) = timer {
+            let coalescer = Arc::clone(self);
+            tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                coalescer.flush_timer(run_id, generation);
+            });
+        }
+    }
+
+    fn flush_boundary(&self, run_id: TurnRunId) {
+        let _publication_order = self.lock_publication_order();
+        let projection = {
+            let mut states = self.lock_states();
+            states.remove(&run_id).and_then(|state| state.pending)
+        };
+        if let Some(projection) = projection {
+            self.publish(projection);
+        }
+    }
+
+    fn flush_timer(&self, run_id: TurnRunId, generation: u64) {
+        let _publication_order = self.lock_publication_order();
+        let projection = {
+            let mut states = self.lock_states();
+            let Some(state) = states.get_mut(&run_id) else {
+                return;
+            };
+            if state.generation != generation {
+                return;
+            }
+            state.timer_scheduled = false;
+            let projection = state.pending.take();
+            if projection.is_some() {
+                state.last_published_at = tokio::time::Instant::now();
+            }
+            projection
+        };
+        if let Some(projection) = projection {
+            self.publish(projection);
+        }
+    }
+
+    fn publish(&self, projection: PendingTextProjection) {
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            projection.owner.as_ref(),
+            &projection.scope,
+            sequence,
+            ThreadLiveProjectionItem::Text {
+                id: projection.id,
+                run_id: projection.run_id,
+                body: projection.body,
+            },
+        );
+    }
+
+    fn lock_states(&self) -> MutexGuard<'_, HashMap<TurnRunId, LiveTextProjectionState>> {
+        match self.states.lock() {
+            Ok(states) => states,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn lock_publication_order(&self) -> MutexGuard<'_, ()> {
+        match self.publication_order.lock() {
+            Ok(order) => order,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -366,17 +523,13 @@ impl LiveProgressMilestoneSink {
         if body.is_empty() {
             return;
         }
-        let sequence = self.publisher.next_live_sequence();
-        self.publisher.publish_live_item(
-            milestone.actor.as_ref().map(|actor| &actor.user_id),
-            &milestone.scope,
-            sequence,
-            ThreadLiveProjectionItem::Text {
-                id: self.text_id(milestone.run_id),
-                run_id: milestone.run_id,
-                body,
-            },
-        );
+        self.text_coalescer.submit(PendingTextProjection {
+            owner: milestone.actor.as_ref().map(|actor| actor.user_id.clone()),
+            scope: milestone.scope.clone(),
+            run_id: milestone.run_id,
+            id: self.text_id(milestone.run_id),
+            body,
+        });
     }
 
     fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
@@ -511,6 +664,12 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
         milestone: LoopHostMilestone,
     ) -> Result<(), AgentLoopHostError> {
         self.inner.publish_loop_milestone(milestone.clone()).await?;
+        if !matches!(
+            &milestone.kind,
+            LoopHostMilestoneKind::ModelTextDelta { .. }
+        ) {
+            self.text_coalescer.flush_boundary(milestone.run_id);
+        }
         match &milestone.kind {
             LoopHostMilestoneKind::ModelStarted { .. } => {
                 self.begin_text_phase(milestone.run_id);

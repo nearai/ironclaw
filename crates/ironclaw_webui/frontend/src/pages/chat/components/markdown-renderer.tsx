@@ -183,13 +183,11 @@ function MarkdownRendererImpl({ content, className = "", streaming = false }) {
     return true;
   };
 
-  // Streaming projections carry the full accumulated reply. Keep Streamdown's
-  // parser and sanitization, but use its synchronous `static` render path for
-  // every committed snapshot. Its `streaming` mode feeds parsed blocks through
-  // a React transition; sustained 50-75 ms updates can continually supersede
-  // that transition and leave the DOM frozen until the provider stops. The
-  // outer `streaming` flag still enables new-word animation. Completed replies
-  // keep the existing marked + DOMPurify path and code-block enhancements.
+  // Streaming projections carry the full accumulated reply. The product
+  // boundary limits replaceable text snapshots to browser-paint cadence, so
+  // Streamdown can reconcile incomplete Markdown without a transition being
+  // continually superseded by provider microbursts. Completed replies keep the
+  // existing marked + DOMPurify path and code-block enhancements.
   React.useEffect(() => {
     latestContentRef.current = normalizedContent;
   }, [normalizedContent]);
@@ -244,7 +242,7 @@ function MarkdownRendererImpl({ content, className = "", streaming = false }) {
             animated={{ duration: 100, easing: "ease-out", sep: "word", stagger: 15 }}
             controls={false}
             isAnimating={streaming}
-            mode="static"
+            mode={streaming ? "streaming" : "static"}
           >
             {normalizedContent}
           </StreamingMarkdown>

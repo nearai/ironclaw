@@ -374,7 +374,84 @@ async fn fresh_product_event_stream_preserves_each_model_text_phase() {
 }
 
 #[tokio::test]
-async fn provider_rate_live_text_stays_smooth_and_precedes_tool_activity() {
+async fn provider_cadence_text_updates_are_not_visibly_batched() {
+    let fixture = live_projection_fixture("webui-text-cadence");
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let activity_id = CapabilityActivityId::new();
+    let mut subscription = fixture
+        .services
+        .product_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(fixture.user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let milestone = |kind| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind,
+    };
+
+    for body in ["first", "second", "third"] {
+        fixture
+            .sink
+            .publish_loop_milestone(milestone(LoopHostMilestoneKind::ModelTextDelta {
+                safe_text: body.to_string(),
+            }))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    fixture
+        .sink
+        .publish_loop_milestone(milestone(LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id,
+            capability_id,
+        }))
+        .await
+        .unwrap();
+
+    let mut text_bodies = Vec::new();
+    for _ in 0..8 {
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
+            .await
+            .expect("live projection event")
+            .expect("live projection subscription remains open")
+            .expect("live projection event remains valid");
+        let ProductOutboundPayload::ProjectionUpdate { state } = envelope.payload() else {
+            continue;
+        };
+        for item in &state.items {
+            match item {
+                ProductProjectionItem::Text {
+                    run_id: observed_run_id,
+                    body,
+                    ..
+                } if *observed_run_id == Some(run_id) => text_bodies.push(body.clone()),
+                ProductProjectionItem::CapabilityActivity(activity)
+                    if activity.invocation_id == InvocationId::from_uuid(activity_id.as_uuid()) =>
+                {
+                    assert_eq!(text_bodies, ["first", "second", "third"]);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    panic!("tool activity did not follow provider-cadence text");
+}
+
+#[tokio::test]
+async fn live_text_microburst_keeps_latest_snapshot_and_precedes_tool_activity() {
     let fixture = live_projection_fixture("webui-text-burst");
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
@@ -421,7 +498,7 @@ async fn provider_rate_live_text_stays_smooth_and_precedes_tool_activity() {
     let mut text_bodies = Vec::new();
     let mut saw_tool = false;
     let mut latest_text_preceded_tool = false;
-    for _ in 0..70 {
+    for _ in 0..8 {
         let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
             .await
             .expect("live projection event")
@@ -466,10 +543,9 @@ async fn provider_rate_live_text_stays_smooth_and_precedes_tool_activity() {
         Some("partial answer 63"),
         "the latest cumulative assistant text must precede tool activity"
     );
-    assert_eq!(
-        text_bodies.len(),
-        64,
-        "the bounded WebUI stream should preserve provider-rate text updates: {text_bodies:#?}"
+    assert!(
+        text_bodies.len() <= 3,
+        "the 64-update microburst should keep only paint-relevant cumulative snapshots: {text_bodies:#?}"
     );
 }
 
