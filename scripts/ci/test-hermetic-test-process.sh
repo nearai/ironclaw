@@ -203,6 +203,7 @@ for stage_call in \
   "run_crate_tests" \
   "run_root_partitions" \
   "run_integration_tier" \
+  "prepare_frontend_dependencies" \
   "run-reborn-group-tests.sh" \
   "check-reborn-qa-fixtures.sh" \
   "reborn-e2e-rust.sh" \

@@ -23,8 +23,10 @@ run() {
 
 prepare_rust_dependencies() {
   # Dependency acquisition is setup, not test behavior. Fetch once before the
-  # hermetic process switches Cargo into offline mode.
+  # hermetic process switches Cargo into offline mode. Rust builds can invoke
+  # the WebUI build script, so prepare its pinned package manager too.
   cargo fetch --locked
+  prepare_frontend_dependencies
 }
 
 run_root_partitions() {
@@ -123,6 +125,10 @@ run_python_e2e() {
 
 prepare_frontend_dependencies() {
   local package_manager
+  if [[ -n "${frontend_corepack_home}" ]]; then
+    return
+  fi
+
   package_manager="$(
     jq -r '.packageManager' \
       "${repo_root}/crates/ironclaw_webui/frontend/package.json"
@@ -137,6 +143,7 @@ prepare_frontend_dependencies() {
   )"
   COREPACK_HOME="${frontend_corepack_home}" \
     corepack install --global "${package_manager}"
+  export COREPACK_HOME="${frontend_corepack_home}"
   (
     cd "${repo_root}/crates/ironclaw_webui/frontend"
     COREPACK_HOME="${frontend_corepack_home}" \
@@ -204,7 +211,6 @@ case "${stage}" in
     run cargo test -p ironclaw_reborn_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     run "${repo_root}/scripts/reborn-e2e-rust.sh" all
-    prepare_frontend_dependencies
     run_frontend_tests
     run cargo build -p ironclaw --bin ironclaw
     run_python_e2e

@@ -18,11 +18,12 @@ compile-only jobs.
 
 Install the CI-pinned toolchains first. In particular, build the Emulate
 revision pinned in `.github/workflows/reborn-e2e.yml`, set
-`IRONCLAW_EMULATE_CLI` to its built CLI, install the E2E Python package and
-Chromium, install frontend dependencies, and prefetch locked Cargo
-dependencies. Package installation is a build-tooling precondition. The
-canonical script performs `cargo fetch --locked` before entering the guarded
-process and then forces Cargo offline. Every command and descendant inside the
+`IRONCLAW_EMULATE_CLI` to its built CLI, and install the E2E Python package and
+Chromium. Package installation is a build-tooling precondition. The canonical
+script performs `cargo fetch --locked` and installs the frontend's checked-in
+`packageManager` into an isolated temporary Corepack cache before entering a
+guarded Cargo stage. Cargo is then forced offline, and WebUI build scripts reuse
+only that suite-owned Corepack cache. Every command and descendant inside the
 suite is guarded, so remote compiler wrappers are disabled rather than treated
 as a network exception.
 
