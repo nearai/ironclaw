@@ -5,7 +5,12 @@ import { useT } from "../../../lib/i18n";
 import { authScope } from "../../../lib/auth-scope";
 import { stageFiles } from "../lib/attachments";
 import { ATTACHMENTS_ONLY_CONTENT } from "../lib/attachment-sentinel";
-import { commandMenuMatches } from "../lib/chat-commands";
+import {
+  INITIAL_COMMAND_MENU_SELECTION,
+  commandMenuMatches,
+  commandMenuSelectionReducer,
+  commandMenuToken,
+} from "../lib/chat-commands";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig";
 import {
   NEW_DRAFT_KEY,
@@ -130,6 +135,33 @@ export function ChatInput({
   // into the new one.
   const stagedDraftKeyRef = React.useRef(draftKey);
   const stagedDraftScopeRef = React.useRef(storageScope);
+
+  // Command menu: `commandToken`/`menuCommands` are pure per-render
+  // derivations of `text`/`commands` (see chat-commands.ts). `menuSelection`
+  // (active row + Esc-dismissed flag) is that file's small pure reducer
+  // contract — this component only dispatches actions and stores the result.
+  // Both the state and the derived matches are mirrored into refs for the
+  // same reason `textRef` exists above: the keydown handler must read the
+  // live value instead of the one captured at the last render.
+  const commandToken = commandMenuToken(text);
+  const menuCommands = commandMenuMatches(text, commands);
+  const [menuSelection, setMenuSelection] = React.useState(
+    INITIAL_COMMAND_MENU_SELECTION
+  );
+  const menuSelectionRef = React.useRef(menuSelection);
+  menuSelectionRef.current = menuSelection;
+  const menuCommandsRef = React.useRef(menuCommands);
+  menuCommandsRef.current = menuCommands;
+  // Tracks the token as of the last `handleChange` (or mount), so typing that
+  // changes the filtered set can reset the selection — see `handleChange`.
+  const commandTokenRef = React.useRef(commandToken);
+  const menuOpen = menuCommands.length > 0 && !menuSelection.dismissed;
+  const activeMenuIndex = Math.max(
+    0,
+    Math.min(menuSelection.index, menuCommands.length - 1)
+  );
+  const activeMenuCommand = menuOpen ? menuCommands[activeMenuIndex] : null;
+
   React.useEffect(() => {
     if (
       stagedDraftKeyRef.current !== draftKey ||
@@ -323,6 +355,19 @@ export function ChatInput({
       const next = e.currentTarget.value;
       textRef.current = next;
       setText(next);
+      // Re-filtering (the command token changed) drops any stale row
+      // selection and un-suppresses a menu the user Esc-dismissed for a
+      // different prefix — see the "reset" case in chat-commands.ts.
+      const nextCommandToken = commandMenuToken(next);
+      if (nextCommandToken !== commandTokenRef.current) {
+        commandTokenRef.current = nextCommandToken;
+        const resetSelection = commandMenuSelectionReducer(
+          menuSelectionRef.current,
+          { type: "reset" }
+        );
+        menuSelectionRef.current = resetSelection;
+        setMenuSelection(resetSelection);
+      }
       // Queue a debounced persist instead of writing on every keystroke.
       // Capture the scope so a flush after an identity change is dropped.
       pendingDraftRef.current = { key: draftKey, text: next, scope: authScope() };
@@ -342,8 +387,68 @@ export function ChatInput({
     }
   }, [canCancel, isCancelling, onCancel]);
 
+  // Complete the draft to the full command word — shared by keyboard
+  // (Enter/Tab) and mouse (click) completion so both paths stay in lockstep.
+  const completeMenuCommand = React.useCallback((command) => {
+    if (!command) return;
+    const next = `/${command.name} `;
+    textRef.current = next;
+    setText(next);
+    textareaRef.current?.focus();
+  }, []);
+
+  // Hover selects a row without completing it (click still completes).
+  const selectMenuIndex = React.useCallback((index) => {
+    const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+      type: "select",
+      index,
+    });
+    menuSelectionRef.current = next;
+    setMenuSelection(next);
+  }, []);
+
   const onKeyDown = React.useCallback(
     (e) => {
+      // Layer the command-menu's own keyboard handling before the
+      // Enter-to-send path below, but only while the menu is actually open —
+      // read live refs (not the `menuOpen`/`menuCommands` closed over at the
+      // last render) so a keystroke right after typing still sees the
+      // current matches.
+      const openMenuCommands = menuCommandsRef.current;
+      const menuIsOpen =
+        openMenuCommands.length > 0 && !menuSelectionRef.current.dismissed;
+      if (menuIsOpen) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          const delta = e.key === "ArrowDown" ? 1 : -1;
+          const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+            type: "move",
+            delta,
+            count: openMenuCommands.length,
+          });
+          menuSelectionRef.current = next;
+          setMenuSelection(next);
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          const boundedIndex = Math.max(
+            0,
+            Math.min(menuSelectionRef.current.index, openMenuCommands.length - 1)
+          );
+          completeMenuCommand(openMenuCommands[boundedIndex]);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+            type: "dismiss",
+          });
+          menuSelectionRef.current = next;
+          setMenuSelection(next);
+          return;
+        }
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         const domSendDisabled =
@@ -353,7 +458,7 @@ export function ChatInput({
         handleSend();
       }
     },
-    [handleSend]
+    [handleSend, completeMenuCommand]
   );
 
   const onPaste = React.useCallback(
@@ -393,7 +498,6 @@ export function ChatInput({
 
   const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
-  const menuCommands = commandMenuMatches(text, commands);
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -433,33 +537,50 @@ export function ChatInput({
             {t("chat.attachmentDropHint")}
           </div>
         )}
-        {menuCommands.length > 0 &&
+        {menuOpen &&
         (
+          // Anchored above the composer (not in normal flow) so the menu
+          // floats over the canvas instead of shoving the send button down
+          // as rows come and go while typing.
           <div
+            id="chat-command-menu-listbox"
             role="listbox"
             aria-label={t("chat.commandMenu")}
-            className="mb-2 overflow-hidden rounded-md border border-iron-700 bg-iron-900/80 text-xs"
+            className="absolute bottom-full left-0 right-0 z-20 mb-2 max-h-64 overflow-y-auto rounded-md border border-iron-700 bg-iron-900/95 text-xs shadow-[0_18px_40px_-18px_rgba(0,0,0,0.7)]"
           >
             {menuCommands.map(
-              (command) => (
-                <button
-                  key={command.name}
-                  type="button"
-                  role="option"
-                  aria-selected={false}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    const next = `/${command.name} `;
-                    textRef.current = next;
-                    setText(next);
-                    textareaRef.current?.focus();
-                  }}
-                  className="flex w-full items-baseline gap-2 px-3 py-1.5 text-left hover:bg-iron-800"
-                >
-                  <span className="font-medium text-iron-100">{command.usage}</span>
-                  <span className="truncate text-iron-400">{command.description}</span>
-                </button>
-              )
+              (command, index) => {
+                const isActive = index === activeMenuIndex;
+                const prefixLength = Math.min(commandToken.length, command.name.length);
+                const matchedPrefix = command.name.slice(0, prefixLength);
+                const restOfName = command.name.slice(prefixLength);
+                return (
+                  <button
+                    key={command.name}
+                    id={`chat-command-option-${command.name}`}
+                    type="button"
+                    role="option"
+                    aria-selected={isActive}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => selectMenuIndex(index)}
+                    onClick={() => completeMenuCommand(command)}
+                    className={[
+                      "flex w-full flex-col gap-0.5 px-3 py-1.5 text-left",
+                      isActive ? "bg-iron-800" : "hover:bg-iron-800",
+                    ].join(" ")}
+                  >
+                    <span className="flex min-w-0 items-baseline gap-2">
+                      <span className="shrink-0 font-mono text-iron-100">
+                        /<span className="text-signal">{matchedPrefix}</span>{restOfName}
+                      </span>
+                      <span className="shrink-0 font-medium text-iron-100">{command.title}</span>
+                      <span className="min-w-0 truncate text-iron-400">{command.description}</span>
+                    </span>
+                    {isActive &&
+                    (<span className="text-iron-400">{command.usage}</span>)}
+                  </button>
+                );
+              }
             )}
           </div>
         )}
@@ -534,6 +655,13 @@ export function ChatInput({
           placeholder={placeholder}
           rows={1}
           disabled={disabled}
+          aria-expanded={menuOpen}
+          aria-controls={menuOpen ? "chat-command-menu-listbox" : undefined}
+          aria-activedescendant={
+            activeMenuCommand
+              ? `chat-command-option-${activeMenuCommand.name}`
+              : undefined
+          }
           className={textClass}
         />
 

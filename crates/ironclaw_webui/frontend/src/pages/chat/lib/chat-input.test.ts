@@ -4,6 +4,36 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+import {
+  INITIAL_COMMAND_MENU_SELECTION,
+  commandMenuMatches,
+  commandMenuSelectionReducer,
+  commandMenuToken,
+} from "./chat-commands";
+
+// Wire shape from `GET /api/webchat/v2/commands`. Two commands share the
+// "mo" prefix so ArrowDown/wraparound has somewhere to move.
+const MENU_COMMANDS = [
+  {
+    name: "model",
+    title: "Model",
+    description: "Show or switch the active LLM provider and model",
+    usage: "/model [provider] [name]",
+  },
+  {
+    name: "modelinfo",
+    title: "Model info",
+    description: "Show detailed information about the active model",
+    usage: "/modelinfo --verbose",
+  },
+  {
+    name: "status",
+    title: "Status",
+    description: "Show what the assistant is doing",
+    usage: "/status",
+  },
+];
+
 function chatInputSourceForTest() {
   const source = readFileSync(
     new URL("../components/chat-input.tsx", import.meta.url),
@@ -72,6 +102,16 @@ function findNode(node, predicate) {
   return null;
 }
 
+// Flattens a synthetic jsx node's `children` into the plain text it would
+// render, so assertions can check for title/description/usage substrings
+// without hand-walking the tree.
+function extractText(node) {
+  if (node == null) return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node.children)) return node.children.map(extractText).join("");
+  return "";
+}
+
 async function flushAsyncHandlers() {
   await new Promise((resolve) => setImmediate(resolve));
 }
@@ -88,6 +128,7 @@ function renderChatInput({
   draftKey,
   authScopeFn = () => "test-scope",
   setDraftCalls = [],
+  commands = [],
 } = {}) {
   const components = {
     Button() {},
@@ -121,7 +162,10 @@ function renderChatInput({
     useT: () => (key) => key,
     authScope: authScopeFn,
     stageFiles: async () => ({ staged: [], errors: [] }),
-    commandMenuMatches: () => [],
+    commandMenuMatches,
+    commandMenuToken,
+    commandMenuSelectionReducer,
+    INITIAL_COMMAND_MENU_SELECTION,
     useAttachmentConfig: () => ({
       accept: [],
       maxCount: 10,
@@ -150,6 +194,7 @@ function renderChatInput({
     sendDisabled,
     canCancel,
     draftKey,
+    commands,
   });
   return { tree, components };
 }
@@ -566,4 +611,214 @@ test("ChatInput keeps Enter blocked when submit becomes disabled during send", a
   await flushAsyncHandlers();
 
   assert.equal(sendCalls, 1);
+});
+
+// --- Command menu: keyboard-driven palette -----------------------------
+// `menuSelection` ({index, dismissed}) is the 7th `useState` call in
+// chat-input.tsx (slot index 6) — text(0)/attachments(1)/attachmentError(2)/
+// isSending(3)/isCancelling(4)/dragOver(5) come first and their indices are
+// pinned by the tests above, so the new state is appended after all of them
+// rather than interleaved.
+const MENU_SELECTION_STATE_INDEX = 6;
+
+function findTextarea(tree) {
+  return findNode(tree, (node) => node.strings.some((part) => part.includes("<textarea")));
+}
+
+function findCommandOption(tree, name) {
+  return findNode(tree, (node) => node.props?.id === `chat-command-option-${name}`);
+}
+
+test("ChatInput ArrowDown moves the active command-menu row", () => {
+  const setCalls = [];
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "ArrowDown",
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+
+  assert.equal(prevented, true);
+  const menuSelectionCalls = setCalls.filter(
+    (call) => call.index === MENU_SELECTION_STATE_INDEX,
+  );
+  assert.deepEqual(menuSelectionCalls, [
+    { index: MENU_SELECTION_STATE_INDEX, value: { index: 1, dismissed: false } },
+  ]);
+});
+
+test("ChatInput Enter completes the active command-menu row without sending", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+  const textCalls = setCalls.filter((call) => call.index === 0);
+  assert.deepEqual(textCalls, [{ index: 0, value: "/model " }]);
+});
+
+test("ChatInput Tab completes the active command-menu row", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Tab",
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+  const textCalls = setCalls.filter((call) => call.index === 0);
+  assert.deepEqual(textCalls, [{ index: 0, value: "/model " }]);
+});
+
+test("ChatInput Escape dismisses the command menu so a later Enter sends normally", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+
+  let escPrevented = false;
+  textareaProps.onKeyDown({
+    key: "Escape",
+    preventDefault: () => {
+      escPrevented = true;
+    },
+  });
+  assert.equal(escPrevented, true);
+  const menuSelectionCalls = setCalls.filter(
+    (call) => call.index === MENU_SELECTION_STATE_INDEX,
+  );
+  assert.deepEqual(menuSelectionCalls, [
+    { index: MENU_SELECTION_STATE_INDEX, value: { index: 0, dismissed: true } },
+  ]);
+
+  let enterPrevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      enterPrevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(enterPrevented, true);
+  assert.equal(sendCalls, 1);
+  // The only text-state change is handleSend's own clear-on-send; the draft
+  // was never rewritten to "/model " by a completion, since Escape
+  // suppressed the menu instead of Enter completing a row.
+  const textCalls = setCalls.filter((call) => call.index === 0);
+  assert.deepEqual(textCalls, [{ index: 0, value: "" }]);
+});
+
+test("ChatInput command-menu rows render the title and description", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  const modelRow = findCommandOption(tree, "model");
+  const rowText = extractText(modelRow);
+  assert.ok(rowText.includes(MENU_COMMANDS[0].title));
+  assert.ok(rowText.includes(MENU_COMMANDS[0].description));
+});
+
+test("ChatInput command-menu shows the usage hint only for the active row", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  // Row 0 ("model") is active by default (no ArrowDown pressed yet).
+  const activeRowText = extractText(findCommandOption(tree, "model"));
+  assert.ok(activeRowText.includes(MENU_COMMANDS[0].usage));
+
+  const inactiveRowText = extractText(findCommandOption(tree, "modelinfo"));
+  assert.ok(!inactiveRowText.includes(MENU_COMMANDS[1].usage));
+});
+
+test("ChatInput command-menu highlights the typed prefix in the row's name", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  const modelRow = findCommandOption(tree, "model");
+  const highlight = findNode(modelRow, (node) => node.props?.className === "text-signal");
+  assert.ok(highlight, "expected a highlighted-prefix span inside the row");
+  assert.equal(extractText(highlight), "mo");
+  // The unhighlighted remainder of the name is still present, split apart
+  // from the highlighted prefix rather than baked into one string.
+  assert.equal(extractText(modelRow).includes("mo"), true);
+  assert.equal(extractText(modelRow).includes("del"), true);
 });

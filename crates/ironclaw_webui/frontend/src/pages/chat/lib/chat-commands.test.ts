@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  INITIAL_COMMAND_MENU_SELECTION,
   commandMenuMatches,
+  commandMenuSelectionReducer,
+  commandMenuToken,
   matchCommand,
   renderCommandResultMarkdown,
 } from "./chat-commands";
@@ -51,6 +54,83 @@ describe("commandMenuMatches", () => {
   it("stops suggesting once arguments follow the command word", () => {
     expect(commandMenuMatches("/model gpt", COMMANDS)).toHaveLength(0);
     expect(commandMenuMatches("plain text", COMMANDS)).toHaveLength(0);
+  });
+});
+
+describe("commandMenuToken", () => {
+  it("derives the lowercased prefix while the draft is a bare command word", () => {
+    expect(commandMenuToken("/mo")).toBe("mo");
+    expect(commandMenuToken("  /STATUS")).toBe("status");
+    expect(commandMenuToken("/")).toBe("");
+  });
+
+  it("returns null once the draft isn't (or is no longer) a bare command word", () => {
+    expect(commandMenuToken("/model gpt-5")).toBeNull();
+    expect(commandMenuToken("plain text")).toBeNull();
+    expect(commandMenuToken("")).toBeNull();
+  });
+});
+
+// Pure selection-state contract for the composer's keyboard-driven command
+// menu (active row + Esc-dismissed flag). `chat-input.tsx` only dispatches
+// actions and mirrors the result into useState/useRef — see its comments —
+// so the wraparound/reset/dismiss math is unit-tested here without React or
+// the DOM.
+describe("commandMenuSelectionReducer", () => {
+  it("moves the active row forward and backward with wraparound", () => {
+    const forward = commandMenuSelectionReducer(
+      { index: 2, dismissed: false },
+      { type: "move", delta: 1, count: 3 },
+    );
+    expect(forward.index).toBe(0);
+
+    const backward = commandMenuSelectionReducer(
+      { index: 0, dismissed: false },
+      { type: "move", delta: -1, count: 3 },
+    );
+    expect(backward.index).toBe(2);
+
+    const middle = commandMenuSelectionReducer(
+      { index: 0, dismissed: false },
+      { type: "move", delta: 1, count: 3 },
+    );
+    expect(middle.index).toBe(1);
+  });
+
+  it("moving with no rows to select stays at row 0", () => {
+    const state = commandMenuSelectionReducer(
+      { index: 2, dismissed: false },
+      { type: "move", delta: 1, count: 0 },
+    );
+    expect(state.index).toBe(0);
+  });
+
+  it("resets the active row and clears the dismissed flag on a filter change", () => {
+    const dismissedMidList = { index: 2, dismissed: true };
+    expect(commandMenuSelectionReducer(dismissedMidList, { type: "reset" })).toEqual(
+      INITIAL_COMMAND_MENU_SELECTION,
+    );
+  });
+
+  it("dismiss sets the flag without touching the active row", () => {
+    const state = commandMenuSelectionReducer(
+      { index: 1, dismissed: false },
+      { type: "dismiss" },
+    );
+    expect(state).toEqual({ index: 1, dismissed: true });
+  });
+
+  it("select sets the active row directly (hover)", () => {
+    const state = commandMenuSelectionReducer(
+      { index: 0, dismissed: false },
+      { type: "select", index: 2 },
+    );
+    expect(state).toEqual({ index: 2, dismissed: false });
+  });
+
+  it("is a no-op for an unrecognized action", () => {
+    const state = { index: 1, dismissed: false };
+    expect(commandMenuSelectionReducer(state, { type: "noop" })).toBe(state);
   });
 });
 
