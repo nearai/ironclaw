@@ -70,6 +70,10 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     await pdf_link.click()
     modal_download = page.locator(SEL_V2["attachment_download"])
     await expect(modal_download).to_be_visible(timeout=15000)
+    pdf_preview = page.locator(
+        SEL_V2["attachment_preview_pdf_frame_for"].format(filename="report.pdf")
+    )
+    await expect(pdf_preview).to_be_visible(timeout=15000)
     assert len(page.context.pages) == open_pages
     await page.get_by_role("button", name="Close", exact=True).last.click()
     await expect(modal_download).to_be_hidden()
