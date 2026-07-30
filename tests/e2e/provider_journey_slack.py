@@ -1,5 +1,6 @@
 """Slack world setup, provider readback, and cleanup for journey replays."""
 
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
@@ -11,7 +12,11 @@ from reborn_webui_harness import (
     reborn_bearer_headers,
 )
 
-EMULATE_SLACK_CHANNEL_BEARER = "emulate-slack-channel-token"
+EMULATE_SLACK_CHANNEL_BEARER_ENV = "IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER"
+
+
+def emulate_slack_channel_bearer() -> str:
+    return os.environ[EMULATE_SLACK_CHANNEL_BEARER_ENV]
 
 
 async def seed_slack_workspace(emulate_url: str) -> dict[str, str]:
@@ -93,7 +98,7 @@ async def configure_slack(base_url: str, slack_state: dict[str, str]) -> None:
                 "values": [
                     {
                         "handle": "slack_bot_token",
-                        "value": EMULATE_SLACK_CHANNEL_BEARER,
+                        "value": emulate_slack_channel_bearer(),
                     },
                     {
                         "handle": "slack_signing_secret",

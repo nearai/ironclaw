@@ -40,10 +40,10 @@ from provider_journey_google import (
     assert_google_provider_outcome,
 )
 from provider_journey_slack import (
-    EMULATE_SLACK_CHANNEL_BEARER,
     assert_slack_provider_baseline,
     assert_slack_provider_outcome,
     cleanup_slack_provider_mutations,
+    emulate_slack_channel_bearer,
 )
 from provider_journey_trace import (
     compile_provider_journey_trace,
@@ -741,7 +741,7 @@ async def test_provider_operation_case_executes_with_provider_readback(
         # only that known channel credential, then require every observed
         # operation request to share one non-null provider account.
         excluded_bearers=(
-            (EMULATE_SLACK_CHANNEL_BEARER,)
+            (emulate_slack_channel_bearer(),)
             if operation_case.provider_service == "slack"
             else ()
         ),

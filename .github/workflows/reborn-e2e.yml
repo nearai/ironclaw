@@ -70,6 +70,7 @@ env:
   # schedule text, which are exactly the values that shift with TZ/locale.
   TZ: "UTC"
   LANG: "C.UTF-8"
+  IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER: "emulate-slack-channel-token"
 
 jobs:
   changes:

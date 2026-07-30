@@ -42,6 +42,10 @@ from journey_types import (
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 from provider_journey_google import require_single_google_account
+from provider_journey_slack import (
+    EMULATE_SLACK_CHANNEL_BEARER_ENV,
+    emulate_slack_channel_bearer,
+)
 from provider_journey_trace import (
     MISSING_SLACK_CHANNEL_ID,
     compile_provider_journey_trace,
@@ -311,6 +315,15 @@ def test_google_account_seed_allows_an_explicit_existing_account():
     )
 
     assert account is None
+
+
+def test_slack_channel_bearer_requires_the_harness_environment(monkeypatch):
+    monkeypatch.delenv(EMULATE_SLACK_CHANNEL_BEARER_ENV, raising=False)
+    with pytest.raises(KeyError, match=EMULATE_SLACK_CHANNEL_BEARER_ENV):
+        emulate_slack_channel_bearer()
+
+    monkeypatch.setenv(EMULATE_SLACK_CHANNEL_BEARER_ENV, "test-channel-token")
+    assert emulate_slack_channel_bearer() == "test-channel-token"
 
 
 @pytest.mark.parametrize(
