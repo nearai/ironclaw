@@ -129,3 +129,36 @@ test("workspace attachments can open their selected file in the workspace viewer
     vi.restoreAllMocks();
   }
 });
+
+test("failed workspace attachments do not offer an unavailable workspace jump", async () => {
+  fetchAttachmentBlobMock.mockRejectedValueOnce(new Error("not found"));
+  const { AttachmentPreviewModal } = await import("./attachment-preview");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => {
+      root.render(<AttachmentPreviewModal
+        attachment={{
+          filename: "missing.html",
+          mime_type: "text/html",
+          fetch_url: "/api/test/missing",
+          workspace_path: "/workspace/generated/missing.html",
+        }}
+        onClose={() => {}}
+      />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    assert.equal(container.textContent?.includes("chat.attachmentLoadFailed"), true);
+    assert.equal(
+      container.querySelector('[data-testid="attachment-open-workspace"]'),
+      null,
+    );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});

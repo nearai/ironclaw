@@ -126,7 +126,7 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         (<PreviewBody mode={view.mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
-        {workspaceRoute &&
+        {status === "ready" && workspaceRoute &&
         (<OpenInWorkspaceButton
           route={workspaceRoute}
           onClose={onClose}
