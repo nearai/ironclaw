@@ -47,12 +47,18 @@ pub(crate) fn validate_process_ownership(
     }
 
     for expected in expected_process_ids {
-        if !processes
+        let Some((_, process_kind, _)) = processes
             .iter()
-            .any(|(process_id, _, _)| process_id == expected)
-        {
+            .find(|(process_id, _, _)| process_id == expected)
+        else {
             return Err(format!(
                 "expected agent-turn process {expected} is missing from the process journal"
+            )
+            .into());
+        };
+        if process_kind != &ProcessKind::AgentTurn {
+            return Err(format!(
+                "expected process {expected} has kind {process_kind:?}, not AgentTurn"
             )
             .into());
         }
@@ -99,20 +105,13 @@ impl ToolErrorClass {
 }
 
 impl RebornIntegrationHarness {
-    /// Assert the process journal and capability-path resource governor agree
-    /// that every agent-turn process belongs to `expected_run_ids`, every
-    /// process parent is present, and no resource hold remains.
+    /// Assert every agent-turn process belongs to `expected_run_ids` and every
+    /// process parent is present.
     ///
     /// Since #6696, admission/active-lock state is updated atomically with the
     /// process snapshot rather than stored as a second reservation record.
-    /// Exact process ownership therefore replaces the retired dual-store
-    /// orphan check; capability resource holds remain a separate authority and
-    /// are read back below.
-    ///
-    /// This deliberately reads the production-composed governor rather than a
-    /// test-owned imitation. A harness that cannot expose that authority fails
-    /// loudly instead of silently weakening the invariant.
-    pub async fn assert_no_orphan_runs_or_reservations(
+    /// Exact process ownership replaces the retired dual-store orphan check.
+    pub async fn assert_process_ownership(
         &self,
         expected_run_ids: &[TurnRunId],
     ) -> HarnessResult<()> {
@@ -138,8 +137,15 @@ impl RebornIntegrationHarness {
                 )
             })
             .collect();
-        validate_process_ownership(&process_ownership, &expected_process_ids)?;
+        validate_process_ownership(&process_ownership, &expected_process_ids)
+    }
 
+    /// Assert the production-composed capability governor has no live holds.
+    ///
+    /// This deliberately reads the production-composed governor rather than a
+    /// test-owned imitation. A harness that cannot expose that authority fails
+    /// loudly instead of silently weakening the invariant.
+    pub fn assert_no_capability_resource_reservations(&self) -> HarnessResult<()> {
         let governor = self.capability_recorder.resource_governor().ok_or(
             "harness does not expose its production-composed capability resource governor",
         )?;
@@ -157,6 +163,20 @@ impl RebornIntegrationHarness {
         }
 
         Ok(())
+    }
+
+    /// Assert process ownership and zero capability holds at a quiescent
+    /// blocked or terminal boundary.
+    ///
+    /// Call [`Self::assert_process_ownership`] alone while a run is actively
+    /// executing: an in-flight capability reservation is legitimate until the
+    /// transition settles and must not be mislabeled as an orphan.
+    pub async fn assert_no_orphan_runs_or_reservations(
+        &self,
+        expected_run_ids: &[TurnRunId],
+    ) -> HarnessResult<()> {
+        self.assert_process_ownership(expected_run_ids).await?;
+        self.assert_no_capability_resource_reservations()
     }
 
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.

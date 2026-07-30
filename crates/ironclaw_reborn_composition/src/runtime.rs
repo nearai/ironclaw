@@ -2788,11 +2788,11 @@ pub async fn build_reborn_runtime(
 }
 
 pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, RebornRuntimeError> {
-    let (runtime, _) = build_runtime_with_authorities(input).await?;
+    let (runtime, _) = build_runtime_with_resource_governor(input).await?;
     Ok(runtime)
 }
 
-pub(crate) async fn build_runtime_with_authorities(
+pub(crate) async fn build_runtime_with_resource_governor(
     input: RebornRuntimeInput,
 ) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
     let RebornRuntimeInput {

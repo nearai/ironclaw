@@ -78,7 +78,7 @@ pub async fn build_runtime_with_resource_governor_for_test(
     ),
     crate::RebornRuntimeError,
 > {
-    crate::runtime::build_runtime_with_authorities(input).await
+    crate::runtime::build_runtime_with_resource_governor(input).await
 }
 
 mod automation;

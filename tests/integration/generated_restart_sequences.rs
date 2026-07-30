@@ -30,49 +30,18 @@ enum PostRestartAction {
 
 impl PostRestartAction {
     const ALL: [Self; 3] = [Self::Approve, Self::Deny, Self::Cancel];
-
-    fn index(self) -> usize {
-        match self {
-            Self::Approve => 0,
-            Self::Deny => 1,
-            Self::Cancel => 2,
-        }
-    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RestartSequence {
-    action: PostRestartAction,
-}
-
-fn restart_sequences() -> Vec<RestartSequence> {
-    PostRestartAction::ALL
-        .into_iter()
-        .map(|action| RestartSequence { action })
-        .collect()
-}
-
-fn validate_restart_sequences(sequences: &[RestartSequence]) -> Result<(), String> {
-    let mut seen = [false; PostRestartAction::ALL.len()];
-    for sequence in sequences {
-        let slot = &mut seen[sequence.action.index()];
-        if *slot {
-            return Err(format!(
-                "duplicate generated restart action: {:?}",
-                sequence.action
-            ));
-        }
-        *slot = true;
-    }
-    let missing: Vec<_> = PostRestartAction::ALL
-        .into_iter()
-        .filter(|action| !seen[action.index()])
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("missing generated restart actions: {missing:?}"))
-    }
+fn assert_complete_restart_actions(actions: &[PostRestartAction]) {
+    assert_eq!(
+        actions,
+        [
+            PostRestartAction::Approve,
+            PostRestartAction::Deny,
+            PostRestartAction::Cancel,
+        ],
+        "restart action denominator changed"
+    );
 }
 
 async fn build_restarted_harness(
@@ -151,13 +120,12 @@ async fn build_restarted_harness(
 
 #[tokio::test]
 async fn generated_restart_sequences_preserve_gate_lifecycle_and_effect_count() {
-    let sequences = restart_sequences();
-    validate_restart_sequences(&sequences)
-        .unwrap_or_else(|error| panic!("restart generator is incomplete: {error}"));
+    assert_complete_restart_actions(&PostRestartAction::ALL);
 
-    for (case_index, sequence) in sequences.into_iter().enumerate() {
+    for (case_index, action) in PostRestartAction::ALL.into_iter().enumerate() {
         let (harness, run_id, gate_ref) = build_restarted_harness(case_index).await;
-        match sequence.action {
+        let workspace_file = format!("generated-restart-{case_index}.txt");
+        match action {
             PostRestartAction::Approve => {
                 harness
                     .approve_gate(run_id, &gate_ref)
@@ -185,19 +153,18 @@ async fn generated_restart_sequences_preserve_gate_lifecycle_and_effect_count() 
         harness
             .assert_no_orphan_runs_or_reservations(&[run_id])
             .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{:?} left an orphan after restart: {error}",
-                    sequence.action
-                )
-            });
-        match sequence.action {
+            .unwrap_or_else(|error| panic!("{action:?} left an orphan after restart: {error}"));
+        match action {
             PostRestartAction::Approve => {
                 assert_eq!(terminal.status, TurnStatus::Completed);
                 harness
                     .assert_capability_result_count(GATED_CAPABILITY, 1)
                     .await
                     .expect("approved effect executes exactly once after restart");
+                harness
+                    .assert_workspace_file_contains(&workspace_file, "generated across restart")
+                    .await
+                    .expect("approved write persists the expected contents after restart");
             }
             PostRestartAction::Deny => {
                 // Denial is delivered back to the loop as a model-visible tool
@@ -209,6 +176,10 @@ async fn generated_restart_sequences_preserve_gate_lifecycle_and_effect_count() 
                     .assert_capability_result_count(GATED_CAPABILITY, 0)
                     .await
                     .expect("denied effect stays unexecuted after restart");
+                harness
+                    .assert_workspace_file_absent(&workspace_file)
+                    .await
+                    .expect("denied write leaves no persisted file after restart");
             }
             PostRestartAction::Cancel => {
                 assert_eq!(terminal.status, TurnStatus::Cancelled);
@@ -216,19 +187,17 @@ async fn generated_restart_sequences_preserve_gate_lifecycle_and_effect_count() 
                     .assert_capability_result_count(GATED_CAPABILITY, 0)
                     .await
                     .expect("cancelled effect stays unexecuted after restart");
+                harness
+                    .assert_workspace_file_absent(&workspace_file)
+                    .await
+                    .expect("cancelled write leaves no persisted file after restart");
             }
         }
     }
 }
 
 #[test]
+#[should_panic(expected = "restart action denominator changed")]
 fn restart_generator_sabotage_detects_a_missing_recovery_arm() {
-    let mut sabotaged = restart_sequences();
-    sabotaged.retain(|sequence| sequence.action != PostRestartAction::Deny);
-    let error = validate_restart_sequences(&sabotaged)
-        .expect_err("removing a recovery arm must fail the generator denominator");
-    assert!(
-        error.contains("Deny"),
-        "missing-arm diagnostic did not name the sabotaged branch: {error}"
-    );
+    assert_complete_restart_actions(&[PostRestartAction::Approve, PostRestartAction::Cancel]);
 }
