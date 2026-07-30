@@ -209,7 +209,7 @@
 <header class="hero"><div class="wrap">
   <h1 id="heroTitle"></h1>
   <p id="heroSub"></p>
-  <span class="hint"><span class="pulse"></span>Click any crate to inspect it — dots show disposition (landed · in flight · planned).</span>
+  <span class="hint"><span class="pulse"></span>Click any crate to inspect it — dots show how much it changes vs today, not work in progress.</span>
   <div class="legend" id="legend"></div>
 </div></header>
 
@@ -276,7 +276,7 @@ const META = {
   repo: "nearai/ironclaw",
   asOf: "2026-07-29 · baseline dde662d5a",
   footSrc: "docs/reborn/target-architecture/ — README · PROPOSAL · families/ · CHECKLIST · PLAN (branch proposal/target-crate-architecture)",
-  footNote: "Forward-looking target map: dots show each crate's disposition relative to today (landed = exists with this charter · in flight = exists but narrows/moves/splits · planned = new). Layout and engine from the architecture-diagram skill (PR #6253); data from the target-architecture proposal."
+  footNote: "Forward-looking target map: dots show each crate's delta vs today's tree (green = already exists with the target charter · amber = the proposal reshapes it — rename, narrowing, layer move, or split · grey = new crate). They are not execution status; the restructure has not started. Layout and engine from the architecture-diagram skill (PR #6253); data from the target-architecture proposal."
 };
 
 const LAYERS = [
@@ -727,7 +727,8 @@ const DEMO_META = {
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const KIND_CLASS = {Kernel:"kind-kernel",Substrate:"kind-substrate",Interface:"kind-interface",Product:"kind-product",Lane:"kind-lane",Capability:"kind-capability"};
-const STATUS_LABEL = {done:"landed",wip:"in flight",planned:"planned"};
+const STATUS_LABEL = {done:"already in shape",wip:"reshaped by the proposal",planned:"new crate"};
+const SLICE_LABEL  = {done:"landed",wip:"in flight",planned:"not started"};
 const PR = `https://github.com/${META.repo}/pull/`;
 const hasStatus = Object.keys(STATUS).length > 0;
 
@@ -740,8 +741,8 @@ $("footSrc").textContent = META.footSrc;
 $("footNote").textContent = META.footNote;
 document.title = META.brandName;
 if (hasStatus) $("legend").innerHTML =
-  '<span><i class="done"></i> landed</span><span><i class="wip"></i> in flight</span><span><i class="planned"></i> planned</span>' +
-  `<span style="color:var(--ink-faint)">status as of ${esc(META.asOf)}</span>`;
+  '<span><i class="done"></i> already in shape — today\'s charter matches the target</span><span><i class="wip"></i> reshaped — renamed, narrowed, moved, or split</span><span><i class="planned"></i> new crate</span>' +
+  `<span style="color:var(--ink-faint)">vs today's tree · ${esc(META.asOf)} · execution not started — see the waves below</span>`;
 
 $("diagram").innerHTML =
   `<div class="dirnote"><span>app sits at the top · contracts at the bottom</span><span class="dl"></span><span>a crate depends only downward ↓</span></div>` +
@@ -812,7 +813,7 @@ if (SLICES.length){
   const prchips = (arr,cls)=>arr && arr.length ? `<div class="prchips">${arr.map(n=>`<a class="pr ${cls}" href="${PR}${n}">#${n}</a>`).join("")}</div>` : "";
   $("slices").innerHTML = SLICES.map(s => `
     <div class="slice${s.full?" full":""}">
-      <div class="slice-hd"><span class="slice-letter">${esc(s.letter)}</span><h3>${esc(s.title)}</h3><span class="pill-status ${s.status}">${STATUS_LABEL[s.status]||s.status}</span></div>
+      <div class="slice-hd"><span class="slice-letter">${esc(s.letter)}</span><h3>${esc(s.title)}</h3><span class="pill-status ${s.status}">${SLICE_LABEL[s.status]||s.status}</span></div>
       <p class="slice-sub">${esc(s.sub||"")}</p>
       ${s.pips&&s.pips.length?`<div class="pips">${s.pips.map(p=>`<span class="pip ${p.level}" title="${esc(p.title||"")}"></span>`).join("")}</div>`:""}
       <div class="slice-meta">
@@ -829,7 +830,7 @@ if (DEMOLITION.length){
   $("demoLede").innerHTML = DEMO_META.lede || "";
   $("demoStats").innerHTML = (DEMO_META.stats||[]).map(s=>`<span class="prog-stat"><b>${esc(s.n)}</b><span>${esc(s.label)}</span></span>`).join("");
   $("demoBody").innerHTML = DEMOLITION.map(stg => {
-    const head = `<tr class="stage"><td colspan="4">${esc(stg.stage)}${stg.status?` <span class="st ${stg.status}">${STATUS_LABEL[stg.status]||stg.status}</span>`:""}</td></tr>`;
+    const head = `<tr class="stage"><td colspan="4">${esc(stg.stage)}${stg.status?` <span class="st ${stg.status}">${SLICE_LABEL[stg.status]||stg.status}</span>`:""}</td></tr>`;
     const rows = stg.rows.map(r => `<tr>
       <td class="del"><s>${esc(r.removed)}</s>${r.sub?`<span class="sub">${esc(r.sub)}</span>`:""}</td>
       <td class="mag">${esc(r.mag)}${r.magSub?`<em>${esc(r.magSub)}</em>`:""}</td>
