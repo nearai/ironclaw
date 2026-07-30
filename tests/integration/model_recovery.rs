@@ -10,6 +10,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_threads::SessionThreadError;
 use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::http_matcher::ScriptedHttpResponse;
@@ -22,6 +23,14 @@ const UNPERSISTED_ASSISTANT_REPLY: &str =
 const UNPERSISTED_TOOL_RESULT: &str =
     "raw tool result that must never enter the transcript failure";
 const TRANSCRIPT_FAILURE_TOOL_URL: &str = "https://transcript-failure.example.test/result";
+
+#[test]
+fn transcript_backend_error_classification_is_detail_free() {
+    let error = SessionThreadError::Backend("storage credential sk-secret".to_string());
+
+    assert_eq!(error.kind_name(), "backend");
+    assert!(!error.kind_name().contains("sk-secret"));
+}
 
 #[tokio::test]
 async fn provider_outage_advances_real_fallback_chain_and_persists_reply() {
