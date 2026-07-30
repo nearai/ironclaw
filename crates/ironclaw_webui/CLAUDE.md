@@ -50,6 +50,10 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
+Run and full-thread regression artifact exports are QA-only. Host composition
+mounts their routes and exposes their browser affordances only when
+`IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT=true`; the default is disabled.
+
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
 **ws-origin → per-route body limit → bearer auth → rate limit → handler** —
 turning the `webui_v2_routes()` descriptors into tower layers.

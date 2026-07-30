@@ -276,6 +276,15 @@ fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     router_with_caller(services, WebUiV2Capabilities::default(), caller())
 }
 
+fn artifact_router_with(services: Arc<dyn ProductSurface>) -> Router {
+    webui_v2_router(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_regression_artifact_export_enabled(true),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()))
+}
+
 fn router_with_caller(
     services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
@@ -2243,7 +2252,7 @@ async fn get_timeline_threads_path_into_request() {
 #[tokio::test]
 async fn get_run_artifact_threads_path_and_run_path_into_request() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
+    let router = artifact_router_with(services.clone());
     let run_id = "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18";
 
     let response = router
@@ -2277,7 +2286,7 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
 #[tokio::test]
 async fn get_thread_artifact_threads_path_into_request() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
+    let router = artifact_router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -2302,6 +2311,35 @@ async fn get_thread_artifact_threads_path_into_request() {
     let request: RebornThreadArtifactRequest =
         serde_json::from_value(queries[0].params.clone()).expect("artifact params");
     assert_eq!(request.thread_id, "thread-x");
+}
+
+#[tokio::test]
+async fn regression_artifact_routes_are_unmounted_by_default() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for path in [
+        "/api/webchat/v2/threads/thread-x/runs/run-x/artifact",
+        "/api/webchat/v2/threads/thread-x/artifact",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "path={path}");
+    }
+
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "a disabled artifact route must not invoke the product surface"
+    );
 }
 
 // The attachment-bytes route carries three path segments and returns raw
@@ -3763,6 +3801,37 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_reports_regression_artifact_export_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_regression_artifact_export_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["regression_artifact_export"], enabled,
+            "session feature must mirror the artifact export gate"
         );
     }
 }

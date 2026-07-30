@@ -35,6 +35,7 @@ type MessageBubbleProps = {
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
   activeRunId?: string | null;
+  regressionArtifactExportEnabled?: boolean;
 };
 
 function formatTimestamp(value?: string) {
@@ -94,6 +95,7 @@ function MessageBubbleImpl({
   onRetry,
   threadId,
   activeRunId,
+  regressionArtifactExportEnabled = false,
 }: MessageBubbleProps) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
@@ -243,13 +245,15 @@ function MessageBubbleImpl({
     message.isFinalReply === true &&
     !isOptimistic &&
     threadId &&
-    turnRunId,
+    turnRunId &&
+    regressionArtifactExportEnabled,
   );
   const showThreadArtifactAction = Boolean(
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === true &&
     !isOptimistic &&
-    threadId,
+    threadId &&
+    regressionArtifactExportEnabled,
   );
   const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
   const isError = role === CHAT_MESSAGE_ROLES.ERROR;

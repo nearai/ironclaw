@@ -27,6 +27,7 @@ export function GatewayLayout({
   isChecking = false,
   isAdmin,
   rebornProjectsEnabled = false,
+  regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
   onSignOut,
 }) {
@@ -173,6 +174,7 @@ export function GatewayLayout({
               currentUser: profile,
               isChecking,
               isAdmin,
+              regressionArtifactExportEnabled,
               globalAutoApproveEnabled,
               threadsState: routeThreadsState,
               setHeaderStatus,

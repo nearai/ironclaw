@@ -159,6 +159,15 @@ fn reborn_projects_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Deployment gate for QA-only scrubbed regression artifact exports.
+/// Read once at composition and default off so production users never receive
+/// the browser affordance or mounted HTTP routes without an operator opt-in.
+fn regression_artifact_export_enabled() -> bool {
+    std::env::var("IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 /// Host-installation composition the Reborn HTTP gateway needs in addition to
 /// the product surface it serves over.
 ///
@@ -580,7 +589,8 @@ pub fn webui_v2_app_with_lifecycle(
         WebUiV2RouteOptions::without_operator_routes()
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-        .with_reborn_projects_enabled(reborn_projects_enabled());
+        .with_reborn_projects_enabled(reborn_projects_enabled())
+        .with_regression_artifact_export_enabled(regression_artifact_export_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

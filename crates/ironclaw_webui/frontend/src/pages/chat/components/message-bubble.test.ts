@@ -183,9 +183,9 @@ test("untagged reasoning in an activity run renders Markdown", async () => {
   assert.match(markup, /data-streaming="false"/);
 });
 
-test("only final assistant replies expose run and full-thread artifact downloads", async () => {
+test("artifact downloads require the deployment gate and a final assistant reply", async () => {
   const { MessageBubble } = await import("./message-bubble");
-  const render = (isFinalReply: boolean) =>
+  const render = (isFinalReply: boolean, enabled = false) =>
     renderToStaticMarkup(
       React.createElement(MessageBubble, {
         message: {
@@ -197,13 +197,16 @@ test("only final assistant replies expose run and full-thread artifact downloads
           isFinalReply,
         },
         threadId: "thread-1",
+        regressionArtifactExportEnabled: enabled,
       }),
     );
 
-  assert.match(render(true), /data-testid="download-run-artifact"/);
-  assert.match(render(true), /data-testid="download-thread-artifact"/);
-  assert.doesNotMatch(render(false), /data-testid="download-run-artifact"/);
-  assert.doesNotMatch(render(false), /data-testid="download-thread-artifact"/);
+  assert.doesNotMatch(render(true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(true), /data-testid="download-thread-artifact"/);
+  assert.match(render(true, true), /data-testid="download-run-artifact"/);
+  assert.match(render(true, true), /data-testid="download-thread-artifact"/);
+  assert.doesNotMatch(render(false, true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(false, true), /data-testid="download-thread-artifact"/);
   assert.match(messageBubbleSource, /fetchRunArtifact\(\{/);
   assert.match(messageBubbleSource, /fetchThreadArtifact\(\{/);
   assert.match(messageBubbleSource, /ironclaw-run-\$\{filenameRunId\}\.json/);

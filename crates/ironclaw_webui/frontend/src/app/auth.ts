@@ -293,6 +293,9 @@ export function useAuthSession() {
     // Projects surface is hidden until the server sets
     // IRONCLAW_REBORN_PROJECTS, while the surface is being finished.
     rebornProjectsEnabled: Boolean(session?.features?.reborn_projects),
+    regressionArtifactExportEnabled: Boolean(
+      session?.features?.regression_artifact_export,
+    ),
     globalAutoApproveEnabled: Boolean(session?.features?.global_auto_approve),
     signIn,
     signOut,

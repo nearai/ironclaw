@@ -79,6 +79,7 @@ export function Chat({
   composerDraft = "",
   composerResetKey = "",
   gatewayStatus,
+  regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
   onConnectionStatusChange,
 }) {
@@ -360,6 +361,9 @@ export function Chat({
             onRetryMessage={retryMessage}
             threadId={activeThreadId}
             activeRunId={activeRunId}
+            regressionArtifactExportEnabled={
+              regressionArtifactExportEnabled
+            }
             logsPath={logsPath}
             pending={activeThreadIsProcessing}
           >
