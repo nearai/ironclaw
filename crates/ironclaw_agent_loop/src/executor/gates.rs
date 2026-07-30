@@ -232,7 +232,6 @@ impl ExecutorStage<GateInput> for GateStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        diagnostic_ref: None,
                         safe_summary: None,
                         explanation_message_ref,
                     },
@@ -325,7 +324,6 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        diagnostic_ref: None,
                         safe_summary: None,
                         explanation_message_ref,
                     },

@@ -197,7 +197,7 @@ impl crate::cas_snapshot::StorageError for BudgetGateError {
 /// that scope to write under the correct tenant's mount view (review
 /// feedback Thermo-Nuclear #2: scope at the store-operation boundary, not
 /// at construction). Over an [`InMemoryBackend`](ironclaw_filesystem::InMemoryBackend)
-/// it is the volatile store tests and local-dev composition use — the
+/// it is the volatile store tests and standalone composition use — the
 /// hand-written `InMemoryBudgetGateStore` was deleted in favor of this one
 /// production store per arch-simplification §4.3.
 pub trait BudgetGateStorePort: Send + Sync + std::fmt::Debug {

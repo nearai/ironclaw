@@ -2,8 +2,8 @@
 //!
 //! # Architecture boundary
 //!
-//! `ironclaw_turns` owns `TurnRunTransitionPort`, claim/heartbeat/transition
-//! DTOs, state-machine invariants, and the trusted `LoopExitApplier`.
+//! `ironclaw_processes` owns claim, heartbeat, and transition contracts.
+//! `ironclaw_turns` owns the agent-turn projection and loop-exit mapping.
 //!
 //! This module owns the `HostFactory` trait that constructs a per-run
 //! `AgentLoopDriverHost`, and the `sanitized_failure`/`sanitized_driver_failure`

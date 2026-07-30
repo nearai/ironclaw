@@ -36,7 +36,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 
-/// The full set of first-party handler registrars a local-dev/test build
+/// The full set of first-party handler registrars a standalone/test build
 /// needs, mirroring `ironclaw_reborn_cli::first_party::bundled_first_party_registrars`.
 pub fn bundled_first_party_registrars() -> Vec<Arc<dyn FirstPartyHandlerRegistrar>> {
     vec![

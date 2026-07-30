@@ -144,7 +144,7 @@ pub(crate) async fn enforce_websocket_origin(
         WebSocketOriginPolicy::NotApplicable => next.run(request).await,
         WebSocketOriginPolicy::LocalhostAllowed => {
             // Permits any localhost-looking origin OR explicit allowlist
-            // entry. Useful for local dev where the browser may not
+            // entry. Useful for standalone where the browser may not
             // always send a Host the listener can mirror.
             let Some(origin) = origin_header_value(&request) else {
                 return forbidden_origin("WebSocket upgrade requires Origin header");

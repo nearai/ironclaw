@@ -1448,7 +1448,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             ("user", "9911", None, "8675309"),
             (
                 lifecycle.turn_coordinator_for_test(),
-                lifecycle.turn_state_store_for_test(),
+                lifecycle.process_gates_for_test(),
                 inbound.binding.tenant_id.clone(),
             ),
         )
@@ -1836,7 +1836,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 ("user", "activation-bootstrap", None, "activation-bootstrap"),
                 (
                     lifecycle.turn_coordinator_for_test(),
-                    lifecycle.turn_state_store_for_test(),
+                    lifecycle.process_gates_for_test(),
                     inbound.binding.tenant_id.clone(),
                 ),
             )

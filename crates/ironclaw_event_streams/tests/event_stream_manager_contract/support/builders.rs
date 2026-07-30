@@ -244,6 +244,9 @@ fn timeline_entry(scope: &ProjectionScope, cursor: u64, kind: TimelineEntryKind)
         hook_decision: None,
         hook_failure_category: None,
         hook_failure_disposition: None,
+        recovery_stage: None,
+        recovery_class: None,
+        recovery_disposition: None,
     }
 }
 

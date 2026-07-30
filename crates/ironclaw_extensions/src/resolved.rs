@@ -16,6 +16,7 @@
 use ironclaw_host_api::{
     ChannelDescriptor, EffectKind, ExtensionId, MemoryDescriptor, PermissionMode,
     RequestedTrustClass, RuntimeCredentialAccountSetup, SecretHandle, VendorAuthRecipe, VendorId,
+    VirtualPath,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,21 @@ pub struct ResolvedExtensionManifest {
     pub description: String,
     pub requested_trust: RequestedTrustClass,
     pub runtime: ExtensionRuntimeV2,
+    /// The extension's package root, when known at compile time. `None` from
+    /// [`ResolvedExtensionManifest::from_v2`] and the v3 parse path — neither
+    /// has a genuine root in scope at TOML-parse time.
+    /// `ExtensionManifestRecord::from_toml`
+    /// (`crates/ironclaw_extensions/src/installations.rs`) overwrites `root`
+    /// with the caller-supplied value afterward, so installed records carry a
+    /// real root wherever the caller has one. When this is still `None` — a
+    /// caller that had no root to pass, or a row persisted before this field
+    /// existed — the loader falls back to fabricating
+    /// `/system/extensions/{id}`. `#[serde(default)]` is required: this
+    /// struct is embedded in `WireManifestRecord`
+    /// (`crates/ironclaw_extensions/src/installations.rs`) and already-persisted
+    /// rows have no `root` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<VirtualPath>,
     /// Present iff the manifest declares `[mcp]` (v3 hosted MCP servers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<ResolvedMcpDeclaration>,
@@ -155,6 +171,9 @@ impl ResolvedExtensionManifest {
             description: manifest.description.clone(),
             requested_trust: manifest.requested_trust,
             runtime: manifest.runtime.clone(),
+            // No package root is in scope at v2 parse time (TOML parsing
+            // precedes materialization); the loader fabricates one.
+            root: None,
             mcp: None,
             tools: manifest.capabilities.clone(),
             channel: None,

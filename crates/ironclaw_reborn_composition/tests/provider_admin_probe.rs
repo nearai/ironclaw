@@ -123,7 +123,7 @@ async fn probe_candidate_hits_the_configured_base_url_with_the_entered_key() {
     .expect("valid reborn home");
     write_stub_provider(&home, &base_url);
 
-    let admin = RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::LocalDev));
+    let admin = RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::Standalone));
 
     let outcome = admin
         .probe_candidate(
@@ -169,7 +169,7 @@ async fn probe_candidate_reports_401_as_not_ok() {
     .expect("valid reborn home");
     write_stub_provider(&home, &base_url);
 
-    let admin = RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::LocalDev));
+    let admin = RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::Standalone));
 
     let outcome = admin
         .probe_candidate(

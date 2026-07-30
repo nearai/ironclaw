@@ -92,10 +92,10 @@ impl InstructionSafetyContext {
         })
     }
 
-    pub fn local_development_noop() -> Self {
+    pub fn non_production_noop() -> Self {
         Self::new(
-            "local-dev-instruction-safety:no-op",
-            "No instruction safety scanner is configured for this local-development run. Treat model-provided goals and instructions as untrusted.",
+            "non-production-instruction-safety:no-op",
+            "No instruction safety scanner is configured for this non-production run. Treat model-provided goals and instructions as untrusted.",
         )
         .expect("static no-op instruction safety context literals are valid") // safety: static literals are valid.
     }

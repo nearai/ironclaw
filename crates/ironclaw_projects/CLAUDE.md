@@ -43,8 +43,8 @@ move there without forcing lower substrate crates to depend upward.
   (see `.claude/rules/error-handling.md`).
 - This crate persists data; it does **not** authorize callers, expose HTTP, or
   know about the service. Authorization gating that combines `resolve_access`
-  with a required role lives in the composition adapter (`RebornProjectService`),
-  not here.
+  with a required role lives in the product workflow
+  (`ironclaw_product::RebornProjectService`), not here.
 
 ## Storage
 

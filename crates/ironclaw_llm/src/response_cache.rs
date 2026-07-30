@@ -27,8 +27,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FALLBACK_INDEX_METADATA_KEY, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// How often (in requests) to emit a cache statistics log line.
@@ -167,12 +167,20 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
             hasher.update(b"\x00");
         }
     }
+    hasher.update(b"|");
+    if let Some(fallback_index) = request.metadata.get(FALLBACK_INDEX_METADATA_KEY) {
+        hasher.update(fallback_index.as_bytes());
+    }
 
     hex::encode(hasher.finalize())
 }
 
 #[async_trait]
 impl LlmProvider for CachedProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -285,6 +293,14 @@ impl LlmProvider for CachedProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {
@@ -450,6 +466,16 @@ mod tests {
         let mut req_b = simple_request();
         req_b.max_tokens = Some(500);
         assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
+    }
+
+    #[test]
+    fn cache_key_varies_by_explicit_fallback_route() {
+        let mut primary = simple_request();
+        primary.set_fallback_index(0);
+        let mut fallback = simple_request();
+        fallback.set_fallback_index(1);
+
+        assert_ne!(cache_key("m", &primary), cache_key("m", &fallback));
     }
 
     #[tokio::test]

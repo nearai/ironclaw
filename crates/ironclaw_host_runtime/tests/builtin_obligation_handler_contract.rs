@@ -34,7 +34,7 @@ use serde_json::json;
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
-        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalHost,
     ))
     .unwrap()
 }

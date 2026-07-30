@@ -55,7 +55,7 @@ pub enum ProductLivePlannedRuntimeAdapterError {
 
 /// In-memory capability I/O staging used by the product-live planned runtime adapters.
 ///
-/// Also records bounded display previews for product composition. Local-dev WebUI wires
+/// Also records bounded display previews for product composition. Standalone WebUI wires
 /// this preview store into projection today; production durable/live fanout still needs
 /// an entrypoint-level hook to pass the same store into its projection services.
 ///
@@ -731,8 +731,8 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
     /// Durable gate-record store the capability port persists model-visible
     /// [`GateRecord`]s into and a later resume renders from (§5.2.9). Without it
     /// approval/auth resumes cannot load the gate record, so it is wired into
-    /// the capability port exactly as the local-dev path does (#6287).
-    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    /// the capability port exactly as the standalone path does (#6287).
+    pub gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     /// Host-private replay-payload store the capability port persists a gate's
     /// `{input, estimate}` into at the fresh raise and reconstitutes on resume
     /// (§5.3 Stage 2a-i). Without it a resume fails closed with no replay input.
@@ -770,7 +770,7 @@ pub struct ProductLivePlannedRuntimeAdapters {
     /// bundle wires it via `with_gate_record_store`; without it the turn
     /// executor reloads an empty requirement set on an `AuthRequired` resume and
     /// applies an unactionable auth block (#6299 / #6287 IronLoop).
-    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    pub gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     /// Host-private replay-payload store, retained alongside the gate-record
     /// store for the same reason — the resume reconstitutes `{input, estimate}`
     /// from it, keyed by `InvocationId`.
@@ -829,7 +829,7 @@ struct ProductLiveLoopCapabilityPortFactory {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
@@ -840,7 +840,7 @@ impl ProductLiveLoopCapabilityPortFactory {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+        gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
         replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     ) -> Self {
         Self {
@@ -879,7 +879,7 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
         .with_execution_mounts(execution_mounts)
         // Wire the durable gate-record + replay-payload stores so approval/auth
         // resumes on this ProductLive path persist and reconstitute their gate
-        // record and replay input — exactly as the local-dev path does (#6287).
+        // record and replay input — exactly as the standalone path does (#6287).
         .with_gate_record_store(Arc::clone(&self.gate_record_store))
         .with_replay_payload_store(Arc::clone(&self.replay_payload_store));
         Ok(factory.for_run_context(run_context.clone()))

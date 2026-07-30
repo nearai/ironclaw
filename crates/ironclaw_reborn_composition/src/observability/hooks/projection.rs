@@ -137,11 +137,11 @@ impl std::fmt::Debug for HookProjectionRegistry {
 /// containment defense knows the root) but returns the fixed `/system/extensions`
 /// path. The isolation guarantee is: **the per-tenant `RootFilesystem` passed
 /// to discovery resolves `/system/extensions/<id>` to that tenant's storage and
-/// no other's.** In local-dev (single-tenant, the only profile
+/// no other's.** In standalone (single-tenant, the only profile
 /// `build_reborn_runtime` wires) the runtime's FS is constructed once per
 /// identity in `build_runtime_substrate`, so it is per-identity by construction;
 /// production wiring (a follow-up, since `build_reborn_runtime` only supports
-/// local-dev) must supply a tenant-scoped backend here.
+/// standalone) must supply a tenant-scoped backend here.
 ///
 /// **This makes the scoped FS the SOLE isolation boundary** — see the
 /// FS-hardening gate on [`HooksActivationConfig`]: `HOOKS_THIRD_PARTY_ENABLED`

@@ -31,7 +31,13 @@ VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
 DEFAULT_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
 MAX_SERVER_LOG_BYTES = 16 * 1024 * 1024
-
+_ARTIFACT_PENDING_SENTINEL = ".pytest-outcome-pending"
+_ARTIFACT_FAILED_SENTINEL = ".pytest-outcome-failed"
+_ARTIFACT_BUNDLES_BY_NODE: dict[
+    str,
+    list[tuple[Path, Path, int]],
+] = {}
+_ARTIFACT_FAILED_NODES: set[str] = set()
 _process_log_drains: dict[
     object,
     tuple[tuple[asyncio.Task[None], ...], Path, int],
@@ -45,7 +51,34 @@ MARKET_DATA_DEV_SECRET = "e2e-market-data-shared-key"
 
 
 def _directory_size(path: Path) -> int:
-    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+    return sum(
+        entry.stat().st_size
+        for entry in path.rglob("*")
+        if entry.is_file()
+    )
+
+
+def _mark_artifact_bundle_outcome(
+    artifact_dir: Path,
+    outcome: str,
+) -> None:
+    pending = artifact_dir / _ARTIFACT_PENDING_SENTINEL
+    failed = artifact_dir / _ARTIFACT_FAILED_SENTINEL
+    pending.unlink(missing_ok=True)
+    failed.unlink(missing_ok=True)
+    if outcome == "pending":
+        pending.touch()
+    elif outcome == "failed":
+        failed.touch()
+    elif outcome != "passed":
+        raise ValueError(f"unsupported artifact outcome: {outcome}")
+
+
+def _artifact_bundle_is_protected(artifact_dir: Path) -> bool:
+    return (
+        (artifact_dir / _ARTIFACT_PENDING_SENTINEL).exists()
+        or (artifact_dir / _ARTIFACT_FAILED_SENTINEL).exists()
+    )
 
 
 def _enforce_artifact_budget(
@@ -53,7 +86,7 @@ def _enforce_artifact_budget(
     max_bytes: int,
     current_artifact_dir: Path | None,
 ) -> None:
-    """Keep the complete uploaded artifact tree within its per-shard budget."""
+    """Keep the complete upload tree bounded, pruning protected bundles last."""
     if not artifact_root.exists():
         return
 
@@ -69,7 +102,12 @@ def _enforce_artifact_budget(
         return
 
     oldest_first = sorted(
-        (path for path in bundles if path != current_artifact_dir),
+        (
+            path
+            for path in bundles
+            if path != current_artifact_dir
+            and not _artifact_bundle_is_protected(path)
+        ),
         key=lambda path: path.stat().st_mtime_ns,
     )
     for path in oldest_first:
@@ -81,10 +119,23 @@ def _enforce_artifact_budget(
     if total_bytes <= max_bytes:
         return
 
+    protected_bundles = {
+        path
+        for path in bundles
+        if path.exists() and _artifact_bundle_is_protected(path)
+    }
     largest_first = sorted(
-        (path for path in artifact_root.rglob("*") if path.is_file()),
-        key=lambda path: path.stat().st_size,
-        reverse=True,
+        (
+            path
+            for path in artifact_root.rglob("*")
+            if path.is_file()
+            and path.name
+            not in {_ARTIFACT_PENDING_SENTINEL, _ARTIFACT_FAILED_SENTINEL}
+        ),
+        key=lambda path: (
+            any(bundle in path.parents for bundle in protected_bundles),
+            -path.stat().st_size,
+        ),
     )
     for path in largest_first:
         if total_bytes <= max_bytes:
@@ -133,6 +184,60 @@ async def _finalize_process_logs(proc) -> None:
     except OSError:
         # Diagnostics cleanup must never replace the scenario's real result.
         pass
+
+
+def _register_artifact_bundle(
+    node_id: str,
+    artifact_root: Path,
+    artifact_dir: Path,
+    max_bytes: int,
+) -> None:
+    _ARTIFACT_BUNDLES_BY_NODE.setdefault(node_id, []).append(
+        (artifact_root, artifact_dir, max_bytes)
+    )
+    outcome = "failed" if node_id in _ARTIFACT_FAILED_NODES else "pending"
+    _mark_artifact_bundle_outcome(artifact_dir, outcome)
+
+
+def _mark_registered_artifact_bundles_failed(node_id: str) -> None:
+    _ARTIFACT_FAILED_NODES.add(node_id)
+    for _, artifact_dir, _ in _ARTIFACT_BUNDLES_BY_NODE.get(node_id, []):
+        if artifact_dir.exists():
+            try:
+                _mark_artifact_bundle_outcome(artifact_dir, "failed")
+            except OSError:
+                # Diagnostics bookkeeping must not replace the scenario failure.
+                pass
+
+
+def _finalize_registered_artifact_bundles(node_id: str) -> None:
+    failed = node_id in _ARTIFACT_FAILED_NODES
+    bundles = _ARTIFACT_BUNDLES_BY_NODE.pop(node_id, [])
+    _ARTIFACT_FAILED_NODES.discard(node_id)
+    for _, artifact_dir, _ in bundles:
+        if artifact_dir.exists():
+            try:
+                _mark_artifact_bundle_outcome(
+                    artifact_dir,
+                    "failed" if failed else "passed",
+                )
+            except OSError:
+                # Diagnostics bookkeeping must not replace the scenario result.
+                pass
+
+    roots: dict[tuple[Path, int], Path] = {}
+    for artifact_root, artifact_dir, max_bytes in bundles:
+        roots[(artifact_root, max_bytes)] = artifact_dir
+    for (artifact_root, max_bytes), current_artifact_dir in roots.items():
+        try:
+            _enforce_artifact_budget(
+                artifact_root,
+                max_bytes,
+                current_artifact_dir,
+            )
+        except OSError:
+            # Pytest calls this from teardown; preserve the scenario result.
+            pass
 
 
 def _artifact_max_bytes() -> int:
@@ -188,7 +293,9 @@ class _ArtifactContext:
                 pass
 
         try:
-            await self._context.tracing.stop(path=str(self._artifact_dir / "trace.zip"))
+            await self._context.tracing.stop(
+                path=str(self._artifact_dir / "trace.zip")
+            )
         except PlaywrightError:
             pass
         await self._context.close()
@@ -228,6 +335,12 @@ class _ArtifactBrowser:
         context_name = f"{readable_name}-{uuid.uuid4().hex[:8]}"
         artifact_dir = self._browser_artifact_root / context_name
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        _register_artifact_bundle(
+            node_id,
+            self._artifact_root,
+            artifact_dir,
+            self._artifact_max_bytes,
+        )
         kwargs.setdefault("record_video_dir", str(artifact_dir / "videos"))
         kwargs.setdefault("record_video_size", {"width": 960, "height": 540})
         context = await self._browser.new_context(*args, **kwargs)

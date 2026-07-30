@@ -12,10 +12,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_host_api::{
     Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
 };
-use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
     TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
@@ -521,7 +521,7 @@ async fn approval_prompt_lookup(
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
-) -> Result<ApprovalPromptLookup, ironclaw_run_state::RunStateError> {
+) -> Result<ApprovalPromptLookup, ironclaw_approvals::ApprovalStoreError> {
     let (store, request_id) =
         match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
             Some(value) => value,

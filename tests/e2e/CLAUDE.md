@@ -83,13 +83,14 @@ final page screenshots, a screenshot-only Playwright trace (DOM snapshots and
 source capture are disabled), and 960×540 video. The nightly workflow uploads
 these diagnostics only when its shard fails.
 
-The complete uploaded artifact tree has a 256 MiB per-shard default budget.
+The complete uploaded artifact tree has a 256 MiB per-shard hard budget.
 Override it with a positive byte count in
 `IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Server stdout and stderr streams retain
-bounded tails while the process is running. Once the shard-wide budget is
-reached, the harness removes the oldest browser context bundles first, then
-the largest remaining files until the complete upload tree fits. Nightly
-servers also run at warn-level logging to limit volume.
+bounded tails while the process is running. Browser context bundles remain
+protected while their test outcome is pending, and failed bundles are pruned
+after successful bundles. If protected bundles alone exceed the hard limit,
+their largest files are removed last so the complete upload tree still fits.
+Nightly servers also run at warn-level logging to limit volume.
 
 ## Test Scenarios
 
@@ -114,6 +115,7 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
 | `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |

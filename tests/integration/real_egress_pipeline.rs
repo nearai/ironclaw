@@ -8,7 +8,7 @@
 //! (network-policy enforcement, DNS/private-IP checks) — only the wire-level
 //! transport (the would-be socket) is a recorder. See
 //! `tests/integration/support/harness/assembly.rs`'s
-//! `local_dev_host_runtime_with_real_egress_pipeline` for the production call
+//! `standalone_host_runtime_with_real_egress_pipeline` for the production call
 //! sites this mirrors (`ironclaw_host_runtime::egress::HostHttpEgressService::production`,
 //! `ironclaw_network::PolicyNetworkHttpEgress`).
 

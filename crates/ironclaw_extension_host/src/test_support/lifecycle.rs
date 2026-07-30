@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval, PersistentApprovalPolicyStore};
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthSurface, RebornAuthContinuationDispatcher,
@@ -28,7 +29,6 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::LifecycleProductSurfaceContext;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 
@@ -56,6 +56,12 @@ pub struct ExtensionLifecycleTestServices {
     pub lifecycle_service: Arc<ExtensionHostLifecycleProductService>,
     pub approval_requests: Arc<TestApprovalRequestStore>,
     pub capability_leases: Arc<TestCapabilityLeaseStore>,
+    /// The exact trust policy instance `ActiveExtensionPublisher` publishes
+    /// into. Tests read back the published `AuthorityCeiling` through
+    /// `TrustPolicy::evaluate` — the real consumption seam
+    /// (`ironclaw_authorization::effects_are_covered`) — instead of exposing
+    /// publisher internals.
+    pub trust_policy: Arc<HostTrustPolicy>,
     secret_store: Arc<dyn SecretStorePort>,
 }
 
@@ -110,7 +116,7 @@ pub async fn build_lifecycle_test_services(
     .with_runtime_credential_account_resolver(credential_resolver);
     host_services = match network_http_egress {
         Some(egress) => host_services
-            .try_with_host_http_egress(TestNetworkHttpEgress(egress))
+            .try_with_host_http_egress(egress)
             .expect("test HTTP egress wires"),
         None => host_services,
     };
@@ -150,9 +156,11 @@ pub async fn build_lifecycle_test_services(
     let lifecycle_service = Arc::new(tokio::sync::Mutex::new(ExtensionLifecycleService::new(
         active_registry.snapshot_owned(),
     )));
+    let trust_policy =
+        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
     let active_extensions = ActiveExtensionPublisher::new(
         Arc::clone(&active_registry),
-        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy")),
+        Arc::clone(&trust_policy),
         Arc::new(InvalidationBus::new()),
     );
     restore_extension_lifecycle_state(
@@ -278,24 +286,25 @@ pub async fn build_lifecycle_test_services(
         lifecycle_service: Arc::new(lifecycle_service),
         approval_requests,
         capability_leases,
+        trust_policy,
         secret_store,
     }
 }
 
-pub async fn invoke_json_with_local_dev_approval(
+pub async fn invoke_json_with_standalone_approval(
     services: &ExtensionLifecycleTestServices,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, FailureKind> {
-    match invoke_with_local_dev_approval(services, capability_id, context, input).await {
+    match invoke_with_standalone_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
         other => panic!("unexpected runtime outcome: {other:?}"),
     }
 }
 
-pub async fn invoke_with_local_dev_approval(
+pub async fn invoke_with_standalone_approval(
     services: &ExtensionLifecycleTestServices,
     capability_id: &str,
     context: ExecutionContext,
@@ -323,7 +332,7 @@ pub async fn invoke_with_local_dev_approval(
                 .expect("approval request persisted");
             let Action::Dispatch { .. } = approval_record.request.action.as_ref() else {
                 panic!(
-                    "unexpected local-dev lifecycle approval action: {:?}",
+                    "unexpected standalone lifecycle approval action: {:?}",
                     approval_record.request.action
                 );
             };
@@ -455,18 +464,6 @@ impl RuntimeCredentialAccountResolver for TestProductAuthRuntimeCredentialResolv
             scope: account.scope.resource,
             handle,
         })
-    }
-}
-
-struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
-
-#[async_trait]
-impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
-    async fn execute(
-        &self,
-        request: ironclaw_network::NetworkHttpRequest,
-    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
-        self.0.execute(request).await
     }
 }
 

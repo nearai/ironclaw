@@ -52,7 +52,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Reopen a FRESH, independent repository at the same on-disk root — not the
     // live `Arc` the running group holds — and confirm the trigger is there.
     let reopened =
-        ironclaw_reborn_composition::test_support::open_local_dev_trigger_repository_for_test(
+        ironclaw_reborn_composition::test_support::open_standalone_trigger_repository_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await?;

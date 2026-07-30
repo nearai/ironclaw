@@ -243,7 +243,8 @@ async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("cas-storm.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+    let root =
+        Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     root.run_migrations().await.unwrap();
     let fs = Arc::new(scoped(root, "/engine/counters"));
     run_storm(fs).await;
@@ -253,7 +254,8 @@ async fn libsql_concurrent_delete_if_version_storm_has_exactly_one_winner_per_ro
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("delete-cas-storm.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+    let root =
+        Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     root.run_migrations().await.unwrap();
     let fs = Arc::new(scoped(root, "/engine/counters"));
     run_delete_storm(fs).await;

@@ -32,7 +32,7 @@ jobs:
           [
             {
               "group": "webui-smoke-files",
-              "files": "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py tests/e2e/scenarios/test_reborn_v2_file_download.py"
+              "files": "tests/e2e/scenarios/test_reborn_webui_harness_artifacts.py tests/e2e/scenarios/test_reborn_webui_v2_smoke.py tests/e2e/scenarios/test_reborn_v2_file_download.py"
             },
             {
               "group": "served-api-routes",
@@ -48,8 +48,7 @@ jobs:
             },
             {
               "group": "legacy-settings-extensions",
-              "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py",
-              "pytest_args": "-k 'not test_reborn_legacy_always_approve_survives_reborn_restart'"
+              "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py"
             },
             {
               "group": "legacy-runtime",

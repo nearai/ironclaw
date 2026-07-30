@@ -514,9 +514,10 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     }
     let has_stored_key = block_on_cli(async move {
-        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
-            .await
-            .map_err(anyhow::Error::from)?;
+        let store =
+            ironclaw_reborn_composition::open_standalone_secret_store(&runtime_storage_root)
+                .await
+                .map_err(anyhow::Error::from)?;
         ironclaw_operator::LlmKeyStore::new(store)
             .exists(&provider_id)
             .await
@@ -665,8 +666,8 @@ pub(crate) fn build_services_input_with_options(
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
     let mut services_input = match profile {
-        RebornProfile::LocalDev
-        | RebornProfile::LocalDevYolo
+        RebornProfile::Standalone
+        | RebornProfile::StandaloneUnrestricted
         | RebornProfile::HostedSingleTenantVolume => {
             build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
         }
@@ -760,7 +761,7 @@ fn build_standalone_local_runtime_services_input(
     .with_local_runtime_workspace_root(workspace_root);
     if services_input.requires_local_runtime_confirmed_host_home_root() {
         let host_home_root =
-            confirmed_host_home_root(options).context("local-dev-yolo host access")?;
+            confirmed_host_home_root(options).context("standalone-unrestricted host access")?;
         services_input = services_input.with_local_runtime_confirmed_host_home_root(host_home_root);
     }
     services_input = services_input.with_optional_nearai_mcp_bootstrap_config(
@@ -851,9 +852,9 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
     ))
 }
 
-/// Read the Google OAuth client secret from the encrypted local-dev secret
+/// Read the Google OAuth client secret from the encrypted standalone secret
 /// store (the same store `config set google.client_secret` writes to via
-/// `LocalDevSecretStoreOpener` — see `commands::config::set`). Opening the
+/// `StandaloneSecretStoreOpener` — see `commands::config::set`). Opening the
 /// store is an idempotent, safe-to-repeat operation. Boot invokes this lazily
 /// only after public OAuth configuration is complete and no higher-precedence
 /// env secret exists, avoiding unnecessary keychain or filesystem access on
@@ -865,11 +866,11 @@ fn google_oauth_client_secret_from_store(
     let storage_root = local_runtime_storage_root(config, config.profile());
     // Boot may open/migrate local runtime state, but it can still avoid all
     // keychain/filesystem writes when no store exists yet.
-    if !ironclaw_reborn_composition::local_dev_db_path(&storage_root).exists() {
+    if !ironclaw_reborn_composition::standalone_db_path(&storage_root).exists() {
         return Ok(None);
     }
     block_on_cli(async move {
-        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&storage_root)
+        let store = ironclaw_reborn_composition::open_standalone_secret_store(&storage_root)
             .await
             .map_err(anyhow::Error::from)?;
         ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
@@ -1155,8 +1156,8 @@ pub(crate) fn local_runtime_storage_root(
 
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     match profile {
-        RebornProfile::LocalDev => RebornCompositionProfile::LocalDev,
-        RebornProfile::LocalDevYolo => RebornCompositionProfile::LocalDevYolo,
+        RebornProfile::Standalone => RebornCompositionProfile::Standalone,
+        RebornProfile::StandaloneUnrestricted => RebornCompositionProfile::StandaloneUnrestricted,
         RebornProfile::HostedSingleTenant => RebornCompositionProfile::HostedSingleTenant,
         RebornProfile::HostedSingleTenantVolume => {
             RebornCompositionProfile::HostedSingleTenantVolume
@@ -2195,7 +2196,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn build_runtime_input_rejects_local_dev_yolo_without_host_access_confirmation() {
+    fn build_runtime_input_rejects_standalone_yolo_without_host_access_confirmation() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
@@ -2211,7 +2212,7 @@ regex_activation_enabled = false
         .expect("boot config");
 
         let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
-            Ok(_) => panic!("local-dev-yolo requires confirmation"),
+            Ok(_) => panic!("standalone-unrestricted requires confirmation"),
             Err(error) => error,
         };
 
@@ -2219,7 +2220,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn build_runtime_input_accepts_confirmed_local_dev_yolo_profile() {
+    fn build_runtime_input_accepts_confirmed_standalone_yolo_profile() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
@@ -2247,7 +2248,10 @@ regex_activation_enabled = false
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
 
-        assert_eq!(services.profile(), RebornCompositionProfile::LocalDevYolo);
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::StandaloneUnrestricted
+        );
         assert_eq!(
             policy.filesystem_backend.as_str(),
             "host_workspace_and_home"
@@ -2311,7 +2315,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn build_runtime_input_for_local_dev_rejects_policy_section() {
+    fn build_runtime_input_for_standalone_rejects_policy_section() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (_temp, config) = boot_config_with_config_toml(
@@ -2325,7 +2329,7 @@ default_profile = "secure_default"
 
         let err = build_runtime_input(&config, RuntimeInputCaller::Run)
             .err()
-            .expect("local-dev must reject policy section");
+            .expect("standalone must reject policy section");
 
         assert!(
             err.to_string().contains("[policy]"),
@@ -3908,7 +3912,7 @@ poll_interval_secs = 15
     /// End-to-end wiring proof (item 1) that
     /// `google_oauth_client_secret_from_store` actually reads back a secret
     /// written the same way `config set google.client_secret` writes it
-    /// (`GoogleOauthSecretStore` over `open_local_dev_secret_store`), not
+    /// (`GoogleOauthSecretStore` over `open_standalone_secret_store`), not
     /// just that the pure merge function accepts a hand-built
     /// `SecretString` — the merge-function tests above already cover the
     /// precedence rules in isolation.
@@ -3931,12 +3935,12 @@ poll_interval_secs = 15
         // this test holds the process-wide env lock, serializing every other
         // env-mutating test behind an interactive system service.
         std::fs::write(
-            storage_root.join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+            storage_root.join(ironclaw_reborn_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
             "00112233445566778899aabbccddeeff".repeat(2),
         )
         .expect("seed cached master key");
         block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&storage_root)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&storage_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)

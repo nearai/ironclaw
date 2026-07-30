@@ -180,20 +180,20 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
   return { rendered, cardProps };
 }
 
-function evalIsLocalDevOrigin({ hostname }) {
+function evalIsLoopbackBrowserOrigin({ hostname }) {
   const context = {};
   if (hostname !== undefined) {
     context.window = { location: { hostname } };
   }
-  // `isLocalDevOrigin` lives in the app-wide shared lib (not this hook
+  // `isLoopbackBrowserOrigin` lives in the app-wide shared lib (not this hook
   // module) since the login page also consumes it — see
   // `src/lib/browser-origin.ts`.
   return runVmModuleForTest(
     "../../../lib/browser-origin.ts",
-    ["isLocalDevOrigin"],
+    ["isLoopbackBrowserOrigin"],
     context,
     import.meta.url
-  ).isLocalDevOrigin();
+  ).isLoopbackBrowserOrigin();
 }
 
 function groupLabels(rendered) {
@@ -610,23 +610,23 @@ test("NearAiSetupMenu closes the setup dropdown on Escape", () => {
   assert.equal(harness.state.open, false);
 });
 
-test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there", () => {
-  assert.equal(evalIsLocalDevOrigin({ hostname: "localhost" }), true);
-  assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.0.1" }), true);
+test("isLoopbackBrowserOrigin detects loopback origins so NEAR AI SSO fails fast there", () => {
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "localhost" }), true);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "127.0.0.1" }), true);
   // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1.
-  assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.1.1" }), true);
-  assert.equal(evalIsLocalDevOrigin({ hostname: "127.255.255.254" }), true);
-  assert.equal(evalIsLocalDevOrigin({ hostname: "::1" }), true);
-  assert.equal(evalIsLocalDevOrigin({ hostname: "api.localhost" }), true);
-  assert.equal(evalIsLocalDevOrigin({ hostname: "app.example.com" }), false);
-  assert.equal(evalIsLocalDevOrigin({ hostname: "192.168.1.50" }), false);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "127.0.1.1" }), true);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "127.255.255.254" }), true);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "::1" }), true);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "api.localhost" }), true);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "app.example.com" }), false);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: "192.168.1.50" }), false);
   // No window (SSR / non-browser): never treat as local.
-  assert.equal(evalIsLocalDevOrigin({ hostname: undefined }), false);
+  assert.equal(evalIsLoopbackBrowserOrigin({ hostname: undefined }), false);
 });
 
 // Drive the real useProviderLogin hook in a VM with a minimal React stub so we
 // can assert caller behavior (per .claude/rules/testing.md "Test Through the
-// Caller"): isLocalDevOrigin gates the NEAR AI login HTTP call, not just a
+// Caller"): isLoopbackBrowserOrigin gates the NEAR AI login HTTP call, not just a
 // helper return value. setTimeout fires synchronously so the remote-origin
 // control path's poll resolves immediately.
 function runProviderLogin({ hostname, activeProviderId = null, popupClosed = false }) {
@@ -638,9 +638,9 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
   const openedUrls = [];
   const popups = [];
   let stateIndex = 0;
-  const { isLocalDevOrigin } = runVmModuleForTest(
+  const { isLoopbackBrowserOrigin } = runVmModuleForTest(
     "../../../lib/browser-origin.ts",
-    ["isLocalDevOrigin"],
+    ["isLoopbackBrowserOrigin"],
     { window: { location: { hostname } } },
     import.meta.url,
   );
@@ -649,7 +649,7 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
     Date,
     Math,
     Promise,
-    isLocalDevOrigin,
+    isLoopbackBrowserOrigin,
     setTimeout: (cb) => {
       cb();
       return 0;
