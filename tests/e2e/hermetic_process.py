@@ -29,6 +29,8 @@ def forward_hermetic_process_env(
     guard_library = source_env.get("IRONCLAW_HERMETIC_NETWORK_GUARD_LIBRARY")
     if guard_library is None:
         return
+    if not guard_library.strip():
+        raise ValueError("Hermetic network guard library must be non-empty")
     if sys.platform == "darwin":
         _prepend_preload(env, "DYLD_INSERT_LIBRARIES", guard_library)
         env["DYLD_FORCE_FLAT_NAMESPACE"] = "1"

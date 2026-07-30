@@ -277,6 +277,16 @@ if sys.platform == "darwin":
 elif sys.platform.startswith("linux"):
     assert child["LD_PRELOAD"] == "/tmp/guard.so:/tmp/existing.so"
     assert child["DYLD_INSERT_LIBRARIES"] == "/tmp/existing.dylib"
+
+try:
+    forward_hermetic_process_env(
+        {},
+        {"IRONCLAW_HERMETIC_NETWORK_GUARD_LIBRARY": "  "},
+    )
+except ValueError as error:
+    assert "must be non-empty" in str(error)
+else:
+    raise AssertionError("empty network guard library did not fail closed")
 PY
 
 set +e
