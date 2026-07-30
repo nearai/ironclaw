@@ -26,9 +26,7 @@ jq -c -n --argjson packages "${packages_json}" '
     "events-conversations",
     "auth-security",
     "memory-skills",
-    "channel-adapters",
-    "extension-operator",
-    "architecture-misc"
+    "adapters-misc"
   ];
 
   def bucket_map:
@@ -96,20 +94,12 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
 
-      ironclaw_host_ingress: "channel-adapters",
-      ironclaw_slack_extension: "channel-adapters",
-      ironclaw_telegram_extension: "channel-adapters",
-      ironclaw_telegram_v2_adapter: "channel-adapters",
-
-      ironclaw_extension_host: "extension-operator",
-      ironclaw_extensions: "extension-operator",
-      ironclaw_operator: "extension-operator",
-
-      ironclaw_architecture: "architecture-misc",
-      ironclaw_common: "architecture-misc",
-      ironclaw_libsql_runtime: "architecture-misc",
-      ironclaw_reborn_traces: "architecture-misc",
-      ironclaw_triggers: "architecture-misc"
+      ironclaw_architecture: "adapters-misc",
+      ironclaw_common: "adapters-misc",
+      ironclaw_extensions: "adapters-misc",
+      ironclaw_reborn_traces: "adapters-misc",
+      ironclaw_slack_extension: "adapters-misc",
+      ironclaw_telegram_extension: "adapters-misc"
     };
 
   bucket_map as $bucket_map
@@ -119,7 +109,7 @@ jq -c -n --argjson packages "${packages_json}" '
         name: $bucket,
         packages: [
           $packages[]?
-          | select(($bucket_map[.] // "architecture-misc") == $bucket)
+          | select(($bucket_map[.] // "adapters-misc") == $bucket)
         ]
       }
     | select(.packages | length > 0)
