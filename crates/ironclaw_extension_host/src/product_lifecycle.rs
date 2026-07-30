@@ -2373,37 +2373,12 @@ impl ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), ProductSurfaceFailure> {
-        let record = self
-            .installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(map_extension_installation_error)?
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} has no installed manifest",
-                    extension_id.as_str()
-                ),
-            })?;
-        let manifest: ironclaw_extensions::ExtensionManifest = record
-            .manifest()
-            .clone()
-            .try_into()
-            .map_err(map_extension_error)?;
-        let package = crate::generic_host::rebuild_package_from_resolved(
-            manifest,
-            record.resolved(),
-            extension_id.as_str(),
+        ensure_lifecycle_package_registered(
+            &self.installation_store,
+            &self.lifecycle_service,
+            extension_id,
         )
-        .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason })?;
-        let mut lifecycle = self.lifecycle_service.lock().await;
-        match lifecycle.registry().get_extension(extension_id) {
-            None => lifecycle
-                .install(package)
-                .await
-                .map_err(map_extension_error),
-            Some(current) if current == &package => Ok(()),
-            Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
-        }
+        .await
     }
 
     /// Fail-closed id check for the catalog import path (#5499): reject a
@@ -2473,14 +2448,7 @@ impl ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<ExtensionPackage, ProductSurfaceFailure> {
-        let lifecycle = self.lifecycle_service.lock().await;
-        lifecycle
-            .registry()
-            .get_extension(extension_id)
-            .cloned()
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("extension {} is not installed", extension_id.as_str()),
-            })
+        lifecycle_package_from(&self.lifecycle_service, extension_id).await
     }
 
     async fn enable_lifecycle_package(
@@ -2607,6 +2575,63 @@ impl ExtensionLifecycleManager {
                 })
             }
         }
+    }
+}
+
+/// Shared with [`crate::hosted_mcp_preparation::HostedMcpPreparationService`],
+/// which repairs the same in-memory lifecycle registry from the same durable
+/// aggregate before hosted-MCP registration proceeds.
+pub(crate) async fn lifecycle_package_from(
+    lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
+    extension_id: &ExtensionId,
+) -> Result<ExtensionPackage, ProductSurfaceFailure> {
+    lifecycle_service
+        .lock()
+        .await
+        .registry()
+        .get_extension(extension_id)
+        .cloned()
+        .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!("extension {} is not installed", extension_id.as_str()),
+        })
+}
+
+/// Shared with [`crate::hosted_mcp_preparation::HostedMcpPreparationService`].
+/// See [`ExtensionLifecycleManager::ensure_lifecycle_package_registered_from_aggregate`].
+pub(crate) async fn ensure_lifecycle_package_registered(
+    installation_store: &Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
+    extension_id: &ExtensionId,
+) -> Result<(), ProductSurfaceFailure> {
+    let record = installation_store
+        .get_manifest(extension_id)
+        .await
+        .map_err(map_extension_installation_error)?
+        .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!(
+                "extension {} has no installed manifest",
+                extension_id.as_str()
+            ),
+        })?;
+    let manifest: ironclaw_extensions::ExtensionManifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .map_err(map_extension_error)?;
+    let package = crate::generic_host::rebuild_package_from_resolved(
+        manifest,
+        record.resolved(),
+        extension_id.as_str(),
+    )
+    .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason })?;
+    let mut lifecycle = lifecycle_service.lock().await;
+    match lifecycle.registry().get_extension(extension_id) {
+        None => lifecycle
+            .install(package)
+            .await
+            .map_err(map_extension_error),
+        Some(current) if current == &package => Ok(()),
+        Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
     }
 }
 

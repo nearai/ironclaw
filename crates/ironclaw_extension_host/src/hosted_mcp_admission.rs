@@ -25,7 +25,12 @@ impl CanonicalHostedMcpEndpoint {
         let host = url
             .host_str()
             .ok_or(HostedMcpAdmissionError::InvalidEndpoint)?;
-        if host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok() {
+        if host.eq_ignore_ascii_case("localhost")
+            || matches!(
+                url.host(),
+                Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_))
+            )
+        {
             return Err(HostedMcpAdmissionError::InvalidEndpoint);
         }
         const CREDENTIAL_QUERY_KEYS: &[&str] = &[
@@ -86,6 +91,8 @@ mod tests {
             "https://127.0.0.1/mcp",
             "http://mcp.example.test",
             "https://mcp.example.test/rpc?Access_Token=must-not-persist",
+            "https://[::1]/mcp",
+            "https://[2001:db8::1]/mcp",
         ] {
             let input = HostedMcpEndpoint::new(endpoint).expect("wire endpoint");
             assert_eq!(

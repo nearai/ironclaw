@@ -480,55 +480,20 @@ impl HostedMcpPreparationService {
         &self,
         extension_id: &ironclaw_host_api::ExtensionId,
     ) -> Result<ExtensionPackage, ProductSurfaceFailure> {
-        self.lifecycle_service
-            .lock()
+        crate::product_lifecycle::lifecycle_package_from(&self.lifecycle_service, extension_id)
             .await
-            .registry()
-            .get_extension(extension_id)
-            .cloned()
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("extension {} is not installed", extension_id.as_str()),
-            })
     }
 
     async fn sync_lifecycle_package(
         &self,
         extension_id: &ironclaw_host_api::ExtensionId,
     ) -> Result<(), ProductSurfaceFailure> {
-        let record = self
-            .installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} has no installed manifest",
-                    extension_id.as_str()
-                ),
-            })?;
-        let manifest: ironclaw_extensions::ExtensionManifest = record
-            .manifest()
-            .clone()
-            .try_into()
-            .map_err(crate::product_lifecycle::map_extension_error)?;
-        let package = crate::generic_host::rebuild_package_from_resolved(
-            manifest,
-            record.resolved(),
-            extension_id.as_str(),
+        crate::product_lifecycle::ensure_lifecycle_package_registered(
+            &self.installation_store,
+            &self.lifecycle_service,
+            extension_id,
         )
-        .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason })?;
-        let mut lifecycle = self.lifecycle_service.lock().await;
-        match lifecycle.registry().get_extension(extension_id) {
-            None => lifecycle
-                .install(package)
-                .await
-                .map_err(crate::product_lifecycle::map_extension_error),
-            Some(current) if current == &package => Ok(()),
-            Some(_) => lifecycle
-                .update(package)
-                .await
-                .map_err(crate::product_lifecycle::map_extension_error),
-        }
+        .await
     }
 }
 
