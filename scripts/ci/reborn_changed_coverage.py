@@ -27,6 +27,7 @@ import tomllib
 
 PRODUCTION_PATH = re.compile(r"^crates/ironclaw_[^/]+/src/.+\.rs$")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+RAW_STRING_START = re.compile(r'(?:b|c)?r(#{0,255})"')
 TEST_PATH_PARTS = {"/tests/", "/test_support/"}
 
 
@@ -222,25 +223,15 @@ def test_only_path(path: str) -> bool:
     )
 
 
-def mechanically_uninstrumentable_line(source_line: str) -> bool:
-    """Return whether a Rust source line is syntactic scaffolding, not behavior."""
-    stripped = source_line.strip()
-    return (
-        not stripped
-        or stripped.startswith("//")
-        or stripped.startswith("#[")
-        or re.match(r"^(?:pub(?:\([^)]*\))?\s+)?use\b", stripped) is not None
-        or re.fullmatch(r"[{}][,;]?", stripped) is not None
-    )
-
-
-def rust_brace_deltas(source: str) -> list[int]:
-    """Return structural Rust brace deltas per line.
+def rust_lexical_structure(source: str) -> tuple[list[str], list[int]]:
+    """Return comment/literal-free Rust lines and structural brace deltas.
 
     Braces inside nested comments, quoted strings, raw strings, and character
-    literals are ignored. This is the small lexer needed by the coverage gate;
-    it deliberately does not attempt to parse Rust expressions or types.
+    literals are ignored and their contents are replaced with spaces. This is
+    the small lexer needed by the coverage gate; it deliberately does not
+    attempt to parse Rust expressions or types.
     """
+    sanitized = list(source)
     deltas = [0] * (source.count("\n") + 1)
     line = 0
     index = 0
@@ -254,10 +245,13 @@ def rust_brace_deltas(source: str) -> list[int]:
             index += 1
             continue
         if block_comment_depth:
+            sanitized[index] = " "
             if character == "/" and following == "*":
+                sanitized[index + 1] = " "
                 block_comment_depth += 1
                 index += 2
             elif character == "*" and following == "/":
+                sanitized[index + 1] = " "
                 block_comment_depth -= 1
                 index += 2
             else:
@@ -265,25 +259,43 @@ def rust_brace_deltas(source: str) -> list[int]:
             continue
         if character == "/" and following == "/":
             newline = source.find("\n", index + 2)
-            index = length if newline < 0 else newline
+            end = length if newline < 0 else newline
+            sanitized[index:end] = " " * (end - index)
+            index = end
             continue
         if character == "/" and following == "*":
+            sanitized[index : index + 2] = [" ", " "]
             block_comment_depth = 1
             index += 2
             continue
 
         raw_match = None
         if index == 0 or not (source[index - 1].isalnum() or source[index - 1] == "_"):
-            raw_match = re.match(r'(?:b|c)?r(#{0,255})"', source[index:])
+            raw_match = RAW_STRING_START.match(source, index)
         if raw_match is not None:
             terminator = '"' + raw_match.group(1)
-            content_start = index + raw_match.end()
+            content_start = raw_match.end()
             content_end = source.find(terminator, content_start)
             end = length if content_end < 0 else content_end + len(terminator)
+            for position in range(index, end):
+                if source[position] != "\n":
+                    sanitized[position] = " "
             line += source[index:end].count("\n")
             index = end
             continue
         if character == '"':
+            start = index
+            if (
+                index > 0
+                and source[index - 1] in {"b", "c"}
+                and (
+                    index == 1
+                    or not (
+                        source[index - 2].isalnum() or source[index - 2] == "_"
+                    )
+                )
+            ):
+                start -= 1
             index += 1
             escaped = False
             while index < length:
@@ -298,6 +310,9 @@ def rust_brace_deltas(source: str) -> list[int]:
                     index += 1
                     break
                 index += 1
+            for position in range(start, index):
+                if source[position] != "\n":
+                    sanitized[position] = " "
             continue
         if character == "'":
             end = index + 1
@@ -312,6 +327,7 @@ def rust_brace_deltas(source: str) -> list[int]:
                     break
                 end += 1
             if end <= length and end > index + 1 and source[end - 1 : end] == "'":
+                sanitized[index:end] = " " * (end - index)
                 index = end
                 continue
         if character == "{":
@@ -319,6 +335,42 @@ def rust_brace_deltas(source: str) -> list[int]:
         elif character == "}":
             deltas[line] -= 1
         index += 1
+    return "".join(sanitized).splitlines(), deltas
+
+
+def mechanically_uninstrumentable_lines(source: str) -> set[int]:
+    """Return Rust scaffolding spans that LLVM cannot execute."""
+    lexical_lines, _brace_deltas = rust_lexical_structure(source)
+    uninstrumentable: set[int] = set()
+    attribute_depth = 0
+    in_use = False
+    for line_number, line in enumerate(lexical_lines, start=1):
+        stripped = line.strip()
+        if attribute_depth:
+            uninstrumentable.add(line_number)
+            attribute_depth += stripped.count("[") - stripped.count("]")
+            continue
+        if stripped.startswith("#["):
+            uninstrumentable.add(line_number)
+            attribute_depth = stripped.count("[") - stripped.count("]")
+            continue
+        if in_use:
+            uninstrumentable.add(line_number)
+            if ";" in stripped:
+                in_use = False
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?use\b", stripped):
+            uninstrumentable.add(line_number)
+            in_use = ";" not in stripped
+            continue
+        if not stripped or re.fullmatch(r"[\[\]{}(),;]+", stripped):
+            uninstrumentable.add(line_number)
+    return uninstrumentable
+
+
+def rust_brace_deltas(source: str) -> list[int]:
+    """Return structural Rust brace deltas per line."""
+    _lexical_lines, deltas = rust_lexical_structure(source)
     return deltas
 
 
@@ -470,7 +522,9 @@ def main() -> int:
             if not instrumented:
                 uninstrumented_files.append(path)
                 continue
-            source_lines = (repo_root / path).read_text(encoding="utf-8").splitlines()
+            uninstrumentable_lines = mechanically_uninstrumentable_lines(
+                (repo_root / path).read_text(encoding="utf-8")
+            )
             candidate_lines = {
                 line for line in added_lines if (path, line) not in exempt_lines
             }
@@ -481,8 +535,7 @@ def main() -> int:
                 line
                 for line in candidate_lines
                 if first_instrumented <= line <= last_instrumented
-                and line <= len(source_lines)
-                and not mechanically_uninstrumentable_line(source_lines[line - 1])
+                and line not in uninstrumentable_lines
             }
             if candidate_lines_in_instrumented_span and not measured_lines:
                 empty_denominator_files.append(path)

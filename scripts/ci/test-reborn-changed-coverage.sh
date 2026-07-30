@@ -323,26 +323,44 @@ cat >"${work}/change.diff" <<'DIFF'
 diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
 --- a/crates/ironclaw_demo/src/lib.rs
 +++ b/crates/ironclaw_demo/src/lib.rs
-@@ -1,0 +2,5 @@
+@@ -1,0 +2,14 @@
 +
 +/// Documents an item inside the executable span.
-+#[derive(Debug)]
-+use std::fmt::Debug;
++/*
++ * A multiline block comment is not executable.
++ */
++#[derive(
++    Debug,
++    Clone,
++)]
++pub use std::fmt::{
++    Debug,
++    Display,
++};
 +}
 DIFF
 printf '%s\n' \
   'pub fn before() {}' \
   '' \
   '/// Documents an item inside the executable span.' \
-  '#[derive(Debug)]' \
-  'use std::fmt::Debug;' \
+  '/*' \
+  ' * A multiline block comment is not executable.' \
+  ' */' \
+  '#[derive(' \
+  '    Debug,' \
+  '    Clone,' \
+  ')]' \
+  'pub use std::fmt::{' \
+  '    Debug,' \
+  '    Display,' \
+  '};' \
   '}' \
   'pub fn after() {}' >"${case_root}/${source_path}"
 cat >"${work}/coverage.lcov" <<EOF
 SF:${case_root}/${source_path}
 DA:1,1
-DA:7,1
-BRDA:7,0,0,1
+DA:16,1
+BRDA:16,0,0,1
 LF:2
 LH:2
 BRF:1
