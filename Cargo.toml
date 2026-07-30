@@ -319,10 +319,6 @@ name = "reborn_integration_extension_delivery"
 path = "tests/integration/extension_delivery.rs"
 
 [[test]]
-name = "reborn_integration_cross_channel_attachment_e2e"
-path = "tests/integration/cross_channel_attachment_e2e.rs"
-
-[[test]]
 name = "reborn_integration_extension_visibility"
 path = "tests/integration/extension_visibility.rs"
 

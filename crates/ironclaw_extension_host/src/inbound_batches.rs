@@ -800,7 +800,7 @@ fn add_duration(
 
 fn decode_snapshot(bytes: &[u8]) -> Result<StoredInboundBatchSnapshot, InboundBatchStoreError> {
     serde_json::from_slice(bytes).map_err(|error| {
-        tracing::warn!(%error, "malformed inbound batch snapshot");
+        tracing::debug!(%error, "malformed inbound batch snapshot");
         store_unavailable()
     })
 }

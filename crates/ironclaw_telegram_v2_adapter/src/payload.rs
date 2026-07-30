@@ -399,8 +399,12 @@ pub fn normalize_telegram_update(
     }
     let triggered = trigger.is_some();
     let trigger = trigger.unwrap_or(ProductTriggerReason::DirectChat);
-    let event_id = match message.media_group_id.as_deref() {
-        Some(media_group_id) => build_media_group_event_id(installation_id, media_group_id)?,
+    let scoped_media_group_key = message
+        .media_group_id
+        .as_deref()
+        .map(|media_group_id| build_media_group_key(&message, media_group_id));
+    let event_id = match scoped_media_group_key.as_deref() {
+        Some(media_group_key) => build_media_group_event_id(installation_id, media_group_key)?,
         None => build_event_id(installation_id, update_id)?,
     };
     let actor = build_actor_ref(message.from.as_ref())?;
@@ -426,7 +430,7 @@ pub fn normalize_telegram_update(
         // coordinator consumes stored contexts.
         reply_context: None,
     };
-    let Some(media_group_id) = message.media_group_id else {
+    let Some(media_group_key) = scoped_media_group_key else {
         return Ok(TelegramInboundEvent::Message(Box::new(normalized)));
     };
     let order = u64::try_from(message.message_id).map_err(|error| {
@@ -436,7 +440,7 @@ pub fn normalize_telegram_update(
         }
     })?;
     let fragment = InboundBatchFragment {
-        batch_key: media_group_id,
+        batch_key: media_group_key,
         fragment_id: format!("tg-update-{update_id}"),
         order,
         settle_millis: TELEGRAM_MEDIA_GROUP_SETTLE_MILLIS,
@@ -543,16 +547,27 @@ fn build_event_id(
 
 fn build_media_group_event_id(
     installation_id: &AdapterInstallationId,
-    media_group_id: &str,
+    media_group_key: &str,
 ) -> Result<ExternalEventId, PayloadParseError> {
     ExternalEventId::new(format!(
-        "tg-{}-media-{media_group_id}",
+        "tg-{}-media-{media_group_key}",
         installation_id.as_str()
     ))
     .map_err(|err| PayloadParseError::InvalidExternalRef {
         kind: "external_event_id",
         reason: err.to_string(),
     })
+}
+
+fn build_media_group_key(message: &TelegramMessage, media_group_id: &str) -> String {
+    let thread = message
+        .message_thread_id
+        .map(|thread_id| thread_id.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "chat-{}-thread-{thread}-group-{media_group_id}",
+        message.chat.id
+    )
 }
 
 fn build_actor_ref(sender: Option<&TelegramUser>) -> Result<ExternalActorRef, PayloadParseError> {
@@ -1813,6 +1828,51 @@ mod tests {
             "all media-group fragments must converge on one durable event"
         );
         assert_ne!(first.fragment_id, second.fragment_id);
+    }
+
+    #[test]
+    fn media_group_identity_is_scoped_to_chat_and_thread() {
+        let payload = |update_id: i64, chat_id: i64, thread_id: Option<i64>| {
+            let mut message = serde_json::json!({
+                "message_id": update_id,
+                "media_group_id": "provider-reused-id",
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": chat_id, "type": "private"},
+                "document": {
+                    "file_id": format!("file-{update_id}"),
+                    "file_name": "report.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 5
+                }
+            });
+            if let Some(thread_id) = thread_id {
+                message["message_thread_id"] = serde_json::json!(thread_id);
+            }
+            serde_json::to_vec(&serde_json::json!({
+                "update_id": update_id,
+                "message": message,
+            }))
+            .expect("payload serializes")
+        };
+        let normalize = |payload: Vec<u8>| {
+            let TelegramInboundEvent::BatchFragment(fragment) =
+                normalize_telegram_update(&payload, &install_id(), &policy())
+                    .expect("media group normalizes")
+            else {
+                panic!("expected media-group fragment");
+            };
+            fragment
+        };
+
+        let first = normalize(payload(801, 777, None));
+        let other_chat = normalize(payload(802, 778, None));
+        let other_thread = normalize(payload(803, 777, Some(42)));
+
+        assert_ne!(first.batch_key, other_chat.batch_key);
+        assert_ne!(first.message.event_id, other_chat.message.event_id);
+        assert_ne!(first.batch_key, other_thread.batch_key);
+        assert_ne!(first.message.event_id, other_thread.message.event_id);
     }
 
     #[test]

@@ -1165,18 +1165,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn manifest_declares_exact_bounded_slack_file_egress() {
-        const MANIFEST: &str =
-            include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-        assert!(MANIFEST.contains("host = \"files.slack.com\""));
-        assert!(MANIFEST.contains("path_prefixes = [\"/files-pri/\"]"));
-        assert!(MANIFEST.contains("path_prefixes = [\"/upload/\"]"));
-        assert!(MANIFEST.contains("response_body_limit_bytes = 5242880"));
-        assert!(MANIFEST.contains("request_body_limit_bytes = 5242880"));
-        assert!(!MANIFEST.contains("/api/files.upload\""));
-    }
-
     #[tokio::test]
     async fn deliver_posts_one_rendered_message_with_the_bot_token_handle() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(

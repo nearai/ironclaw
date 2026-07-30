@@ -253,8 +253,8 @@ pub enum CoordinatedDeliveryError {
     WorkspaceAttachmentRead(#[source] ProjectFsError),
     #[error("workspace attachments exceed the delivery budget")]
     WorkspaceAttachmentBudgetExceeded,
-    #[error("workspace attachment reference is invalid")]
-    WorkspaceAttachmentRefInvalid,
+    #[error("workspace attachment reference is invalid: {reason}")]
+    WorkspaceAttachmentRefInvalid { reason: &'static str },
     #[error("caller-supplied materialized workspace attachments are not accepted")]
     PreMaterializedWorkspaceAttachment,
 }
@@ -814,7 +814,9 @@ async fn materialize_workspace_file_parts(
         return if attachments.is_empty() {
             Ok(parts)
         } else {
-            Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)
+            Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                reason: "delivery intent does not accept attachments",
+            })
         };
     }
 
@@ -830,34 +832,49 @@ async fn materialize_workspace_file_parts(
     let mut seen_paths = HashSet::with_capacity(attachments.len());
     for attachment in attachments {
         if !seen_ids.insert(attachment.id.clone()) {
-            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid);
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                reason: "duplicate attachment id",
+            });
         }
         let path = attachment
             .storage_key
             .as_deref()
-            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)
+            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                reason: "missing storage key",
+            })
             .and_then(|path| {
-                ScopedPath::new(path)
-                    .map_err(|_| CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)
+                ScopedPath::new(path).map_err(|_| {
+                    CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                        reason: "malformed storage key",
+                    }
+                })
             })?;
         if !seen_paths.insert(path.clone()) {
-            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid);
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                reason: "duplicate storage key",
+            });
         }
         let intent = ReplyAttachmentIntent {
             path,
-            filename: attachment
-                .filename
-                .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)?,
+            filename: attachment.filename.ok_or(
+                CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                    reason: "missing filename",
+                },
+            )?,
             mime_type: attachment.mime_type,
-            size_bytes: attachment
-                .size_bytes
-                .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)?,
+            size_bytes: attachment.size_bytes.ok_or(
+                CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                    reason: "missing size",
+                },
+            )?,
         };
         intent.validate().map_err(|error| match error {
             ironclaw_outbound::OutboundError::ReplyAttachmentIntentLimitExceeded => {
                 CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded
             }
-            _ => CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid,
+            _ => CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid {
+                reason: "invalid attachment metadata",
+            },
         })?;
         refs.push(intent);
     }

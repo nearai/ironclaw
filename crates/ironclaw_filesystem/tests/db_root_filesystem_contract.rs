@@ -40,6 +40,69 @@ async fn libsql_create_subtree_atomic_publishes_the_complete_batch() {
 }
 
 #[tokio::test]
+async fn libsql_create_subtree_atomic_rejects_conflicts_without_overwrite() {
+    let filesystem = libsql_root().await;
+    let prefix =
+        VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-conflict").unwrap();
+    let file =
+        VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-conflict/0.txt").unwrap();
+    filesystem
+        .create_subtree_atomic(
+            &prefix,
+            vec![AtomicSubtreeEntry {
+                path: file.clone(),
+                entry: Entry::bytes(b"original".to_vec()),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let error = filesystem
+        .create_subtree_atomic(
+            &prefix,
+            vec![AtomicSubtreeEntry {
+                path: file.clone(),
+                entry: Entry::bytes(b"replacement".to_vec()),
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
+    assert_eq!(filesystem.read_file(&file).await.unwrap(), b"original");
+}
+
+#[tokio::test]
+async fn libsql_create_subtree_atomic_rejects_invalid_batch_without_partial_write() {
+    let filesystem = libsql_root().await;
+    let prefix =
+        VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-invalid").unwrap();
+    let valid =
+        VirtualPath::new("/engine/tenants/t1/users/u1/attachments/message-invalid/0.txt").unwrap();
+    let outside = VirtualPath::new("/engine/tenants/t1/users/u2/escaped.txt").unwrap();
+
+    let error = filesystem
+        .create_subtree_atomic(
+            &prefix,
+            vec![
+                AtomicSubtreeEntry {
+                    path: valid.clone(),
+                    entry: Entry::bytes(b"valid".to_vec()),
+                },
+                AtomicSubtreeEntry {
+                    path: outside,
+                    entry: Entry::bytes(b"escaped".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FilesystemError::PathOutsideMount { .. }));
+    assert!(filesystem.get(&valid).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn libsql_root_filesystem_reads_writes_and_stats_files() {
     let filesystem = libsql_root().await;
     let path = VirtualPath::new("/engine/tenants/t1/users/u1/file.txt").unwrap();
@@ -1872,6 +1935,68 @@ mod postgres_tests {
         assert_eq!(versions.len(), 2);
         assert_eq!(fs.read_file(&first).await.unwrap(), b"alpha");
         assert_eq!(fs.read_file(&second).await.unwrap(), b"beta");
+    }
+
+    #[tokio::test]
+    async fn postgres_create_subtree_atomic_rejects_conflicts_without_overwrite() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let batch_prefix = vpath(&prefix, "attachments/message-conflict");
+        let file = vpath(&prefix, "attachments/message-conflict/0.txt");
+        fs.create_subtree_atomic(
+            &batch_prefix,
+            vec![AtomicSubtreeEntry {
+                path: file.clone(),
+                entry: Entry::bytes(b"original".to_vec()),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let error = fs
+            .create_subtree_atomic(
+                &batch_prefix,
+                vec![AtomicSubtreeEntry {
+                    path: file.clone(),
+                    entry: Entry::bytes(b"replacement".to_vec()),
+                }],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
+        assert_eq!(fs.read_file(&file).await.unwrap(), b"original");
+    }
+
+    #[tokio::test]
+    async fn postgres_create_subtree_atomic_rejects_invalid_batch_without_partial_write() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let batch_prefix = vpath(&prefix, "attachments/message-invalid");
+        let valid = vpath(&prefix, "attachments/message-invalid/0.txt");
+        let outside = VirtualPath::new(format!("{prefix}-outside/escaped.txt")).unwrap();
+
+        let error = fs
+            .create_subtree_atomic(
+                &batch_prefix,
+                vec![
+                    AtomicSubtreeEntry {
+                        path: valid.clone(),
+                        entry: Entry::bytes(b"valid".to_vec()),
+                    },
+                    AtomicSubtreeEntry {
+                        path: outside,
+                        entry: Entry::bytes(b"escaped".to_vec()),
+                    },
+                ],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FilesystemError::PathOutsideMount { .. }));
+        assert!(fs.get(&valid).await.unwrap().is_none());
     }
 
     #[tokio::test]

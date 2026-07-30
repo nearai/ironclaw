@@ -122,35 +122,43 @@ where
             extracted_text,
         });
     }
+    let manifest_path = ScopedPath::new(format!(
+        "{}/{}",
+        batch_path.as_str(),
+        BATCH_MANIFEST_FILENAME
+    ))?;
+    // Cover both the durable refs and every attachment body. The manifest is
+    // committed in the same atomic subtree, so an exact manifest match is
+    // sufficient to recognize an identical provider replay without retaining
+    // a second copy of the complete byte-bearing batch in memory.
+    let manifest = batch_manifest_digest(&refs, &entries);
     entries.push(ScopedAtomicSubtreeEntry {
-        path: ScopedPath::new(format!(
-            "{}/{}",
-            batch_path.as_str(),
-            BATCH_MANIFEST_FILENAME
-        ))?,
-        entry: Entry::bytes(batch_manifest_digest(&refs)),
+        path: manifest_path.clone(),
+        entry: Entry::bytes(manifest.clone()),
     });
     match filesystem
-        .create_subtree_atomic(scope, &batch_path, entries.clone())
+        .create_subtree_atomic(scope, &batch_path, entries)
         .await
     {
         Ok(_) => Ok(refs),
         Err(conflict @ FilesystemError::VersionMismatch { .. }) => {
-            if existing_batch_matches(filesystem, scope, &batch_path, &entries).await? {
-                Ok(refs)
-            } else {
-                Err(AttachmentLandingError::Write(conflict))
+            match filesystem.get(scope, &manifest_path).await {
+                Ok(Some(committed)) if committed.entry.body == manifest => Ok(refs),
+                Ok(_) | Err(FilesystemError::PermissionDenied { .. }) => {
+                    Err(AttachmentLandingError::Write(conflict))
+                }
+                Err(error) => Err(AttachmentLandingError::Write(error)),
             }
         }
         Err(error) => Err(AttachmentLandingError::Write(error)),
     }
 }
 
-fn batch_manifest_digest(refs: &[AttachmentRef]) -> Vec<u8> {
+fn batch_manifest_digest(refs: &[AttachmentRef], entries: &[ScopedAtomicSubtreeEntry]) -> Vec<u8> {
     let mut digest = Sha256::new();
     digest.update(b"ironclaw.attachment-batch.v1");
     digest.update((refs.len() as u64).to_be_bytes());
-    for attachment in refs {
+    for (attachment, entry) in refs.iter().zip(entries) {
         digest_field(&mut digest, attachment.id.as_bytes());
         digest.update([match attachment.kind {
             AttachmentKind::Document => 0,
@@ -168,6 +176,8 @@ fn batch_manifest_digest(refs: &[AttachmentRef]) -> Vec<u8> {
         }
         digest_optional_field(&mut digest, attachment.storage_key.as_deref());
         digest_optional_field(&mut digest, attachment.extracted_text.as_deref());
+        digest_field(&mut digest, entry.path.as_str().as_bytes());
+        digest_field(&mut digest, &entry.entry.body);
     }
     digest.finalize().to_vec()
 }
@@ -185,32 +195,6 @@ fn digest_optional_field(digest: &mut Sha256, value: Option<&str>) {
 fn digest_field(digest: &mut Sha256, value: &[u8]) {
     digest.update((value.len() as u64).to_be_bytes());
     digest.update(value);
-}
-
-async fn existing_batch_matches<F>(
-    filesystem: &ScopedFilesystem<F>,
-    scope: &ResourceScope,
-    batch_path: &ironclaw_host_api::ScopedPath,
-    expected: &[ScopedAtomicSubtreeEntry],
-) -> Result<bool, FilesystemError>
-where
-    F: RootFilesystem,
-{
-    let children = filesystem
-        .list_dir_bounded(scope, batch_path, expected.len().saturating_add(1))
-        .await?;
-    if children.len() != expected.len() {
-        return Ok(false);
-    }
-    for item in expected {
-        let Some(actual) = filesystem.get(scope, &item.path).await? else {
-            return Ok(false);
-        };
-        if actual.entry != item.entry {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// Maximum characters of extracted document *content* retained on a reference
@@ -522,6 +506,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_only_message_batch_replay_returns_the_original_conflict() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let mut write_only = MountPermissions::none();
+        write_only.write = true;
+        let writer = project_mount(backend, write_only);
+        let scope = test_scope();
+        let attachments = vec![inbound("att-0", "text/plain", "a.txt", b"first")];
+
+        land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            attachments.clone(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("initial write-only batch lands");
+        let error = land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            attachments,
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect_err("write-only authority cannot prove an identical replay");
+
+        assert!(matches!(
+            error,
+            AttachmentLandingError::Write(FilesystemError::VersionMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn rejects_an_oversized_attachment_in_the_batch() {
         // The bridge threads its `max_bytes` bound to each landing; an item over
         // the cap fails the batch with TooLarge before its bytes are written.
@@ -582,7 +604,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            AttachmentLandingError::TooMany { count: 11, max: 10 }
+            AttachmentLandingError::TooMany { count, max }
+                if count == DEFAULT_ATTACHMENT_BUDGETS.max_count + 1
+                    && max == DEFAULT_ATTACHMENT_BUDGETS.max_count
         ));
     }
 

@@ -808,7 +808,11 @@ fn unique_subtree_temp_path(
         })?
         .to_string_lossy();
     let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(".{name}.subtree.tmp.{counter}")))
+    // The counter is process-local. Include the PID so two IronClaw
+    // processes sharing one disk mount cannot choose the same staging tree
+    // and then have the loser clean up the winner's in-flight batch.
+    let process_id = std::process::id();
+    Ok(parent.join(format!(".{name}.subtree.tmp.{process_id}.{counter}")))
 }
 
 async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<(), FilesystemError> {

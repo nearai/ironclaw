@@ -90,7 +90,7 @@ pub(crate) fn validate_reply_attachment_intents(
             .iter()
             .any(|existing| existing.path == intent.path)
         {
-            return Err(OutboundError::Serialization);
+            return Err(OutboundError::ReplyAttachmentIntentConflict);
         }
         total_bytes = total_bytes
             .checked_add(intent.size_bytes)

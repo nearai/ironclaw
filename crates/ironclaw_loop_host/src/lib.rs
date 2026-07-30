@@ -988,7 +988,8 @@ fn persisted_message_content(message: &ThreadMessageRecord) -> Option<MessageCon
     })
 }
 
-fn reply_attachment_seal_error(_error: OutboundError) -> AgentLoopHostError {
+fn reply_attachment_seal_error(error: OutboundError) -> AgentLoopHostError {
+    tracing::debug!(error = %error, "reply attachment finalization failed");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "reply attachment finalization failed",

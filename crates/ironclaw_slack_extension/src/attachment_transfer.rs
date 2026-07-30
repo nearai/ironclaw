@@ -140,7 +140,7 @@ pub(super) async fn fetch_attachment(
         .as_deref()
         .unwrap_or("application/octet-stream")
         .to_ascii_lowercase();
-    if provider_mime != attachment.descriptor.mime_type {
+    if !provider_mime.eq_ignore_ascii_case(&attachment.descriptor.mime_type) {
         return Err(transfer_error(
             "slack attachment MIME metadata did not match",
             false,
@@ -191,10 +191,11 @@ pub(super) async fn fetch_attachment(
         ));
     }
 
+    let filename = inbound_filename(attachment.descriptor.filename.clone().or(file.name))?;
     Ok(InboundAttachment {
         id: attachment.descriptor.external_file_id.clone(),
         mime_type: attachment.descriptor.mime_type.clone(),
-        filename: attachment.descriptor.filename.clone().or(file.name),
+        filename,
         bytes: download.body,
     })
 }
@@ -632,6 +633,26 @@ fn outbound_filename(file: &WorkspaceFile) -> Result<String, String> {
         })
         .ok_or_else(|| "slack attachment filename is invalid".to_string())?;
     Ok(filename.to_string())
+}
+
+fn inbound_filename(filename: Option<String>) -> Result<Option<String>, ChannelError> {
+    let Some(filename) = filename else {
+        return Ok(None);
+    };
+    let valid = !filename.is_empty()
+        && filename.len() <= 255
+        && !matches!(filename.as_str(), "." | "..")
+        && !filename
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'));
+    if valid {
+        Ok(Some(filename))
+    } else {
+        Err(transfer_error(
+            "slack attachment filename is invalid",
+            false,
+        ))
+    }
 }
 
 fn outbound_mime_type(value: &str) -> Result<String, String> {

@@ -452,6 +452,13 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         ]
     );
     assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));
+    assert_eq!(api_post.response_body_limit_bytes, Some(256 * 1024));
+    assert!(
+        api_post
+            .paths
+            .iter()
+            .all(|path| path != "/api/files.upload")
+    );
 
     let api_get = channel
         .egress
@@ -463,6 +470,7 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         ["/api/files.info", "/api/files.getUploadURLExternal",]
     );
     assert_eq!(api_get.request_body_limit_bytes, Some(0));
+    assert_eq!(api_get.response_body_limit_bytes, Some(256 * 1024));
 
     let private_download = channel
         .egress
@@ -470,6 +478,7 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         .find(|target| target.host == "files.slack.com" && target.methods == [NetworkMethod::Get])
         .expect("Slack private download target");
     assert_eq!(private_download.path_prefixes, ["/files-pri/"]);
+    assert_eq!(private_download.request_body_limit_bytes, Some(0));
     assert_eq!(
         private_download.response_body_limit_bytes,
         Some(5 * 1024 * 1024)
@@ -481,6 +490,7 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         .find(|target| target.host == "files.slack.com" && target.methods == [NetworkMethod::Post])
         .expect("Slack external upload target");
     assert_eq!(external_upload.path_prefixes, ["/upload/"]);
+    assert_eq!(external_upload.response_body_limit_bytes, Some(256 * 1024));
     assert_eq!(
         external_upload.request_body_limit_bytes,
         Some(5 * 1024 * 1024)

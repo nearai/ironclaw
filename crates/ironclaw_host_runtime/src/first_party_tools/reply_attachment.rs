@@ -191,6 +191,7 @@ fn default_mime_type(filename: &str) -> &'static str {
 }
 
 fn map_filesystem_error(error: FilesystemError) -> FirstPartyCapabilityError {
+    tracing::debug!(error = %error, "reply attachment filesystem operation failed");
     match error {
         FilesystemError::PermissionDenied { .. }
         | FilesystemError::Contract(_)
@@ -204,6 +205,7 @@ fn map_filesystem_error(error: FilesystemError) -> FirstPartyCapabilityError {
 }
 
 fn map_intent_validation_error(error: OutboundError) -> FirstPartyCapabilityError {
+    tracing::debug!(error = %error, "reply attachment intent validation failed");
     match error {
         OutboundError::ReplyAttachmentIntentLimitExceeded => attachment_too_large(),
         OutboundError::InvalidRequest { .. } | OutboundError::ReplyAttachmentIntentConflict => {
@@ -217,6 +219,7 @@ fn map_intent_validation_error(error: OutboundError) -> FirstPartyCapabilityErro
 }
 
 fn map_intent_port_error(error: OutboundError) -> FirstPartyCapabilityError {
+    tracing::debug!(error = %error, "reply attachment intent persistence failed");
     match error {
         OutboundError::ReplyAttachmentIntentsSealed => {
             FirstPartyCapabilityError::with_safe_summary(
