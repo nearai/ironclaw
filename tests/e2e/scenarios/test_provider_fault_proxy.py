@@ -8,6 +8,7 @@ import gzip
 import httpx
 import pytest
 from aiohttp import web
+
 from helpers import AUTH_TOKEN
 from provider_fault_proxy import (
     PROVIDER_FAULT_PROFILES,
@@ -50,6 +51,19 @@ async def _start_upstream() -> tuple[str, list[dict], web.AppRunner]:
                     "Content-Type": "application/json",
                     "X-Upstream": "emulate",
                 },
+            )
+        if request.path == "/oauth/token":
+            return web.json_response(
+                {"access_token": "provider-issued-secret-token"}
+            )
+        if request.path == "/oauth/user-token":
+            return web.json_response(
+                {
+                    "access_token": "provider-issued-bot-token",
+                    "authed_user": {
+                        "access_token": "provider-issued-user-token"
+                    },
+                }
             )
         return web.json_response(
             response_body,
@@ -109,6 +123,33 @@ async def test_provider_fault_proxy_is_transparent_and_redacts_credentials(
     assert request["responded"] is True
     assert request["credential_fingerprint"]
     assert "never-record-this-token" not in str(proxy.state)
+
+
+async def test_provider_fault_proxy_fingerprints_issued_token_without_recording_it(
+    fault_proxy,
+):
+    proxy, _ = fault_proxy
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{proxy.url}/oauth/token")
+
+    response.raise_for_status()
+    request = proxy.state["requests"][0]
+    assert request["issued_credential_fingerprint"] == "c3da4738d8e1"
+    assert "provider-issued-secret-token" not in str(proxy.state)
+
+
+async def test_provider_fault_proxy_prefers_issued_user_account_token(
+    fault_proxy,
+):
+    proxy, _ = fault_proxy
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{proxy.url}/oauth/user-token")
+
+    response.raise_for_status()
+    request = proxy.state["requests"][0]
+    assert request["issued_credential_fingerprint"] == "5309d6d55911"
+    assert "provider-issued-user-token" not in str(proxy.state)
+    assert "provider-issued-bot-token" not in str(proxy.state)
 
 
 async def test_provider_fault_proxy_preserves_compressed_responses(fault_proxy):
