@@ -40,8 +40,8 @@ CANNED_RESPONSES = [
     # already-run writes).
     (
         re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
-        "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
-        "Both are ready to download.",
+        "Done — I saved [report.csv](/workspace/report.csv) and "
+        "[report.pdf](sandbox:/workspace/report.pdf). Both are ready to download.",
     ),
     (
         re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),

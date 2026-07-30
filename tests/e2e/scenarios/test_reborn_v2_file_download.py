@@ -39,7 +39,7 @@ async def _read_download_bytes(download) -> bytes:
 
 
 async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
-    """Agent writes a CSV + PDF; the reply renders chips that download the bytes."""
+    """Agent writes files; reply links open previews and chips download the bytes."""
     page = reborn_v2_yolo_page
 
     composer = page.locator(SEL_V2["chat_composer"])
@@ -52,6 +52,27 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     pdf_chip = page.locator(SEL_V2["project_file_chip_for"].format(path=PDF_PATH))
     await expect(csv_chip).to_be_visible(timeout=45000)
     await expect(pdf_chip).to_be_visible(timeout=45000)
+
+    # Both the ordinary Markdown href and the sandbox-style href are normalized
+    # into thread-scoped in-app preview links. Clicking must open the existing
+    # authenticated preview modal without spawning a browser tab.
+    assistant_msg = page.locator(SEL_V2["msg_assistant"]).last
+    csv_link = assistant_msg.locator(
+        SEL_V2["workspace_file_link_for"].format(path=CSV_PATH)
+    )
+    pdf_link = assistant_msg.locator(
+        SEL_V2["workspace_file_link_for"].format(path=PDF_PATH)
+    )
+    await expect(csv_link).to_have_attribute("href", CSV_PATH)
+    await expect(pdf_link).to_have_attribute("href", PDF_PATH)
+
+    open_pages = len(page.context.pages)
+    await pdf_link.click()
+    modal_download = page.locator(SEL_V2["attachment_download"])
+    await expect(modal_download).to_be_visible(timeout=15000)
+    assert len(page.context.pages) == open_pages
+    await page.get_by_role("button", name="Close", exact=True).last.click()
+    await expect(modal_download).to_be_hidden()
 
     # The chip's inline download icon performs the bearer-authenticated blob
     # fetch and saves the exact bytes the agent wrote — no modal needed.
@@ -66,7 +87,6 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
 
     # Clicking the chip body instead opens the preview modal, whose footer
     # Download action saves the bytes too (covers the preview path for the PDF).
-    modal_download = page.locator(SEL_V2["attachment_download"])
     await pdf_chip.click()
     await expect(modal_download).to_be_visible(timeout=15000)
     async with page.expect_download() as pdf_dl:
