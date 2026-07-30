@@ -66,7 +66,9 @@ fn render_attachment(index: usize, attachment: &AttachmentRef) -> String {
     let type_label = match attachment.kind {
         AttachmentKind::Audio => "audio",
         AttachmentKind::Image => "image",
+        AttachmentKind::Video => "video",
         AttachmentKind::Document => "document",
+        AttachmentKind::Other => "other",
     };
     let project_path_attr = attachment
         .storage_key
@@ -109,6 +111,14 @@ fn body_text(attachment: &AttachmentRef, has_project_path: bool) -> String {
                 .to_string()
         }
         AttachmentKind::Image => "[Image attached — not yet stored.]".to_string(),
+        AttachmentKind::Video if has_project_path => {
+            "[Video attached — the file is saved at the project path above.]".to_string()
+        }
+        AttachmentKind::Video => "[Video attached — not yet stored.]".to_string(),
+        AttachmentKind::Other if has_project_path => {
+            "[Binary attachment — the file is saved at the project path above.]".to_string()
+        }
+        AttachmentKind::Other => "[Binary attachment — not yet stored.]".to_string(),
     }
 }
 

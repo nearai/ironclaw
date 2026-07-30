@@ -93,13 +93,17 @@ where
         let fallback_extension = canonical_extension(&mime_type).unwrap_or(UNKNOWN_EXTENSION);
         // Extract document text before the bytes are moved into the write.
         // Images go to the vision model; audio transcription is provider-backed
-        // and handled by a later pipeline stage, so both leave `extracted_text`
+        // and handled by a later pipeline stage. Video and other binary media
+        // also have no document extractor, so all four leave `extracted_text`
         // unset here.
         let extracted_text = match kind {
             AttachmentKind::Document => {
                 extract_document_text(&bytes, &mime_type, filename.as_deref())
             }
-            AttachmentKind::Image | AttachmentKind::Audio => None,
+            AttachmentKind::Image
+            | AttachmentKind::Audio
+            | AttachmentKind::Video
+            | AttachmentKind::Other => None,
         };
         let landing = AttachmentLanding {
             message_id,
@@ -164,6 +168,8 @@ fn batch_manifest_digest(refs: &[AttachmentRef], entries: &[ScopedAtomicSubtreeE
             AttachmentKind::Document => 0,
             AttachmentKind::Image => 1,
             AttachmentKind::Audio => 2,
+            AttachmentKind::Video => 3,
+            AttachmentKind::Other => 4,
         }]);
         digest_field(&mut digest, attachment.mime_type.as_bytes());
         digest_optional_field(&mut digest, attachment.filename.as_deref());
