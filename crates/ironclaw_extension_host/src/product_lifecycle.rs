@@ -207,6 +207,23 @@ pub struct ExtensionLifecycleManager {
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
 
+/// Constructor dependency bundle for [`ExtensionLifecycleManager::new`].
+///
+/// One field per prior constructor argument, in the same order — this is a
+/// pure aggregation to stay under clippy's `too_many_arguments` threshold, not
+/// a behavior change. `hosted_mcp_dependencies` stays a single nested field
+/// (its own [`crate::HostedMcpPreparationDependencies`] bundle), not folded in.
+pub struct ExtensionLifecycleManagerDependencies {
+    pub filesystem: Arc<dyn RootFilesystem>,
+    pub catalog: AvailableExtensionCatalog,
+    pub installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    pub lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
+    pub active_extensions: ActiveExtensionPublisher,
+    pub credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+    pub tenant_operator_user_id: UserId,
+    pub hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies,
+}
+
 impl ExtensionLifecycleManager {
     pub async fn register_hosted_mcp(
         &self,
@@ -228,16 +245,17 @@ impl ExtensionLifecycleManager {
             .prepare_if_pending(package_ref, scope, credential_gate, caller)
             .await
     }
-    pub fn new(
-        filesystem: Arc<dyn RootFilesystem>,
-        catalog: AvailableExtensionCatalog,
-        installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
-        lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
-        active_extensions: ActiveExtensionPublisher,
-        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
-        tenant_operator_user_id: UserId,
-        hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies,
-    ) -> Self {
+    pub fn new(dependencies: ExtensionLifecycleManagerDependencies) -> Self {
+        let ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup,
+            tenant_operator_user_id,
+            hosted_mcp_dependencies,
+        } = dependencies;
         let catalog = Arc::new(RwLock::new(catalog));
         let operation_lock = Arc::new(Mutex::new(()));
         let hosted_mcp_preparation = Arc::new(
@@ -1137,13 +1155,8 @@ impl ExtensionLifecycleManager {
             // so there is nothing to compensate.
             Some(existing) => {
                 let preparation_ready = self
-                    .installation_store
-                    .get_manifest(existing.extension_id())
-                    .await
-                    .map_err(map_extension_installation_error)?
-                    .is_none_or(|manifest| {
-                        manifest.initial_preparation() == PreparationRequirement::Ready
-                    });
+                    .manifest_preparation_ready(existing.extension_id())
+                    .await?;
                 decide_install_on_existing(
                     &available.package.id,
                     existing.owner(),
@@ -1160,7 +1173,15 @@ impl ExtensionLifecycleManager {
             }
             None => {
                 self.install_fresh_locked(&available, caller).await?;
-                true
+                // `install_fresh_locked` registers and materializes the
+                // package but does not run discovery: preparation happens
+                // later via `prepare_if_pending` / `activate_with_credential_gate`.
+                // Derive readiness from the persisted manifest exactly like
+                // the existing-install branch above, so a
+                // `PreparationRequirement::Required` package does not report
+                // its (not-yet-discovered) capabilities as visible.
+                self.manifest_preparation_ready(&available.package.id)
+                    .await?
             }
         };
 
@@ -1187,6 +1208,24 @@ impl ExtensionLifecycleManager {
                 ),
             },
         ))
+    }
+
+    /// Whether `extension_id`'s persisted manifest reports discovery as
+    /// already complete. A missing manifest is treated as ready (nothing to
+    /// wait on); this mirrors the existing-install branch of `install` so
+    /// both the existing- and fresh-install paths derive
+    /// `preparation_ready` identically instead of the fresh path assuming
+    /// readiness that discovery has not yet produced.
+    async fn manifest_preparation_ready(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, ProductSurfaceFailure> {
+        Ok(self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .is_none_or(|manifest| manifest.initial_preparation() == PreparationRequirement::Ready))
     }
 
     /// First install of an id: register the lifecycle package, materialize
@@ -3069,13 +3108,17 @@ fn compensation_failure(
 mod tests {
     use std::sync::Arc;
 
+    use ironclaw_extensions::ResolvedMcpDeclaration;
     use ironclaw_extensions::{
         ExtensionInstallationStore, ExtensionInstallationStorePort as _, ExtensionLifecycleService,
         ExtensionManifest, ExtensionManifestRecord, ExtensionRegistry, HostApiContractRegistry,
         ManifestSource, SharedExtensionRegistry,
     };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, UserId, VirtualPath};
+    use ironclaw_host_api::{
+        EffectKind, HostPortCatalog, InvocationId, PermissionMode, ResourceScope, UserId,
+        VirtualPath,
+    };
     use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
 
@@ -3111,22 +3154,22 @@ mod tests {
             Arc::new(InvalidationBus::new()),
         );
         let owner = UserId::new("lifecycle-owner").expect("valid owner");
-        let manager = ExtensionLifecycleManager::new(
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
             filesystem,
             catalog,
-            installation_store.clone(),
+            installation_store: installation_store.clone(),
             lifecycle_service,
             active_extensions,
-            None,
-            owner.clone(),
-            crate::HostedMcpPreparationDependencies {
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
                 runtime_ports: None,
                 catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
                     ironclaw_safety::Sanitizer::new(),
                 )),
                 oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
             },
-        );
+        });
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("package ref");
 
@@ -3204,22 +3247,22 @@ mod tests {
         );
         let alice = UserId::new("alice").expect("valid user");
         let bob = UserId::new("bob").expect("valid user");
-        let manager = ExtensionLifecycleManager::new(
-            Arc::clone(&filesystem),
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::clone(&filesystem),
             catalog,
-            installation_store.clone(),
+            installation_store: installation_store.clone(),
             lifecycle_service,
             active_extensions,
-            None,
-            alice.clone(),
-            crate::HostedMcpPreparationDependencies {
+            credential_cleanup: None,
+            tenant_operator_user_id: alice.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
                 runtime_ports: None,
                 catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
                     ironclaw_safety::Sanitizer::new(),
                 )),
                 oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
             },
-        );
+        });
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("package ref");
 
@@ -3311,6 +3354,385 @@ mod tests {
                 .expect("installation lookup")
                 .is_none()
         );
+    }
+
+    /// Wraps a real [`ExtensionInstallationStore`] so `admit_package_definition`
+    /// (the call `HostedMcpPreparationService::register` makes between its two
+    /// lock acquisitions) can be paused mid-flight. Lets the deadlock test below
+    /// force the exact interleaving the lock-order fix depends on: register
+    /// signals `holding` once it is inside `admit_package_definition`, then
+    /// blocks on `release` until the test lets it continue.
+    struct PauseOnAdmitStore {
+        inner: ExtensionInstallationStore,
+        holding: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ironclaw_extensions::ExtensionInstallationStorePort for PauseOnAdmitStore {
+        async fn admit_package_definition(
+            &self,
+            record: ExtensionManifestRecord,
+        ) -> Result<
+            ironclaw_extensions::PackageDefinitionAdmissionOutcome,
+            ExtensionInstallationError,
+        > {
+            self.holding.notify_one();
+            self.release.notified().await;
+            self.inner.admit_package_definition(record).await
+        }
+
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.list_manifests().await
+        }
+
+        async fn get_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.get_manifest(extension_id).await
+        }
+
+        async fn persist_removal_tombstone(
+            &self,
+            manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.persist_removal_tombstone(manifest).await
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            manifest: ExtensionManifestRecord,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .upsert_manifest_and_installation(manifest, installation)
+                .await
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.list_installations().await
+        }
+
+        async fn get_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.get_installation(installation_id).await
+        }
+
+        async fn upsert_installation(
+            &self,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_installation(installation).await
+        }
+
+        async fn activate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            user_id: &UserId,
+        ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+            self.inner
+                .activate_membership(installation_id, user_id)
+                .await
+        }
+
+        async fn deactivate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            user_id: &UserId,
+        ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+            self.inner
+                .deactivate_membership(installation_id, user_id)
+                .await
+        }
+
+        async fn delete_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_installation(installation_id).await
+        }
+
+        async fn delete_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_manifest(extension_id).await
+        }
+    }
+
+    /// Minimal valid third-party WASM extension bundle for `import_bundle`,
+    /// parameterized by id so it never collides with the hosted-MCP fixture id.
+    fn importable_bundle_zip(id: &str) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Lock order import fixture"
+version = "0.1.0"
+description = "Fixture extension for concurrent register/import lock-order coverage"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run the fixture"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#
+        );
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (path, bytes) in [
+            ("manifest.toml", manifest.as_bytes()),
+            ("wasm/tool.wasm", b"\0asm\x0d\0\x01\0".as_slice()),
+            ("schemas/run.input.json", b"{}".as_slice()),
+            ("schemas/run.output.json", b"{}".as_slice()),
+        ] {
+            writer.start_file(path, options).expect("start zip entry");
+            writer.write_all(bytes).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    /// Regression test for the AB-BA lock-order deadlock between
+    /// `HostedMcpPreparationService::register` and
+    /// `ExtensionLifecycleManager::import_bundle`: both coordinate the same
+    /// `catalog` `RwLock` and `operation_lock` `Mutex`, and must acquire them
+    /// in the same order.
+    ///
+    /// A prior version of this test drove the same scenario through the
+    /// production `ExtensionLifecycleService::execute` + `import_extension_bundle`
+    /// entry points with `tokio::join!`, but the two tasks never reliably
+    /// interleaved (register's own async work completed before import even
+    /// reached the catalog lock), so it passed in ~0.07s against the buggy
+    /// lock order too — a non-discriminating regression test. This version
+    /// pauses `register` mid-flight (inside `admit_package_definition`, which
+    /// runs between its two lock acquisitions) via a controllable test double,
+    /// forcing `import_bundle` to actually contend for the shared locks before
+    /// `register` is allowed to finish:
+    ///
+    /// 1. `register` grabs its first lock (`catalog` when fixed,
+    ///    `operation_lock` when buggy), then blocks inside
+    ///    `admit_package_definition` and signals `holding`.
+    /// 2. The test waits for `holding`, then spawns `import_bundle`, which
+    ///    unconditionally takes `catalog` first, then `operation_lock` — and
+    ///    waits briefly to let it reach that second lock.
+    /// 3. The test releases `register`.
+    ///    - Fixed order: `register` already holds `catalog`, so `import_bundle`
+    ///      was already blocked on `catalog` in step 2 (never touched
+    ///      `operation_lock`); both complete once `register` finishes.
+    ///    - Buggy order: `register` holds only `operation_lock` in step 1, so
+    ///      `import_bundle` takes `catalog` free in step 2 and blocks on
+    ///      `operation_lock` (held by `register`). Releasing `register` lets it
+    ///      resume and block on `catalog` (held by `import_bundle`): AB-BA
+    ///      deadlock, and the timeout below fires.
+    #[tokio::test]
+    async fn concurrent_register_and_import_bundle_do_not_deadlock() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let inner_store = ExtensionInstallationStore::load_at(
+            filesystem.clone(),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+            ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            crate::product_extension_host_api_contract_registry().expect("host contracts"),
+        )
+        .await
+        .expect("installation store");
+        let holding = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> =
+            Arc::new(PauseOnAdmitStore {
+                inner: inner_store,
+                holding: Arc::clone(&holding),
+                release: Arc::clone(&release),
+            });
+        let catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("lock-order-owner").expect("valid owner");
+        let manager = Arc::new(ExtensionLifecycleManager::new(
+            ExtensionLifecycleManagerDependencies {
+                filesystem,
+                catalog,
+                installation_store,
+                lifecycle_service,
+                active_extensions,
+                credential_cleanup: None,
+                tenant_operator_user_id: owner,
+                hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                    runtime_ports: None,
+                    catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                        ironclaw_safety::Sanitizer::new(),
+                    )),
+                    oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+                },
+            },
+        ));
+
+        let register_request = ironclaw_host_api::RegisterHostedMcpRequest {
+            desired_id: ironclaw_host_api::LifecyclePackageId::new("lock-order-register")
+                .expect("package id"),
+            desired_name: "Lock order register fixture".to_string(),
+            endpoint: ironclaw_host_api::HostedMcpEndpoint::new("https://mcp.example.test/mcp")
+                .expect("public fixture endpoint"),
+            auth_selection: Some(ironclaw_host_api::HostedMcpAuthSelection::Auto),
+        };
+        let register_manager = Arc::clone(&manager);
+        let register_task =
+            tokio::spawn(
+                async move { register_manager.register_hosted_mcp(register_request).await },
+            );
+
+        holding.notified().await;
+
+        let import_manager = Arc::clone(&manager);
+        let bundle = importable_bundle_zip("lock-order-import");
+        let import_task = tokio::spawn(async move { import_manager.import_bundle(bundle).await });
+
+        // Give `import_bundle` time to take `catalog` and reach `operation_lock`
+        // before releasing `register`. Only affects whether the buggy order's
+        // deadlock is observed; the fixed order completes regardless of timing.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        release.notify_one();
+
+        let (register_result, import_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(register_task, import_task)
+            })
+            .await
+            .expect(
+                "register and import_bundle both complete without deadlocking on the shared \
+                 catalog/operation locks",
+            );
+
+        register_result
+            .expect("register task did not panic")
+            .expect("hosted MCP registration completes");
+        import_result
+            .expect("import task did not panic")
+            .expect("bundle import completes");
+    }
+
+    /// Fresh install of a package whose manifest requires discovery
+    /// (`PreparationRequirement::Required`, e.g. a hosted MCP package before
+    /// its tools are discovered) must not report its statically-declared
+    /// Model-visibility capabilities as visible: `install_fresh_locked` does
+    /// not run discovery, so those ids are not yet callable. Before the fix,
+    /// the fresh-install (`None`) branch of `install` hardcoded
+    /// `preparation_ready = true` regardless of the manifest, leaking the
+    /// capability id into the response. This pins the fix that derives
+    /// `preparation_ready` from the persisted manifest on both branches.
+    #[tokio::test]
+    async fn fresh_install_with_required_preparation_reports_no_visible_capabilities() {
+        let mut package = fixture_extension_package();
+        // Declares `fixture.search` (Model visibility) already; make
+        // preparation `Required` so discovery has not yet run.
+        let mut resolved = (*package.resolved_manifest).clone();
+        resolved.mcp = Some(ResolvedMcpDeclaration {
+            server: "https://mcp.example.com/rpc".to_string(),
+            namespace: "fixture".to_string(),
+            max_tools: 64,
+            default_permission: PermissionMode::Ask,
+            effects: vec![EffectKind::Network],
+            credential_handles: Vec::new(),
+            dynamic_input_schemas: Default::default(),
+            registration_auth: ironclaw_host_api::HostedMcpAuthSelection::NoAuth,
+        });
+        package.resolved_manifest = Arc::new(resolved);
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("lifecycle-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+
+        let response = manager
+            .install(package_ref, &owner)
+            .await
+            .expect("fresh install succeeds");
+
+        match response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall {
+                installed,
+                visible_capability_ids,
+                ..
+            }) => {
+                assert!(installed);
+                assert!(
+                    visible_capability_ids.is_empty(),
+                    "preparation-required fresh install must not report visible capabilities \
+                     before discovery runs, got {visible_capability_ids:?}"
+                );
+            }
+            other => panic!("expected ExtensionInstall payload, got {other:?}"),
+        }
     }
 
     fn capability_provider_contracts() -> HostApiContractRegistry {

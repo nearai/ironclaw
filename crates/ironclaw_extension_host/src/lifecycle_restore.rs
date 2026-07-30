@@ -39,15 +39,6 @@ pub async fn restore_extension_lifecycle_state(
             let available = crate::hosted_mcp_manifest::available_package(manifest)?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
         }
-        if stored_manifest.as_ref().is_some_and(|manifest| {
-            manifest.initial_preparation() == ironclaw_extensions::PreparationRequirement::Required
-        }) {
-            tracing::debug!(
-                extension_id = installation.extension_id().as_str(),
-                "skipping pending extension installation during offline restore"
-            );
-            continue;
-        }
         if remove_retired_internal_installation(installation_store, &installation).await? {
             continue;
         }
@@ -79,12 +70,22 @@ pub async fn restore_extension_lifecycle_state(
         if available.source != ManifestSource::UserRegistered {
             materialize_available_extension(filesystem.as_ref(), &available).await?;
         }
+        let still_pending = stored_manifest.as_ref().is_some_and(|manifest| {
+            manifest.initial_preparation() == ironclaw_extensions::PreparationRequirement::Required
+        });
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
                 .install(available.package.clone())
                 .await
                 .map_err(map_extension_error)?;
+            if still_pending {
+                tracing::debug!(
+                    extension_id = installation.extension_id().as_str(),
+                    "registered pending extension installation during offline restore without enabling it"
+                );
+                continue;
+            }
             lifecycle
                 .enable(&available.package.id)
                 .await

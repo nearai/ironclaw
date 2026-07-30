@@ -69,6 +69,12 @@ impl HostedMcpPreparationService {
             ironclaw_product::LifecyclePackageKind::Extension,
             extension_id.as_str(),
         )?;
+        // Lock order invariant: catalog write guard BEFORE operation_lock,
+        // matching `ExtensionLifecycleManager::import_bundle` /
+        // `install` (see product_lifecycle.rs). Both paths share the same
+        // catalog and operation_lock, so acquiring them in a consistent
+        // order prevents an AB-BA deadlock across concurrent callers.
+        let mut catalog = self.catalog.write().await;
         let _guard = self.operation_lock.lock().await;
         let definition = match request.auth_selection.as_ref() {
             Some(selection) => crate::hosted_mcp_manifest::pending_manifest(
@@ -89,10 +95,7 @@ impl HostedMcpPreparationService {
             .await
             .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
         let available = crate::hosted_mcp_manifest::available_package(&definition)?;
-        self.catalog
-            .write()
-            .await
-            .extend(AvailableExtensionCatalog::from_packages(vec![available]));
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
         Ok(crate::hosted_mcp_manifest::registration_response(
             package_ref,
         ))

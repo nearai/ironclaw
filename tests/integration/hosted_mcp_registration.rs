@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use hosted_mcp_registration_server::{
     HostedMcpAuthPolicy, HostedMcpRegistrationNetworkEgress, HostedMcpRegistrationServer,
-    HostedMcpTool,
+    HostedMcpTool, ScriptedMetadataResponse,
 };
 use ironclaw_auth::{
     AuthContinuationRef, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
@@ -887,6 +887,39 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     .await;
     assert!(restored_secret_store.set(restored.secret_store()).is_ok());
 
+    // Drive the real activation caller directly, WITHOUT re-issuing
+    // `ExtensionInstall` (which would side-effect-repair the lifecycle
+    // registry). This proves the restore path itself registers a pending
+    // hosted-MCP install so activation/OAuth-continuation resumes see the
+    // credential blocker, not a masked "extension ... is not installed".
+    let activation_only = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("a restored pending hosted MCP install resumes via activation alone");
+    assert!(
+        activation_only.blockers.iter().any(|blocker| matches!(
+            blocker,
+            ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+        )),
+        "activation without a prior re-install must still surface the credential setup \
+         blocker rather than \"is not installed\": {activation_only:#?}"
+    );
+    assert!(
+        restored
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capability projection")
+            .is_empty(),
+        "activation alone must not publish tools for the still-pending restored extension",
+    );
+
     let resumed = install_fixture(&restored, scope).await;
     assert_eq!(
         credential_provider_from_response(&resumed),
@@ -1118,6 +1151,154 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(server.requests().iter().any(|request| {
         request.rpc_method.as_deref() == Some("tools/call") && request.authorization_matches
     }));
+}
+
+/// Drives all four `fetch_oauth_metadata` failure branches (transport error,
+/// non-200 status, oversized body, malformed JSON) through the ordinary
+/// install path. Each sub-case gets its own fixture server/services (the
+/// scripted overrides are one-shot), but shares one assertion: the failure
+/// must surface (as an error, or as a still-installed non-progressing
+/// response) and the definition must remain unprepared, with no tools
+/// published.
+#[tokio::test]
+async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
+    async fn assert_metadata_failure_blocks_preparation(
+        user_id: &str,
+        egress: Arc<dyn ironclaw_network::NetworkHttpEgress>,
+    ) {
+        let fixture_secret_store = Arc::new(OnceLock::new());
+        let services = build_lifecycle_test_services_with_auth_provider(
+            user_id,
+            Some(egress),
+            false,
+            Arc::new(FixtureOAuthProvider {
+                secret_store: Arc::clone(&fixture_secret_store),
+                access_token: "oauth-token".to_string(),
+            }),
+        )
+        .await;
+        assert!(fixture_secret_store.set(services.secret_store()).is_ok());
+        let scope = webui_gate_resource_scope_for_owner(user_id);
+        services
+            .lifecycle_service
+            .execute(
+                lifecycle_product_context(scope.clone()),
+                LifecycleProductAction::ExtensionRegisterHostedMcp {
+                    request: automatic_request(),
+                },
+            )
+            .await
+            .expect("OAuth registration persists the tenant definition");
+
+        let install_result = services
+            .lifecycle_service
+            .execute(
+                lifecycle_product_context(scope),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: fixture_package_ref(),
+                },
+            )
+            .await;
+        // The transport-error branch is swallowed into a still-installed
+        // response (mirrors `install_activation_error`'s `Transient` arm);
+        // the non-200 and malformed-JSON branches propagate as a real
+        // error. Either way, no blockers get fabricated and no OAuth setup
+        // requirement is discovered.
+        match install_result {
+            Ok(response) => assert!(
+                response.blockers.is_empty(),
+                "a metadata-fetch failure surfaces as a still-installed response, not a \
+                 fabricated credential blocker: {response:#?}"
+            ),
+            Err(ref error) => assert_eq!(
+                error.kind,
+                ProductSurfaceErrorKind::Validation,
+                "a non-transient metadata-fetch failure surfaces as an invalid binding \
+                 request: {error:#?}"
+            ),
+        }
+        assert!(
+            services
+                .extension_management
+                .active_model_visible_capabilities()
+                .await
+                .expect("active capability projection")
+                .is_empty(),
+            "a metadata-fetch failure must not publish any tools"
+        );
+        let installation_store = services.extension_management.installation_store_for_test();
+        let manifest = installation_store
+            .get_manifest(&ExtensionId::new("mcp-fixture").expect("extension id"))
+            .await
+            .expect("installed manifest readback")
+            .expect("fixture manifest remains durable after a metadata-fetch failure");
+        assert_eq!(
+            manifest.initial_preparation(),
+            ironclaw_extensions::PreparationRequirement::Required,
+            "a metadata-fetch failure must leave the definition unprepared: {manifest:#?}"
+        );
+    }
+
+    let oauth_policy = || HostedMcpAuthPolicy::OAuth {
+        access_token: "oauth-token".to_string(),
+    };
+    let search_tool = || vec![HostedMcpTool::read_only("search", json!("ok"))];
+
+    // Sub-case 1: transport error on the protected-resource fetch.
+    let transport_server = HostedMcpRegistrationServer::start(oauth_policy(), search_tool()).await;
+    let transport_egress = Arc::new(
+        HostedMcpRegistrationNetworkEgress::for_server_with_transport_failure_on(
+            &transport_server,
+            "/.well-known/oauth-protected-resource",
+        ),
+    );
+    assert_metadata_failure_blocks_preparation(
+        "hosted-mcp-oauth-metadata-transport",
+        transport_egress,
+    )
+    .await;
+
+    // Sub-case 2: non-200 status on the protected-resource fetch.
+    let non200_server = HostedMcpRegistrationServer::start(oauth_policy(), search_tool()).await;
+    non200_server.script_protected_resource_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        b"boom".to_vec(),
+    ));
+    let non200_egress = Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+        &non200_server,
+    ));
+    assert_metadata_failure_blocks_preparation("hosted-mcp-oauth-metadata-non200", non200_egress)
+        .await;
+
+    // Sub-case 3: an oversized (>64 KiB) protected-resource body.
+    let oversized_server = HostedMcpRegistrationServer::start(oauth_policy(), search_tool()).await;
+    oversized_server.script_protected_resource_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::OK,
+        vec![b'a'; 64 * 1024 + 1],
+    ));
+    let oversized_egress = Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+        &oversized_server,
+    ));
+    assert_metadata_failure_blocks_preparation(
+        "hosted-mcp-oauth-metadata-oversized",
+        oversized_egress,
+    )
+    .await;
+
+    // Sub-case 4: malformed JSON in the protected-resource body.
+    let malformed_server = HostedMcpRegistrationServer::start(oauth_policy(), search_tool()).await;
+    malformed_server.script_protected_resource_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::OK,
+        b"not-json".to_vec(),
+    ));
+    let malformed_egress = Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+        &malformed_server,
+    ));
+    assert_metadata_failure_blocks_preparation(
+        "hosted-mcp-oauth-metadata-malformed",
+        malformed_egress,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1496,3 +1677,16 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
         "documented read-only Azure list tool completes: {outcome:?}"
     );
 }
+
+// The `HostedMcpPreparationService::register` / `ExtensionLifecycleManager::
+// import_bundle` lock-order regression test used to live here, driving both
+// production entry points concurrently through `lifecycle_service` with
+// `tokio::join!`. That version could not reliably force the two tasks to
+// interleave on the shared catalog/operation locks (it passed in ~0.07s even
+// with the lock-order fix reverted), so it was a non-discriminating
+// regression test. The deterministic replacement — which pauses `register`
+// mid-flight via a controllable installation-store double to force the
+// actual AB-BA contention — lives at the crate tier:
+// `crates/ironclaw_extension_host/src/product_lifecycle.rs`'s
+// `concurrent_register_and_import_bundle_do_not_deadlock` test, which can
+// construct `ExtensionLifecycleManager` directly with that double.

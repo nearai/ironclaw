@@ -67,6 +67,11 @@ pub struct HostedMcpRegistrationServer {
 pub struct HostedMcpRegistrationNetworkEgress {
     loopback_base: String,
     client: reqwest::Client,
+    /// When set, any request whose path contains this substring fails at the
+    /// transport layer instead of reaching the fixture server, scripting the
+    /// `ports.runtime_http_egress().execute(...)` `Err` branch of
+    /// `fetch_oauth_metadata`.
+    fail_transport_for_path: Option<String>,
 }
 
 impl HostedMcpRegistrationNetworkEgress {
@@ -77,6 +82,20 @@ impl HostedMcpRegistrationNetworkEgress {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("fixture client"),
+            fail_transport_for_path: None,
+        }
+    }
+
+    /// Same as [`Self::for_server`], but requests whose path contains
+    /// `path_substr` fail with a transport error instead of reaching the
+    /// server, for scripting `fetch_oauth_metadata`'s egress-`Err` branch.
+    pub fn for_server_with_transport_failure_on(
+        server: &HostedMcpRegistrationServer,
+        path_substr: impl Into<String>,
+    ) -> Self {
+        Self {
+            fail_transport_for_path: Some(path_substr.into()),
+            ..Self::for_server(server)
         }
     }
 }
@@ -102,6 +121,15 @@ impl NetworkHttpEgress for HostedMcpRegistrationNetworkEgress {
             || !matches!(host, "mcp.example.test" | "auth.example.test")
         {
             return Err(NetworkHttpError::PolicyDenied { reason: "hosted MCP fixture accepts only mcp.example.test and auth.example.test HTTPS origins".to_string(), request_bytes, response_bytes: 0 });
+        }
+        if let Some(path_substr) = &self.fail_transport_for_path
+            && source.path().contains(path_substr.as_str())
+        {
+            return Err(NetworkHttpError::Transport {
+                reason: "hosted MCP fixture scripted a transport failure".to_string(),
+                request_bytes,
+                response_bytes: 0,
+            });
         }
         let mut target =
             url::Url::parse(&self.loopback_base).map_err(|error| NetworkHttpError::InvalidUrl {
@@ -179,6 +207,8 @@ impl HostedMcpRegistrationServer {
             policy,
             tools,
             requests: Mutex::new(Vec::new()),
+            protected_resource_override: Mutex::new(None),
+            authorization_server_override: Mutex::new(None),
         });
         let (shutdown, receiver) = oneshot::channel();
         let app = Router::new()
@@ -216,6 +246,26 @@ impl HostedMcpRegistrationServer {
     pub fn requests(&self) -> Vec<RecordedHostedMcpRequest> {
         self.state.requests.lock().expect("request lock").clone()
     }
+
+    /// Scripts the next `/.well-known/oauth-protected-resource` response,
+    /// replacing the default valid JSON document.
+    pub fn script_protected_resource_response(&self, response: ScriptedMetadataResponse) {
+        *self
+            .state
+            .protected_resource_override
+            .lock()
+            .expect("protected-resource override lock") = Some(response);
+    }
+
+    /// Scripts the next `/.well-known/oauth-authorization-server` response,
+    /// replacing the default valid JSON document.
+    pub fn script_authorization_server_response(&self, response: ScriptedMetadataResponse) {
+        *self
+            .state
+            .authorization_server_override
+            .lock()
+            .expect("authorization-server override lock") = Some(response);
+    }
 }
 
 impl Drop for HostedMcpRegistrationServer {
@@ -229,10 +279,31 @@ impl Drop for HostedMcpRegistrationServer {
     }
 }
 
+/// Scripts a raw status/body pair for the protected-resource or
+/// authorization-server metadata endpoints, in place of their default valid
+/// JSON document, for driving `fetch_oauth_metadata`'s non-200 / oversized /
+/// malformed-JSON failure branches.
+#[derive(Clone, Debug)]
+pub struct ScriptedMetadataResponse {
+    pub status: StatusCode,
+    pub body: Vec<u8>,
+}
+
+impl ScriptedMetadataResponse {
+    pub fn new(status: StatusCode, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+        }
+    }
+}
+
 struct StateData {
     policy: HostedMcpAuthPolicy,
     tools: Vec<HostedMcpTool>,
     requests: Mutex<Vec<RecordedHostedMcpRequest>>,
+    protected_resource_override: Mutex<Option<ScriptedMetadataResponse>>,
+    authorization_server_override: Mutex<Option<ScriptedMetadataResponse>>,
 }
 
 async fn mcp(
@@ -366,19 +437,37 @@ fn record_metadata_request(state: &StateData, path: &str) {
         });
 }
 
-async fn protected_resource(State(state): State<Arc<StateData>>) -> Json<Value> {
+async fn protected_resource(State(state): State<Arc<StateData>>) -> Response {
     record_metadata_request(&state, "/.well-known/oauth-protected-resource");
+    if let Some(scripted) = state
+        .protected_resource_override
+        .lock()
+        .expect("protected-resource override lock")
+        .take()
+    {
+        return (scripted.status, scripted.body).into_response();
+    }
     Json(
         // Representative protected-resource response: admission consumes only
         // its security-critical URLs and tolerates unrelated standard fields.
         json!({"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"],"scopes_supported":["default"],"bearer_methods_supported":["header"],"resource_name":"Hosted MCP fixture"}),
     )
+    .into_response()
 }
-async fn authorization_server(State(state): State<Arc<StateData>>) -> Json<Value> {
+async fn authorization_server(State(state): State<Arc<StateData>>) -> Response {
     record_metadata_request(&state, "/.well-known/oauth-authorization-server");
+    if let Some(scripted) = state
+        .authorization_server_override
+        .lock()
+        .expect("authorization-server override lock")
+        .take()
+    {
+        return (scripted.status, scripted.body).into_response();
+    }
     Json(
         json!({"issuer":"https://auth.example.test","authorization_endpoint":"https://auth.example.test/authorize","token_endpoint":"https://auth.example.test/token","registration_endpoint":"https://auth.example.test/register","scopes_supported":["default"],"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"]}),
     )
+    .into_response()
 }
 async fn dynamic_client_registration() -> Json<Value> {
     Json(
