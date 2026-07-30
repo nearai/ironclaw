@@ -70,6 +70,7 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
     try:
         page = await context.new_page()
         project_requests: list[str] = []
+        project_list_queries: list[dict[str, list[str]]] = []
         thread_create_requests: list[dict] = []
         project_thread_requests: list[str] = []
         project_file_requests: list[str] = []
@@ -89,6 +90,7 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
 
             if path == "/api/webchat/v2/projects" and request.method == "GET":
                 project_requests.append(path)
+                project_list_queries.append(parse_qs(parsed.query))
                 await fulfill_json(route, {"projects": MOCK_PROJECTS})
                 return
 
@@ -235,6 +237,7 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
             "context": context,
             "page": page,
             "project_requests": project_requests,
+            "project_list_queries": project_list_queries,
             "thread_create_requests": thread_create_requests,
             "project_thread_requests": project_thread_requests,
             "project_file_requests": project_file_requests,
@@ -306,21 +309,26 @@ async def test_reborn_projects_overview_shows_only_api_backed_fields(
         )
 
         await expect(
-            page.locator(SEL_V2["projects_summary_for"].format(kind="projects"))
-        ).to_contain_text("3")
+            page.locator(SEL_V2["projects_summary_value_for"].format(kind="projects"))
+        ).to_have_text("3")
         await expect(
-            page.locator(SEL_V2["projects_summary_for"].format(kind="active"))
-        ).to_contain_text("2")
+            page.locator(SEL_V2["projects_summary_value_for"].format(kind="active"))
+        ).to_have_text("2")
         await expect(
-            page.locator(SEL_V2["projects_summary_for"].format(kind="archived"))
-        ).to_contain_text("1")
+            page.locator(SEL_V2["projects_summary_value_for"].format(kind="archived"))
+        ).to_have_text("1")
 
         await expect(research_card).to_contain_text("Active")
         await expect(research_card).to_contain_text("Owner")
-        await expect(research_card).to_contain_text("Updated")
+        await expect(
+            research_card.locator(SEL_V2["project_updated_at"])
+        ).to_have_attribute("datetime", MOCK_PROJECTS[1]["updated_at"])
         await expect(archived_card).to_contain_text("Archived")
         await expect(archived_card).to_contain_text("Viewer")
-        await expect(archived_card).to_contain_text("Updated")
+        await expect(
+            archived_card.locator(SEL_V2["project_updated_at"])
+        ).to_have_attribute("datetime", MOCK_PROJECTS[2]["updated_at"])
+        assert {"limit": ["500"]} in harness["project_list_queries"]
 
         for fabricated_copy in [
             "Healthy",
