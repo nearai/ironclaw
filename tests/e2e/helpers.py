@@ -265,6 +265,7 @@ SEL_V2 = {
     "admin_suspended_status_name": "Suspended",
     "admin_suspend_button_name": "Suspend",
     "admin_activate_button_name": "Activate",
+    "admin_user_detail_delete": "[data-testid='admin-user-detail-delete']",
     "admin_configuration_group_test_id": "admin-configuration-group",
     "admin_extension_configuration_heading_name": "Extension configuration",
     "admin_slack_configuration_heading_name": "Slack deployment configuration",
