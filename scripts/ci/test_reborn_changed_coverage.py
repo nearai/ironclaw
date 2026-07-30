@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -94,6 +95,13 @@ class ChangedCoverageTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci/reborn_changed_coverage.py", workflow)
         self.assertIn("github.event.pull_request.base.sha", workflow)
         self.assertIn("reborn-changed-coverage.json", workflow)
+        self.assertRegex(
+            workflow,
+            re.compile(
+                r"- name: Post sticky coverage comment\n"
+                r"\s+if: .*always\(\).*github\.event_name == 'pull_request'",
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -177,7 +177,7 @@ jobs:
       - name: Run bounded libsql user-session soak
         run: |
           mkdir -p target/ironclaw-stress
-          cargo run -p ironclaw_stress --release -- \
+          cargo run --locked -p ironclaw_stress --release -- \
             --backend libsql \
             --preset soak-user-session \
             --trace-jsonl target/ironclaw-stress/soak-trace.jsonl \

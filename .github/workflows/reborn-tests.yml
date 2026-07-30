@@ -744,7 +744,6 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Test changed-code coverage gate
-        if: github.event_name == 'pull_request'
         run: python3 scripts/ci/test_reborn_changed_coverage.py
 
       - name: Enforce changed production-line coverage
@@ -769,7 +768,7 @@ jobs:
       # reborn-coverage.yml workflow's comment step) — enforcement happens in
       # the "Render Reborn coverage ratchet" step above, not here.
       - name: Post sticky coverage comment
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

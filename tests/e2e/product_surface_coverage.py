@@ -56,6 +56,16 @@ def _evidence(**fields: str) -> dict[str, str]:
     return {field: value for field, value in fields.items() if value}
 
 
+def _scheduled_live_evidence(case: ProviderJourneyCase) -> dict[str, str]:
+    return _evidence(
+        tier="scheduled_live",
+        source=case.live_evidence.workflow,
+        test=case.live_evidence.job,
+        case_id=case.live_evidence.case_id,
+        artifact=case.live_evidence.artifact,
+    )
+
+
 def build_capability_evidence() -> dict[str, dict[str, list[dict[str, str]]]]:
     evidence = {axis: defaultdict(list) for axis in COVERAGE_AXES}
 
@@ -110,15 +120,7 @@ def build_capability_evidence() -> dict[str, dict[str, list[dict[str, str]]]]:
         for capability_id in capabilities:
             evidence["journey"][capability_id].append(reference)
             if isinstance(case, ProviderJourneyCase):
-                evidence["live"][capability_id].append(
-                    _evidence(
-                        tier="scheduled_live",
-                        source=case.live_evidence.workflow,
-                        test=case.live_evidence.job,
-                        case_id=case.live_evidence.case_id,
-                        artifact=case.live_evidence.artifact,
-                    )
-                )
+                evidence["live"][capability_id].append(_scheduled_live_evidence(case))
 
     return {
         axis: {
@@ -187,15 +189,7 @@ def _journey_row(case: ProviderJourneyCase | ProductJourneyCase) -> dict:
     if isinstance(case, ProviderJourneyCase):
         evidence["live"] = {
             "status": "scheduled",
-            "items": [
-                _evidence(
-                    tier="scheduled_live",
-                    source=case.live_evidence.workflow,
-                    test=case.live_evidence.job,
-                    case_id=case.live_evidence.case_id,
-                    artifact=case.live_evidence.artifact,
-                )
-            ],
+            "items": [_scheduled_live_evidence(case)],
         }
     return {
         "id": case.case_id,

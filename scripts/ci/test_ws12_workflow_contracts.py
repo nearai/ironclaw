@@ -43,16 +43,24 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         self.assertIn(f"missing workflow: {path}", validate_workflow_texts(sabotaged))
 
     def test_unconditional_skip_fails_loudly(self) -> None:
-        sabotaged = copy.deepcopy(self.workflows)
         path = ".github/workflows/nightly-deep-ci.yml"
-        sabotaged[path] += "\n  disabled-lane:\n    if: false\n"
-
-        self.assertTrue(
-            any(
-                "unconditionally skipped" in error
-                for error in validate_workflow_texts(sabotaged)
-            )
+        conditions = (
+            "if: false",
+            "if:  false",
+            "if: 'false'",
+            "if: |\n      false",
         )
+        for condition in conditions:
+            with self.subTest(condition=condition):
+                sabotaged = copy.deepcopy(self.workflows)
+                sabotaged[path] += f"\n  disabled-lane:\n    {condition}\n"
+
+                self.assertTrue(
+                    any(
+                        "unconditionally skipped" in error
+                        for error in validate_workflow_texts(sabotaged)
+                    )
+                )
 
     def test_code_style_runs_workflow_and_shard_sabotage_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/code_style.yml").read_text(

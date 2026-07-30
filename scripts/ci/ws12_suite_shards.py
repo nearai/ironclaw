@@ -28,7 +28,7 @@ def _required_text(record: dict, key: str, label: str) -> str:
     return value
 
 
-def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
+def _validate_config(policy: dict) -> tuple[int, int, list[str]]:
     config = policy.get("playwright")
     if not isinstance(config, dict):
         raise PolicyError("missing [playwright] policy")
@@ -42,21 +42,29 @@ def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
         raise PolicyError("playwright.max_shard_seconds must be a positive integer")
     if not isinstance(patterns, list) or not patterns:
         raise PolicyError("playwright.discovery_globs must be a non-empty list")
-
-    discovered: set[str] = set()
     for pattern in patterns:
         if not isinstance(pattern, str) or not pattern:
             raise PolicyError("playwright.discovery_globs contains an invalid pattern")
+    return shard_count, budget, patterns
+
+
+def _discover_suites(repo_root: Path, patterns: list[str]) -> set[str]:
+    discovered: set[str] = set()
+    for pattern in patterns:
         discovered.update(
             path.relative_to(repo_root).as_posix() for path in repo_root.glob(pattern)
         )
     if not discovered:
         raise PolicyError("playwright discovery matched no suites")
+    return discovered
 
+
+def _classify_suites(
+    policy: dict, repo_root: Path
+) -> tuple[dict[str, dict], dict[str, list[dict]]]:
     suites = policy.get("suite", [])
     if not isinstance(suites, list) or not suites:
         raise PolicyError("policy contains no [[suite]] entries")
-
     by_path: dict[str, dict] = {}
     affinity_members: dict[str, list[dict]] = defaultdict(list)
     for index, suite in enumerate(suites):
@@ -79,7 +87,12 @@ def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
             raise PolicyError(f"suite path does not exist: {path}")
         by_path[path] = suite
         affinity_members[affinity].append(suite)
+    return by_path, affinity_members
 
+
+def _classify_waivers(
+    policy: dict, repo_root: Path, by_path: dict[str, dict]
+) -> set[str]:
     waivers = policy.get("waiver", [])
     if not isinstance(waivers, list):
         raise PolicyError("[[waiver]] entries must be tables")
@@ -99,7 +112,12 @@ def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
         if not (repo_root / evidence).is_file():
             raise PolicyError(f"waiver evidence does not exist: {evidence}")
         waived.add(path)
+    return waived
 
+
+def _reconcile_discovery(
+    discovered: set[str], by_path: dict[str, dict], waived: set[str]
+) -> None:
     classified = set(by_path) | waived
     missing = sorted(discovered - classified)
     stale = sorted(classified - discovered)
@@ -110,6 +128,10 @@ def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
     if stale:
         raise PolicyError(f"policy entries outside discovery scope: {', '.join(stale)}")
 
+
+def _affinity_bundles(
+    affinity_members: dict[str, list[dict]], budget: int
+) -> list[tuple[int, str, list[str]]]:
     bundles: list[tuple[int, str, list[str]]] = []
     for affinity, members in affinity_members.items():
         seconds = sum(member["historical_seconds"] for member in members)
@@ -120,7 +142,15 @@ def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
         bundles.append(
             (seconds, affinity, sorted(member["path"] for member in members))
         )
+    return bundles
 
+
+def _place_bundles(
+    bundles: list[tuple[int, str, list[str]]],
+    shard_count: int,
+    budget: int,
+    expected_paths: set[str],
+) -> list[dict]:
     # Longest-processing-time greedy placement. Affinity groups are indivisible.
     shards = [{"seconds": 0, "affinities": [], "files": []} for _ in range(shard_count)]
     for seconds, affinity, files in sorted(
@@ -153,9 +183,19 @@ def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
             }
         )
 
-    if len(assigned) != len(set(assigned)) or set(assigned) != set(by_path):
+    if len(assigned) != len(set(assigned)) or set(assigned) != expected_paths:
         raise PolicyError("generated matrix does not assign every suite exactly once")
     return matrix
+
+
+def validate_and_generate(policy: dict, repo_root: Path) -> list[dict]:
+    shard_count, budget, patterns = _validate_config(policy)
+    discovered = _discover_suites(repo_root, patterns)
+    by_path, affinity_members = _classify_suites(policy, repo_root)
+    waived = _classify_waivers(policy, repo_root, by_path)
+    _reconcile_discovery(discovered, by_path, waived)
+    bundles = _affinity_bundles(affinity_members, budget)
+    return _place_bundles(bundles, shard_count, budget, set(by_path))
 
 
 def main() -> int:

@@ -8315,6 +8315,7 @@ CASES: dict[str, CaseSpec] = {
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
+        retry_policy="never",
     ),
     "qa_6a_gmail_connect": CaseSpec(
         case_qa_6a_gmail_connect,

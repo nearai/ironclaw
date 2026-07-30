@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -55,6 +56,19 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+UNCONDITIONAL_SKIP = re.compile(
+    r"""(?mx)
+    ^[ \t]*if[ \t]*:[ \t]*
+    (?:
+        ["']?[ \t]*false[ \t]*["']?[ \t]*$
+        |
+        [|>][-+]?[ \t]*\n[ \t]+["']?[ \t]*false[ \t]*["']?[ \t]*$
+        |
+        \$\{\{[ \t]*false[ \t]*\}\}[ \t]*$
+    )
+    """
+)
+
 
 def validate_workflow_texts(workflows: dict[str, str]) -> list[str]:
     """Return every missing lane marker; an empty result is the only pass."""
@@ -64,10 +78,10 @@ def validate_workflow_texts(workflows: dict[str, str]) -> list[str]:
         if text is None:
             errors.append(f"missing workflow: {path}")
             continue
-        for marker in markers:
-            if marker not in text:
-                errors.append(f"{path}: missing {marker!r}")
-        if "if: false" in text or "if: ${{ false }}" in text:
+        errors.extend(
+            f"{path}: missing {marker!r}" for marker in markers if marker not in text
+        )
+        if UNCONDITIONAL_SKIP.search(text):
             errors.append(f"{path}: contains an unconditionally skipped lane")
     return errors
 

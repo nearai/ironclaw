@@ -9983,22 +9983,30 @@ class RunCaseWithRetriesTests(unittest.TestCase):
         self.assertEqual(calls["count"], 1)
 
     def test_mechanically_identifiable_deterministic_cases_are_no_retry(self):
-        deterministic_markers = (
-            "_routine",
-            "_delivery",
-            "_trigger",
-            "exactly_once",
-            "_guard",
-            "_hygiene",
-        )
         retryable = [
             name
             for name, spec in run_live_qa.CASES.items()
-            if any(marker in name for marker in deterministic_markers)
+            if any(
+                marker in name
+                for marker in run_live_qa.NO_RETRY_CASE_NAME_MARKERS
+            )
             and spec.retry_policy != "never"
         ]
 
         self.assertEqual(retryable, [])
+
+    def test_slack_strategy_doc_side_effect_is_no_retry(self):
+        spec = run_live_qa.CASES["qa_5d_slack_strategy_doc_answer"]
+
+        self.assertEqual(spec.retry_policy, "never")
+        self.assertEqual(
+            run_live_qa._case_attempts(
+                "qa_5d_slack_strategy_doc_answer",
+                spec,
+                configured_attempts=3,
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":
