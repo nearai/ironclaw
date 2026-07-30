@@ -136,7 +136,12 @@ function syncCodeBlockLabels(pre, labels) {
   }
 }
 
-function MarkdownRendererImpl({ content, className = "", streaming = false }) {
+function MarkdownRendererImpl({
+  content,
+  className = "",
+  streaming = false,
+  onWorkspaceFileOpen = undefined,
+}) {
   const t = useT();
   const ref = React.useRef(null);
   const normalizedContent = typeof content === "string" ? content : "";
@@ -151,6 +156,21 @@ function MarkdownRendererImpl({ content, className = "", streaming = false }) {
   const renderTimerRef = React.useRef(null);
   const requestRenderRef = React.useRef(() => false);
   const scheduleStreamingRenderRef = React.useRef(() => {});
+  const handleClick = React.useCallback(
+    (event) => {
+      if (typeof onWorkspaceFileOpen !== "function") return;
+      const target = event.target;
+      const anchor =
+        target instanceof Element
+          ? target.closest("a[data-workspace-path]")
+          : null;
+      const path = anchor?.getAttribute("data-workspace-path");
+      if (!path) return;
+      event.preventDefault();
+      onWorkspaceFileOpen(path);
+    },
+    [onWorkspaceFileOpen],
+  );
 
   const renderedHtml =
     normalizedContent && rendered &&
@@ -274,6 +294,7 @@ function MarkdownRendererImpl({ content, className = "", streaming = false }) {
     return (
       <div
         ref={ref}
+        onClick={handleClick}
         className={["markdown-body", "whitespace-pre-wrap", className].join(" ")}
       >
         {normalizedContent}
@@ -284,6 +305,7 @@ function MarkdownRendererImpl({ content, className = "", streaming = false }) {
   return (
     <div
       ref={ref}
+      onClick={handleClick}
       className={["markdown-body", className].join(" ")}
       dangerouslySetInnerHTML={{ __html: renderedHtml }}
     />

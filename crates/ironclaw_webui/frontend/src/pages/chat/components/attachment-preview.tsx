@@ -55,15 +55,26 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
     let objectUrl = null;
     fetchAttachmentBlob(attachment.fetch_url)
       .then(async (blob) => {
+        const resolvedMode = attachmentPreviewMode(
+          attachment.mime_type || blob.type,
+        );
         // Keep the Blob for downloads so `saveBlob` can force the logical
         // filename even when Chromium's PDF viewer owns the preview object URL.
         objectUrl = URL.createObjectURL(blob);
-        const next = { downloadUrl: objectUrl, downloadBlob: blob };
-        if (mode === "image" || mode === "audio" || mode === "video") {
+        const next = {
+          downloadUrl: objectUrl,
+          downloadBlob: blob,
+          mode: resolvedMode,
+        };
+        if (
+          resolvedMode === "image" ||
+          resolvedMode === "audio" ||
+          resolvedMode === "video"
+        ) {
           next.dataUrl = await blobToDataUrl(blob);
-        } else if (mode === "pdf") {
+        } else if (resolvedMode === "pdf") {
           next.frameUrl = objectUrl;
-        } else if (mode === "text") {
+        } else if (resolvedMode === "text") {
           const text = await blob.text();
           next.truncated = text.length > MAX_TEXT_PREVIEW_CHARS;
           next.text = next.truncated ? text.slice(0, MAX_TEXT_PREVIEW_CHARS) : text;
@@ -100,7 +111,7 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         {status === "error" &&
         (<div className="text-sm text-iron-400">{t("chat.attachmentLoadFailed")}</div>)}
         {status === "ready" &&
-        (<PreviewBody mode={mode} view={view} filename={filename} t={t} />)}
+        (<PreviewBody mode={view.mode || mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
         {view.downloadUrl &&

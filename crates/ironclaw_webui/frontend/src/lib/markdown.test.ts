@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import assert from "node:assert/strict";
 import { afterEach, test, vi } from "vitest";
 
@@ -67,7 +68,7 @@ test("renderMarkdown routes parsed HTML through DOMPurify.sanitize, stripping ha
   assert.equal(out, "<p><img src=x></p>", "renderMarkdown returns sanitize's output, never raw markup");
 });
 
-test("renderMarkdown installs the external-link hardening hook once", async () => {
+test("renderMarkdown installs workspace and external-link hooks once", async () => {
   const calls = { hooks: [] };
   const renderMarkdown = await loadRenderMarkdown({
     parse: (content) => `<p>${content}</p>`,
@@ -80,16 +81,20 @@ test("renderMarkdown installs the external-link hardening hook once", async () =
   renderMarkdown("[example](https://example.com)");
   renderMarkdown("[again](https://example.com)");
 
-  assert.equal(calls.hooks.length, 1, "DOMPurify hook is registered only once");
-  assert.equal(calls.hooks[0].name, "afterSanitizeAttributes");
+  assert.equal(calls.hooks.length, 2, "each DOMPurify link hook is registered only once");
+  const targetHook = calls.hooks.find(
+    ({ name }) => name === "afterSanitizeAttributes",
+  );
+  assert.ok(targetHook);
 
   const attrs = new Map([["href", "https://example.com"]]);
   const node = {
     tagName: "A",
     getAttribute: (name) => attrs.get(name) || null,
     setAttribute: (name, value) => attrs.set(name, value),
+    removeAttribute: (name) => attrs.delete(name),
   };
-  calls.hooks[0].hook(node);
+  targetHook.hook(node);
 
   assert.equal(attrs.get("target"), "_blank");
   assert.equal(attrs.get("rel"), "noopener noreferrer");
@@ -107,4 +112,24 @@ test("renderMarkdown returns an empty string for falsy content", async () => {
   assert.equal(renderMarkdown(""), "");
   assert.equal(renderMarkdown(null), "");
   assert.equal(renderMarkdown(undefined), "");
+});
+
+test("renderMarkdown preserves scoped workspace links for in-app previews", async () => {
+  vi.resetModules();
+  vi.doUnmock("marked");
+  vi.doUnmock("dompurify");
+
+  const { renderMarkdown } = await import("./markdown");
+  const out = renderMarkdown(
+    "[plain](/workspace/plain.txt) [sandbox](sandbox:/workspace/sandbox.txt)",
+  );
+
+  assert.match(
+    out,
+    /<a href="\/workspace\/plain\.txt" data-workspace-path="\/workspace\/plain\.txt" target="_blank" rel="noopener noreferrer">plain<\/a>/,
+  );
+  assert.match(
+    out,
+    /<a href="\/workspace\/sandbox\.txt" data-workspace-path="\/workspace\/sandbox\.txt" target="_blank" rel="noopener noreferrer">sandbox<\/a>/,
+  );
 });

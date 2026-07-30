@@ -7,8 +7,9 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
-import { fetchRunArtifact } from "../../../lib/api";
+import { fetchRunArtifact, projectFileContentUrl } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { basename } from "../lib/project-file-paths";
 import {
   CHAT_MESSAGE_ROLES,
   messageBelongsToActiveRun,
@@ -125,6 +126,17 @@ function MessageBubbleImpl({
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
+  const openWorkspaceFile = React.useCallback(
+    (path: string) => {
+      if (!threadId) return;
+      setPreviewAttachment({
+        filename: basename(path),
+        mime_type: "",
+        fetch_url: projectFileContentUrl({ threadId, path }),
+      });
+    },
+    [threadId],
+  );
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -257,7 +269,15 @@ function MessageBubbleImpl({
           {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
           role === CHAT_MESSAGE_ROLES.SYSTEM ||
           role === CHAT_MESSAGE_ROLES.ERROR
-            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} streaming={isStreamingAssistantReply} /></div>)
+            ? (<div className={contentOpacityClass}><MarkdownRenderer
+                content={content}
+                streaming={isStreamingAssistantReply}
+                onWorkspaceFileOpen={
+                  role === CHAT_MESSAGE_ROLES.ASSISTANT && threadId
+                    ? openWorkspaceFile
+                    : undefined
+                }
+              /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
@@ -281,12 +301,13 @@ function MessageBubbleImpl({
                 onPreview={setPreviewAttachment}
               />))}
             </div>
-            <AttachmentPreviewModal
-              attachment={previewAttachment}
-              onClose={() => setPreviewAttachment(null)}
-            />
             </>
           )}
+
+          {previewAttachment && (<AttachmentPreviewModal
+            attachment={previewAttachment}
+            onClose={() => setPreviewAttachment(null)}
+          />)}
 
           {role === CHAT_MESSAGE_ROLES.ASSISTANT &&
           (<ProjectFileChips

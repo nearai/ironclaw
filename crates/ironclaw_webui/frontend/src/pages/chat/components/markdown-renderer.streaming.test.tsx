@@ -73,3 +73,36 @@ test("streaming Markdown throttles snapshots and stops after a load failure", as
     vi.useRealTimers();
   }
 });
+
+test("workspace links delegate to the in-app file preview", async () => {
+  renderMarkdownMock.mockReset();
+  renderMarkdownMock.mockImplementation(
+    () =>
+      '<p><a href="/workspace/report.csv" data-workspace-path="/workspace/report.csv"><span>report.csv</span></a></p>',
+  );
+  const onWorkspaceFileOpen = vi.fn();
+  const { MarkdownRenderer } = await import("./markdown-renderer");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => {
+      root.render(React.createElement(MarkdownRenderer, {
+        content: "[report.csv](/workspace/report.csv)",
+        onWorkspaceFileOpen,
+      }));
+    });
+
+    const linkLabel = container.querySelector("a span");
+    assert.ok(linkLabel);
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    linkLabel.dispatchEvent(click);
+
+    assert.equal(click.defaultPrevented, true);
+    assert.deepEqual(onWorkspaceFileOpen.mock.calls, [["/workspace/report.csv"]]);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
