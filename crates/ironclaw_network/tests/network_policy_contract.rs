@@ -3,7 +3,8 @@ use ironclaw_host_api::{
     ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_network::{
-    NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url, target_matches_pattern,
+    NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url, parse_host_pattern,
+    target_matches_pattern,
 };
 
 #[tokio::test]
@@ -329,6 +330,99 @@ fn pattern(
         scheme,
         host_pattern: host_pattern.to_string(),
         port,
+    }
+}
+
+// `parse_host_pattern` is the chokepoint an untrusted operator-supplied
+// hostname string (e.g. the sandbox's `IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS`)
+// must go through before becoming policy. Unlike `NetworkTargetPattern::
+// validate_declaration` (shape-only, permits a reviewed `*` for legitimate
+// full-access grants), this rejects the bare wildcard outright: a typo in an
+// env var was never reviewed, and `host_matches_pattern` treats `*` as
+// "match every host".
+#[test]
+fn parse_host_pattern_accepts_plain_and_wildcard_hostnames() {
+    let plain = parse_host_pattern("crates.io").unwrap();
+    assert_eq!(plain.host_pattern, "crates.io");
+    assert_eq!(plain.scheme, None);
+    assert_eq!(plain.port, None);
+
+    let wildcard = parse_host_pattern("*.corp.example.com").unwrap();
+    assert_eq!(wildcard.host_pattern, "*.corp.example.com");
+}
+
+#[test]
+fn parse_host_pattern_trims_surrounding_whitespace() {
+    let pattern = parse_host_pattern("  crates.io  ").unwrap();
+    assert_eq!(pattern.host_pattern, "crates.io");
+}
+
+#[test]
+fn parse_host_pattern_rejects_empty_and_bare_wildcard() {
+    assert!(
+        parse_host_pattern("")
+            .unwrap_err()
+            .is_invalid_host_pattern()
+    );
+    assert!(
+        parse_host_pattern("   ")
+            .unwrap_err()
+            .is_invalid_host_pattern()
+    );
+    assert!(
+        parse_host_pattern("*")
+            .unwrap_err()
+            .is_invalid_host_pattern()
+    );
+}
+
+// `parse_host_pattern` is documented as the *stricter* chokepoint relative
+// to `NetworkTargetPattern::validate_declaration`
+// (`crates/ironclaw_host_api/src/action.rs`), which caps host patterns at
+// 253 bytes (the DNS name length limit). A validator billed as strictly
+// stricter must not be laxer on any axis, including length — an unbounded
+// `parse_host_pattern` would let an operator-supplied env var push an
+// arbitrarily large string into `NetworkPolicy::allowed_targets` that
+// `validate_declaration` would have rejected.
+#[test]
+fn parse_host_pattern_rejects_patterns_over_253_bytes() {
+    let too_long = format!("{}.example.com", "a".repeat(250));
+    assert!(too_long.len() > 253);
+    assert!(
+        parse_host_pattern(&too_long)
+            .unwrap_err()
+            .is_invalid_host_pattern(),
+        "parse_host_pattern must reject patterns over 253 bytes, matching \
+         validate_declaration's length cap"
+    );
+}
+
+#[test]
+fn parse_host_pattern_accepts_pattern_at_exactly_253_bytes() {
+    // 253 bytes is the DNS name length limit and validate_declaration's
+    // exact cap; parse_host_pattern must not be stricter than that either.
+    let label = "a".repeat(249);
+    let at_limit = format!("{label}.com");
+    assert_eq!(at_limit.len(), 253);
+    assert!(parse_host_pattern(&at_limit).is_ok());
+}
+
+#[test]
+fn parse_host_pattern_rejects_malformed_hostnames() {
+    for bad in [
+        "not a host!",
+        "..leading-dot.com",
+        "trailing-dot.com.",
+        "double..dot.com",
+        "has space.com",
+        "embedded\0nul.com",
+    ] {
+        assert!(
+            parse_host_pattern(bad)
+                .unwrap_err()
+                .is_invalid_host_pattern(),
+            "expected {bad:?} to be rejected"
+        );
     }
 }
 

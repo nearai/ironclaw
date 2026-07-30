@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_approvals::{
     DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverrideKey,
     ToolPermissionOverrideStorePort,
 };
 use ironclaw_host_api::{Action, CapabilityId, Principal, ResourceScope};
-use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnError, TurnErrorCategory, TurnRunId, TurnStatus,

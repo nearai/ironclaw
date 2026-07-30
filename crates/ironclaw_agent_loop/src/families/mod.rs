@@ -32,7 +32,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         model:DefaultModelStrategy(primary_or_fallback_index),\
         batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
         gate:DefaultGateHandlingStrategy(block),\
-        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},stale_request=iteration_retry,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),\
+        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
         stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
@@ -46,8 +46,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x05, 0x9f, 0x9c, 0x88, 0x91, 0x15, 0xcc, 0xf1, 0x4e, 0x05, 0x7e, 0x5d, 0x9a, 0x1e, 0xb9, 0xfe,
-    0x3c, 0x39, 0xd6, 0x00, 0xae, 0x07, 0xc4, 0x2c, 0x85, 0xe8, 0x39, 0x3f, 0xcf, 0x95, 0x71, 0x9e,
+    0xca, 0xbb, 0x66, 0x61, 0xe4, 0xfd, 0xb4, 0x81, 0x12, 0x15, 0xc9, 0xde, 0x1d, 0x18, 0x68, 0xc3,
+    0x58, 0xf7, 0x9e, 0x51, 0xa7, 0x91, 0xd5, 0x75, 0xde, 0xe3, 0x7f, 0x96, 0x25, 0xbc, 0xf1, 0xda,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn availability_attempts_override_gives_one_retry_then_abort() {
+    async fn availability_attempts_override_gives_one_retry_then_observation() {
         use crate::state::{LoopExecutionState, RecoveryAttemptClass, RecoveryStrategyState};
         use crate::strategies::{
             ModelErrorClass, ModelErrorSummary, RecoveryOutcome, SanitizedStrategySummary,
@@ -223,6 +223,8 @@ mod tests {
         let err = ModelErrorSummary {
             class: ModelErrorClass::Unavailable,
             safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
+            retry_after_ms: None,
+            next_fallback_index: Some(1),
         };
 
         let state = LoopExecutionState::initial_for_run(&context);
@@ -245,8 +247,8 @@ mod tests {
             .on_model_error(&exhausted, &err)
             .await;
         assert!(
-            matches!(outcome, RecoveryOutcome::Abort { .. }),
-            "second availability failure should abort at attempts=1, got {outcome:?}"
+            matches!(outcome, RecoveryOutcome::ModelErrorObservation { .. }),
+            "second availability failure should get one observation at attempts=1, got {outcome:?}"
         );
     }
 }

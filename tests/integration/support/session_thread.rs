@@ -146,7 +146,7 @@ impl RebornThreadHarness<InMemoryBackend> {
 /// `CompositeRootFilesystem`-specific constructor (integration tier).
 impl RebornThreadHarness<CompositeRootFilesystem> {
     /// Harness backed by a shared production-path composite; threads land at
-    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_local_dev_database_roots`).
+    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_standalone_database_roots`).
     /// `root` (also held by `GroupSharedStorage::turn_root`) keeps the `TempDir` alive so
     /// on-disk libsql data persists across `reopened()` calls.
     pub fn filesystem_shared_composite(

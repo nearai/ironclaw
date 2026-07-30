@@ -162,7 +162,7 @@ impl HostSkillContextBuildError {
             Self::TrustDataMissing
             | Self::VisibilityDataMissing
             | Self::UnsafeModelVisibleContent => AgentLoopHostErrorKind::PolicyDenied,
-            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::ContextOverflow,
             Self::BudgetMisconfigured | Self::Internal => AgentLoopHostErrorKind::Internal,
         };
         AgentLoopHostError::new(kind, self.to_string())

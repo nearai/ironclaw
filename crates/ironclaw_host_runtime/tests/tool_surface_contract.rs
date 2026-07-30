@@ -347,6 +347,39 @@ async fn visible_surface_empty_registry_returns_deterministic_empty_version() {
 }
 
 #[tokio::test]
+async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
+    let registry_runtime = runtime_with(
+        registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::RegistryInstalled),
+        Arc::new(GrantAuthorizer),
+    );
+    let local_runtime = runtime_with(
+        registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::InstalledLocal),
+        Arc::new(GrantAuthorizer),
+    );
+    let request = || {
+        visible_request(context_with_grants([(
+            capability_id("echo.say"),
+            vec![EffectKind::DispatchCapability],
+        )]))
+    };
+
+    let registry_surface = registry_runtime
+        .visible_capabilities(request())
+        .await
+        .unwrap();
+    let local_surface = local_runtime.visible_capabilities(request()).await.unwrap();
+
+    assert_eq!(
+        registry_surface.capabilities[0].description_trust,
+        CapabilityDescriptionTrust::VerifiedCatalog
+    );
+    assert_eq!(
+        local_surface.capabilities[0].description_trust,
+        CapabilityDescriptionTrust::Untrusted
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_default_policy_and_missing_provider_trust_fail_closed() {
     let authorizer = Arc::new(CountingGrantAuthorizer::default());
     let runtime = runtime_with(
@@ -1062,7 +1095,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
         dispatcher.clone(),
         Arc::new(GrantAuthorizer),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-        local_dev_runtime_policy(),
+        standalone_runtime_policy(),
     )
     .with_trust_policy(Arc::new(trust_policy_for([(
         "echo",
@@ -1836,11 +1869,11 @@ fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
         .collect()
 }
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -2019,7 +2052,7 @@ fn runtime_with_dispatcher(
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-        local_dev_runtime_policy(),
+        standalone_runtime_policy(),
     )
 }
 
@@ -2031,6 +2064,25 @@ fn registry_from_manifests<const N: usize>(manifests: [(&str, &str); N]) -> Exte
             ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap();
         registry.insert(package).unwrap();
     }
+    registry
+}
+
+fn registry_from_manifest_source(manifest: &str, source: ManifestSource) -> ExtensionRegistry {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    let manifest = ExtensionManifest::parse(
+        &manifest,
+        source,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
     registry
 }
 

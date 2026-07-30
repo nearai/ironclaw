@@ -1,26 +1,20 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use super::port_adapters::{HostManagedLoopCheckpointPort, HostManagedLoopProgressPort};
 
-use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, FailureKind, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
 use ironclaw_turns::{
-    CheckpointStateRecord, CheckpointStateStorePort, GetCheckpointStateRequest,
-    InMemoryRunProfileResolver, LoopCheckpointStateRef, LoopCheckpointStore,
-    PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
-    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnStateRowStore,
+    InMemoryRunProfileResolver, LoopCheckpointStateRef, ProcessLoopCheckpointStore,
+    RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProgressEvent,
         LoopProgressPort, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
-        LoopRunContext, RunProfileResolutionRequest, StageCheckpointPayloadRequest,
+        LoopRunContext, LoopSafeSummary, RunProfileResolutionRequest,
+        StageCheckpointPayloadRequest, SystemInferenceTaskId,
     },
 };
 
@@ -70,63 +64,49 @@ async fn recovery_progress_adapter_preserves_sequence_and_typed_labels() {
     ));
 }
 
-use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+#[tokio::test]
+async fn compaction_redaction_progress_adapter_preserves_count_and_reason() {
+    let context = test_run_context().await;
+    let sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = sink.clone();
+    let port = HostManagedLoopProgressPort::new(context.clone(), milestone_sink);
+    let task_id = SystemInferenceTaskId::new();
+
+    port.emit_loop_progress(LoopProgressEvent::CompactionLeakDetected {
+        task_id,
+        reason_kind: LoopSafeSummary::new("redacted").expect("valid safe reason"),
+        redacted_leak_count: 2,
+    })
+    .await
+    .expect("compaction redaction progress must reach the durable milestone seam");
+
+    let milestones = sink.milestones();
+    assert_eq!(milestones.len(), 1);
+    let milestone = &milestones[0];
+    assert_eq!(milestone.scope, context.scope);
+    assert_eq!(milestone.turn_id, context.turn_id);
+    assert_eq!(milestone.run_id, context.run_id);
+    assert!(matches!(
+        &milestone.kind,
+        LoopHostMilestoneKind::CompactionLeakDetected {
+            task_id: emitted_task_id,
+            reason_kind,
+            redacted_leak_count: 2,
+        } if *emitted_task_id == task_id && reason_kind.as_str() == "redacted"
+    ));
+}
 
 fn test_checkpoint_port(
     context: LoopRunContext,
 ) -> (
     HostManagedLoopCheckpointPort,
-    Arc<CheckpointStateStore<InMemoryBackend>>,
-    Arc<TurnStateRowStore<InMemoryBackend>>,
+    Arc<ProcessLoopCheckpointStore>,
 ) {
-    let state_store = in_memory_checkpoint_state_store();
-    let checkpoint_store = Arc::new(in_memory_turn_state_store());
+    let checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-    let port = HostManagedLoopCheckpointPort::new(
-        context,
-        state_store.clone(),
-        checkpoint_store.clone(),
-        milestone_sink,
-    );
-    (port, state_store, checkpoint_store)
-}
-
-struct CountingCheckpointStateStore {
-    inner: Arc<CheckpointStateStore<InMemoryBackend>>,
-    get_calls: AtomicUsize,
-}
-
-impl Default for CountingCheckpointStateStore {
-    fn default() -> Self {
-        Self {
-            inner: in_memory_checkpoint_state_store(),
-            get_calls: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl CountingCheckpointStateStore {
-    fn get_calls(&self) -> usize {
-        self.get_calls.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl CheckpointStateStorePort for CountingCheckpointStateStore {
-    async fn put_checkpoint_state(
-        &self,
-        request: PutCheckpointStateRequest,
-    ) -> Result<CheckpointStateRecord, TurnError> {
-        self.inner.put_checkpoint_state(request).await
-    }
-
-    async fn get_checkpoint_state(
-        &self,
-        request: GetCheckpointStateRequest,
-    ) -> Result<Option<CheckpointStateRecord>, TurnError> {
-        self.get_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.get_checkpoint_state(request).await
-    }
+    let port =
+        HostManagedLoopCheckpointPort::new(context, checkpoint_store.clone(), milestone_sink);
+    (port, checkpoint_store)
 }
 
 #[tokio::test]
@@ -134,7 +114,7 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
     let context = test_run_context().await;
     let expected_schema_id = context.checkpoint_schema_id.clone();
     let expected_schema_version = context.checkpoint_schema_version;
-    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+    let (port, _checkpoint_store) = test_checkpoint_port(context);
     let payload = br#"{"iteration":3}"#.to_vec();
 
     let state_ref = port
@@ -170,137 +150,11 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
 }
 
 #[tokio::test]
-async fn checkpoint_port_skips_read_back_for_host_staged_ref() {
-    let context = test_run_context().await;
-    let state_store = Arc::new(CountingCheckpointStateStore::default());
-    let checkpoint_store = Arc::new(in_memory_turn_state_store());
-    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-    let port = HostManagedLoopCheckpointPort::new(
-        context.clone(),
-        state_store.clone(),
-        checkpoint_store,
-        milestone_sink,
-    );
-
-    let state_ref = port
-        .stage_checkpoint_payload(StageCheckpointPayloadRequest {
-            kind: LoopCheckpointKind::BeforeModel,
-            schema_id: context.checkpoint_schema_id.clone(),
-            payload: br#"{"iteration":1}"#.to_vec(),
-        })
-        .await
-        .expect("host staging should write payload");
-
-    port.checkpoint(LoopCheckpointRequest {
-        kind: LoopCheckpointKind::BeforeModel,
-        state_ref,
-        gate_ref: None,
-    })
-    .await
-    .expect("host-staged ref should checkpoint without a read-back");
-
-    assert_eq!(
-        state_store.get_calls(),
-        0,
-        "checkpoint should trust refs returned by this host's stage call"
-    );
-
-    let directly_staged = state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            context.scope.clone(),
-            context.turn_id,
-            context.run_id,
-            context.checkpoint_schema_id.clone(),
-            context.checkpoint_schema_version,
-            LoopCheckpointKind::BeforeModel,
-            br#"{"iteration":2}"#.to_vec(),
-        ))
-        .await
-        .expect("direct store staging should work");
-
-    port.checkpoint(LoopCheckpointRequest {
-        kind: LoopCheckpointKind::BeforeModel,
-        state_ref: directly_staged.state_ref,
-        gate_ref: None,
-    })
-    .await
-    .expect("directly staged ref should still be accepted through store verification");
-
-    assert_eq!(
-        state_store.get_calls(),
-        1,
-        "refs not minted by this host must still use durable store verification"
-    );
-}
-
-#[tokio::test]
-async fn checkpoint_port_load_payload_follows_retry_linked_source_run_ref() {
-    let source_context = test_run_context().await;
-    let retry_context = LoopRunContext::new(
-        source_context.scope.clone(),
-        source_context.turn_id,
-        TurnRunId::new(),
-        source_context.resolved_run_profile.clone(),
-    );
-    let expected_schema_id = retry_context.checkpoint_schema_id.clone();
-    let expected_schema_version = retry_context.checkpoint_schema_version;
-    let (retry_port, state_store, checkpoint_store) = test_checkpoint_port(retry_context.clone());
-    let payload = br#"{"iteration":4,"retry":true}"#.to_vec();
-
-    let staged = state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            source_context.scope.clone(),
-            source_context.turn_id,
-            source_context.run_id,
-            expected_schema_id.clone(),
-            expected_schema_version,
-            LoopCheckpointKind::BeforeModel,
-            payload.clone(),
-        ))
-        .await
-        .expect("stage source run payload");
-    let token = staged
-        .state_ref
-        .as_str()
-        .strip_prefix("checkpoint:")
-        .expect("state store ref should use checkpoint prefix");
-    let source_run_ref =
-        LoopCheckpointStateRef::for_run(&source_context, token).expect("source run ref");
-    let metadata = checkpoint_store
-        .put_loop_checkpoint(PutLoopCheckpointRequest {
-            scope: retry_context.scope.clone(),
-            turn_id: retry_context.turn_id,
-            run_id: retry_context.run_id,
-            state_ref: source_run_ref,
-            schema_id: expected_schema_id.clone(),
-            schema_version: expected_schema_version,
-            kind: LoopCheckpointKind::BeforeModel,
-            gate_ref: None,
-        })
-        .await
-        .expect("write retry checkpoint link metadata");
-
-    let loaded = retry_port
-        .load_checkpoint_payload(LoadCheckpointPayloadRequest {
-            checkpoint_id: metadata.checkpoint_id,
-            expected_schema_id: expected_schema_id.clone(),
-            expected_schema_version,
-        })
-        .await
-        .expect("load retry-linked checkpoint payload");
-
-    assert_eq!(loaded.kind, LoopCheckpointKind::BeforeModel);
-    assert_eq!(loaded.schema_id, expected_schema_id);
-    assert_eq!(loaded.schema_version, expected_schema_version);
-    assert_eq!(loaded.payload.as_bytes(), payload.as_slice());
-}
-
-#[tokio::test]
 async fn checkpoint_port_load_payload_rejects_schema_mismatch() {
     let context = test_run_context().await;
     let expected_schema_id = context.checkpoint_schema_id.clone();
     let expected_schema_version = context.checkpoint_schema_version;
-    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+    let (port, _checkpoint_store) = test_checkpoint_port(context);
     let state_ref = port
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
@@ -336,7 +190,7 @@ async fn checkpoint_port_load_payload_rejects_schema_version_mismatch() {
     let context = test_run_context().await;
     let expected_schema_id = context.checkpoint_schema_id.clone();
     let stored_schema_version = context.checkpoint_schema_version;
-    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+    let (port, _checkpoint_store) = test_checkpoint_port(context);
     let state_ref = port
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
@@ -374,7 +228,7 @@ async fn checkpoint_port_load_payload_missing_metadata_is_unavailable() {
     let context = test_run_context().await;
     let expected_schema_id = context.checkpoint_schema_id.clone();
     let expected_schema_version = context.checkpoint_schema_version;
-    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+    let (port, _checkpoint_store) = test_checkpoint_port(context);
 
     let error = port
         .load_checkpoint_payload(LoadCheckpointPayloadRequest {
@@ -384,40 +238,6 @@ async fn checkpoint_port_load_payload_missing_metadata_is_unavailable() {
         })
         .await
         .expect_err("missing metadata must reject");
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
-}
-
-#[tokio::test]
-async fn checkpoint_port_load_payload_missing_state_record_is_unavailable() {
-    let context = test_run_context().await;
-    let expected_schema_id = context.checkpoint_schema_id.clone();
-    let expected_schema_version = context.checkpoint_schema_version;
-    let (port, _state_store, checkpoint_store) = test_checkpoint_port(context.clone());
-    let missing_state_ref =
-        LoopCheckpointStateRef::for_run(&context, "missing-state").expect("valid ref");
-    let metadata = checkpoint_store
-        .put_loop_checkpoint(PutLoopCheckpointRequest {
-            scope: context.scope.clone(),
-            turn_id: context.turn_id,
-            run_id: context.run_id,
-            state_ref: missing_state_ref,
-            schema_id: expected_schema_id.clone(),
-            schema_version: expected_schema_version,
-            kind: LoopCheckpointKind::BeforeBlock,
-            gate_ref: None,
-        })
-        .await
-        .expect("write checkpoint metadata");
-
-    let error = port
-        .load_checkpoint_payload(LoadCheckpointPayloadRequest {
-            checkpoint_id: metadata.checkpoint_id,
-            expected_schema_id,
-            expected_schema_version,
-        })
-        .await
-        .expect_err("missing state payload must reject");
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
 }
@@ -485,7 +305,7 @@ async fn checkpoint_write_rejects_foreign_run_scoped_state_ref() {
     // foreign run's payload and later fail to load. (CodeRabbit PR #4841.)
     let context = test_run_context().await;
     let foreign_run = TurnRunId::new();
-    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+    let (port, _checkpoint_store) = test_checkpoint_port(context);
 
     let foreign_ref =
         LoopCheckpointStateRef::new(format!("checkpoint:{foreign_run}:retry_state")).unwrap();

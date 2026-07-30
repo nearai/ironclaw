@@ -1,4 +1,5 @@
 // arch-exempt: large_file, model accounting assertions extend the existing whole-port contract fixture, plan #6089
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -7,22 +8,24 @@ use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
     AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
+use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
     LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
     ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnStatus,
+    TurnCoordinator, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
+    claimed_turn_run_from_process_claim,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
-        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptionTrust,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
+        CommunicationRuntimeContext, ConcurrencyHint, ConnectedChannelSummary,
+        ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
         HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
         InstructionMaterializationStore, InstructionSafetyContext,
@@ -44,7 +47,6 @@ use ironclaw_turns::{
         PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
         VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
-    runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
 
 #[test]
@@ -282,6 +284,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -340,6 +343,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -384,6 +388,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -425,6 +430,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -456,6 +462,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
@@ -601,6 +608,152 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
     );
     assert_eq!(first.skill_context.len(), 1);
     assert_eq!(first.skill_context[0].source_name, "alpha");
+}
+
+#[derive(Clone, Default)]
+struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+struct SharedLogWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedLogWriterGuard {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log writer lock").extend(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+    type Writer = SharedLogWriterGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedLogWriterGuard(Arc::clone(&self.0))
+    }
+}
+
+impl SharedLogWriter {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().expect("log writer lock").clone())
+            .expect("tracing output is UTF-8")
+    }
+}
+
+fn prompt_surface_request(descriptors: Vec<CapabilityDescriptorView>) -> InstructionBundleRequest {
+    InstructionBundleRequest {
+        context_bundle: LoopContextBundle::default(),
+        visible_surface: Some(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface-catalog-description").unwrap(),
+            descriptors,
+            callable_capability_ids: None,
+        }),
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    }
+}
+
+fn prompt_capability_descriptor(
+    capability_id: &str,
+    description: &str,
+    description_trust: CapabilityDescriptionTrust,
+) -> CapabilityDescriptorView {
+    CapabilityDescriptorView {
+        capability_id: CapabilityId::new(capability_id).unwrap(),
+        provider: None,
+        runtime: RuntimeKind::Wasm,
+        safe_name: capability_id.to_string(),
+        safe_description: description.to_string(),
+        description_trust,
+        concurrency_hint: ConcurrencyHint::Exclusive,
+        parameters_schema: serde_json::json!({"type": "object"}),
+    }
+}
+
+/// Regression for the production Attio incident: signature-verified catalog
+/// descriptions may document auth vocabulary without being redacted or dropped.
+#[tokio::test]
+async fn instruction_bundle_preserves_verified_catalog_description_intact() {
+    let description = concat!(
+        "Authenticated with an Attio workspace API key presented as a Bearer header ",
+        "against api.attio.com."
+    );
+    let bundle = InstructionBundleBuilder::new(claimed_run_context().await)
+        .build(prompt_surface_request(vec![prompt_capability_descriptor(
+            "attio.invoke",
+            description,
+            CapabilityDescriptionTrust::VerifiedCatalog,
+        )]))
+        .expect("verified catalog description must not deny prompt construction");
+
+    let prompt = bundle
+        .materialized_messages
+        .iter()
+        .find(|message| message.model_content.contains("Capabilities:"))
+        .expect("capability surface reaches the model");
+    assert!(prompt.model_content.contains(description));
+    assert!(prompt.model_content.contains("Bearer"));
+}
+
+/// A malformed or unsafe untrusted package must degrade only its own prompt
+/// entry. The warning carries the capability id and matched denylist pattern,
+/// but never the rejected description value.
+#[tokio::test]
+async fn instruction_bundle_skips_one_bad_untrusted_description_and_warns() {
+    let rejected_description = "API key: sk-live-value-123456";
+    let context = claimed_run_context().await;
+    let logs = SharedLogWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_target(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(logs.clone())
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, || {
+        InstructionBundleBuilder::new(context).build(prompt_surface_request(vec![
+            prompt_capability_descriptor(
+                "unsafe.invoke",
+                rejected_description,
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+            prompt_capability_descriptor(
+                "healthy.invoke",
+                "Healthy capability remains available",
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+        ]))
+    });
+    let bundle = result.expect("one bad descriptor must not deny prompt construction");
+
+    let prompt = bundle
+        .materialized_messages
+        .iter()
+        .find(|message| message.model_content.contains("Capabilities:"))
+        .expect("capability surface reaches the model");
+    assert!(prompt.model_content.contains("healthy.invoke"));
+    assert!(
+        prompt
+            .model_content
+            .contains("Healthy capability remains available")
+    );
+    assert!(!prompt.model_content.contains("unsafe.invoke"));
+    assert!(!prompt.model_content.contains(rejected_description));
+
+    let logs = logs.contents();
+    assert!(
+        logs.contains("unsafe.invoke"),
+        "warning names culprit: {logs}"
+    );
+    assert!(
+        logs.contains("api key"),
+        "warning names matched pattern: {logs}"
+    );
+    assert!(
+        !logs.contains(rejected_description),
+        "warning must not contain the offending value: {logs}"
+    );
 }
 
 #[tokio::test]
@@ -1630,6 +1783,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
                 runtime: RuntimeKind::Wasm,
                 safe_name: "Echo".to_string(),
                 safe_description: "Returns an opaque result ref".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
@@ -1639,6 +1793,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
                 runtime: RuntimeKind::Wasm,
                 safe_name: "Hidden".to_string(),
                 safe_description: "Should not reach the prompt".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
@@ -2223,6 +2378,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
@@ -2754,6 +2910,7 @@ impl AgentLoopDriver for ReplyDriver {
                         .model_profile_id
                         .clone(),
                 ),
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -3045,6 +3202,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3082,6 +3240,7 @@ async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress(
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3126,6 +3285,7 @@ impl RecordingAgentLoopHost {
                     runtime: RuntimeKind::Wasm,
                     safe_name: "Echo".to_string(),
                     safe_description: "Returns an opaque result ref".to_string(),
+                    description_trust: Default::default(),
                     concurrency_hint: ConcurrencyHint::Exclusive,
                     parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
                 }],
@@ -3505,7 +3665,8 @@ async fn claimed_run_context() -> LoopRunContext {
         Some(ProjectId::new("project-loop").unwrap()),
         ThreadId::new("thread-loop-host").unwrap(),
     );
-    let store = Arc::new(in_memory_turn_state_store());
+    let processes = in_memory_agent_turn_process_system();
+    let store = Arc::new(processes.runtime());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {
@@ -3527,13 +3688,21 @@ async fn claimed_run_context() -> LoopRunContext {
         .await
         .unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            scope_filter: Some(scope),
+    let runner_id = TurnRunnerId::new();
+    let claimed = processes
+        .transitions()
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted(runner_id.as_uuid().to_string()),
+            scope_filter: Some(scope.to_resource_scope()),
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
         })
         .await
+        .unwrap()
+        .pop()
+        .map(claimed_turn_run_from_process_claim)
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(claimed.state.run_id, run_id);
@@ -3644,7 +3813,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         self.pre_called.store(true, Ordering::SeqCst);
         if self.reject_pre.load(Ordering::SeqCst) {
             return Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
                 "model call budget exceeded",
             )
             .expect("safe summary is valid"));
@@ -3664,7 +3833,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         }
         if self.reject_post.load(Ordering::SeqCst) {
             return Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
                 "model call accounting failed",
             )
             .expect("safe summary is valid"));
@@ -3686,6 +3855,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
         }],
         surface_version: None,
         model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+        fallback_index: 0,
         capability_view: None,
     }
 }
@@ -3960,7 +4130,7 @@ async fn post_accounting_failure_after_success_fails_closed() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
     assert_eq!(error.safe_summary, "model call accounting failed");
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
@@ -4066,7 +4236,7 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
     assert_eq!(error.safe_summary, "model call accounting failed");
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
@@ -4086,9 +4256,9 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
     );
 }
 
-/// Budget-exceeded pre-call rejection prevents gateway call.
+/// Spend-budget pre-call rejection prevents the provider call.
 #[tokio::test]
-async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
+async fn spend_budget_exceeded_pre_call_rejects_without_calling_gateway() {
     let context = claimed_run_context().await;
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
@@ -4107,7 +4277,7 @@ async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::SpendBudgetExceeded);
     assert!(error.safe_summary.contains("budget exceeded"));
     // Gateway was never called.
     assert_eq!(gateway.requests().len(), 0);
@@ -4133,6 +4303,18 @@ async fn error_kind_mapping_through_host_managed_port() {
         (
             AgentLoopHostErrorKind::BudgetExceeded,
             "model call budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::SpendBudgetExceeded,
+            "model spend budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::ContextOverflow,
+            "model context overflow",
+        ),
+        (
+            AgentLoopHostErrorKind::OutputTruncated,
+            "model output truncated",
         ),
         (
             AgentLoopHostErrorKind::PolicyDenied,

@@ -18,7 +18,7 @@
 //!   `ironclaw_conversations` using trusted installation configuration for
 //!   tenant/default scope selection.
 //! - [`IdempotencyLedger`] — durable action deduplication port.
-//! - [`InMemoryIdempotencyLedger`] — local-dev/test ledger with in-flight lease
+//! - [`InMemoryIdempotencyLedger`] — standalone/test ledger with in-flight lease
 //!   recovery semantics.
 //! - [`ProductInboundAction`] — durable ledger record for inbound actions.
 
@@ -31,12 +31,14 @@ mod approval_prompt;
 mod auth_continuation;
 mod auth_interaction;
 mod auth_prompt;
+mod automation_product_service;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
 mod command_admission;
 mod command_dispatch;
 mod commands;
+mod communication_context;
 mod conversation_binding;
 mod error;
 mod extension_account_setup;
@@ -53,11 +55,18 @@ mod ledger;
 mod lifecycle;
 mod outbound_delivery;
 mod policy;
+mod product_auth_prompt;
 mod product_surface_inbound;
+mod project_create_capability;
+mod project_service;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
 mod workflow;
+
+pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
+pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
+pub use project_service::RebornProjectService;
 
 pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
@@ -96,6 +105,7 @@ pub use auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
     PairingAuthChallengeView, auth_prompt_view_for_blocked_auth,
 };
+pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,
@@ -104,19 +114,20 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
-pub use command_admission::DirectConversationCommandAdmission;
+pub use command_admission::{CommandActorRoleResolver, DirectConversationCommandAdmission};
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     RejectingProductCommandAdmissionService,
 };
 pub use commands::{
-    CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    CommandAudience, CommandResultField, CommandResultView, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
     ProductModelCommandInput, ProductStatusCommandInput, UnknownProductCommandName,
-    command_help_text, declared_command_help_text, product_command_descriptors,
-    render_command_result_text, validate_declared_product_command,
+    declared_command_help_text, product_command_descriptors, render_command_result_text,
+    required_audience, validate_declared_product_command,
 };
+pub use communication_context::RuntimeCommunicationContextProvider;
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationBindingService, ProductConversationRouteKey,
@@ -301,7 +312,9 @@ pub use reborn_services::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
     OperatorStatusService, OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
-    OutboundDeliveryTargetsListInput, OutboundPreferencesProductService, PROJECT_CREATE_COMMAND,
+    OutboundDeliveryTargetsListInput, OutboundPreferencesProductService,
+    PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
+    PRODUCT_COMMAND_LIST_COMMAND, PRODUCT_COMMAND_LIST_COMMAND_ID, PROJECT_CREATE_COMMAND,
     PROJECT_DELETE_CAPABILITY, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
     PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
     PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY,
@@ -329,14 +342,15 @@ pub use reborn_services::{
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
     RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
+    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountInfo, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
@@ -357,39 +371,40 @@ pub use reborn_services::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornOutboundPreferencesService, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectInfo, RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse,
-    RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornVendorAuthAccounts, RebornViewDescriptor, RebornViewPage, RebornViewProvider,
-    RebornViewQuery, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction,
-    RunArtifactToolCall, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductService,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID,
-    THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
-    UnavailableRebornViewProvider, UnsupportedAutomationProductService,
-    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
-    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductService,
-    UpsertLlmProviderRequest, list_outbound_delivery_targets_for_model,
-    normalize_operator_log_context_value, outbound_delivery_synthetic_provider,
-    outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,
-    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
-    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+    RebornOutboundPreferencesService, RebornProductCommandInfo, RebornProductCommandListResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact,
+    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts,
+    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery, RunArtifactLogs,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
+    SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SUBMIT_TURN_COMMAND, SetActiveLlmRequest,
+    SettingsToolPermissionState, SkillsProductService, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope, UnavailableRebornViewProvider,
+    UnsupportedAutomationProductService, UnsupportedOperatorLogsService,
+    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
+    UnsupportedOutboundPreferencesProductService, UpsertLlmProviderRequest,
+    list_outbound_delivery_targets_for_model, normalize_operator_log_context_value,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model,
 };
 
 pub use product_surface_inbound::{

@@ -10,6 +10,9 @@ pub(crate) fn host_error_to_model_gateway_error(
 ) -> LoopModelGatewayError {
     let reason_kind = error.reason_kind;
     let gate_ref = error.gate_ref;
+    let retry_after_ms = error.retry_after_ms;
+    let next_fallback_index = error.next_fallback_index;
+    let usage = error.usage;
     let existing_detail = error
         .detail
         .map(ironclaw_loop_host::scrub_model_visible_detail);
@@ -28,6 +31,9 @@ pub(crate) fn host_error_to_model_gateway_error(
                         safe_summary: LoopSafeSummary::model_gateway_failed(),
                         reason_kind: None,
                         gate_ref: None,
+                        retry_after_ms: None,
+                        next_fallback_index: None,
+                        usage: None,
                         detail: None,
                     },
                     Some(ironclaw_loop_host::scrub_model_visible_detail(raw_summary)),
@@ -42,6 +48,15 @@ pub(crate) fn host_error_to_model_gateway_error(
     }
     if let Some(gate_ref) = gate_ref {
         converted = converted.with_gate_ref(gate_ref);
+    }
+    if let Some(retry_after_ms) = retry_after_ms {
+        converted = converted.with_retry_after_ms(retry_after_ms);
+    }
+    if let Some(next_fallback_index) = next_fallback_index {
+        converted = converted.with_next_fallback_index(next_fallback_index);
+    }
+    if let Some(usage) = usage {
+        converted = converted.with_usage(usage);
     }
     converted
 }
@@ -68,6 +83,37 @@ mod tests {
         assert!(!detail.contains(concat!("ghp", "_012345678901234567890123456789012345")));
         assert!(detail.contains("/host/route"));
         assert!(!detail.contains("EXTERNAL, UNTRUSTED source"));
+    }
+
+    #[test]
+    fn fallback_route_evidence_survives_the_gateway_boundary() {
+        let converted = host_error_to_model_gateway_error(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "model service is unavailable",
+            )
+            .with_next_fallback_index(1),
+        );
+
+        assert_eq!(converted.next_fallback_index, Some(1));
+    }
+
+    #[test]
+    fn failed_model_usage_survives_the_gateway_boundary() {
+        let usage = ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..Default::default()
+        };
+        let converted = host_error_to_model_gateway_error(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::OutputTruncated,
+                "model response was truncated before completion",
+            )
+            .with_usage(usage),
+        );
+
+        assert_eq!(converted.usage, Some(usage));
     }
 
     #[test]

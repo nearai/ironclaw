@@ -772,7 +772,7 @@ mod tests {
         std::mem::forget(temp);
         RebornProviderAdmin::new(RebornBootConfig::new(
             home,
-            ironclaw_reborn_config::RebornProfile::LocalDev,
+            ironclaw_reborn_config::RebornProfile::Standalone,
         ))
     }
 
@@ -910,7 +910,7 @@ mod tests {
 
         let admin = RebornProviderAdmin::new(RebornBootConfig::new(
             home,
-            ironclaw_reborn_config::RebornProfile::LocalDev,
+            ironclaw_reborn_config::RebornProfile::Standalone,
         ));
         let entries = admin.menu_entries().expect("menu entries load");
         assert!(

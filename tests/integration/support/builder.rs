@@ -46,10 +46,10 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition, GetRunStateRequest,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
     IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
+    TurnScope, TurnStatus,
 };
 
 use super::capability_backend::{
@@ -57,7 +57,7 @@ use super::capability_backend::{
 };
 use super::doubles::ParkingCapabilityGate;
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ThreadModelMode};
-use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
+use super::harness::{HarnessCapabilityRecorder, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
@@ -188,6 +188,11 @@ pub struct RebornIntegrationHarnessBuilder {
     lease_recovery_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_append_finalized_assistant_message: bool,
+    fail_append_tool_result_reference: bool,
+    /// Additive raw-provider call recording for terminal side-effect assertions.
+    record_model_calls: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -285,6 +290,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Fail the primary vendor route as unavailable and let the real loop
+    /// recovery and provider chain advance to scripted fallback index one.
+    pub fn advance_fallback_after_unavailable(mut self) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvance;
+        self
+    }
+
     /// Report one provider content-filter finish reason, then resume scripted
     /// playback through the real model gateway and recovery path.
     pub fn content_filter_model_once(mut self) -> Self {
@@ -320,6 +332,24 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Report output truncation `failures` times, then resume scripted
+    /// playback through the real provider gateway and recovery path.
+    pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::OutputTruncated,
+            failures,
+        ));
+        self
+    }
+
+    /// Record provider calls while otherwise delegating normal scripted
+    /// playback. Used by terminal-path tests that need to prove no second model
+    /// call happens after a non-model persistence boundary fails.
+    pub fn record_model_calls_for_test(mut self) -> Self {
+        self.record_model_calls = true;
+        self
+    }
+
     /// Park this harness's tool/capability dispatch until released
     /// (tool-path analog of `park_model`, issue #5476 lease-wedge coverage).
     /// Only the `BuiltinHttpTools` backend wires this today. See
@@ -351,6 +381,19 @@ impl RebornIntegrationHarnessBuilder {
     /// this harness so terminal recovery can be reached without a long script.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject the runtime's final assistant transcript write while retaining
+    /// the real scheduler, loop host, turn store, and thread read path.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript persistence after a capability completes.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
         self
     }
 
@@ -672,6 +715,12 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
         }
+        if self.fail_append_finalized_assistant_message {
+            group_builder = group_builder.fail_append_finalized_assistant_message_for_test();
+        }
+        if self.fail_append_tool_result_reference {
+            group_builder = group_builder.fail_append_tool_result_reference_for_test();
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -679,6 +728,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .model_mode(self.model_mode)
+            .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
     }
@@ -705,7 +755,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_runtime: Arc<ironclaw_turns::AgentTurnProcessRuntime>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -723,6 +773,9 @@ pub struct RebornIntegrationHarness {
     /// Requests captured by the recoverable-failure provider wrapper before it
     /// either injects a failure or delegates to `scripted_llm`.
     pub(crate) model_provider_call_probe: Option<ModelProviderCallProbe>,
+    /// Primary/fallback route calls captured at the two scripted vendor seams.
+    pub(crate) fallback_provider_call_probe:
+        Option<super::scripted_provider::FallbackProviderCallProbe>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -788,6 +841,9 @@ impl RebornIntegrationHarness {
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             planned_default_iteration_limit: None,
+            fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
+            record_model_calls: false,
         }
     }
 
@@ -1007,8 +1063,31 @@ impl RebornIntegrationHarness {
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the
     /// capability harness's disjoint bootstrap store.
-    pub(crate) fn turn_state_store_for_test(&self) -> Arc<TurnStateRowStore<HarnessTurnBackend>> {
-        Arc::clone(&self._shared.turn_store)
+    pub(crate) fn agent_turn_runtime_for_test(&self) -> Arc<dyn AgentTurnRuntimePort> {
+        Arc::clone(&self._shared.turn_runtime) as Arc<dyn AgentTurnRuntimePort>
+    }
+
+    pub(crate) fn process_gates_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>
+    {
+        self._shared.process_system.gates()
+    }
+
+    pub(crate) fn turn_event_projection_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_turns::TurnEventProjectionSource> {
+        Arc::new(ironclaw_turns::TurnEventProjectionFromProcessJournal::new(
+            self._shared.process_system.journal(),
+        ))
+    }
+
+    /// Exact governor used by this thread's production-composed capability
+    /// path. Intended for invariant sabotage/read-back only.
+    pub(crate) fn capability_resource_governor_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.capability_recorder.resource_governor()
     }
 
     /// Register a scripted model gateway for a scope OTHER than this
@@ -1139,7 +1218,7 @@ impl RebornIntegrationHarness {
                 .await
                 .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
             let mut fresh_composite = CompositeRootFilesystem::new();
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
                 &mut fresh_composite,
                 filesystem,
             )?;
@@ -1196,18 +1275,19 @@ impl RebornIntegrationHarness {
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            // The live store exposes its hot snapshot before a critical append's
-            // caller receives the durable ack. Rebuild this fresh row-store view
-            // on every attempt so an early Running read is not cached indefinitely.
-            let fresh_turn_store = TurnStateRowStore::new(scoped_turns_fs_composite(
-                Arc::clone(&fresh_composite),
-                &self._shared.canonical_binding,
-            )?);
-            let state = fresh_turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
+            let fresh_process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+                scoped_processes_fs_composite(
+                    Arc::clone(&fresh_composite),
+                    &self._shared.canonical_binding,
+                )?,
+            ));
+            let fresh_processes =
+                ironclaw_runner::runtime::ProcessRuntimeSystem::from_process_journal_store(
+                    fresh_process_store,
+                );
+            let state = fresh_processes
+                .agent_turn_runtime()
+                .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if state.status == TurnStatus::BlockedApproval {
                 return match state.gate_ref.as_ref().map(GateRef::as_str) {
@@ -1638,11 +1718,8 @@ impl RebornIntegrationHarness {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let state = self
-                .turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
+                .turn_runtime
+                .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if let ControlFlow::Break(outcome) = decide(&state) {
                 return outcome;
@@ -1697,11 +1774,8 @@ impl RebornIntegrationHarness {
     /// value rather than a settled one.
     pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
         Ok(self
-            .turn_store
-            .get_run_state(GetRunStateRequest {
-                scope: self.turn_scope.clone(),
-                run_id,
-            })
+            .turn_runtime
+            .get_run_state(&self.turn_scope, run_id)
             .await?)
     }
 
@@ -1735,7 +1809,7 @@ impl RebornIntegrationHarness {
     /// gate class happens to be blocked.
     pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(gate_ref)
+            .approve_standalone_gate(gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1759,7 +1833,7 @@ impl RebornIntegrationHarness {
         stale_gate_ref: &GateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(real_gate_ref)
+            .approve_standalone_gate(real_gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1796,7 +1870,7 @@ impl RebornIntegrationHarness {
     /// `ResumeTurnPrecondition::BlockedApprovalGate`.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
-            .deny_local_dev_gate(gate_ref)
+            .deny_standalone_gate(gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1883,9 +1957,9 @@ impl RebornIntegrationHarness {
     /// dispatch-time execution-context resolution actually stamps on the run.
     ///
     /// That user is NOT the capability harness's fixed constructor user: the
-    /// production capability surface (`local_dev_visible_capability_request` /
-    /// `local_dev_resource_scope_for_run` in
-    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) resolves
+    /// production capability surface (`standalone_visible_capability_request` /
+    /// `standalone_resource_scope_for_run` in
+    /// `crates/ironclaw_reborn_composition/src/runtime/standalone.rs`) resolves
     /// the execution user per run as `thread owner → run actor → fixed
     /// fallback`, and every harness thread run carries an actor — so the fixed
     /// fallback never applies here. Seeding under the harness's fixed
@@ -2125,7 +2199,7 @@ impl RebornIntegrationHarness {
 /// (`assert_reply_persists_after_reopen`, `assert_gate_survives_reopen`) —
 /// each builds its own higher-level store (thread service, turn-state store)
 /// over the fresh composite this returns.
-async fn reopen_fresh_libsql_composite(
+pub(crate) async fn reopen_fresh_libsql_composite(
     db_path: &Path,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
     let db = Arc::new(
@@ -2134,14 +2208,17 @@ async fn reopen_fresh_libsql_composite(
             .await
             .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(
+        LibSqlRootFilesystem::new(db)
+            .map_err(|e| format!("failed to build libsql runtime for reopen: {e}"))?,
+    );
     // Migrations are idempotent — the schema already exists from `build()`.
     fresh_fs
         .run_migrations()
         .await
         .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+    ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )?;
@@ -2162,21 +2239,22 @@ pub(crate) async fn build_storage_composite(
     let mut composite = CompositeRootFilesystem::new();
     let reopen = match mode {
         StorageMode::InMemory => {
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
             StorageReopen::None
         }
         StorageMode::LibSql => {
-            ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::build_default_database_roots_for_test(
                 dir,
                 &mut composite,
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
             StorageReopen::LibSql {
-                db_path: dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME),
+                db_path: dir
+                    .join(ironclaw_reborn_composition::test_support::STANDALONE_DB_FILENAME),
             }
         }
         StorageMode::Postgres => {
@@ -2188,7 +2266,7 @@ pub(crate) async fn build_storage_composite(
                 .run_migrations()
                 .await
                 .map_err(|error| format!("Postgres migrations failed: {error}"))?;
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 filesystem,
             )?;
@@ -2256,24 +2334,33 @@ pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgr
         .map_err(|error| format!("Postgres pool must build: {error}").into())
 }
 
-/// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
-/// `binding` inside the production composite.
+/// Build a `ScopedFilesystem` that maps `/processes` and the compatibility
+/// `/turns` alias to the row-native process path for `binding` inside the
+/// composite.
 ///
 /// Uses the production path prefix `""` (no `/engine` prefix) so turn state
 /// lands under `/tenants/...` inside the composite, where the database backend
 /// is mounted. The 4-arm match lives in `filesystem::turns_scope_path`; the
 /// binary-E2E tier reuses it via `scoped_turns_fs` in `harness.rs` with the
 /// `/engine` prefix.
-pub(crate) fn scoped_turns_fs_composite(
+pub(crate) fn scoped_processes_fs_composite(
     composite: Arc<CompositeRootFilesystem>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
     let target = super::filesystem::turns_scope_path("", binding);
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").expect("valid turns alias"),
-        VirtualPath::new(target).expect("valid turns target"),
-        MountPermissions::read_write_list_delete(),
-    )])?;
+    let target = VirtualPath::new(target).expect("valid process target");
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").expect("valid processes alias"),
+            target.clone(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/turns").expect("valid turns alias"),
+            target,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])?;
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         composite, mounts,
     )))

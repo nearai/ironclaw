@@ -25,7 +25,6 @@ mod hsm;
 mod in_memory;
 mod index;
 mod libsql;
-mod libsql_pool;
 mod local;
 mod postgres;
 mod record;
@@ -44,7 +43,10 @@ pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
 pub use fault::{Fault, FaultInjecting, FaultKind, RecordedOp};
 pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
-pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
+pub use index::{
+    Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor,
+    Page, SortDirection,
+};
 pub use libsql::LibSqlRootFilesystem;
 pub use local::DiskFilesystem;
 pub use postgres::PostgresRootFilesystem;

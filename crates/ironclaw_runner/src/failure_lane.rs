@@ -19,7 +19,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
+use crate::failure_categories::{
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
+};
 
 /// The lane a terminal run failure (or ingress refusal) belongs to.
 ///
@@ -95,7 +97,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "invalid_model_output",
     "checkpoint_rejected",
     "checkpoint_unavailable",
-    "transcript_write_failed",
+    TRANSCRIPT_WRITE_FAILED_CATEGORY,
     "driver_bug",
     "interrupted_unexpectedly",
     "no_progress_detected",
@@ -108,6 +110,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "model_unavailable",
     "model_internal",
     "model_invalid_output",
+    "model_output_truncated",
     "model_stale_request",
     // Capability recovery categories
     "capability_transient",
@@ -136,6 +139,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     // Pinned provider categories (failure_categories.rs)
     "model_credits_exhausted",
     "model_credentials_unavailable",
+    "model_spend_budget_exhausted",
     BUDGET_ACCOUNTING_FAILED_CATEGORY,
 ];
 

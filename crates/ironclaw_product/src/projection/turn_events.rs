@@ -12,10 +12,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_host_api::{
     Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
 };
-use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
     TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
@@ -31,8 +31,10 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
 use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
+use ironclaw_runner::failure_categories::CHECKPOINT_REJECTED_CATEGORY;
 use ironclaw_runner::failure_summary::{
-    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+    checkpoint_rejection_host_explanation_from_detail, pinned_failure_summary_for_category,
+    reborn_failure_summary_for_category_and_detail,
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
@@ -521,7 +523,7 @@ async fn approval_prompt_lookup(
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
-) -> Result<ApprovalPromptLookup, ironclaw_run_state::RunStateError> {
+) -> Result<ApprovalPromptLookup, ironclaw_approvals::ApprovalStoreError> {
     let (store, request_id) =
         match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
             Some(value) => value,
@@ -931,6 +933,10 @@ async fn failure_summary_for_turn_event(
     fallback_summary: String,
     detail: Option<String>,
 ) -> String {
+    if category == CHECKPOINT_REJECTED_CATEGORY {
+        return checkpoint_rejection_host_explanation_from_detail(detail.as_deref())
+            .unwrap_or(fallback_summary);
+    }
     if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
     }

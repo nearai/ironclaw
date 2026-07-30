@@ -53,6 +53,23 @@ class ObservableAssertion(StrEnum):
     RESTART_IDEMPOTENCY = "restart_idempotency"
 
 
+class SlackChannelFixture(StrEnum):
+    """Provider-side Slack destination selected during trace compilation."""
+
+    SEEDED = "seeded"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True)
+class ProviderJourneyReplayFacts:
+    """Small typed sidecar for deterministic provider replay compilation."""
+
+    google_spreadsheet_id: str = "sheet_reborn_abc"
+    slack_channel: SlackChannelFixture = SlackChannelFixture.SEEDED
+    expected_capability_failure: str | None = None
+    timeout_seconds: int = 120
+
+
 @dataclass(frozen=True)
 class PytestEvidence:
     """One exact Pytest declaration that CI can execute."""
@@ -69,6 +86,31 @@ class CargoEvidence:
     test: str
     target: str
     manifest: str | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryAddressEvidence:
+    """One provider address asserted at the cited caller/integration seam.
+
+    Production models channel destinations as an opaque conversation id plus
+    an optional thread anchor. Keep that shape here instead of inventing
+    vendor-specific channel/DM/thread enums.
+    """
+
+    conversation_id: str
+    thread_anchor: str | None
+    exact_count: int
+    assertion: str
+
+
+@dataclass(frozen=True)
+class LiveEvidence:
+    """One scheduled live case and the artifact that carries its result."""
+
+    workflow: str
+    job: str
+    case_id: str
+    artifact: str
 
 
 @dataclass(frozen=True)
@@ -90,12 +132,17 @@ class ProviderJourneyCase(JourneyCaseBase):
     """A harvested provider journey whose full-path runner requires a trace."""
 
     trace: str
+    live_evidence: LiveEvidence
+    replay: ProviderJourneyReplayFacts = ProviderJourneyReplayFacts()
     repeat_after_reset: bool = False
 
 
 @dataclass(frozen=True)
 class ProductJourneyCase(JourneyCaseBase):
     """A trace-less product journey proved by its owning executable test."""
+
+    delivery_addresses: tuple[DeliveryAddressEvidence, ...] = ()
+    browser_evidence: PytestEvidence | None = None
 
 
 JourneyCase: TypeAlias = ProviderJourneyCase | ProductJourneyCase

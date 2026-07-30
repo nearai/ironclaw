@@ -117,7 +117,7 @@ impl Default for SkillActivationSelectorConfig {
             regex_activation_enabled: true,
             // Library default stays the legacy full-body contract; the Reborn
             // composition seam opts into `Listing` (see
-            // `ironclaw_reborn_composition::runtime::local_dev_selector_config`
+            // `ironclaw_reborn_composition::runtime::skill_activation_selector_config`
             // and the `IRONCLAW_REBORN_SKILL_INJECTION` env switch).
             injection_mode: SkillInjectionMode::Full,
         }

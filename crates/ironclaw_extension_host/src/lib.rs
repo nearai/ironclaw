@@ -26,6 +26,8 @@ mod admin_configuration_store;
 pub mod available_extension_import;
 pub mod available_extensions;
 pub mod bundled_skills;
+pub mod capability_surface;
+pub mod channel_command_roles;
 pub mod channel_config;
 pub mod channel_connection;
 pub mod channel_delivery;
@@ -58,6 +60,7 @@ pub mod host_api_contracts;
 mod hosted_mcp_discovery_authority;
 pub mod ingress;
 pub mod install_policy;
+pub mod ironhub;
 pub mod lifecycle;
 pub mod lifecycle_product_service;
 pub mod lifecycle_restore;
@@ -132,7 +135,7 @@ pub use admin_configuration_store::{
 };
 pub use available_extension_import::{
     extension_asset_path, imported_extension_package, inline_extension_dir_assets,
-    materialize_available_extension,
+    materialize_available_extension, registry_extension_package,
 };
 pub use available_extensions::{
     AdminConfigurationCatalogUse, AvailableExtensionAsset, AvailableExtensionAssetContent,

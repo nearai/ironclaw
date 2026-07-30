@@ -1130,7 +1130,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "same-user one-shot approval lease should satisfy the local-dev gate, got {decision:?}"
+            "same-user one-shot approval lease should satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1176,7 +1176,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "settings persistent approval grant should satisfy the local-dev gate, got {decision:?}"
+            "settings persistent approval grant should satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::RequireApproval { .. }),
-            "expired persistent approval grant must not satisfy the local-dev gate, got {decision:?}"
+            "expired persistent approval grant must not satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1347,7 +1347,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::RequireApproval { .. }),
-            "different-user approval lease must not satisfy the local-dev gate, got {decision:?}"
+            "different-user approval lease must not satisfy the standalone gate, got {decision:?}"
         );
     }
 

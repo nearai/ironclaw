@@ -476,6 +476,22 @@ function mergeFullRefresh(fresh, current, options = {}) {
       .map((message) => message?.turnRunId)
       .filter((runId) => typeof runId === "string"),
   );
+  const currentFinalizedRunIds = new Set(
+    current
+      .filter(isFinalAssistantMessage)
+      .map((message) => message?.turnRunId)
+      .filter((runId) => typeof runId === "string"),
+  );
+  const latestLiveAssistantIndexByFinalizedRun = new Map();
+  current.forEach((message, index) => {
+    if (
+      isLiveAssistantMessage(message) &&
+      finalizedRunIds.has(message.turnRunId) &&
+      !currentFinalizedRunIds.has(message.turnRunId)
+    ) {
+      latestLiveAssistantIndexByFinalizedRun.set(message.turnRunId, index);
+    }
+  });
   const freshSequenceWindow =
     rawFreshSequenceWindow || timelineSequenceWindow(hydratedFresh);
   const currentSequenceWindow =
@@ -487,7 +503,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
       freshSequenceWindow,
       currentSequenceWindow,
     );
-  const preserved = current.filter((message) => {
+  const preserved = current.filter((message, index) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
     }
@@ -500,11 +516,10 @@ function mergeFullRefresh(fresh, current, options = {}) {
     ) {
       return false;
     }
-    if (
-      isLiveAssistantMessage(message) &&
-      !finalizedRunIds.has(message.turnRunId)
-    ) {
-      return true;
+    if (isLiveAssistantMessage(message)) {
+      if (!finalizedRunIds.has(message.turnRunId)) return true;
+      if (currentFinalizedRunIds.has(message.turnRunId)) return true;
+      return latestLiveAssistantIndexByFinalizedRun.get(message.turnRunId) !== index;
     }
     if (isSeededOptimisticMessage(message)) return true;
     if (
@@ -700,7 +715,10 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const append = [];
 
   for (const message of anchoredPreserved) {
-    if (!isRunActivityMessage(message)) {
+    if (
+      !isRunActivityMessage(message) &&
+      !isLiveAssistantMessage(message)
+    ) {
       append.push(message);
       continue;
     }

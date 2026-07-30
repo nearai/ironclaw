@@ -176,8 +176,7 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// Shorten the group's turn-state store lease TTL (default 90s,
-    /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
+    /// Shorten the group's process lease TTL (default 90s) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
     /// `None` (default) leaves today's behavior byte-identical.
     pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
@@ -199,6 +198,21 @@ impl RebornIntegrationGroupBuilder {
     /// whole-turn recovery scenario. Production defaults remain unchanged.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject final assistant transcript writes at the runtime port while
+    /// leaving the real filesystem service in place for inbound messages and
+    /// read-back assertions.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript writes after the capability has completed,
+    /// while retaining the real capability path and thread read-back service.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
         self
     }
 

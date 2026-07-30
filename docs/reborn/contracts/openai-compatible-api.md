@@ -114,8 +114,8 @@ The route:
   reader polls `SessionThreadService::finalized_assistant_message_by_run` for
   the accepted run's finalized assistant message and returns a sanitized Chat
   Completions response.
-- Inherits the shared turn-admission policy from the configured
-  `TurnCoordinator` / turn-state store. A wait timeout must not release
+- Inherits the shared process-concurrency policy from the configured
+  `TurnCoordinator` / process journal. A wait timeout must not release
   admission capacity while the underlying run remains queued, running, blocked,
   cancel-requested, or otherwise non-terminal.
 - Carries the requested public model string as a composition/policy hint for

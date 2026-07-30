@@ -27,10 +27,10 @@ use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, AttachmentKind,
+    AttachmentRef, ContextMessage, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent,
+    MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -203,6 +203,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         messages: Vec::new(),
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -260,6 +261,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -314,6 +316,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -407,6 +410,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1328,6 +1332,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1368,6 +1373,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1410,6 +1416,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1454,6 +1461,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1725,6 +1733,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1827,6 +1836,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1915,6 +1925,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1962,6 +1973,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2162,6 +2174,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2230,6 +2243,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2360,6 +2374,152 @@ async fn transcript_port_finalizes_assistant_reply_into_durable_thread_history()
 }
 
 #[tokio::test]
+async fn transcript_port_retries_transient_finalized_assistant_backend_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::FinalizedAssistant,
+        TranscriptWriteFailure::Backend,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "persist after transient failure".to_string(),
+            },
+        })
+        .await
+        .expect("the exact finalized assistant write is retried");
+
+    assert_eq!(service.attempts(), 2);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Assistant)
+            .count(),
+        1,
+        "retry must converge on one durable assistant message"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_retries_transient_tool_result_backend_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::ToolResultReference,
+        TranscriptWriteFailure::Backend,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:transient-tool-write").unwrap(),
+            safe_summary: "tool completed once".to_string(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect("the exact tool-result reference write is retried");
+
+    assert_eq!(service.attempts(), 2);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::ToolResultReference)
+            .count(),
+        1,
+        "retry must not duplicate the tool-result reference"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_does_not_retry_non_backend_write_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::FinalizedAssistant,
+        TranscriptWriteFailure::Serialization,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope,
+        fixture.run_context,
+    );
+
+    let error = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "invalid write".to_string(),
+            },
+        })
+        .await
+        .expect_err("serialization failures are terminal without retry");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert_eq!(service.attempts(), 1);
+}
+
+#[tokio::test]
+async fn transcript_port_stops_after_bounded_backend_write_attempts() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::ToolResultReference,
+        TranscriptWriteFailure::Backend,
+        usize::MAX,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope,
+        fixture.run_context,
+    );
+
+    let error = adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:permanent-tool-write").unwrap(),
+            safe_summary: "tool completed once".to_string(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect_err("persistent backend failure remains terminal");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert_eq!(service.attempts(), 3);
+}
+
+#[tokio::test]
 async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
@@ -2368,6 +2528,13 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         fixture.run_context.clone(),
     );
     let result_ref = LoopResultRef::new("result:demo-tool").unwrap();
+    // Provider validation has accepted metadata above 4 KiB since #5001.
+    // This exercises the transcript caller that used to retain the stale
+    // 4 KiB bound and terminate otherwise successful reasoning-heavy runs.
+    let response_reasoning = "response reasoning ".repeat(256);
+    let call_reasoning = "call reasoning ".repeat(320);
+    assert!(response_reasoning.len() > 4096);
+    assert!(call_reasoning.len() > 4096);
 
     let first_ref = adapter
         .append_capability_result_ref(AppendCapabilityResultRef {
@@ -2382,8 +2549,8 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                     provider_tool_name: ProviderToolName::new("demo__echo")
                         .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"hello"}),
-                    response_reasoning: Some("provider reasoning".to_string()),
-                    reasoning: Some("provider reasoning".to_string()),
+                    response_reasoning: Some(response_reasoning.clone()),
+                    reasoning: Some(call_reasoning.clone()),
                     signature: Some("sig-1".to_string()),
                 },
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -2456,11 +2623,11 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     );
     assert_eq!(
         provider_call.response_reasoning.as_deref(),
-        Some("provider reasoning")
+        Some(response_reasoning.as_str())
     );
     assert_eq!(
         provider_call.reasoning.as_deref(),
-        Some("provider reasoning")
+        Some(call_reasoning.as_str())
     );
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
 }
@@ -3109,6 +3276,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3130,6 +3298,122 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
     assert_eq!(calls[0].turn_id, fixture.run_context.turn_id);
     assert_eq!(calls[0].messages[0].role, HostManagedModelMessageRole::User);
     assert_eq!(calls[0].messages[0].content, "hello reborn");
+}
+
+#[tokio::test]
+async fn model_port_rejects_mismatched_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback("model says hi", 1));
+    let port = ThreadBackedLoopModelPort::with_milestone_sink(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+        milestone_sink.clone(),
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 2,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    assert_eq!(
+        error.safe_summary,
+        "model gateway returned mismatched fallback route evidence"
+    );
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fallback_index, 2);
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        LoopHostMilestoneKind::ModelFailed {
+            reason_kind: AgentLoopHostErrorKind::Internal
+        }
+    ));
+}
+
+#[tokio::test]
+async fn model_port_rejects_missing_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_without_fallback_evidence(
+        "model says hi",
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    assert_eq!(
+        error.safe_summary,
+        "model gateway returned mismatched fallback route evidence"
+    );
+}
+
+#[tokio::test]
+async fn model_port_accepts_matching_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback(
+        "fallback model says hi",
+        2,
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 2,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.chunks[0].safe_text_delta, "fallback model says hi");
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fallback_index, 2);
 }
 
 /// Records every storage key the model port asks it to read and returns a fixed
@@ -3210,6 +3494,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3256,6 +3541,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3300,6 +3586,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3371,6 +3658,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3493,6 +3781,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3543,6 +3832,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3586,6 +3876,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             inline_messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3629,6 +3920,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
                     .model_profile_id
                     .clone(),
             ),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3687,6 +3979,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3745,6 +4038,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3786,6 +4080,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3825,6 +4120,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3854,6 +4150,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3889,6 +4186,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3948,6 +4246,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -4379,6 +4678,208 @@ impl GatedThreadFixture {
             thread_id: base.thread_id,
             run_context: base.run_context,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TranscriptWriteOperation {
+    FinalizedAssistant,
+    ToolResultReference,
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptWriteFailure {
+    Backend,
+    Serialization,
+}
+
+struct ScriptedTranscriptWriteThreadService {
+    inner: Arc<InMemorySessionThreadService>,
+    operation: TranscriptWriteOperation,
+    failure: TranscriptWriteFailure,
+    failures_remaining: AtomicUsize,
+    attempts: AtomicUsize,
+}
+
+impl ScriptedTranscriptWriteThreadService {
+    fn new(
+        inner: Arc<InMemorySessionThreadService>,
+        operation: TranscriptWriteOperation,
+        failure: TranscriptWriteFailure,
+        failures: usize,
+    ) -> Self {
+        Self {
+            inner,
+            operation,
+            failure,
+            failures_remaining: AtomicUsize::new(failures),
+            attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+
+    fn scripted_failure(&self, operation: TranscriptWriteOperation) -> Option<SessionThreadError> {
+        if self.operation != operation {
+            return None;
+        }
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+        {
+            return None;
+        }
+        Some(match self.failure {
+            TranscriptWriteFailure::Backend => {
+                SessionThreadError::Backend("transient transcript backend failure".to_string())
+            }
+            TranscriptWriteFailure::Serialization => {
+                SessionThreadError::Serialization("invalid transcript request".to_string())
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for ScriptedTranscriptWriteThreadService {
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("scripted transcript service does not create threads")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("scripted transcript service does not accept inbound messages")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!("scripted transcript service does not replay inbound messages")
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not mark submitted")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not reject messages")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not append assistant drafts")
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(error) = self.scripted_failure(TranscriptWriteOperation::FinalizedAssistant) {
+            return Err(error);
+        }
+        self.inner.append_finalized_assistant_message(request).await
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(error) = self.scripted_failure(TranscriptWriteOperation::ToolResultReference) {
+            return Err(error);
+        }
+        self.inner.append_tool_result_reference(request).await
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not append capability display previews")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not update tool result references")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not update assistant drafts")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not finalize draft messages")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not redact messages")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: ironclaw_threads::LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("scripted transcript service does not load context windows")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("scripted transcript service does not load context messages")
+    }
+
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        self.inner.list_thread_history(request).await
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("scripted transcript service does not create summaries")
     }
 }
 
@@ -4854,6 +5355,27 @@ impl RecordingGateway {
             response: Ok(HostManagedModelResponse::assistant_reply(
                 content.to_string(),
             )),
+        }
+    }
+
+    fn reply_with_fallback(content: &str, fallback_index: u32) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(
+                HostManagedModelResponse::assistant_reply(content.to_string())
+                    .with_effective_fallback_index(fallback_index),
+            ),
+        }
+    }
+
+    fn reply_without_fallback_evidence(content: &str) -> Self {
+        let mut response = HostManagedModelResponse::assistant_reply(content.to_string());
+        response.effective_fallback_index = None;
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(response),
         }
     }
 

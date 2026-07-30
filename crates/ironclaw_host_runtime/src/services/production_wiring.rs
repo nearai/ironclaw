@@ -2,11 +2,11 @@ use std::any::{TypeId, type_name};
 
 use thiserror::Error;
 
+use ironclaw_approvals::ApprovalRequestStore;
 use ironclaw_approvals::PersistentApprovalPolicyStore;
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
-use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
+use ironclaw_processes::{ProcessJournalStore, ProcessResultStore};
 
 use super::{
     DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
@@ -80,9 +80,9 @@ pub enum ProductionWiringComponent {
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
-    ProcessStorePort,
+    ProcessRuntimePort,
     ProcessResultStorePort,
-    RunState,
+    InvocationState,
     ApprovalRequests,
     CapabilityLeases,
     PersistentApprovalPolicies,
@@ -111,9 +111,9 @@ impl ProductionWiringComponent {
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
-            Self::ProcessStorePort => "process_store",
+            Self::ProcessRuntimePort => "process_runtime",
             Self::ProcessResultStorePort => "process_result_store",
-            Self::RunState => "run_state",
+            Self::InvocationState => "invocation_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
             Self::PersistentApprovalPolicies => "persistent_approval_policies",
@@ -241,7 +241,7 @@ pub(super) struct ProductionComponentTypes {
     pub(super) resource_governor: ProductionComponentType,
     pub(super) process_store: ProductionComponentType,
     pub(super) process_result_store: ProductionComponentType,
-    pub(super) run_state: Option<ProductionComponentType>,
+    pub(super) invocation_state: Option<ProductionComponentType>,
     pub(super) approval_requests: Option<ProductionComponentType>,
     pub(super) capability_leases: Option<ProductionComponentType>,
     pub(super) persistent_approval_policies: Option<ProductionComponentType>,
@@ -262,8 +262,6 @@ pub(super) struct ProductionComponentTypes {
     pub(super) first_party_runtime: Option<ProductionComponentType>,
     pub(super) turn_state: Option<ProductionComponentType>,
     pub(super) run_profile_resolver: Option<ProductionComponentType>,
-    pub(super) turn_run_transition_port: Option<ProductionComponentType>,
-    pub(super) turn_run_transition_port_verified: bool,
     pub(super) turn_run_wake_notifier: Option<ProductionComponentType>,
 }
 
@@ -277,7 +275,7 @@ impl ProductionComponentType {
     pub(super) fn of<T: ?Sized + 'static>() -> Self {
         Self {
             implementation: type_name::<T>(),
-            readiness: classify_component_type::<T>(),
+            readiness: classify_component_type_of::<T>(),
         }
     }
 
@@ -288,6 +286,13 @@ impl ProductionComponentType {
         Self {
             implementation,
             readiness,
+        }
+    }
+
+    pub(super) fn erased(implementation: &'static str, type_id: TypeId) -> Self {
+        Self {
+            implementation,
+            readiness: classify_component_type(implementation, type_id),
         }
     }
 }
@@ -303,8 +308,14 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
     component.map(|component| component.implementation)
 }
 
-fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
-    let type_id = TypeId::of::<T>();
+fn classify_component_type_of<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
+    classify_component_type(type_name::<T>(), TypeId::of::<T>())
+}
+
+fn classify_component_type(
+    implementation: &'static str,
+    type_id: TypeId,
+) -> ProductionImplementationReadiness {
     match () {
         () if type_id == TypeId::of::<DiskFilesystem>()
             || type_id == TypeId::of::<InMemoryResourceGovernor>()
@@ -313,14 +324,12 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             // behind the one production `FilesystemProcess*Store<F>`
             // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
             // still local-only; libSQL/Postgres monomorphizations are distinct.
-            || type_id == TypeId::of::<ProcessStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<ProcessJournalStore<InMemoryBackend>>()
             || type_id == TypeId::of::<ProcessResultStore<InMemoryBackend>>()
-            // The run-state and approval-request stores no longer have bespoke
-            // in-memory implementations; "in-memory" is the `InMemoryBackend`
-            // behind the one production `Filesystem*Store<F>` (arch-simplification
-            // §4.3). A store backed by `InMemoryBackend` is still local-only;
-            // libSQL/Postgres monomorphizations are distinct.
-            || type_id == TypeId::of::<RunStateStore<InMemoryBackend>>()
+            || is_local_only_test_component(implementation)
+            // Approval requests use one filesystem-backed store. The process
+            // invocation fake exists only behind test support. Both are
+            // local-only when backed by `InMemoryBackend`.
             || type_id == TypeId::of::<ApprovalRequestStore<InMemoryBackend>>()
             // The persistent-approval and capability-lease stores no longer have
             // bespoke in-memory implementations; "in-memory" is now the
@@ -355,4 +364,9 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
         }
         () => ProductionImplementationReadiness::ProductionCandidate,
     }
+}
+
+fn is_local_only_test_component(implementation: &str) -> bool {
+    implementation.contains("ProcessInvocationStateStore<")
+        && implementation.contains("InMemoryBackend")
 }

@@ -84,6 +84,10 @@ impl BedrockProvider {
 
 #[async_trait]
 impl LlmProvider for BedrockProvider {
+    fn provider_id(&self) -> String {
+        "bedrock".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.display_model
     }
@@ -131,7 +135,10 @@ impl LlmProvider for BedrockProvider {
             builder = builder.inference_config(config);
         }
 
-        let response = builder.send().await.map_err(|e| map_sdk_error(&e))?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| map_sdk_error(&model_id, &e))?;
 
         let (text, _tool_calls) = extract_content_blocks(response.output())?;
         let (input_tokens, output_tokens) = extract_token_usage(response.usage());
@@ -196,7 +203,10 @@ impl LlmProvider for BedrockProvider {
             builder = builder.inference_config(config);
         }
 
-        let response = builder.send().await.map_err(|e| map_sdk_error(&e))?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| map_sdk_error(&model_id, &e))?;
 
         let (text, tool_calls) = extract_content_blocks(response.output())?;
         let (input_tokens, output_tokens) = extract_token_usage(response.usage());
@@ -679,50 +689,13 @@ fn map_stop_reason(reason: &StopReason) -> FinishReason {
 
 /// Map AWS SDK errors to `LlmError`.
 fn map_sdk_error<R: std::fmt::Debug>(
+    model_id: &str,
     error: &aws_sdk_bedrockruntime::error::SdkError<ConverseError, R>,
 ) -> LlmError {
     use aws_sdk_bedrockruntime::error::SdkError;
 
     match error {
-        SdkError::ServiceError(service_err) => {
-            let msg = match service_err.err() {
-                ConverseError::ModelTimeoutException(e) => {
-                    format!("Model timeout: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::ModelNotReadyException(e) => {
-                    format!("Model not ready: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::ThrottlingException(e) => {
-                    format!("Throttled: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::ValidationException(e) => {
-                    format!("Validation error: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::AccessDeniedException(e) => {
-                    format!("Access denied: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::ResourceNotFoundException(e) => {
-                    format!("Resource not found: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::ModelErrorException(e) => {
-                    format!("Model error: {}", e.message().unwrap_or("unknown"))
-                }
-                ConverseError::InternalServerException(e) => {
-                    format!(
-                        "Internal server error: {}",
-                        e.message().unwrap_or("unknown")
-                    )
-                }
-                ConverseError::ServiceUnavailableException(e) => {
-                    format!("Service unavailable: {}", e.message().unwrap_or("unknown"))
-                }
-                _ => format!("Bedrock service error: {}", service_err.err()),
-            };
-            LlmError::RequestFailed {
-                provider: "bedrock".to_string(),
-                reason: msg,
-            }
-        }
+        SdkError::ServiceError(service_err) => map_converse_error(model_id, service_err.err()),
         SdkError::TimeoutError(_) => LlmError::RequestFailed {
             provider: "bedrock".to_string(),
             reason: "Request timed out".to_string(),
@@ -734,6 +707,67 @@ fn map_sdk_error<R: std::fmt::Debug>(
         _ => LlmError::RequestFailed {
             provider: "bedrock".to_string(),
             reason: format!("AWS SDK error: {}", error),
+        },
+    }
+}
+
+fn map_converse_error(model_id: &str, error: &ConverseError) -> LlmError {
+    let provider = "bedrock".to_string();
+    match error {
+        ConverseError::ModelTimeoutException(error) => LlmError::RequestFailed {
+            provider,
+            reason: format!("Model timeout: {}", error.message().unwrap_or("unknown")),
+        },
+        ConverseError::ModelNotReadyException(error) => LlmError::RequestFailed {
+            provider,
+            reason: format!("Model not ready: {}", error.message().unwrap_or("unknown")),
+        },
+        ConverseError::ThrottlingException(_) => LlmError::RateLimited {
+            provider,
+            retry_after: None,
+        },
+        ConverseError::ValidationException(error) => {
+            let reason = error.message().unwrap_or("unknown");
+            let mapped =
+                crate::error::map_provider_message_error("bedrock", model_id, reason.to_string());
+            if matches!(mapped, LlmError::ContextLengthExceeded { .. }) {
+                mapped
+            } else {
+                LlmError::InvalidRequest {
+                    provider,
+                    reason: format!("Validation error: {reason}"),
+                }
+            }
+        }
+        ConverseError::AccessDeniedException(_) => LlmError::AuthFailed { provider },
+        ConverseError::ResourceNotFoundException(_) => LlmError::ModelNotAvailable {
+            provider,
+            model: model_id.to_string(),
+        },
+        ConverseError::ModelErrorException(error) => LlmError::InvalidResponse {
+            provider,
+            reason: format!(
+                "Model error (original status {}, resource {}): {}",
+                error
+                    .original_status_code()
+                    .map_or_else(|| "unknown".to_string(), |status| status.to_string()),
+                error.resource_name().unwrap_or(model_id),
+                error.message().unwrap_or("unknown")
+            ),
+        },
+        ConverseError::InternalServerException(_) => LlmError::BadGateway {
+            provider,
+            status: 500,
+            retry_after: None,
+        },
+        ConverseError::ServiceUnavailableException(_) => LlmError::BadGateway {
+            provider,
+            status: 503,
+            retry_after: None,
+        },
+        _ => LlmError::RequestFailed {
+            provider,
+            reason: format!("Bedrock service error: {error}"),
         },
     }
 }
@@ -810,6 +844,203 @@ pub(crate) fn document_to_json(doc: &Document) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::provider::{ChatMessage, Role};
+    use aws_sdk_bedrockruntime::types::error::{
+        AccessDeniedException, InternalServerException, ModelErrorException,
+        ModelNotReadyException, ModelTimeoutException, ResourceNotFoundException,
+        ServiceUnavailableException, ThrottlingException, ValidationException,
+    };
+
+    const TEST_MODEL_ID: &str = "us.anthropic.claude-test-v1";
+
+    #[test]
+    fn model_timeout_preserves_bedrock_identity_and_cause() {
+        let error = ConverseError::ModelTimeoutException(
+            ModelTimeoutException::builder()
+                .message("inference exceeded 60 seconds")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(reason, "Model timeout: inference exceeded 60 seconds");
+            }
+            other => panic!("expected request failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_not_ready_preserves_bedrock_identity_and_cause() {
+        let error = ConverseError::ModelNotReadyException(
+            ModelNotReadyException::builder()
+                .message("model is warming up")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(reason, "Model not ready: model is warming up");
+            }
+            other => panic!("expected request failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn throttling_is_typed_rate_limit_without_invented_retry_delay() {
+        let error = ConverseError::ThrottlingException(
+            ThrottlingException::builder()
+                .message("account request quota exceeded")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::RateLimited {
+                provider,
+                retry_after,
+            } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected rate limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_failure_preserves_cause_as_invalid_request() {
+        let error = ConverseError::ValidationException(
+            ValidationException::builder()
+                .message("temperature must be between zero and one")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::InvalidRequest { provider, reason } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(
+                    reason,
+                    "Validation error: temperature must be between zero and one"
+                );
+            }
+            other => panic!("expected invalid request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_context_overflow_preserves_parsed_token_counts() {
+        let error = ConverseError::ValidationException(
+            ValidationException::builder()
+                .message(
+                    "maximum context length is 128000 tokens; messages resulted in 150000 tokens",
+                )
+                .build(),
+        );
+
+        assert!(matches!(
+            map_converse_error(TEST_MODEL_ID, &error),
+            LlmError::ContextLengthExceeded {
+                used: 150_000,
+                limit: 128_000
+            }
+        ));
+    }
+
+    #[test]
+    fn access_denied_is_typed_auth_failure_for_bedrock() {
+        let error = ConverseError::AccessDeniedException(
+            AccessDeniedException::builder()
+                .message("principal lacks bedrock:InvokeModel")
+                .build(),
+        );
+
+        assert!(matches!(
+            map_converse_error(TEST_MODEL_ID, &error),
+            LlmError::AuthFailed { provider } if provider == "bedrock"
+        ));
+    }
+
+    #[test]
+    fn resource_not_found_preserves_requested_model_identity() {
+        let error = ConverseError::ResourceNotFoundException(
+            ResourceNotFoundException::builder()
+                .message("inference profile was not found")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::ModelNotAvailable { provider, model } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(model, TEST_MODEL_ID);
+            }
+            other => panic!("expected unavailable model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_error_preserves_bedrock_identity_and_cause() {
+        let error = ConverseError::ModelErrorException(
+            ModelErrorException::builder()
+                .message("upstream model returned malformed output")
+                .original_status_code(424)
+                .resource_name(TEST_MODEL_ID)
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::InvalidResponse { provider, reason } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(
+                    reason,
+                    "Model error (original status 424, resource us.anthropic.claude-test-v1): upstream model returned malformed output"
+                );
+            }
+            other => panic!("expected invalid response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn internal_server_failure_preserves_bedrock_status() {
+        let error = ConverseError::InternalServerException(
+            InternalServerException::builder()
+                .message("internal failure")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::BadGateway {
+                provider,
+                status,
+                retry_after,
+            } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(status, 500);
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected provider unavailability, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_unavailable_preserves_bedrock_status() {
+        let error = ConverseError::ServiceUnavailableException(
+            ServiceUnavailableException::builder()
+                .message("capacity temporarily unavailable")
+                .build(),
+        );
+
+        match map_converse_error(TEST_MODEL_ID, &error) {
+            LlmError::BadGateway {
+                provider,
+                status,
+                retry_after,
+            } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(status, 503);
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected provider unavailability, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_json_to_document_round_trip() {

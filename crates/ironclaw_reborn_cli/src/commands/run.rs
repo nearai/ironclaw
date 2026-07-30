@@ -19,7 +19,7 @@ pub(crate) struct RunCommand {
     #[arg(long = "dry-run")]
     dry_run: bool,
 
-    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    /// Confirm trusted-laptop host filesystem access for the unrestricted standalone profile.
     #[arg(long = "confirm-host-access")]
     confirm_host_access: bool,
 }

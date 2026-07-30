@@ -1,39 +1,71 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProcessId;
+use ironclaw_processes::{
+    ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
+    ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
+    ProcessSuspensionKind,
+};
 use ironclaw_triggers::{
     BlockedActiveRunKind, TriggerActiveRunLookup, TriggerActiveRunState,
     TriggerActiveRunStateRequest, TriggerError, TriggerRunHistoryStatus,
 };
-use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
+use ironclaw_turns::{TurnError, TurnRunId};
 
-use crate::turn_run_snapshot::TurnRunSnapshotSource;
-
-type ActiveRunIndex = HashMap<String, HashMap<ironclaw_turns::TurnRunId, TriggerActiveRunState>>;
-
-pub(crate) struct SnapshotActiveRunLookup {
-    snapshot_source: Arc<dyn TurnRunSnapshotSource>,
+pub(crate) struct ProcessActiveRunLookup {
+    lifecycle_source: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
 }
 
-impl SnapshotActiveRunLookup {
-    pub(crate) fn new(snapshot_source: Arc<dyn TurnRunSnapshotSource>) -> Self {
-        Self { snapshot_source }
+pub(crate) struct RebindableProcessLifecycleLookupSource {
+    inner: std::sync::Arc<
+        std::sync::RwLock<std::sync::Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>>,
+    >,
+}
+
+impl RebindableProcessLifecycleLookupSource {
+    pub(crate) fn new(
+        inner: std::sync::Arc<
+            std::sync::RwLock<std::sync::Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>>,
+        >,
+    ) -> Self {
+        Self { inner }
     }
 }
 
 #[async_trait]
-impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
+impl ProcessLifecycleLookupSource for RebindableProcessLifecycleLookupSource {
+    type Error = TurnError;
+
+    async fn process_lifecycle_states(
+        &self,
+        request: ProcessLifecycleLookupBatchRequest,
+    ) -> Vec<Result<ProcessLifecycleLookupResult, Self::Error>> {
+        let source = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        source.process_lifecycle_states(request).await
+    }
+}
+
+impl ProcessActiveRunLookup {
+    pub(crate) fn new(
+        lifecycle_source: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
+    ) -> Self {
+        Self { lifecycle_source }
+    }
+}
+
+#[async_trait]
+impl TriggerActiveRunLookup for ProcessActiveRunLookup {
     async fn active_run_state(
         &self,
         request: TriggerActiveRunStateRequest,
     ) -> Result<TriggerActiveRunState, TriggerError> {
-        let snapshot = self
-            .snapshot_source
-            .turn_run_snapshot()
-            .await
-            .map_err(trigger_backend_error)?;
-        let run_index = active_run_index(&snapshot);
-        Ok(active_run_state_from_index(&run_index, &request))
+        let mut results = self.active_run_states(vec![request]).await;
+        results.pop().unwrap_or(Ok(TriggerActiveRunState::Missing))
     }
 
     async fn active_run_states(
@@ -43,89 +75,82 @@ impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
         if requests.is_empty() {
             return Vec::new();
         }
-        let snapshot = match self.snapshot_source.turn_run_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let reason = trigger_backend_error(error).to_string();
-                return requests
-                    .into_iter()
-                    .map(|_| {
-                        Err(TriggerError::Backend {
-                            reason: reason.clone(),
-                        })
-                    })
-                    .collect();
-            }
+        let lookup_request = ProcessLifecycleLookupBatchRequest {
+            processes: requests
+                .iter()
+                .map(|request| ProcessLifecycleLookupRequest {
+                    tenant_id: request.tenant_id.clone(),
+                    process_id: process_id_from_turn_run_id(request.run_id),
+                })
+                .collect(),
         };
-        let run_index = active_run_index(&snapshot);
-        requests
-            .iter()
-            .map(|request| Ok(active_run_state_from_index(&run_index, request)))
+        self.lifecycle_source
+            .process_lifecycle_states(lookup_request)
+            .await
+            .into_iter()
+            .map(|result| {
+                result
+                    .map(active_run_state_from_process_lifecycle)
+                    .map_err(trigger_backend_error)
+            })
             .collect()
     }
 }
 
-fn active_run_index(snapshot: &TurnPersistenceSnapshot) -> ActiveRunIndex {
-    let mut index = ActiveRunIndex::new();
-    for run in &snapshot.runs {
-        let state = if run.status.is_terminal() {
-            TriggerActiveRunState::Terminal {
-                status: terminal_run_history_status(run.status),
-            }
-        } else if run.status.is_blocked() {
-            TriggerActiveRunState::Blocked {
-                kind: blocked_active_run_kind(run.status),
-            }
-        } else {
-            TriggerActiveRunState::Nonterminal
-        };
-        index
-            .entry(run.scope.tenant_id.as_str().to_owned())
-            .or_default()
-            .insert(run.run_id, state);
-    }
-    index
+fn process_id_from_turn_run_id(run_id: TurnRunId) -> ProcessId {
+    ProcessId::from_uuid(run_id.as_uuid())
 }
 
-fn active_run_state_from_index(
-    run_index: &ActiveRunIndex,
-    request: &TriggerActiveRunStateRequest,
+fn active_run_state_from_process_lifecycle(
+    result: ProcessLifecycleLookupResult,
 ) -> TriggerActiveRunState {
-    run_index
-        .get(request.tenant_id.as_str())
-        .and_then(|tenant_runs| tenant_runs.get(&request.run_id))
-        .copied()
-        .unwrap_or(TriggerActiveRunState::Missing)
+    match result {
+        ProcessLifecycleLookupResult::Missing => TriggerActiveRunState::Missing,
+        ProcessLifecycleLookupResult::Found { status, suspension } => {
+            if status.is_terminal() {
+                TriggerActiveRunState::Terminal {
+                    status: terminal_process_history_status(status),
+                }
+            } else if status == ProcessLifecycleStatus::Suspended {
+                TriggerActiveRunState::Blocked {
+                    kind: blocked_active_process_kind(
+                        suspension.as_ref().map(|suspension| suspension.kind),
+                    ),
+                }
+            } else {
+                TriggerActiveRunState::Nonterminal
+            }
+        }
+    }
 }
 
-fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
+fn terminal_process_history_status(status: ProcessLifecycleStatus) -> TriggerRunHistoryStatus {
     debug_assert!(
         status.is_terminal(),
-        "only terminal turn statuses should be normalized into run-history status"
+        "only terminal process statuses should be normalized into run-history status"
     );
     match status {
-        TurnStatus::Completed => TriggerRunHistoryStatus::Ok,
-        TurnStatus::Cancelled | TurnStatus::Failed | TurnStatus::RecoveryRequired => {
-            TriggerRunHistoryStatus::Error
+        ProcessLifecycleStatus::Completed | ProcessLifecycleStatus::Stopped => {
+            TriggerRunHistoryStatus::Ok
         }
-        TurnStatus::Queued
-        | TurnStatus::Running
-        | TurnStatus::BlockedApproval
-        | TurnStatus::BlockedAuth
-        | TurnStatus::BlockedResource
-        | TurnStatus::BlockedDependentRun
-        | TurnStatus::BlockedExternalTool
-        | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
+        ProcessLifecycleStatus::Cancelled
+        | ProcessLifecycleStatus::Failed
+        | ProcessLifecycleStatus::Killed
+        | ProcessLifecycleStatus::RecoveryRequired => TriggerRunHistoryStatus::Error,
+        ProcessLifecycleStatus::Queued
+        | ProcessLifecycleStatus::Running
+        | ProcessLifecycleStatus::Suspended
+        | ProcessLifecycleStatus::StopRequested
+        | ProcessLifecycleStatus::CancelRequested => TriggerRunHistoryStatus::Error,
     }
 }
 
 /// User-facing hold granularity for a gate-parked run (#5886): approval and
 /// auth get specific copy; the remaining blocked states share a generic one.
-fn blocked_active_run_kind(status: TurnStatus) -> BlockedActiveRunKind {
-    debug_assert!(status.is_blocked(), "only blocked statuses map to a kind");
-    match status {
-        TurnStatus::BlockedApproval => BlockedActiveRunKind::Approval,
-        TurnStatus::BlockedAuth => BlockedActiveRunKind::Auth,
+fn blocked_active_process_kind(kind: Option<ProcessSuspensionKind>) -> BlockedActiveRunKind {
+    match kind {
+        Some(ProcessSuspensionKind::Approval) => BlockedActiveRunKind::Approval,
+        Some(ProcessSuspensionKind::Authorization) => BlockedActiveRunKind::Auth,
         _ => BlockedActiveRunKind::Other,
     }
 }
@@ -141,92 +166,146 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use ironclaw_host_api::TenantId;
+    use ironclaw_processes::ProcessSuspension;
     use ironclaw_triggers::TriggerId;
-    use ironclaw_turns::{
-        AcceptedMessageRef, AgentLoopDriverDescriptor, CancellationPolicy,
-        CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ContextProfileId, EventCursor, LoopDriverId, ModelProfileId, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RunProfileId, RunProfileVersion, RuntimeProfileConstraints,
-        SchedulingClass, SourceBindingRef, SteeringPolicy, TurnId, TurnRunId, TurnRunProfile,
-        TurnRunRecord, TurnScope,
-    };
+    use ironclaw_turns::TurnRunId;
 
     #[derive(Default)]
-    struct CountingSnapshotSource {
+    struct CountingLifecycleSource {
         calls: std::sync::Mutex<usize>,
     }
 
-    impl CountingSnapshotSource {
+    impl CountingLifecycleSource {
         fn calls(&self) -> usize {
-            *self.calls.lock().expect("snapshot calls lock")
+            *self.calls.lock().expect("lifecycle calls lock")
         }
     }
 
     #[async_trait]
-    impl TurnRunSnapshotSource for CountingSnapshotSource {
-        async fn turn_run_snapshot(
+    impl ProcessLifecycleLookupSource for CountingLifecycleSource {
+        type Error = TurnError;
+
+        async fn process_lifecycle_states(
             &self,
-        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
-            *self.calls.lock().expect("snapshot calls lock") += 1;
-            Ok(TurnPersistenceSnapshot::default())
+            request: ProcessLifecycleLookupBatchRequest,
+        ) -> Vec<Result<ProcessLifecycleLookupResult, Self::Error>> {
+            *self.calls.lock().expect("lifecycle calls lock") += 1;
+            request
+                .processes
+                .into_iter()
+                .map(|_| Ok(ProcessLifecycleLookupResult::Missing))
+                .collect()
         }
     }
 
-    struct StaticSnapshotSource {
-        snapshot: TurnPersistenceSnapshot,
+    struct StaticLifecycleSource {
+        processes: Vec<LifecycleFixture>,
+    }
+
+    struct LifecycleFixture {
+        tenant_id: TenantId,
+        process_id: ProcessId,
+        status: ProcessLifecycleStatus,
+        suspension: Option<ProcessSuspension>,
     }
 
     #[async_trait]
-    impl TurnRunSnapshotSource for StaticSnapshotSource {
-        async fn turn_run_snapshot(
+    impl ProcessLifecycleLookupSource for StaticLifecycleSource {
+        type Error = TurnError;
+
+        async fn process_lifecycle_states(
             &self,
-        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
-            Ok(self.snapshot.clone())
+            request: ProcessLifecycleLookupBatchRequest,
+        ) -> Vec<Result<ProcessLifecycleLookupResult, Self::Error>> {
+            request
+                .processes
+                .into_iter()
+                .map(|lookup| {
+                    let result = self
+                        .processes
+                        .iter()
+                        .find(|fixture| {
+                            fixture.tenant_id == lookup.tenant_id
+                                && fixture.process_id == lookup.process_id
+                        })
+                        .map(|fixture| ProcessLifecycleLookupResult::Found {
+                            status: fixture.status,
+                            suspension: fixture.suspension.clone(),
+                        })
+                        .unwrap_or(ProcessLifecycleLookupResult::Missing);
+                    Ok(result)
+                })
+                .collect()
         }
     }
 
     #[derive(Default)]
-    struct FailingSnapshotSource {
+    struct FailingLifecycleSource {
         calls: std::sync::Mutex<usize>,
     }
 
-    impl FailingSnapshotSource {
+    impl FailingLifecycleSource {
         fn calls(&self) -> usize {
-            *self.calls.lock().expect("snapshot calls lock")
+            *self.calls.lock().expect("lifecycle calls lock")
         }
     }
 
     #[async_trait]
-    impl TurnRunSnapshotSource for FailingSnapshotSource {
-        async fn turn_run_snapshot(
+    impl ProcessLifecycleLookupSource for FailingLifecycleSource {
+        type Error = TurnError;
+
+        async fn process_lifecycle_states(
             &self,
-        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
-            *self.calls.lock().expect("snapshot calls lock") += 1;
-            Err(ironclaw_turns::TurnError::Unavailable {
-                reason: "snapshot failed".to_string(),
-            })
+            request: ProcessLifecycleLookupBatchRequest,
+        ) -> Vec<Result<ProcessLifecycleLookupResult, Self::Error>> {
+            *self.calls.lock().expect("lifecycle calls lock") += 1;
+            request
+                .processes
+                .into_iter()
+                .map(|_| {
+                    Err(ironclaw_turns::TurnError::Unavailable {
+                        reason: "lifecycle failed".to_string(),
+                    })
+                })
+                .collect()
         }
     }
 
     #[test]
-    fn terminal_turn_statuses_map_to_run_history_statuses() {
+    fn terminal_process_statuses_map_to_run_history_statuses() {
         let cases = [
-            (TurnStatus::Completed, TriggerRunHistoryStatus::Ok),
-            (TurnStatus::Cancelled, TriggerRunHistoryStatus::Error),
-            (TurnStatus::Failed, TriggerRunHistoryStatus::Error),
-            (TurnStatus::RecoveryRequired, TriggerRunHistoryStatus::Error),
+            (
+                ProcessLifecycleStatus::Completed,
+                TriggerRunHistoryStatus::Ok,
+            ),
+            (ProcessLifecycleStatus::Stopped, TriggerRunHistoryStatus::Ok),
+            (
+                ProcessLifecycleStatus::Cancelled,
+                TriggerRunHistoryStatus::Error,
+            ),
+            (
+                ProcessLifecycleStatus::Failed,
+                TriggerRunHistoryStatus::Error,
+            ),
+            (
+                ProcessLifecycleStatus::Killed,
+                TriggerRunHistoryStatus::Error,
+            ),
+            (
+                ProcessLifecycleStatus::RecoveryRequired,
+                TriggerRunHistoryStatus::Error,
+            ),
         ];
 
-        for (turn_status, expected) in cases {
-            assert_eq!(terminal_run_history_status(turn_status), expected);
+        for (process_status, expected) in cases {
+            assert_eq!(terminal_process_history_status(process_status), expected);
         }
     }
 
     #[tokio::test]
-    async fn active_run_batch_lookup_uses_one_snapshot_for_page() {
-        let snapshot_source = Arc::new(CountingSnapshotSource::default());
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
+    async fn active_run_batch_lookup_uses_one_lifecycle_lookup_for_page() {
+        let lifecycle_source = Arc::new(CountingLifecycleSource::default());
+        let lookup = ProcessActiveRunLookup::new(lifecycle_source.clone());
         let tenant_id = TenantId::new("trigger-active-batch-tenant").expect("tenant id");
         let fire_slot = Utc::now();
 
@@ -247,7 +326,7 @@ mod tests {
             ])
             .await;
 
-        assert_eq!(snapshot_source.calls(), 1);
+        assert_eq!(lifecycle_source.calls(), 1);
         assert_eq!(results.len(), 2);
         assert!(
             results
@@ -257,21 +336,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_run_batch_lookup_returns_nonterminal_and_terminal_states_from_snapshot() {
+    async fn active_run_batch_lookup_returns_nonterminal_and_terminal_states_from_lifecycle() {
         let tenant_id = TenantId::new("trigger-active-state-tenant").expect("tenant id");
         let nonterminal_run_id = TurnRunId::new();
         let terminal_run_id = TurnRunId::new();
         let missing_run_id = TurnRunId::new();
-        let snapshot_source = Arc::new(StaticSnapshotSource {
-            snapshot: TurnPersistenceSnapshot {
-                runs: vec![
-                    turn_run_record(&tenant_id, nonterminal_run_id, TurnStatus::Running),
-                    turn_run_record(&tenant_id, terminal_run_id, TurnStatus::Completed),
-                ],
-                ..TurnPersistenceSnapshot::default()
-            },
+        let lifecycle_source = Arc::new(StaticLifecycleSource {
+            processes: vec![
+                lifecycle_fixture(
+                    &tenant_id,
+                    nonterminal_run_id,
+                    ProcessLifecycleStatus::Running,
+                    None,
+                ),
+                lifecycle_fixture(
+                    &tenant_id,
+                    terminal_run_id,
+                    ProcessLifecycleStatus::Completed,
+                    None,
+                ),
+            ],
         });
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source);
+        let lookup = ProcessActiveRunLookup::new(lifecycle_source);
         let fire_slot = Utc::now();
 
         let results = lookup
@@ -314,18 +400,35 @@ mod tests {
         let auth_run = TurnRunId::new();
         let resource_run = TurnRunId::new();
         let dependent_run = TurnRunId::new();
-        let snapshot_source = Arc::new(StaticSnapshotSource {
-            snapshot: TurnPersistenceSnapshot {
-                runs: vec![
-                    turn_run_record(&tenant_id, approval_run, TurnStatus::BlockedApproval),
-                    turn_run_record(&tenant_id, auth_run, TurnStatus::BlockedAuth),
-                    turn_run_record(&tenant_id, resource_run, TurnStatus::BlockedResource),
-                    turn_run_record(&tenant_id, dependent_run, TurnStatus::BlockedDependentRun),
-                ],
-                ..TurnPersistenceSnapshot::default()
-            },
+        let lifecycle_source = Arc::new(StaticLifecycleSource {
+            processes: vec![
+                lifecycle_fixture(
+                    &tenant_id,
+                    approval_run,
+                    ProcessLifecycleStatus::Suspended,
+                    process_suspension(ProcessSuspensionKind::Approval),
+                ),
+                lifecycle_fixture(
+                    &tenant_id,
+                    auth_run,
+                    ProcessLifecycleStatus::Suspended,
+                    process_suspension(ProcessSuspensionKind::Authorization),
+                ),
+                lifecycle_fixture(
+                    &tenant_id,
+                    resource_run,
+                    ProcessLifecycleStatus::Suspended,
+                    process_suspension(ProcessSuspensionKind::Resource),
+                ),
+                lifecycle_fixture(
+                    &tenant_id,
+                    dependent_run,
+                    ProcessLifecycleStatus::Suspended,
+                    process_suspension(ProcessSuspensionKind::AwaitingChildProcess),
+                ),
+            ],
         });
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source);
+        let lookup = ProcessActiveRunLookup::new(lifecycle_source);
         let fire_slot = Utc::now();
         let request = |run_id| TriggerActiveRunStateRequest {
             tenant_id: tenant_id.clone(),
@@ -372,20 +475,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_run_batch_lookup_returns_empty_without_snapshot() {
-        let snapshot_source = Arc::new(CountingSnapshotSource::default());
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
+    async fn active_run_batch_lookup_returns_empty_without_lifecycle_read() {
+        let lifecycle_source = Arc::new(CountingLifecycleSource::default());
+        let lookup = ProcessActiveRunLookup::new(lifecycle_source.clone());
 
         let results = lookup.active_run_states(Vec::new()).await;
 
         assert!(results.is_empty());
-        assert_eq!(snapshot_source.calls(), 0);
+        assert_eq!(lifecycle_source.calls(), 0);
     }
 
     #[tokio::test]
-    async fn snapshot_source_error_fans_out_to_all_batch_results() {
-        let snapshot_source = Arc::new(FailingSnapshotSource::default());
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
+    async fn lifecycle_source_error_fans_out_to_all_batch_results() {
+        let lifecycle_source = Arc::new(FailingLifecycleSource::default());
+        let lookup = ProcessActiveRunLookup::new(lifecycle_source.clone());
         let tenant_id = TenantId::new("trigger-active-error-tenant").expect("tenant id");
         let fire_slot = Utc::now();
 
@@ -406,117 +509,35 @@ mod tests {
             ])
             .await;
 
-        assert_eq!(snapshot_source.calls(), 1);
+        assert_eq!(lifecycle_source.calls(), 1);
         assert_eq!(results.len(), 2);
         assert!(results.into_iter().all(|result| matches!(
             result,
-            Err(TriggerError::Backend { reason }) if reason.contains("snapshot failed")
+            Err(TriggerError::Backend { reason }) if reason.contains("lifecycle failed")
         )));
     }
 
-    fn turn_run_record(
+    fn lifecycle_fixture(
         tenant_id: &TenantId,
         run_id: TurnRunId,
-        status: TurnStatus,
-    ) -> TurnRunRecord {
-        let scope = TurnScope::new(
-            tenant_id.clone(),
-            None,
-            None,
-            ironclaw_host_api::ThreadId::new(format!("thread-{run_id}")).expect("thread id"),
-        );
-        TurnRunRecord {
-            run_id,
-            turn_id: TurnId::new(),
-            scope,
-            accepted_message_ref: AcceptedMessageRef::new(format!("message:{run_id}"))
-                .expect("message ref"),
-            source_binding_ref: SourceBindingRef::new(format!("source:{run_id}"))
-                .expect("source binding ref"),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(format!(
-                "reply:{run_id}"
-            ))
-            .expect("reply target binding ref"),
+        status: ProcessLifecycleStatus,
+        suspension: Option<ProcessSuspension>,
+    ) -> LifecycleFixture {
+        LifecycleFixture {
+            tenant_id: tenant_id.clone(),
+            process_id: process_id_from_turn_run_id(run_id),
             status,
-            profile: TurnRunProfile::from_resolved(resolved_run_profile()),
-            resolved_model_route: None,
-            model_usage: None,
-            checkpoint_id: None,
-            gate_ref: None,
-            blocked_activity_id: None,
-            credential_requirements: Vec::new(),
-            failure: None,
-            event_cursor: EventCursor(1),
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
-            received_at: Utc::now(),
-            parent_run_id: None,
-            subagent_depth: 0,
-            spawn_tree_root_run_id: None,
-            product_context: None,
-            resume_disposition: None,
+            suspension,
         }
     }
 
-    fn resolved_run_profile() -> ResolvedRunProfile {
-        let checkpoint_schema_id =
-            CheckpointSchemaId::new("trigger_active_checkpoint").expect("checkpoint schema");
-        ResolvedRunProfile {
-            run_class_id: RunClassId::new("trigger_active").expect("run class"),
-            profile_id: RunProfileId::default_profile(),
-            profile_version: RunProfileVersion::new(1),
-            loop_driver: AgentLoopDriverDescriptor {
-                id: LoopDriverId::new("trigger_active_loop").expect("loop driver"),
-                version: RunProfileVersion::new(1),
-                checkpoint_schema_id: Some(checkpoint_schema_id.clone()),
-                checkpoint_schema_version: Some(RunProfileVersion::new(1)),
-            },
-            checkpoint_schema_id,
-            checkpoint_schema_version: RunProfileVersion::new(1),
-            model_profile_id: ModelProfileId::new("trigger_active_model").expect("model profile"),
-            capability_surface_profile_id: CapabilitySurfaceProfileId::new("trigger_active_caps")
-                .expect("capability surface profile"),
-            context_profile_id: ContextProfileId::new("trigger_active_context")
-                .expect("context profile"),
-            steering_policy: SteeringPolicy {
-                allow_steering: false,
-                allow_interrupt: true,
-                allow_driver_specific_nudges: false,
-            },
-            cancellation_policy: CancellationPolicy {
-                allow_cancel: true,
-                require_checkpoint_before_cancel: false,
-            },
-            checkpoint_policy: CheckpointPolicy {
-                require_before_model: false,
-                require_before_side_effect: true,
-                require_before_block: true,
-                max_checkpoint_bytes: 64 * 1024,
-                require_final_checkpoint: false,
-                allow_no_reply_completion: false,
-            },
-            resource_budget_policy: ResourceBudgetPolicy {
-                tier: ResourceBudgetTier::new("trigger_active_budget").expect("budget tier"),
-                max_model_calls: 1,
-                max_capability_invocations: 1,
-            },
-            personal_context_policy: Default::default(),
-            runtime_constraints: RuntimeProfileConstraints {
-                allow_raw_runtime_backend_selection: false,
-                allow_broad_capability_surface: false,
-            },
-            runner_pool_id: None,
-            scheduling_class: SchedulingClass::new("trigger_active").expect("scheduling class"),
-            concurrency_class: ConcurrencyClass::new("trigger_active").expect("concurrency class"),
-            resolution_fingerprint: RunProfileFingerprint::new("trigger-active-profile-v1")
-                .expect("run profile fingerprint"),
-            provenance: RedactedRunProfileProvenance {
-                sources: Vec::new(),
-                effective_privileges: Vec::new(),
-            },
-        }
+    fn process_suspension(kind: ProcessSuspensionKind) -> Option<ProcessSuspension> {
+        Some(ProcessSuspension {
+            kind,
+            gate_ref: None,
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        })
     }
 }

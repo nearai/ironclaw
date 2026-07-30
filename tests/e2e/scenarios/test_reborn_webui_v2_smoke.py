@@ -34,7 +34,7 @@ import aiohttp
 import httpx
 import pytest
 from playwright.async_api import expect
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
@@ -204,57 +204,130 @@ async def _wait_for_automation_named(
         ) from None
 
 
-async def _install_fake_v2_event_source(page) -> None:
-    await page.add_init_script(
-        """
+async def _install_fake_v2_event_stream(page) -> None:
+    script = """
         (() => {
+          const nativeFetch = window.fetch.bind(window);
+          const encoder = new TextEncoder();
+          const expectedAuthorization = __EXPECTED_AUTHORIZATION__;
           let activeStream = null;
+          let holdNextConnection = false;
+
           const currentStream = () => {
-            if (!activeStream || activeStream.readyState === 2) {
-              throw new Error("no EventSource stream is open");
+            if (!activeStream || activeStream.closed) {
+              throw new Error("no event stream is open");
             }
             return activeStream;
           };
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              if (activeStream && activeStream.readyState !== 2) {
-                activeStream.close();
+
+          const closeStream = (stream, error = null) => {
+            if (!stream || stream.closed) return;
+            stream.closed = true;
+            if (stream.controller) {
+              if (error) {
+                stream.controller.error(error);
+              } else {
+                stream.controller.close();
               }
-              activeStream = this;
-              setTimeout(() => {
-                if (activeStream !== this || this.readyState === 2) return;
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
             }
-            close() {
-              this.readyState = 2;
-              if (activeStream === this) activeStream = null;
+            if (activeStream === stream) activeStream = null;
+          };
+
+          const openStreamResponse = (signal) => {
+            const stream = { closed: false, controller: null };
+            const body = new ReadableStream({
+              start(controller) {
+                stream.controller = controller;
+              },
+              cancel() {
+                stream.closed = true;
+                if (activeStream === stream) activeStream = null;
+              },
+            });
+            if (activeStream && !activeStream.closed) {
+              closeStream(activeStream);
             }
-          }
-          window.EventSource = FakeEventSource;
+            activeStream = stream;
+            signal?.addEventListener(
+              "abort",
+              () => closeStream(stream),
+              { once: true },
+            );
+            return new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          };
+
+          window.fetch = async (input, init = {}) => {
+            const request = new Request(input, init);
+            const url = new URL(request.url, window.location.href);
+            if (!url.pathname.endsWith("/events")) {
+              return nativeFetch(input, init);
+            }
+            if (url.searchParams.has("token")) {
+              return new Response("", { status: 400 });
+            }
+            if (request.headers.get("Authorization") !== expectedAuthorization) {
+              return new Response("", { status: 401 });
+            }
+            if (!holdNextConnection) {
+              return openStreamResponse(request.signal);
+            }
+            return new Promise((resolve, reject) => {
+              const stream = {
+                closed: false,
+                controller: null,
+                resolve,
+                reject,
+              };
+              activeStream = stream;
+              request.signal?.addEventListener(
+                "abort",
+                () => {
+                  if (stream.closed) return;
+                  stream.closed = true;
+                  if (activeStream === stream) activeStream = null;
+                  reject(new DOMException("Aborted", "AbortError"));
+                },
+                { once: true },
+              );
+            });
+          };
+
           window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
             const stream = currentStream();
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
+            if (!stream.controller) throw new Error("event stream is reconnecting");
+            stream.controller.enqueue(encoder.encode(
+              `id: ${id}\\nevent: ${type}\\ndata: ${
+                JSON.stringify({ type, ...frame })
+              }\\n\\n`
+            ));
           };
+
           window.__failLatestV2Sse = (readyState = 2) => {
             const stream = currentStream();
-            stream.readyState = readyState;
-            if (readyState === 2 && activeStream === stream) activeStream = null;
-            if (typeof stream.onerror !== "function") {
-              throw new Error("EventSource has no error handler");
+            if (readyState === 0) {
+              holdNextConnection = true;
+              closeStream(stream, new TypeError("event stream interrupted"));
+              return;
             }
-            stream.onerror(new Event("error"));
+            holdNextConnection = false;
+            if (stream.resolve) {
+              stream.closed = true;
+              if (activeStream === stream) activeStream = null;
+              stream.resolve(new Response("", { status: 401 }));
+              return;
+            }
+            closeStream(stream, new TypeError("event stream interrupted"));
           };
         })();
         """
+    await page.add_init_script(
+        script.replace(
+            "__EXPECTED_AUTHORIZATION__",
+            json.dumps(f"Bearer {REBORN_V2_AUTH_TOKEN}"),
+        )
     )
 
 
@@ -1512,7 +1585,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1638,7 +1711,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     send_requests: list[dict] = []
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1766,7 +1839,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     release_second_send = asyncio.Event()
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -2082,6 +2155,22 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
         context.locator(SEL_V2["logs_context_chip"].format(key="source"))
     ).to_contain_text("slack")
 
+    native_dialogs = capture_native_dialogs(reborn_v2_page)
+    clear_button = reborn_v2_page.get_by_role("button", name="Clear", exact=True)
+    await clear_button.click()
+    confirmation = reborn_v2_page.get_by_role(
+        "dialog", name="Clear all log entries?"
+    )
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+    await expect(entry).to_be_visible()
+
+    await clear_button.click()
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+    await expect(entry).to_have_count(0)
+    assert native_dialogs == []
+
 
 async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
     reborn_v2_server, reborn_v2_browser
@@ -2304,13 +2393,7 @@ async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
 
-    native_dialogs: list[str] = []
-
-    async def dismiss_native_dialog(dialog) -> None:
-        native_dialogs.append(dialog.type)
-        await dialog.dismiss()
-
-    reborn_v2_page.on("dialog", dismiss_native_dialog)
+    native_dialogs = capture_native_dialogs(reborn_v2_page)
     await reborn_v2_page.goto(
         f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}"
     )
@@ -2447,7 +2530,7 @@ async def test_reborn_v2_loading_older_messages_preserves_viewport(
         viewport={"width": 1280, "height": 720}
     )
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body) -> None:
         await route.fulfill(

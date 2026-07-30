@@ -49,7 +49,8 @@ use ironclaw_product::{
     OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW,
+    PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_LIST_COMMAND, PROJECT_CREATE_COMMAND,
     PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
@@ -113,7 +114,7 @@ use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
-use crate::webui_v2::schema::WebChatV2EventFrame;
+use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
 use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
@@ -1107,9 +1108,8 @@ pub async fn get_attachment(
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
-/// SSE polling cadence for `stream_events`. The service only exposes a
-/// drain-style read; once the backlog is flushed the handler waits this
-/// long before checking for newly arrived events.
+/// SSE polling cadence for product surfaces that expose only the legacy
+/// drain-style read. Subscription-capable surfaces bypass this fallback.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Upper bound for idle `stream_events` polling. A browser tab with no
@@ -1118,8 +1118,8 @@ const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// hosted Postgres.
 const SSE_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
 
-/// SSE keep-alive cadence. axum emits an SSE comment line every interval
-/// to keep proxies from closing the idle connection.
+/// SSE keep-alive cadence. Axum emits a comment line for proxies, and the
+/// subscription path emits a typed frame for browser application code.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// HTTP header the browser's `EventSource` sends on auto-reconnect to
@@ -1304,6 +1304,12 @@ fn sse_error_event(error: ProductSurfaceError) -> Event {
     }
 }
 
+fn sse_keep_alive_event() -> Event {
+    Event::default()
+        .event(WebChatV2Event::KeepAlive.event_name())
+        .data(r#"{"type":"keep_alive"}"#)
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
@@ -1359,7 +1365,8 @@ fn build_sse_stream(
                     );
                     return;
                 }
-                Ok(Ok(response)) => {
+                Ok(Ok(mut response)) => {
+                    let subscription = response.subscription.take();
                     let events = match decode_product_outbound_events(response.events) {
                         Ok(events) => events,
                         Err(error) => {
@@ -1376,11 +1383,63 @@ fn build_sse_stream(
                             yield Ok(event);
                         }
                     }
+                    if let Some(subscription) = subscription {
+                        loop {
+                            let remaining =
+                                SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                            if remaining.is_zero() {
+                                return;
+                            }
+                            let next = tokio::select! {
+                                biased;
+                                _ = slot_guard.cancelled() => return,
+                                result = tokio::time::timeout(
+                                    remaining,
+                                    subscription.next(),
+                                ) => result,
+                                _ = tokio::time::sleep(SSE_KEEPALIVE_INTERVAL) => {
+                                    // Axum's comment keep-alive keeps proxies
+                                    // open, but parser packages do not surface
+                                    // comments to the browser watchdog. Emit a
+                                    // typed application frame as liveness proof
+                                    // while the projection is legitimately idle.
+                                    yield Ok(sse_keep_alive_event());
+                                    continue;
+                                }
+                            };
+                            let response = match next {
+                                Ok(Some(Ok(response))) => response,
+                                Ok(Some(Err(error))) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                                Ok(None) => return,
+                                Err(_) => {
+                                    tracing::debug!(
+                                        target = "ironclaw_webui_v2::sse",
+                                        "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                                    );
+                                    return;
+                                }
+                            };
+                            let events = match decode_product_outbound_events(response.events) {
+                                Ok(events) => events,
+                                Err(error) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                            };
+                            for envelope in events {
+                                if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+                    }
                     if had_events {
-                        // The production projection service waits on its live
-                        // subscription when no new item is replayable. Re-enter
-                        // it immediately after delivering a batch so assistant
-                        // text deltas are not delayed by the idle poll cadence.
+                        // Drain-only compatibility surfaces may have another
+                        // buffered batch ready. Re-enter immediately after
+                        // delivery before applying the idle poll cadence.
                         idle_polls = 0;
                         continue;
                     }
@@ -1532,6 +1591,46 @@ pub struct ListThreadsQuery {
     pub candidate_thread_id: Option<String>,
     #[serde(default)]
     pub needs_approval: bool,
+}
+
+/// `GET /api/webchat/v2/commands`
+pub async fn list_commands(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ironclaw_product::RebornProductCommandListResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_LIST_COMMAND,
+        EmptyProductCommandInput {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteCommandBody {
+    pub text: String,
+}
+
+/// `POST /api/webchat/v2/threads/:thread_id/commands`
+pub async fn execute_command(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ExecuteCommandBody>,
+) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_EXECUTE_COMMAND,
+        ironclaw_product::RebornExecuteProductCommandRequest {
+            thread_id,
+            text: body.text,
+        },
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/automations`

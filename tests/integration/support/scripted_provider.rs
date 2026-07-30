@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
+    LlmProvider, ModelFallbackRoute, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;
 use tokio::sync::oneshot;
@@ -27,6 +27,7 @@ use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, Tr
 /// Model name surfaced by the scripted provider. Non-empty and not "default" so
 /// the Reborn model gateway's model-override resolution accepts it.
 pub const SCRIPTED_MODEL_NAME: &str = "scripted/integration-test";
+pub const SCRIPTED_FALLBACK_MODEL_NAME: &str = "scripted/integration-fallback";
 
 /// Build a `TraceLlm` that replays the given scripted replies in order.
 pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>) -> TraceLlm {
@@ -149,6 +150,195 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+// ---------------------------------------------------------------------------
+// Ordered provider fallback (vendor seam) — whole-turn recovery coverage.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct FallbackProviderCallRecords {
+    primary_calls: usize,
+    fallback_calls: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct FallbackProviderCallProbe(Arc<Mutex<FallbackProviderCallRecords>>);
+
+impl FallbackProviderCallProbe {
+    fn record_primary(&self) {
+        lock(&self.0).primary_calls += 1;
+    }
+
+    fn record_fallback(&self) {
+        lock(&self.0).fallback_calls += 1;
+    }
+
+    pub fn primary_calls(&self) -> usize {
+        lock(&self.0).primary_calls
+    }
+
+    pub fn fallback_calls(&self) -> usize {
+        lock(&self.0).fallback_calls
+    }
+}
+
+pub struct UnavailablePrimaryLlm {
+    calls: FallbackProviderCallProbe,
+}
+
+pub struct SuccessfulFallbackLlm {
+    inner: Arc<TraceLlm>,
+    calls: FallbackProviderCallProbe,
+}
+
+pub fn scripted_fallback_vendor_pair(
+    fallback: Arc<TraceLlm>,
+) -> (
+    UnavailablePrimaryLlm,
+    SuccessfulFallbackLlm,
+    FallbackProviderCallProbe,
+) {
+    let calls = FallbackProviderCallProbe::default();
+    (
+        UnavailablePrimaryLlm {
+            calls: calls.clone(),
+        },
+        SuccessfulFallbackLlm {
+            inner: fallback,
+            calls: calls.clone(),
+        },
+        calls,
+    )
+}
+
+fn scripted_primary_unavailable() -> LlmError {
+    LlmError::BadGateway {
+        provider: "scripted_primary".to_string(),
+        status: 503,
+        retry_after: None,
+    }
+}
+
+#[async_trait]
+impl LlmProvider for UnavailablePrimaryLlm {
+    fn model_name(&self) -> &str {
+        SCRIPTED_MODEL_NAME
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record_primary();
+        Err(scripted_primary_unavailable())
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record_primary();
+        Err(scripted_primary_unavailable())
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SuccessfulFallbackLlm {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
+    fn model_name(&self) -> &str {
+        SCRIPTED_FALLBACK_MODEL_NAME
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record_fallback();
+        self.inner.complete(request).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.calls.record_fallback();
+        self.inner.complete_streaming(request, sink).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record_fallback();
+        self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record_fallback();
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        match requested_model.filter(|model| !model.trim().is_empty()) {
+            Some(model) => self.inner.effective_model_name(Some(model)),
+            None => self.active_model_name(),
+        }
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        if fallback_index == 0 {
+            return Ok(ModelFallbackRoute {
+                fallback_index,
+                model: self.effective_model_name(requested_model),
+            });
+        }
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        self.model_name().to_string()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+}
+
 /// A raw `LlmProvider` that parks the first model call until the test releases it, then
 /// delegates to the inner scripted `TraceLlm`. Same vendor-SDK seam as `scripted_trace_llm`,
 /// preserving the single-fake invariant.
@@ -165,6 +355,10 @@ pub fn parking_trace_llm(gate: ParkingModelGate, inner: Arc<TraceLlm>) -> Parkin
 
 #[async_trait]
 impl LlmProvider for ParkingLlm {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -178,12 +372,72 @@ impl LlmProvider for ParkingLlm {
         self.inner.complete(request).await
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.gate.park().await;
+        self.inner.complete_streaming(request, sink).await
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.gate.park().await;
         self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.gate.park().await;
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        self.inner.active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
     }
 }
 
@@ -200,6 +454,7 @@ pub enum RecoverableModelFailure {
     ContextOverflow,
     ContentFiltered,
     InvalidOutput,
+    OutputTruncated,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -359,6 +614,115 @@ impl ModelProviderCallProbe {
     }
 }
 
+/// Additive provider-call recorder that preserves the selected provider mode.
+///
+/// Unlike a model-mode enum variant, this decorator can wrap normal, parked,
+/// recoverable, or failing providers without making builder-call order alter
+/// the behavior under test.
+pub struct RecordingLlm {
+    inner: Arc<dyn LlmProvider>,
+    calls: ModelProviderCallProbe,
+}
+
+pub fn recording_llm(inner: Arc<dyn LlmProvider>) -> (RecordingLlm, ModelProviderCallProbe) {
+    let calls = ModelProviderCallProbe::default();
+    (
+        RecordingLlm {
+            inner,
+            calls: calls.clone(),
+        },
+        calls,
+    )
+}
+
+#[async_trait]
+impl LlmProvider for RecordingLlm {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
+        self.inner.complete(request).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
+        self.inner.complete_streaming(request, sink).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
+        self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        self.inner.active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+}
+
 /// A raw provider that reports a configured failure for interactive,
 /// tool-capable calls a bounded number of times, then delegates to the scripted
 /// provider. Text-only system inference still delegates normally so context
@@ -409,10 +773,64 @@ impl RecoverableFailureLlm {
             })
             .is_ok()
     }
+
+    fn scheduled_tool_failure(&self) -> Option<Result<ToolCompletionResponse, LlmError>> {
+        if !self.consume_scheduled_failure() {
+            return None;
+        }
+        Some(match self.failure {
+            RecoverableModelFailure::ContextOverflow => Err(LlmError::ContextLengthExceeded {
+                used: CONTEXT_OVERFLOW_USED_TOKENS,
+                limit: 1,
+            }),
+            RecoverableModelFailure::ContentFiltered => Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::ContentFilter,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            }),
+            RecoverableModelFailure::InvalidOutput => Ok(ToolCompletionResponse {
+                content: Some(String::new()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            }),
+            RecoverableModelFailure::OutputTruncated => Ok(ToolCompletionResponse {
+                content: Some(
+                    "partial response that must not be reported as complete\n\
+                     to=builtin__http weirdjson\n\
+                     {\"url\":\"https://api.example.test/partial\"}"
+                        .into(),
+                ),
+                tool_calls: Vec::new(),
+                input_tokens: 11,
+                output_tokens: 7,
+                finish_reason: FinishReason::Length,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            }),
+        })
+    }
 }
 
 #[async_trait]
 impl LlmProvider for RecoverableFailureLlm {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -426,42 +844,78 @@ impl LlmProvider for RecoverableFailureLlm {
         self.inner.complete(request).await
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
+        self.inner.complete_streaming(request, sink).await
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.calls.record(&request.messages, true);
-        if self.consume_scheduled_failure() {
-            return match self.failure {
-                RecoverableModelFailure::ContextOverflow => Err(LlmError::ContextLengthExceeded {
-                    used: CONTEXT_OVERFLOW_USED_TOKENS,
-                    limit: 1,
-                }),
-                RecoverableModelFailure::ContentFiltered => Ok(ToolCompletionResponse {
-                    content: None,
-                    tool_calls: Vec::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    finish_reason: FinishReason::ContentFilter,
-                    cache_read_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    reasoning: None,
-                    reasoning_details: None,
-                }),
-                RecoverableModelFailure::InvalidOutput => Ok(ToolCompletionResponse {
-                    content: Some(String::new()),
-                    tool_calls: Vec::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    finish_reason: FinishReason::Stop,
-                    cache_read_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    reasoning: None,
-                    reasoning_details: None,
-                }),
-            };
+        if let Some(result) = self.scheduled_tool_failure() {
+            return result;
         }
         self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
+        if let Some(result) = self.scheduled_tool_failure() {
+            return result;
+        }
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        self.inner.active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
     }
 }
 
@@ -491,11 +945,19 @@ pub enum ErrLlmKind {
 /// non-retryable-error mapping through to `TurnStatus::Failed`.
 pub struct ErrLlm {
     kind: ErrLlmKind,
+    calls: ModelProviderCallProbe,
 }
 
 impl ErrLlm {
-    pub fn new(kind: ErrLlmKind) -> Self {
-        Self { kind }
+    pub fn new(kind: ErrLlmKind) -> (Self, ModelProviderCallProbe) {
+        let calls = ModelProviderCallProbe::default();
+        (
+            Self {
+                kind,
+                calls: calls.clone(),
+            },
+            calls,
+        )
     }
 
     fn make_error(&self) -> LlmError {
@@ -518,14 +980,16 @@ impl LlmProvider for ErrLlm {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
         Err(self.make_error())
     }
 
     async fn complete_with_tools(
         &self,
-        _request: ToolCompletionRequest,
+        request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
         Err(self.make_error())
     }
 }
