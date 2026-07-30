@@ -42,42 +42,72 @@ function createHarness({
   const refs = [];
   const effects = [];
 
-  function EventSource() {}
-  EventSource.CONNECTING = 0;
-  EventSource.OPEN = 1;
-  EventSource.CLOSED = 2;
+  class EventSourcePlus {
+    constructor(url, options) {
+      this.url = url;
+      this.options = options;
+      this.lastEventId = undefined;
+      this.requestOptions = {};
+      streams.push(this);
+    }
+
+    listen(hooks) {
+      this.hooks = hooks;
+      const stream = this;
+      this.controller = {
+        abortCalls: [],
+        reconnectCalls: 0,
+        abort(reason) {
+          this.abortCalls.push(reason);
+        },
+        reconnect() {
+          this.reconnectCalls += 1;
+          stream.request();
+        },
+      };
+      this.request();
+      return this.controller;
+    }
+
+    request() {
+      this.hooks.onRequest?.({ options: this.requestOptions });
+    }
+
+    respond(status = 200, contentType = "text/event-stream") {
+      const response = {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: new Headers({ "content-type": contentType }),
+      };
+      if (response.ok && contentType.includes("text/event-stream")) {
+        this.hooks.onResponse?.({ response });
+      } else {
+        this.hooks.onResponseError?.({ response });
+      }
+    }
+
+    message(frame, { event = frame.type, id = "" } = {}) {
+      if (id) this.lastEventId = id;
+      this.hooks.onMessage?.({
+        data: JSON.stringify(frame),
+        event,
+        id,
+      });
+    }
+  }
 
   const context = {
     CONNECTION_STATUS,
-    authScope: () => "tenant:user",
     clientActionId: () => "browser-tab-connection",
-    EventSource,
+    EventSourcePlus,
+    eventStreamRequest: ({ threadId, connectionId }) => ({
+      url: `http://localhost/events/${threadId}?connection_id=${connectionId}`,
+      headers: () => ({ Authorization: "Bearer token-1" }),
+    }),
+    globalThis: {},
+    Headers,
     JSON,
     Math,
-    globalThis: {
-      crypto: { randomUUID: () => "browser-tab-connection" },
-    },
-    openEventStream: (args) => {
-      const listeners = new Map();
-      const stream = {
-        args,
-        readyState: EventSource.CONNECTING,
-        closeCalls: 0,
-        onmessage: null,
-        onopen: null,
-        onerror: null,
-        addEventListener: (name, handler) => listeners.set(name, handler),
-        close() {
-          this.closeCalls += 1;
-          this.readyState = EventSource.CLOSED;
-        },
-        listener(name) {
-          return listeners.get(name);
-        },
-      };
-      streams.push(stream);
-      return stream;
-    },
     React: {
       useEffect: (effect, dependencies) => {
         const index = effectIndex++;
@@ -172,423 +202,177 @@ function createHarness({
   };
 }
 
-test("useSSE reflects browser offline and online events", () => {
-  const { cleanup, context, statuses, streams, windowListeners } = createHarness();
-
+test("useSSE delegates framing, credentials, and retries to EventSourcePlus", () => {
+  const { streams, statuses } = createHarness();
   const stream = streams[0];
-  stream.readyState = context.EventSource.OPEN;
-  stream.onopen();
-  windowListeners.get("offline")();
-  assert.deepEqual(statuses, ["connecting", "connected", "reconnecting"]);
 
-  windowListeners.get("online")();
-  assert.deepEqual(statuses, [
-    "connecting",
-    "connected",
-    "reconnecting",
-    "connected",
-  ]);
+  assert.equal(
+    stream.url,
+    "http://localhost/events/thread-1?connection_id=browser-tab-connection",
+  );
+  assert.deepEqual(stream.options.headers(), { Authorization: "Bearer token-1" });
+  assert.equal(stream.options.credentials, "same-origin");
+  assert.equal(stream.options.retryStrategy, "always");
+  assert.equal(stream.options.maxRetryInterval, 30_000);
+  assert.equal(typeof stream.requestOptions.query.connection_generation, "number");
 
-  cleanup();
-  assert.equal(windowListeners.has("offline"), false);
-  assert.equal(windowListeners.has("online"), false);
+  stream.respond();
+  assert.deepEqual(statuses, ["connecting", "connecting", "connected"]);
+
+  stream.hooks.onRequestError?.({});
+  assert.equal(statuses.at(-1), "reconnecting");
 });
 
-test("useSSE starts reconnecting when the browser is already offline", () => {
-  const { statuses } = createHarness({ online: false });
-
-  assert.deepEqual(statuses, ["reconnecting"]);
-});
-
-test("useSSE resumes delivery after returning to a hidden tab", () => {
+test("useSSE dispatches typed frames from the packaged parser", () => {
   const events = [];
-  const { context, documentListeners, statuses, streams, timers } = createHarness({
-    onEvent: (event) => events.push(event),
-  });
+  const { streams } = createHarness({ onEvent: (event) => events.push(event) });
+  const stream = streams[0];
 
-  const initial = streams[0];
-  initial.readyState = context.EventSource.OPEN;
-  initial.onopen();
+  stream.message(
+    { type: "projection_update", state: { items: [] } },
+    { id: "cursor-1" },
+  );
+  stream.message(
+    { state: { items: [] } },
+    { event: "projection_snapshot", id: "cursor-2" },
+  );
+
+  assert.equal(
+    JSON.stringify(events),
+    JSON.stringify([
+      {
+        type: "projection_update",
+        frame: { type: "projection_update", state: { items: [] } },
+        lastEventId: "cursor-1",
+      },
+      {
+        type: "projection_snapshot",
+        frame: { state: { items: [] } },
+        lastEventId: "cursor-2",
+      },
+    ]),
+  );
+});
+
+test("useSSE reconnects an active run when an open stream stops delivering", () => {
+  const { renderActivityExpected, streams, timers } = createHarness();
+  const stream = streams[0];
+  stream.respond();
+
+  renderActivityExpected(true);
+  const watchdog = timers.find(
+    (timer) => timer.delay === 30_000 && !timer.cleared,
+  );
+  assert.ok(watchdog);
+
+  watchdog.handler();
+  assert.equal(stream.controller.reconnectCalls, 1);
+  assert.equal(typeof stream.requestOptions.query.connection_generation, "number");
+});
+
+test("useSSE pauses while hidden and reconnects when visible", () => {
+  const { context, documentListeners, statuses, streams } = createHarness();
+  const stream = streams[0];
+  stream.respond();
 
   context.document.visibilityState = "hidden";
   documentListeners.get("visibilitychange")();
-  assert.equal(initial.closeCalls, 1);
+  assert.deepEqual(stream.controller.abortCalls, ["document hidden"]);
+  assert.equal(statuses.at(-1), "paused");
 
   context.document.visibilityState = "visible";
   documentListeners.get("visibilitychange")();
-  const resumed = streams[1];
-  resumed.readyState = context.EventSource.CONNECTING;
-  resumed.onerror({});
-
-  assert.equal(resumed.closeCalls, 0);
-  assert.equal(timers.filter((timer) => timer.delay === 10_000).length, 1);
-
-  resumed.readyState = context.EventSource.OPEN;
-  resumed.listener("projection_update")({
-    data: JSON.stringify({ type: "projection_update", state: { items: [] } }),
-    lastEventId: "after-tab-resume",
-  });
-
-  assert.equal(streams.length, 2);
-  assert.equal(events.length, 1);
-  assert.deepEqual(statuses, [
-    "connecting",
-    "connected",
-    "paused",
-    "connecting",
-    "reconnecting",
-    "connected",
-  ]);
-});
-
-test("useSSE lets EventSource recover transient failures natively", () => {
-  const { context, statuses, streams, timers } = createHarness();
-
-  assert.deepEqual(statuses, ["connecting"]);
-  const stream = streams[0];
-  stream.readyState = context.EventSource.CONNECTING;
-  stream.onerror({});
-
-  assert.deepEqual(statuses, ["connecting", "reconnecting"]);
-  assert.equal(stream.closeCalls, 0);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 10_000);
-
-  stream.readyState = context.EventSource.OPEN;
-  stream.listener("keep_alive")({
-    data: JSON.stringify({ type: "keep_alive" }),
-    lastEventId: "resume-cursor",
-  });
-
-  assert.equal(timers[0].cleared, true);
-  assert.equal(streams.length, 1);
-  assert.deepEqual(statuses, ["connecting", "reconnecting", "connected"]);
-});
-
-test("useSSE reconnects an active run when an open stream stops delivering frames", () => {
-  const { context, statuses, streams, timers } = createHarness({
-    activityExpected: true,
-  });
-
-  const stalled = streams[0];
-  stalled.readyState = context.EventSource.OPEN;
-  stalled.onopen();
-  stalled.listener("projection_update")({
-    data: JSON.stringify({
-      type: "projection_update",
-      state: { items: [{ text: { id: "text:run-1", body: "partial" } }] },
-    }),
-    lastEventId: "partial-cursor",
-  });
-
-  const activityWatchdog = timers
-    .filter((timer) => timer.delay === 30_000 && !timer.cleared)
-    .at(-1);
-  assert.ok(activityWatchdog);
-  activityWatchdog.handler();
-
-  assert.equal(stalled.closeCalls, 1);
+  assert.equal(stream.controller.reconnectCalls, 1);
+  assert.equal(statuses.at(-2), "connecting");
   assert.equal(statuses.at(-1), "reconnecting");
-  const reconnectTimer = timers.find(
-    (timer) => timer.delay === 2000 && !timer.cleared,
-  );
-  assert.ok(reconnectTimer);
-  reconnectTimer.handler();
-
-  assert.equal(streams.length, 2);
-  assert.equal(streams[1].args.afterCursor, "partial-cursor");
 });
 
-test("useSSE does not arm the stall watchdog for an idle thread", () => {
-  const { context, streams, timers } = createHarness();
+test("useSSE lets retryable responses retry and stops on terminal responses", () => {
+  const retryable = createHarness();
+  retryable.streams[0].respond(204, "");
+  assert.equal(retryable.statuses.at(-1), "reconnecting");
+  assert.equal(retryable.streams[0].controller.abortCalls.length, 0);
+  retryable.cleanup();
 
+  const terminal = createHarness();
+  terminal.streams[0].respond(403, "application/json");
+  assert.equal(terminal.statuses.at(-1), "disconnected");
+  assert.deepEqual(terminal.streams[0].controller.abortCalls, [
+    "non-retryable stream response",
+  ]);
+  terminal.cleanup();
+});
+
+test("useSSE stops after a non-retryable stream event", () => {
+  const events = [];
+  const { statuses, streams } = createHarness({
+    onEvent: (event) => events.push(event),
+  });
   const stream = streams[0];
-  stream.readyState = context.EventSource.OPEN;
-  stream.onopen();
-  stream.listener("keep_alive")({
-    data: JSON.stringify({ type: "keep_alive" }),
-    lastEventId: "idle-cursor",
+
+  stream.message({
+    type: "stream_error",
+    kind: "not_found",
+    retryable: false,
   });
 
-  assert.equal(
-    timers.filter((timer) => timer.delay === 30_000 && !timer.cleared).length,
-    0,
-  );
-  assert.equal(stream.closeCalls, 0);
+  assert.equal(events[0].type, "error");
+  assert.equal(statuses.at(-1), "disconnected");
+  assert.deepEqual(stream.controller.abortCalls, [
+    "non-retryable stream event",
+  ]);
 });
 
-test("useSSE arms the stall watchdog when an idle thread starts a run", () => {
-  const { context, renderActivityExpected, streams, timers } = createHarness();
-
+test("useSSE clears packaged replay state before rebasing from origin", () => {
+  const events = [];
+  const { statuses, streams } = createHarness({
+    onEvent: (event) => events.push(event),
+  });
   const stream = streams[0];
-  stream.readyState = context.EventSource.OPEN;
-  stream.onopen();
-  assert.equal(
-    timers.filter((timer) => timer.delay === 30_000 && !timer.cleared).length,
-    0,
+  stream.message(
+    { type: "projection_update", state: { items: [] } },
+    { id: "stale-cursor" },
   );
+  assert.equal(stream.lastEventId, "stale-cursor");
 
-  renderActivityExpected(true);
+  stream.message({
+    type: "stream_error",
+    kind: "replay_unavailable",
+    retryable: true,
+  });
 
-  assert.equal(
-    timers.filter((timer) => timer.delay === 30_000 && !timer.cleared).length,
-    1,
-    "starting a run must arm recovery even when the stalled stream cannot deliver an accepted frame",
-  );
+  assert.equal(stream.lastEventId, undefined);
+  assert.equal(stream.controller.reconnectCalls, 1);
+  assert.equal(statuses.at(-1), "reconnecting");
+  assert.equal(events.at(-1).type, "error");
 });
 
-test("useSSE keeps one watchdog across repeated native errors", () => {
-  const { context, statuses, streams, timers } = createHarness();
-
-  const stream = streams[0];
-  stream.readyState = context.EventSource.CONNECTING;
-  stream.onerror({});
-  stream.onerror({});
-
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 10_000);
-  assert.equal(stream.closeCalls, 0);
-  assert.deepEqual(statuses, ["connecting", "reconnecting", "reconnecting"]);
-});
-
-test("useSSE falls back to app reconnect timer for closed streams", () => {
-  const { context, statuses, streams, timers } = createHarness();
-
-  const stream = streams[0];
-  stream.readyState = context.EventSource.CLOSED;
-  stream.onerror({});
-
-  assert.deepEqual(statuses, ["connecting", "disconnected"]);
-  assert.equal(stream.closeCalls, 1);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 2000);
-
-  timers[0].handler();
-
-  assert.equal(streams.length, 2);
-  assert.deepEqual(statuses, ["connecting", "disconnected", "reconnecting"]);
-});
-
-test("useSSE replaces a reconnect attempt that never finishes opening", () => {
-  const { context, statuses, streams, timers } = createHarness();
-
+test("useSSE starts each route from a fresh stream and ignores disposed callbacks", () => {
+  const events = [];
+  const { cleanup, render, streams } = createHarness({
+    onEvent: (event) => events.push(event),
+  });
   const first = streams[0];
-  first.readyState = context.EventSource.CONNECTING;
-  first.onerror({});
-
-  const nativeWatchdog = timers.find((timer) => timer.delay === 10_000);
-  assert.ok(nativeWatchdog);
-  nativeWatchdog.handler();
-
-  const reconnectTimer = timers.find((timer) => timer.delay === 2000);
-  assert.ok(reconnectTimer);
-  reconnectTimer.handler();
-
-  assert.equal(streams.length, 2);
-  const stalledReplacement = streams[1];
-  const openWatchdog = timers
-    .filter((timer) => timer.delay === 10_000 && !timer.cleared)
-    .at(-1);
-  assert.ok(openWatchdog);
-
-  openWatchdog.handler();
-
-  assert.equal(stalledReplacement.closeCalls, 1);
-  assert.equal(
-    timers.filter((timer) => timer.delay === 4000 && !timer.cleared).length,
-    1,
-  );
-  assert.deepEqual(statuses, [
-    "connecting",
-    "reconnecting",
-    "reconnecting",
-    "reconnecting",
-    "reconnecting",
-  ]);
-});
-
-test("useSSE does not reconnect after a non-retryable server error", () => {
-  const events = [];
-  const { context, statuses, streams, timers, windowListeners } = createHarness({
-    onEvent: (event) => events.push(event),
-  });
-
-  const stream = streams[0];
-  stream.listener("stream_error")({
-    data: JSON.stringify({
-      type: "stream_error",
-      error: "not_found",
-      kind: "not_found",
-      retryable: false,
-    }),
-    lastEventId: "",
-  });
-
-  assert.equal(stream.closeCalls, 1);
-  assert.equal(stream.readyState, context.EventSource.CLOSED);
-  assert.equal(timers.length, 0);
-  assert.deepEqual(statuses, ["connecting", "disconnected"]);
-  assert.equal(events.length, 1);
-  assert.equal(events[0].type, "error");
-  assert.equal(events[0].frame.retryable, false);
-
-  // Browsers report the server's subsequent close through `onerror`. It must
-  // not override the terminal classification or schedule another connection.
-  stream.onerror({});
-  windowListeners.get("online")();
-  assert.equal(timers.length, 0);
-  assert.equal(streams.length, 1);
-  assert.deepEqual(statuses, ["connecting", "disconnected"]);
-});
-
-test("useSSE starts each thread route from a fresh projection", () => {
-  const { cleanup, render, streams } = createHarness();
-
-  streams[0].listener("projection_update")({
-    data: JSON.stringify({
-      type: "projection_update",
-      state: { items: [] },
-    }),
-    lastEventId: "thread-1-cursor",
-  });
-
-  render("thread-2");
-  assert.equal(streams[1].args.threadId, "thread-2");
-  assert.equal(streams[1].args.afterCursor, undefined);
-  assert.equal(streams[1].args.connectionId, "browser-tab-connection");
-  assert.equal(streams[1].args.connectionGeneration, 2);
-
-  streams[1].listener("projection_update")({
-    data: JSON.stringify({
-      type: "projection_update",
-      state: { items: [] },
-    }),
-    lastEventId: "thread-2-cursor",
-  });
-
-  render("thread-1");
-  assert.equal(streams[2].args.threadId, "thread-1");
-  assert.equal(streams[2].args.afterCursor, undefined);
-  assert.equal(streams[2].args.connectionGeneration, 3);
-  assert.equal(
-    streams[2].args.connectionId,
-    streams[1].args.connectionId,
-    "thread switches must reuse the tab connection id so the server can supersede the old stream",
+  first.message(
+    { type: "projection_update", state: { items: [] } },
+    { id: "thread-1-cursor" },
   );
 
   render("thread-2");
-  assert.equal(streams[3].args.threadId, "thread-2");
-  assert.equal(streams[3].args.afterCursor, undefined);
-  assert.equal(streams[3].args.connectionGeneration, 4);
+  const second = streams[1];
+  assert.equal(first.controller.abortCalls.at(-1), "component disposed");
+  assert.equal(second.lastEventId, undefined);
+  assert.match(second.url, /thread-2/);
+  assert.equal(
+    new URL(first.url).searchParams.get("connection_id"),
+    new URL(second.url).searchParams.get("connection_id"),
+  );
+  assert.ok(
+    second.requestOptions.query.connection_generation >
+      first.requestOptions.query.connection_generation,
+  );
 
-  cleanup();
-});
-
-test("useSSE discards a volatile live cursor when the chat page remounts", () => {
-  const { cleanup, remount, streams } = createHarness();
-
-  streams[0].listener("projection_update")({
-    data: JSON.stringify({
-      type: "projection_update",
-      state: { items: [] },
-    }),
-    lastEventId: "before-navigation",
-  });
-
-  remount("thread-1");
-  assert.equal(streams[1].args.afterCursor, undefined);
-  assert.equal(streams[1].args.connectionGeneration, 2);
-
-  cleanup();
-});
-
-test("useSSE ignores callbacks from a stream disposed by a thread switch", () => {
-  const { cleanup, render, statuses, streams, timers } = createHarness();
-  const disposedStream = streams[0];
-
-  render("thread-2");
-  assert.equal(disposedStream.closeCalls, 1);
-  assert.equal(streams.length, 2);
-
-  // A network error can already be queued when React cleans up the old
-  // effect. It must not schedule an orphan reconnect for the old thread.
-  disposedStream.onerror({});
-  disposedStream.listener("stream_error")({
-    data: JSON.stringify({
-      error: "unavailable",
-      kind: "replay_unavailable",
-      retryable: true,
-    }),
-    lastEventId: "",
-  });
-
-  assert.equal(timers.length, 0);
-  assert.equal(streams.length, 2);
-  assert.deepEqual(statuses, ["connecting", "connecting"]);
-
-  cleanup();
-});
-
-test("useSSE rebases from origin when the server rejects its replay cursor", () => {
-  const events = [];
-  const { statuses, streams, timers } = createHarness({
-    onEvent: (event) => events.push(event),
-  });
-
-  const stream = streams[0];
-  stream.listener("projection_update")({
-    data: JSON.stringify({
-      type: "projection_update",
-      state: { items: [] },
-    }),
-    lastEventId: "stale-cursor",
-  });
-  stream.listener("stream_error")({
-    data: JSON.stringify({
-      error: "unavailable",
-      kind: "replay_unavailable",
-      retryable: true,
-    }),
-    lastEventId: "",
-  });
-
-  assert.equal(stream.closeCalls, 1);
-  assert.deepEqual(statuses, ["connecting", "connected", "reconnecting"]);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 2000);
-  assert.equal(events.length, 2);
-  assert.equal(events[1].type, "error");
-
-  timers[0].handler();
-
-  assert.equal(streams.length, 2);
-  assert.equal(streams[1].args.afterCursor, undefined);
-  assert.deepEqual(statuses, [
-    "connecting",
-    "connected",
-    "reconnecting",
-    "reconnecting",
-  ]);
-});
-
-test("useSSE does not treat a legacy application error as a transport error", () => {
-  const events = [];
-  const { statuses, streams, timers } = createHarness({
-    onEvent: (event) => events.push(event),
-  });
-
-  streams[0].onerror({
-    data: JSON.stringify({
-      error: "unavailable",
-      kind: "replay_unavailable",
-      retryable: true,
-    }),
-    lastEventId: "",
-  });
-
+  first.message({ type: "projection_update", state: { items: ["late"] } });
   assert.equal(events.length, 1);
-  assert.equal(events[0].type, "error");
-  assert.deepEqual(statuses, ["connecting", "reconnecting"]);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 2000);
+  cleanup();
 });

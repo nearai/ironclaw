@@ -140,14 +140,16 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
-- The SPA also sends a bounded, random `connection_id` that is stable for one
-  loaded browser tab plus a monotonically increasing `connection_generation`
-  for each EventSource it creates. A same-caller, same-id stream supersedes its
-  prior generation without consuming another slot; a delayed older generation
-  receives `204` and cannot cancel the current stream. This prevents
-  proxy-reordered closes/opens during thread navigation from stranding the
-  replacement stream behind the cap; distinct tabs still consume distinct
-  slots.
+- The SPA consumes SSE through `event-source-plus`, which owns event framing,
+  `Last-Event-ID`, abort, and retry/backoff over `fetch`/`ReadableStream`. The
+  bearer is sent in the `Authorization` header rather than the request URL. A
+  bounded, random `connection_id` remains stable for one loaded browser tab and
+  `connection_generation` increments for every package-managed request. A
+  same-caller, same-id stream supersedes its prior generation without consuming
+  another slot; a delayed older generation receives `204` and cannot cancel the
+  current stream. This prevents proxy-reordered closes/opens during thread
+  navigation from stranding the replacement stream behind the cap; distinct
+  tabs still consume distinct slots.
 - A successful facade subscription emits an application-level `keep_alive`
   frame immediately after admission. Browser connection state uses that frame
   as proof that the projection tail is ready instead of waiting for a model
@@ -174,8 +176,8 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   the former only postpones lag under provider microbursts, while the latter
   makes ordinary text visibly chunky. Completed phases continue through the
   existing marked + DOMPurify renderer and code-block enhancement path.
-- `after_cursor` is retained only within one mounted Chat route (including
-  native EventSource retries and visibility recovery). A route/thread remount
+- The packaged SSE client retains `Last-Event-ID` only within one mounted Chat
+  route, including retries and visibility recovery. A route/thread remount
   starts at the projection origin so the server returns durable state plus the
   compacted current live state; it does not persist process-local live cursors
   across SPA navigation.
