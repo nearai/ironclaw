@@ -283,6 +283,15 @@ Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
 
+User-registered hosted-MCP admission and lifecycle behavior belongs in
+`reborn_integration_hosted_mcp_registration` rather than the single-tool turn
+harness above. Its loopback server in
+`tests/support/hosted_mcp_registration_server.rs` drives registration,
+discovery, ordinary install/auth/activation, credential injection, restore,
+and invocation through production seams. Keep live public-server checks
+explicitly ignored canaries; deterministic cases use the recorded MCP fixture
+under `tests/fixtures/hosted_mcp/`.
+
 ### Credential injection (GitHub)
 
 `.with_github_issue_tools()` wires the real GitHub first-party WASM
