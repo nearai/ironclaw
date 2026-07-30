@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
+import { ConfirmDialog } from "../../design-system/confirm-dialog";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -157,6 +158,7 @@ export function LogsPage() {
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
+  const [clearDialogOpen, setClearDialogOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (autoScroll && followLatestRef.current && outputRef.current) {
@@ -226,9 +228,8 @@ export function LogsPage() {
 
           {/* Clear */}
           <button
-            onClick={() => {
-              if (confirm(t("logs.confirmClear"))) clearEntries();
-            }}
+            type="button"
+            onClick={() => setClearDialogOpen(true)}
             className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           >
             {t("logs.clear")}
@@ -332,6 +333,16 @@ export function LogsPage() {
               (entry) => (<LogEntry key={entry.id} entry={entry} />)
             )}
       </div>
+      <ConfirmDialog
+        open={clearDialogOpen}
+        title={t("logs.confirmClear")}
+        confirmLabel={t("logs.clear")}
+        onConfirm={() => {
+          clearEntries();
+          setClearDialogOpen(false);
+        }}
+        onCancel={() => setClearDialogOpen(false)}
+      />
     </div>
   );
 }

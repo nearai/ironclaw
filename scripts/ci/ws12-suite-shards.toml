@@ -1,0 +1,190 @@
+# Stable scheduling input for the nightly Reborn Playwright suite.
+#
+# Durations are allocation weights captured from successful workflow run
+# https://github.com/nearai/ironclaw/actions/runs/29801208169 (2026-07-21).
+# That run reported one duration per affinity group, so the group duration is
+# divided across its files. The generator always re-coalesces an affinity group
+# before placing it; the per-file split is only a stable, additive encoding.
+# Refresh these values from a successful `--durations=25` run when a shard moves
+# by more than 20%, and update captured_run/captured_at in the same change.
+
+[playwright]
+shard_count = 4
+max_shard_seconds = 140
+captured_run = 29801208169
+captured_at = "2026-07-21"
+discovery_globs = [
+  "tests/e2e/scenarios/test_reborn_webui_harness_artifacts.py",
+  "tests/e2e/scenarios/test_reborn_v2_file_download.py",
+  "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+  "tests/e2e/scenarios/test_reborn_webui_v2_*_api.py",
+  "tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py",
+]
+
+[[waiver]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py"
+owner = "openai-compat"
+reason = "Selected by the exact-node Responses manifest in the deterministic Reborn E2E lane."
+evidence = "tests/e2e/reborn_responses_e2e_tests.txt"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_harness_artifacts.py"
+affinity = "served-api-routes"
+historical_seconds = 22
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py"
+affinity = "webui-smoke-files"
+historical_seconds = 22
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_v2_file_download.py"
+affinity = "webui-smoke-files"
+historical_seconds = 23
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_automation_trace_outbound_api.py"
+affinity = "served-api-routes"
+historical_seconds = 9
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_extensions_api.py"
+affinity = "served-api-routes"
+historical_seconds = 9
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_filesystem_api.py"
+affinity = "served-api-routes"
+historical_seconds = 8
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_operator_api.py"
+affinity = "served-api-routes"
+historical_seconds = 8
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_product_auth_api.py"
+affinity = "served-api-routes"
+historical_seconds = 8
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_session_api.py"
+affinity = "served-api-routes"
+historical_seconds = 8
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_skills_api.py"
+affinity = "served-api-routes"
+historical_seconds = 8
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_streaming_run_control_api.py"
+affinity = "served-api-routes"
+historical_seconds = 8
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py"
+affinity = "legacy-core-ui"
+historical_seconds = 16
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_rendering.py"
+affinity = "legacy-core-ui"
+historical_seconds = 16
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py"
+affinity = "legacy-core-ui"
+historical_seconds = 15
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_dom_resource_limits.py"
+affinity = "legacy-core-ui"
+historical_seconds = 15
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_approval.py"
+affinity = "legacy-auth-inputs"
+historical_seconds = 23
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py"
+affinity = "legacy-auth-inputs"
+historical_seconds = 22
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_attachments.py"
+affinity = "legacy-auth-inputs"
+historical_seconds = 22
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py"
+affinity = "legacy-settings-extensions"
+historical_seconds = 18
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py"
+affinity = "legacy-settings-extensions"
+historical_seconds = 18
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py"
+affinity = "legacy-settings-extensions"
+historical_seconds = 18
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py"
+affinity = "legacy-settings-extensions"
+historical_seconds = 17
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py"
+affinity = "legacy-settings-extensions"
+historical_seconds = 17
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_message_persistence.py"
+affinity = "legacy-runtime"
+historical_seconds = 25
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_pending_messages.py"
+affinity = "legacy-runtime"
+historical_seconds = 25
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_sse_history.py"
+affinity = "legacy-runtime"
+historical_seconds = 25
+retry = "never"
+
+[[suite]]
+path = "tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_execution.py"
+affinity = "legacy-runtime"
+historical_seconds = 25
+retry = "never"

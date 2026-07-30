@@ -158,6 +158,45 @@ jobs:
             target/ironclaw-stress/concurrency-ramp-report.txt
           if-no-files-found: ignore
 
+  libsql-user-session-soak:
+    name: libsql user-session soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ironclaw-stress-soak
+          save-if: ${{ github.event_name == 'schedule' }}
+      - name: Run bounded libsql user-session soak
+        run: |
+          mkdir -p target/ironclaw-stress
+          cargo run --locked -p ironclaw_stress --release -- \
+            --backend libsql \
+            --preset soak-user-session \
+            --trace-jsonl target/ironclaw-stress/soak-trace.jsonl \
+            --human-read \
+            --bottleneck-report \
+            > target/ironclaw-stress/soak-summary.json \
+            2> target/ironclaw-stress/soak-report.txt
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ironclaw-stress-libsql-soak
+          path: |
+            target/ironclaw-stress/soak-trace.jsonl
+            target/ironclaw-stress/soak-summary.json
+            target/ironclaw-stress/soak-report.txt
+          if-no-files-found: error
+          retention-days: 14
+
   postgres-api-capacity:
     name: hosted-single-tenant Postgres API capacity
     runs-on: ubuntu-latest
@@ -217,9 +256,9 @@ jobs:
           key: ironclaw-stress-postgres-api
           save-if: ${{ github.event_name == 'schedule' }}
 
-      - name: Build hosted-single-tenant server and stress runner
+      - name: Build shipping-profile hosted server and stress runner
         run: |
-          cargo build --release \
+          cargo build --locked --profile dist \
             --package ironclaw \
             --bin ironclaw
           cargo build --release --package ironclaw_stress
@@ -258,7 +297,7 @@ jobs:
           EOF
 
           IRONCLAW_REBORN_HOME="$RUNNER_TEMP/ironclaw-reborn-home" \
-            target/release/ironclaw serve \
+            target/dist/ironclaw serve \
               --host 127.0.0.1 \
               --port 18080 \
               > target/ironclaw-stress/postgres-api-server.log \

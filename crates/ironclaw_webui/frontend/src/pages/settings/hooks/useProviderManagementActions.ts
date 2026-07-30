@@ -13,6 +13,7 @@ export function useProviderManagementActions({ settings, gatewayStatus, searchQu
   const providerState = useLlmProviders({ settings, gatewayStatus });
   const [dialogProvider, setDialogProvider] = React.useState(null);
   const [isDialogOpen, setIsDialogOpen] = React.useState(false);
+  const [providerToDelete, setProviderToDelete] = React.useState(null);
   const [message, setMessage] = React.useState(null);
   const messageTimerRef = React.useRef(null);
 
@@ -68,22 +69,32 @@ export function useProviderManagementActions({ settings, gatewayStatus, searchQu
   );
 
   const handleDelete = React.useCallback(
-    async (provider) => {
-      if (!window.confirm(t("llm.confirmDelete", { id: provider.id }))) return;
+    (provider) => {
+      setProviderToDelete(provider);
+    },
+    []
+  );
+
+  const confirmDelete = React.useCallback(
+    async () => {
+      if (!providerToDelete) return;
       try {
-        await providerState.deleteCustomProvider(provider);
+        await providerState.deleteCustomProvider(providerToDelete);
         showMessage("success", t("llm.providerDeleted"));
       } catch (err) {
         showMessage("error", err.message);
+      } finally {
+        setProviderToDelete(null);
       }
     },
-    [providerState, showMessage, t]
+    [providerState, providerToDelete, showMessage, t]
   );
 
   return {
     providerState,
     dialogProvider,
     isDialogOpen,
+    providerToDelete,
     message,
     filteredProviders: providerState.providers.filter((provider) =>
       matchesProvider(provider, searchQuery)
@@ -94,5 +105,7 @@ export function useProviderManagementActions({ settings, gatewayStatus, searchQu
     handleUse,
     handleSave,
     handleDelete,
+    confirmDelete,
+    cancelDelete: () => setProviderToDelete(null),
   };
 }
