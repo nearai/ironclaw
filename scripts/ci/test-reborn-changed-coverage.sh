@@ -258,6 +258,41 @@ check_rc "a changed production file absent from LCOV fails" 1
 check_text "missing file is named" "changed production files are absent from coverage"
 check_report_text "machine report cannot turn a missing file into a pass" '"passed": false'
 
+reexports_path="crates/ironclaw_demo/src/reexports.rs"
+printf '%s\n' \
+  'pub use crate::service::Service;' \
+  'pub(crate) mod support;' >"${case_root}/${reexports_path}"
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/reexports.rs b/crates/ironclaw_demo/src/reexports.rs
+--- /dev/null
++++ b/crates/ironclaw_demo/src/reexports.rs
+@@ -0,0 +1,2 @@
++pub use crate::service::Service;
++pub(crate) mod support;
+DIFF
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+DA:1,1
+BRDA:1,0,0,1
+LF:1
+LH:1
+BRF:1
+BRH:1
+end_of_record
+EOF
+run_gate
+check_rc "an uninstrumentable re-export module in a measured crate passes" 0
+check_text "re-export-only additions keep an explicit empty denominator" "Changed line coverage: 100.00% (0/0)"
+
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- /dev/null
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -0,0 +1,3 @@
++pub fn classify(value: bool) -> bool {
++    value
++}
+DIFF
 cat >"${work}/coverage.lcov" <<EOF
 SF:${case_root}/${source_path}
 end_of_record

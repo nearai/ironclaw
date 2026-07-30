@@ -162,6 +162,35 @@ Run:
 
 This keeps the development loop fast while preserving outside-in coverage.
 
+## How local tests map to CI
+
+The test types above describe *what evidence to add*. CI lanes describe *when
+that evidence runs*. Keep those decisions separate: a browser test does not
+become a live canary because it runs nightly, and a deterministic provider
+journey remains hermetic even when the deep lane repeats it in more orders.
+
+| Lane | Purpose | What engineers should expect |
+| --- | --- | --- |
+| Pull request feedback | Fast, scoped signal on the proposed change | Relevant deterministic subsets, evidence gates, and changed-code checks may run before review. |
+| Merge queue | Production gate on the merged result | Queue-covered deterministic checks run in the same shape required before `main`; path scope is computed by workflow jobs rather than trigger filters. |
+| Push to `main` | Confirm the queue result and publish shared evidence | Repeats queue-covered checks, runs the documented post-merge-only Windows, benchmark, and legacy snapshot checks, warms caches, and publishes reports. |
+| Deep scheduled | Exercise expensive breadth | Higher property-test counts, reversed and isolated journey order, mutation audits, browser shards, stress, soak, and live drift run outside the ordinary merge gate. |
+| Release artifact | Verify what will actually ship | Smoke the exact built archive or binary rather than treating a development build as release evidence. |
+
+The authoritative workflow contract, required-check names, and scheduling
+details live in [`.github/workflows/README.md`](../../.github/workflows/README.md).
+Its "Known accepted gaps" section names deterministic and informational checks
+that are deliberately not merge-gating. Re-derive the current lanes before
+changing CI:
+
+```bash
+rg -n "pull_request:|merge_group:|push:|schedule:|workflow_dispatch:" \
+  .github/workflows
+```
+
+A green pull request does not imply that scheduled, live, backend, or release
+tiers ran. Name the tiers actually exercised in the pull request test card.
+
 ## Where tests belong
 
 | Behavior | Location | Notes |
@@ -561,16 +590,106 @@ representative compositions across ingress, execution, provider state, and
 delivery. A `JourneyCase` is evidence metadata, not a workflow DSL: execution
 logic, provider setup, and readback remain in their owning test modules.
 
-Each case names its trace when it has one, isolated provider worlds, ingress,
-execution lane, delivery target, observable assertions, and an exact Pytest or
-Cargo test declaration. `test_journey_coverage.py` verifies that the evidence
-still exists and is executable. It also derives inbound and outbound channel
-surfaces from shipped first-party manifests, so adding a production channel
-without representative journey evidence fails CI.
+Each case names isolated provider worlds, ingress, execution lane, delivery
+target, observable assertions, and an exact Pytest or Cargo declaration.
+Provider journeys also bind their recorded trace, replay facts, and scheduled
+live evidence. Product journeys may bind exact delivery addresses and browser
+evidence when the cited test proves those claims. Do not populate an optional
+field from intent: name it only when the referenced test asserts it.
+
+`test_journey_coverage.py` verifies that the evidence still exists and is
+executable. It also derives inbound and outbound channel surfaces from shipped
+first-party manifests, so adding a production channel without representative
+journey evidence fails CI.
 
 Prefer one representative whole-path case per supported ingress and delivery
 mechanism. Do not multiply every provider operation by every ingress or move
 provider-specific assertions into the generic registry.
+
+Run the registry gate directly after adding or changing a journey:
+
+```bash
+cd tests/e2e
+pytest scenarios/test_journey_coverage.py -q
+```
+
+## Generated lifecycle and interaction coverage
+
+`tests/e2e/state_machine_coverage.py` projects journeys, provider operations,
+provider faults, and focused Reborn integration tests onto the lifecycle
+dimensions that matter across boundaries. It is an evidence inventory, not a
+second runtime state machine and not a Cartesian-product test generator.
+
+Update it when production adds or changes a supported:
+
+- ingress, authentication, policy, operation, provider-outcome, lifecycle, or
+  delivery class;
+- trigger, retry, cancellation, duplicate, restart, or concurrent-submit
+  sequence;
+- terminal-stability, at-most-once-effect, actor-isolation,
+  truthful-uncertainty, or no-orphan-resource invariant;
+- high-risk interaction between two of those dimensions.
+
+Prefer projecting an existing `JourneyCase`, `ProviderOperationCase`, or
+provider fault. Add a focused row only when no existing registry owns the
+evidence, and cite the exact executable Pytest or Cargo declaration. Add a
+required pair only for an interaction whose combined behavior carries more
+risk than either dimension alone.
+
+Re-derive the supported dimensions, sequences, invariants, and selected pairs,
+then run the fail-loud gate:
+
+```bash
+rg -n \
+  "SUPPORTED_DIMENSIONS|REQUIRED_EQUIVALENCE_PAIRS|SequenceClass|StateMachineInvariant" \
+  tests/e2e/state_machine_coverage.py
+cd tests/e2e
+pytest scenarios/test_state_machine_coverage.py -q
+```
+
+## Promoting failures into regression tests
+
+When a production, live-canary, or QA failure is reproducible, promote it to
+the lowest deterministic seam that proves the broken rule:
+
+1. State the user-visible failure and the expected outcome.
+2. Remove credentials, personal data, provider identifiers, and irrelevant
+   transcript content before committing any fixture.
+3. Reproduce the failure with a unit/contract, Reborn integration, recorded
+   fixture, provider operation, journey, or browser test.
+4. Confirm the regression test fails for the original reason.
+5. Apply the fix and confirm the same test passes.
+6. Keep a live canary only when real model or provider drift remains a distinct
+   risk.
+
+The commit hook and
+[`regression-test-check.yml`](../../.github/workflows/regression-test-check.yml)
+require test changes for conventionally named fixes and selected high-risk
+paths. `[skip-regression-check]` and the matching label are review-visible
+exceptions for genuinely infeasible cases, not substitutes for a reproducible
+test. Explain the missing deterministic seam and compensating evidence in the
+pull request test card.
+
+## Mutation audits test the assertions
+
+Coverage proves that code ran; it does not prove that a test would detect the
+wrong result. Use a mutation audit when a critical invariant, escaped defect,
+or suspiciously broad coverage needs assertion-strength evidence.
+
+Start with one file or package, triage every viable survivor, and verify a
+`real-gap` fix against both unmodified and sabotaged code:
+
+```bash
+./scripts/mutation-audit.sh -p OWNING_CRATE path/to/production.rs
+./scripts/mutation-verify-fix.sh -p OWNING_CRATE \
+  'copy the exact mutant string from the triage queue'
+```
+
+Do not optimize a workspace mutation score. Equivalent mutants and unclear
+product contracts are explicit outcomes, and broad mutation work belongs in
+the scheduled frontier. Follow
+[`docs/internal/mutation-audit.md`](mutation-audit.md) for environment
+isolation, verdicts, acceptance criteria, and the fail-loud self-test.
 
 ## Product-surface coverage report
 
@@ -588,3 +707,19 @@ silently become passing evidence. A harvested live-QA fixture is not current
 live evidence unless a stable live result artifact binds back to its typed row.
 Scheduled live cells name the exact workflow, job, case id, and result artifact
 and remain `scheduled` until a consumer inspects that result.
+
+Generate the same bird's-eye view locally instead of maintaining a separate
+capability or journey spreadsheet:
+
+```bash
+cd tests/e2e
+python product_surface_coverage.py \
+  --json ../../artifacts/product-surface-coverage/matrix.json \
+  --markdown ../../artifacts/product-surface-coverage/matrix.md
+```
+
+Open `artifacts/product-surface-coverage/matrix.md` for the human-readable
+matrix. In GitHub Actions, download the
+`product-surface-coverage-<source-commit>` artifact from the Reborn E2E run.
+External dashboards or Notion pages may summarize or link this report, but the
+typed registries and generated matrix remain authoritative.

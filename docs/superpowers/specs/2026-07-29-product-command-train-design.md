@@ -185,17 +185,49 @@ drop out. Surviving slices: descriptor metadata
 (`title`/`description`/`usage` added to main's descriptor struct beside
 PR-1's `audience`), WebUI backend, frontend palette.
 
+### Implicit-owner rule extended to both doors (PR-1 audit fix)
+
+PR-1's final review found the channel role resolver
+(`ChannelActorRoleResolver::actor_role` in
+`crates/ironclaw_extension_host/src/channel_command_roles.rs`) had no
+env-bearer-operator bypass: an operator with no admin-directory record was
+permanently denied channel admin commands, while the WebUI door
+(`RebornServices::authorize_admin`, and now `caller_is_command_admin` below)
+already treated `caller.operator_config` as an implicit admin. PR-2 closes
+that gap: when the resolved bound user equals the resolver's
+`operator_user_id` and the admin directory has no record at all (`Ok(None)`),
+the resolver now also returns `Ok(Some(AdminUserRole::Owner))`. A persisted
+directory record of any status — including Suspended — still governs whenever
+one exists; the new arm only fires on "no record."
+
+The two doors remain asymmetric in one respect: the WebUI's
+`caller.operator_config` bypass short-circuits before any directory lookup
+and has no record-governs behavior at all, so a Suspended operator record
+denies through the channel resolver but still admits through the WebUI door.
+That asymmetry is tracked, not fixed, in issue #6877.
+
 ### Backend (`reborn_services/product_commands.rs` facade + webui_v2 routes)
 
 - `GET /api/webchat/v2/commands` — inventory with metadata, filtered by the
   authenticated caller's `AdminUserRole` (direct lookup; no channel port)
   against the listing audience. Members: `model` + `status`. Admins: + the
-  lifecycle family.
+  lifecycle family. An env-bearer operator caller (`caller.operator_config`)
+  is an implicit admin here too, without a directory record.
 - `POST /api/webchat/v2/threads/{thread_id}/commands` — shared parser →
   the same `required_audience` policy function the channel admission uses
   (surfaces cannot drift) → the same typed operations. `/status` keeps the
-  thread-ownership probe (foreign-thread 404 pinned). Member `/model set`
-  gets the same permanent `PolicyDenied` shape; handlers are never reached.
+  thread-ownership probe, but a foreign thread and a never-created thread
+  both resolve to the identical constant idle `CommandResultView` — never a
+  404. (Design review ruled this indistinguishable-idle response
+  equivalent-or-better than the originally planned foreign-thread 404: a
+  404-vs-200 split would let a caller probe for other users' thread ids one
+  guess at a time.) Member `/model set` gets the same permanent
+  `AccessDenied` shape; handlers are never reached. Lifecycle commands stay
+  listing-only through this route — `execute` rejects every
+  `ProductCommand::Lifecycle` as `InvalidRequest` (the same role-filtered help
+  text `/status`/`/model`'s help paths use) even for an admin caller who has
+  already cleared the audience gate; admins manage extensions from the
+  WebUI's Extensions page, not the composer.
 
 ### Frontend (`crates/ironclaw_webui/frontend/src/pages/chat/`)
 
@@ -209,13 +241,34 @@ re-filtering as you type. Results render as the generic system-notice bubble,
 ephemeral (Decision 6). Unknown `/text` submits as an ordinary message,
 matching channels.
 
+Two fixes landed on top of the rebased `alpine-fight` slice: (1) `EmptyState`
+(the landing view's composer, mounted before any thread exists) did not
+forward its `commands` prop to the nested `ChatInput`, so the palette was
+unreachable from a brand-new thread's first composer — `chat.tsx` now passes
+`commands={activeThreadId ? chatCommands : []}` to both `EmptyState` and
+`ChatInput`, and `EmptyState` forwards it through, pinned by a dedicated
+`EmptyState` prop-forwarding test. (2) The `chat.commandFailed` locale key
+(`"Couldn't run that command."` in `en`) was added across all 11 locale files
+for `useChat.ts`'s `runCommand` client-side execute-failure path, but a
+review-caught defect initially left it dead-wired: the catch block called the
+generic `failureMessageForRequestError` helper instead of this key (and the
+test mocked that helper, so the disconnect stayed green). Fixed by rewiring
+the catch to call `t("chat.commandFailed")` directly and de-mocking the test
+to bind the real translator, so the key is now actually reachable.
+
 ### Tests
 
-- WebUI caller tier: member vs admin inventory filtering; `/status` on an
-  owned thread returns the rendered view; foreign thread 404 (kept pin);
-  member `/model set` policy rejection.
+- WebUI caller tier: member vs admin inventory filtering (including the
+  operator-implicit-admin case); `/status` on an owned thread returns the
+  rendered view, a foreign thread is indistinguishable from a never-created
+  one (both settle to the constant idle view, never a 404); member
+  `/model set` gets an `AccessDenied` rejection; an admin's lifecycle-command
+  execute attempt still gets `InvalidRequest` (listing-only holds even for
+  admins).
 - Frontend vitest: existing chat-commands suites plus keyboard navigation and
-  metadata rendering; locale key parity; `tsc` + conventions lint.
+  metadata rendering; the landing-composer forwarding fix pinned via an
+  `EmptyState` test; locale key parity (incl. `chat.commandFailed`); `tsc` +
+  conventions lint.
 - Descriptor→DTO projection contract pinned.
 
 ## PR-3 — Native Slack slash commands
@@ -224,10 +277,20 @@ matching channels.
 
 Reuse the single signed `[channel.ingress]` `events` route — Slack lets every
 slash command point at any Request URL, and the HMAC recipe signs the raw
-body regardless of content type. No manifest-schema or host changes.
-`crates/ironclaw_slack_extension/src/{payload,channel}.rs` learn the payload
-shapes: JSON → existing event path; form-encoded with `command` → slash
-invocation; form-encoded `ssl_check=1` → immediate empty 200.
+body regardless of content type; verification happens before content-type
+branching, so a forged signature on a form body is rejected at the same
+ingress layer as a forged JSON body. No manifest-schema or host changes.
+`crates/ironclaw_slack_extension/src/payload.rs` gains `normalize_slack_inbound`,
+a sibling entry point that branches on the (host-forwarded) Content-Type
+header: `application/x-www-form-urlencoded` → the new slash-command form
+parser; anything else, including an absent header, → delegates verbatim to
+the existing `normalize_slack_event`, so the two entry points share exactly
+one JSON parsing implementation. Inside the form branch, a minimal
+all-`Option` probe for `ssl_check` is parsed BEFORE the full slash-command
+form: Slack's `ssl_check` endpoint-verification POST carries only
+`ssl_check` + `token`, never the mandatory `channel_id`/`user_id`/`command`/
+`trigger_id` fields a real invocation requires, so the probe must run first
+or the handshake would always fail mandatory-field validation.
 
 ### Normalization (dispatcher mapping)
 
@@ -243,30 +306,59 @@ message events produce:
   unknown-command rejection path, which delivers the role-filtered
   "Available commands" help. (If a real `help` command ever joins the
   registry, this mapping upgrades gracefully into executing it.)
-- Actor from `user_id`, conversation from `channel_id`, `DirectChat`
-  trigger, event id derived from `trigger_id` (unique per invocation; Slack
-  does not redeliver slash commands).
+- A registered command **other than** `/ironclaw` pointed at this same
+  Request URL (an app-config mistake — a second Slack slash command
+  aimed at the identical signed endpoint) is passed through raw as
+  `"{command} {text}"` rather than mapped — the adapter does not guess
+  intent; the generic classifier/admission layer rejects the unrecognized
+  text as an undeclared command, with role-filtered help.
+- Actor from `user_id`, conversation from `channel_id`; event id
+  `slack-{installation}-slash-{trigger_id}` (namespaced beside the
+  event_callback id space; unique per invocation — Slack does not redeliver
+  slash commands, unlike the Events API; cite Slack's docs in the PR).
+- **Trigger is derived, never hardcoded**: `DirectChat` only when the slash
+  form indicates a genuine DM (`channel_name == "directmessage"` /
+  `D`-prefixed `channel_id` — the adapter's existing `is_dm_channel`
+  semantics), else `BotCommand` (maps to the Shared route, which the
+  direct-conversation admission rejects). Hardcoding `DirectChat` would
+  silently defeat both the non-DM rejection edge and the connect-nudge
+  gate, which key off the same trigger classification.
 
 Downstream — classification, pairing, PR-1 admission, dispatch, observer
-bot-DM delivery — is identical to the space-prefixed path. Ingress ACK is
-the immediate empty 200 (Slack's ≤3s rule); the visible result is the bot's
-DM message.
+bot-DM delivery — is identical to the space-prefixed path. The ingress 200
+is ack-after-durable-admission (command execution itself is synchronous
+within the ingress request; only the reply posting is async), normally well
+inside Slack's ≤3s rule — the router's 20s deadline ceiling is a
+pre-existing degraded-backend exposure worth one line in the PR, not new
+risk. The visible result is the bot's DM message.
 
 ### Help rendering: per-channel invocation prefix
 
 Neutral help renders `/model`, but typing `/model` bare in Slack fails
-(client-intercepted). `ChannelDescriptor` presentation gains an optional
-command display prefix; Slack's manifest sets `/ironclaw ` so help and
-rejection notices render `/ironclaw model` there. Other channels keep the
-plain `/name` rendering. The space-typed ` /model` path keeps working as an
-undocumented fallback.
+(client-intercepted). `ChannelPresentation`
+(`crates/ironclaw_host_api/src/channel.rs`) gains an optional
+`command_prefix: Option<String>` field, declared under the manifest's
+`[channel.presentation]` section beside `supports_markdown` /
+`max_message_chars`; Slack's manifest sets `command_prefix = "/ironclaw "` so
+help and rejection notices render `/ironclaw model` there. Other channels
+leave it `None` and keep the plain `/name` rendering.
+`ChannelDescriptor::validate` rejects a declared prefix that is empty, does
+not start with `/`, contains a control character, or exceeds 32 bytes
+(`ChannelDescriptorError::InvalidCommandPrefix`). The space-typed ` /model`
+path keeps working as an undocumented fallback.
 
 ### Behavioral edges
 
 - Slash invoked outside the bot DM: flows through the same pipeline; the
-  direct-conversation admission rejects; if the bot cannot post into that
-  conversation the user sees nothing — accepted MVP limitation, noted in the
-  PR. `response_url` support is the future fix.
+  direct-conversation admission rejects, and the observer's command-feedback
+  path posts the denial notice straight to the invoking channel
+  (`envelope.external_conversation_ref()`) — independent of any
+  shared-conversation binding or `slack_allowed_channels` allowlist
+  resolution, so it is delivered even to a channel never configured there.
+  The user sees nothing only if Slack itself refuses the post (the bot is
+  not a member of that specific channel) — accepted MVP limitation, noted in
+  the PR. `response_url` delivery would remove even that dependency and is
+  the future fix.
 - Unpaired user: existing connect-nudge path.
 - Natively registered but manifest-undeclared command: rejects with
   role-filtered help. Declaration is the single source of truth; Slack

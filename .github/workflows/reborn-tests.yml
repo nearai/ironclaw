@@ -137,78 +137,7 @@ jobs:
       - id: packages
         name: Build package matrix from Reborn crate families
         run: |
-          # Reborn/product crate families that are always tested, including
-          # crates the shipped binary does not link (channel adapters, webui_v2).
-          allowlist_packages="$(
-            cargo metadata --no-deps --format-version 1 \
-              | jq -c '
-                  [
-                    .packages[]
-                    | select(
-                        (
-                          (.name == "ironclaw")
-                          or (.name == "ironclaw_runner")
-                          or (.name | startswith("ironclaw_reborn"))
-                          or (.name | startswith("ironclaw_product"))
-                          or (.name == "ironclaw_architecture")
-                          or (.name == "ironclaw_slack_extension")
-                          or (.name == "ironclaw_telegram_extension")
-                          or (.name == "ironclaw_telegram_v2_adapter")
-                          or (.name | startswith("ironclaw_webui"))
-                        )
-                        # The root workspace package (test-only host for the
-                        # reborn integration [[test]] targets) matches
-                        # startswith("ironclaw_reborn") by NAME only. Its
-                        # `[[test]]` suites run via the dedicated root /
-                        # integration-coverage / group jobs — never as a
-                        # per-crate bucket, where `--all-targets` would
-                        # redundantly (and, for env-sensitive integration
-                        # suites, incorrectly) re-run them. Pre-Tier-B this was
-                        # implicit: the host package was `ironclaw_legacy`,
-                        # which never matched the allowlist.
-                        and (.name != "ironclaw_reborn_integration_tests")
-                      )
-                    | .name
-                  ]
-                  | unique
-                '
-          )"
-
-          # The full canonical ironclaw dependency closure: every workspace
-          # crate the shipped Reborn binary links (normal + build deps). Running
-          # each crate's own suite on every PR is the "run everything on every
-          # PR" gate -- a green reborn-tests run means the whole closure is
-          # green, so the ~43 shared crates (auth, host_runtime, skills,
-          # extensions, ...) can no longer regress unnoticed.
-          closure_packages="$(
-            comm -12 \
-              <(cargo tree -p ironclaw -e normal,build --prefix none \
-                | grep -oE 'ironclaw_[a-z0-9_]+' \
-                | sort -u) \
-              <(cargo metadata --no-deps --format-version 1 \
-                | jq -r '.packages[].name' \
-                | sort -u) \
-              | jq -R -s -c 'split("\n") | map(select(length > 0))'
-          )"
-
-          if [ -z "${closure_packages}" ] || [ "${closure_packages}" = "[]" ]; then
-            echo "No Reborn CLI workspace dependency closure crates discovered" >&2
-            exit 1
-          fi
-
-          # Union so closure coverage never drops the non-closure allowlist crates.
-          packages="$(
-            jq -n -c \
-              --argjson allowlist "${allowlist_packages}" \
-              --argjson closure "${closure_packages}" \
-              '$allowlist + $closure | unique'
-          )"
-
-          if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
-            echo "No Reborn workspace crates discovered" >&2
-            exit 1
-          fi
-
+          packages="$(scripts/ci/discover-reborn-package-crates.sh)"
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
           buckets="$(scripts/ci/reborn-crate-test-buckets.sh "${packages}")"
           echo "buckets=${buckets}" >> "$GITHUB_OUTPUT"
@@ -244,6 +173,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
+
       - name: Free disk space
         run: |
           df -h /
@@ -263,6 +195,7 @@ jobs:
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
         run: |
           needs_webui_node=false
+          needs_postgres_image=false
           sccache_dist_enabled=true
 
           while IFS= read -r package; do
@@ -270,8 +203,14 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw|ironclaw_reborn_composition)
+              ironclaw|ironclaw_reborn_composition|ironclaw_webui)
                 needs_webui_node=true
+                ;;
+            esac
+
+            case "${package}" in
+              ironclaw_reborn_composition|ironclaw_triggers)
+                needs_postgres_image=true
                 ;;
             esac
 
@@ -283,7 +222,12 @@ jobs:
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
           echo "needs_webui_node=${needs_webui_node}" >> "${GITHUB_OUTPUT}"
+          echo "needs_postgres_image=${needs_postgres_image}" >> "${GITHUB_OUTPUT}"
           echo "sccache_dist_enabled=${sccache_dist_enabled}" >> "${GITHUB_OUTPUT}"
+
+      - name: Pre-pull Postgres test image
+        if: ${{ steps.bucket-settings.outputs.needs_postgres_image == 'true' }}
+        run: docker pull postgres:16-alpine
 
       - name: Enable pnpm for setup-node cache
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
@@ -353,6 +297,8 @@ jobs:
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
           printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[] | "- " + .'
 
+          scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
+          export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
           mkdir -p coverage
 
           while IFS= read -r package; do
@@ -370,7 +316,8 @@ jobs:
 
             # One combined test+lcov invocation, not the two-step `--no-report test` + `report` shape (report has no --workspace/-p, only reports the root package).
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-            timeout --signal=INT --kill-after=30s 40m \
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              timeout --signal=INT --kill-after=30s 40m \
               "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions -p "$package" ${feature_flags} --all-targets \
                 --lcov --output-path "coverage/${package}.lcov" \
                 test --ignore-rust-version -- --nocapture
@@ -475,7 +422,10 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn root tests
-        run: scripts/ci/run-reborn-root-partition.sh
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
+          scripts/ci/run-reborn-root-partition.sh
 
   reborn-group-tests:
     name: Reborn group tests
@@ -567,7 +517,7 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn group tests
-        run: scripts/ci/run-reborn-group-tests.sh
+        run: scripts/ci/run-hermetic-deterministic-suite.sh groups
 
   reborn-integration-coverage:
     name: Reborn integration coverage (${{ matrix.lane }})
@@ -610,6 +560,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
+
       - name: Free disk space
         run: |
           df -h /
@@ -617,11 +570,32 @@ jobs:
           docker system prune -af || true
           df -h /
 
+      - name: Pre-pull Postgres test image
+        run: docker pull postgres:16-alpine
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch coverage
         with:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
+
+      - name: Enable pnpm for setup-node cache
+        run: corepack enable pnpm
+
+      - name: Install Node.js for instrumented WebUI bundle builds
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies for coverage
+        run: |
+          cd crates/ironclaw_webui/frontend
+          pnpm install --frozen-lockfile
 
       - name: Install mold and clang
         run: |
@@ -671,7 +645,10 @@ jobs:
           # instrumented binaries) keeps the build-cache speed win while
           # guaranteeing this lane's lcov reflects only its own test run.
           cargo llvm-cov clean --profraw-only
-          scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
+          scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
+          IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+            scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
 
       - name: Upload lane lcov artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -880,10 +857,7 @@ jobs:
         run: corepack enable pnpm
 
       - name: Run Reborn WebUI frontend tests
-        run: |
-          cd crates/ironclaw_webui/frontend
-          pnpm install --frozen-lockfile
-          pnpm test
+        run: scripts/ci/run-hermetic-deterministic-suite.sh frontend
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
@@ -905,6 +879,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
+
       - name: Install mold
         run: |
           scripts/ci/install-ci-apt-packages.sh mold
@@ -912,6 +889,24 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Enable pnpm for setup-node cache
+        run: corepack enable pnpm
+
+      - name: Install Node.js for QA replay WebUI bundle builds
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies for QA replay
+        run: |
+          cd crates/ironclaw_webui/frontend
+          pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -935,7 +930,16 @@ jobs:
           scripts/ci/check-reborn-qa-fixtures.sh
 
       - name: Run Reborn QA fixture contracts and replay
-        run: cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior -- --nocapture
+        run: |
+          scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
+          IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
+            scripts/ci/run-hermetic-deterministic-suite.sh \
+            command \
+            cargo test \
+            -p ironclaw_reborn_integration_tests \
+            --test reborn_qa_recorded_behavior \
+            -- \
+            --nocapture
 
   reborn-tests:
     name: Tests (Reborn)
@@ -1020,6 +1024,7 @@ jobs:
             echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
             exit 1
           fi
+
           if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" false "allow"; then
             echo "Critical named-function mutation gate failed: ${{ needs.critical-mutation.result }}"
             exit 1

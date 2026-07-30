@@ -683,6 +683,7 @@ mod tests {
             supports_markdown: true,
             supports_threads: false,
             max_message_chars: Some(4096),
+            command_prefix: None,
         });
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
@@ -716,6 +717,7 @@ mod tests {
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),
+                command_prefix: None,
             }),
             "the channel's declared presentation reaches the connected-channel summary"
         );

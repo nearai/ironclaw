@@ -1809,6 +1809,58 @@ pub enum RebornOperatorConfigDiagnosticSeverity {
     Error,
 }
 
+/// One command entry in the caller's audience-filtered `product.commands.list`
+/// response. Presentation metadata only (Task 1's descriptor fields) — the
+/// caller's audience has already been applied by the service, so no
+/// `audience` field is carried here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornProductCommandInfo {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub usage: String,
+}
+
+/// Response for `product.commands.list`: the registry, filtered to the
+/// commands the caller's audience may see, in registry order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornProductCommandListResponse {
+    pub commands: Vec<RebornProductCommandInfo>,
+}
+
+/// Request for `product.commands.execute`: a raw slash-command line plus the
+/// bound thread it should be attributed to (needed by `/status`, harmless for
+/// commands that ignore it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExecuteProductCommandRequest {
+    pub thread_id: String,
+    pub text: String,
+}
+
+/// Sanitized, role-filtered rejection for a `product.commands.execute` call.
+/// `message` is always safe to render — it is either a fixed copy string or
+/// audience-filtered help text; the underlying `ProductRejection`'s internal
+/// `reason` never crosses this boundary (leak rule, matching the channel
+/// observer's `InvalidRequest` -> help-text behavior).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornCommandRejection {
+    pub kind: crate::ProductRejectionKind,
+    pub message: String,
+}
+
+/// Response for `product.commands.execute`. Exactly one of `result` /
+/// `rejection` is present; `command` names the resolved command token when
+/// one could be extracted from `text` (empty when parsing failed before a
+/// command name was ever identified).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExecuteProductCommandResponse {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::commands::CommandResultView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<RebornCommandRejection>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

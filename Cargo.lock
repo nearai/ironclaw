@@ -4344,6 +4344,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-test",
  "url",
  "uuid",
 ]
@@ -4843,6 +4844,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "thiserror 2.0.18",
  "tokio",
  "uuid",

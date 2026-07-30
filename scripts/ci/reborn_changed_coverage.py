@@ -363,6 +363,12 @@ def mechanically_uninstrumentable_lines(source: str) -> set[int]:
             uninstrumentable.add(line_number)
             in_use = ";" not in stripped
             continue
+        if re.fullmatch(
+            r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?mod\s+[A-Za-z_]\w*\s*;",
+            stripped,
+        ):
+            uninstrumentable.add(line_number)
+            continue
         if not stripped or re.fullmatch(r"[\[\]{}(),;]+", stripped):
             uninstrumentable.add(line_number)
     return uninstrumentable
@@ -518,16 +524,18 @@ def main() -> int:
         uninstrumented_files: list[str] = []
         empty_denominator_files: list[str] = []
         for path, added_lines in sorted(changed.items()):
-            instrumented = coverage.lines.get(path)
-            if not instrumented:
-                uninstrumented_files.append(path)
-                continue
             uninstrumentable_lines = mechanically_uninstrumentable_lines(
                 (repo_root / path).read_text(encoding="utf-8")
             )
             candidate_lines = {
                 line for line in added_lines if (path, line) not in exempt_lines
             }
+            instrumented = coverage.lines.get(path)
+            if not instrumented:
+                if candidate_lines and candidate_lines <= uninstrumentable_lines:
+                    continue
+                uninstrumented_files.append(path)
+                continue
             measured_lines = candidate_lines & set(instrumented)
             first_instrumented = min(instrumented)
             last_instrumented = max(instrumented)

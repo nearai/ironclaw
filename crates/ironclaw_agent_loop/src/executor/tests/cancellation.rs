@@ -478,6 +478,29 @@ async fn model_cancelled_returns_cancelled_without_retry() {
     assert_eq!(host.model_requests().len(), 1);
 }
 
+#[tokio::test]
+async fn transcript_finalize_cancelled_propagates_cancelled_without_retry() {
+    let host = MockHost::new(vec![reply_response()])
+        .fail_transcript_with(AgentLoopHostErrorKind::Cancelled);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await;
+
+    assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "transcript cancellation must not trigger another model call"
+    );
+    assert!(
+        host.finalized_assistant_messages().is_empty(),
+        "a cancelled transcript write must not fabricate a finalized reply"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_internal_error_backoff_wakes_the_sleep() {
     // Internal-error backoffs run up to 60s per attempt; a cancel request must
