@@ -59,9 +59,12 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
     let objectUrl = null;
     fetchAttachmentBlob(attachment.fetch_url)
       .then(async (blob) => {
-        const resolvedMode = attachmentPreviewMode(
-          attachment.mime_type || blob.type,
-        );
+        // Once bytes have landed, the authenticated response's Content-Type is
+        // authoritative. Never let stale or forged descriptor metadata choose
+        // an executable renderer (for example, a text/html Blob in a PDF
+        // iframe). A missing/unknown response type safely falls back to the
+        // download-only mode.
+        const resolvedMode = attachmentPreviewMode(blob.type);
         // Keep the Blob for downloads so `saveBlob` can force the logical
         // filename even when Chromium's PDF viewer owns the preview object URL.
         objectUrl = URL.createObjectURL(blob);
