@@ -929,7 +929,7 @@ impl RebornIntegrationHarness {
             );
         }
         let (event_id, envelope) = self.build_user_envelope(text)?;
-        let attachment = ironclaw_host_api::InboundAttachment {
+        let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
@@ -966,14 +966,14 @@ impl RebornIntegrationHarness {
         let inbound = attachments
             .into_iter()
             .enumerate()
-            .map(
-                |(index, (filename, mime_type, bytes))| ironclaw_host_api::InboundAttachment {
+            .map(|(index, (filename, mime_type, bytes))| {
+                ironclaw_host_api::attachment::InboundAttachment {
                     id: format!("{event_id}-att-{index}"),
                     mime_type: mime_type.to_string(),
                     filename: Some(filename.to_string()),
                     bytes,
-                },
-            )
+                }
+            })
             .collect();
         let ack = self
             .workflow
