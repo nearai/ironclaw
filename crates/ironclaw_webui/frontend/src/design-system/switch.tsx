@@ -4,16 +4,16 @@ import { cn } from "../utils/cn";
 
 const SIZES = {
   sm: {
-    track: "h-6 w-11",
+    track: "h-6 w-11 p-px",
     thumb: "h-5 w-5",
     checkedThumb: "translate-x-5",
     uncheckedThumb: "translate-x-0",
   },
   md: {
-    track: "h-7 w-12",
+    track: "h-7 w-12 p-[3px]",
     thumb: "h-5 w-5",
     checkedThumb: "translate-x-5",
-    uncheckedThumb: "translate-x-1",
+    uncheckedThumb: "translate-x-0",
   },
 };
 

@@ -62,18 +62,36 @@ test("Switch disabled state blocks changes and uses native disabled behavior", (
   assert.deepEqual(changes, []);
 });
 
-test("Switch small size preserves the compact settings dimensions", () => {
-  const rendered = Switch({
-    checked: false,
-    size: "sm",
-    "aria-label": "Enable planning",
-    onChange: () => {},
-  }) as ReactElement<SwitchElementProps>;
+for (const {
+  size,
+  trackHeight,
+  trackWidth,
+  trackPadding,
+} of [
+  { size: "sm", trackHeight: "h-6", trackWidth: "w-11", trackPadding: "p-px" },
+  { size: "md", trackHeight: "h-7", trackWidth: "w-12", trackPadding: "p-[3px]" },
+] as const) {
+  test(`Switch ${size} size centers the thumb at both endpoints`, () => {
+    const render = (checked: boolean) =>
+      Switch({
+        checked,
+        size,
+        "aria-label": "Enable planning",
+        onChange: () => {},
+      }) as ReactElement<SwitchElementProps>;
+    const unchecked = render(false);
+    const checked = render(true);
 
-  assert.match(rendered.props.className ?? "", /\bh-6\b/);
-  assert.match(rendered.props.className ?? "", /\bw-11\b/);
-  assert.match(rendered.props.children?.props.className ?? "", /\bh-5\b/);
-  assert.match(rendered.props.children?.props.className ?? "", /\bw-5\b/);
-  assert.match(rendered.props.children?.props.className ?? "", /translate-x-0/);
-  assert.equal(rendered.props.children?.props["aria-hidden"], "true");
-});
+    assert.match(unchecked.props.className ?? "", new RegExp(`\\b${trackHeight}\\b`));
+    assert.match(unchecked.props.className ?? "", new RegExp(`\\b${trackWidth}\\b`));
+    assert.ok(unchecked.props.className?.includes(trackPadding));
+    assert.match(unchecked.props.children?.props.className ?? "", /\bh-5\b/);
+    assert.match(unchecked.props.children?.props.className ?? "", /\bw-5\b/);
+    assert.match(
+      unchecked.props.children?.props.className ?? "",
+      /translate-x-0/
+    );
+    assert.match(checked.props.children?.props.className ?? "", /translate-x-5/);
+    assert.equal(unchecked.props.children?.props["aria-hidden"], "true");
+  });
+}
