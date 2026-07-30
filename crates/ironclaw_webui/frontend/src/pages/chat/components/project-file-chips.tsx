@@ -3,6 +3,7 @@ import { statProjectFile, projectFileContentUrl } from "../../../lib/api";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { basename, extractWorkspaceFilePaths, formatSize } from "../lib/project-file-paths";
+import { workspaceFilePathFromHref } from "../../../lib/workspace-file-links";
 
 // One chip for an agent-referenced workspace file. Builds an attachment-shaped
 // descriptor so it reuses the exact same `AttachmentChip` + preview modal as
@@ -38,6 +39,7 @@ function ProjectFileChip({ threadId, path, onPreview }) {
     mime_type: meta.mime_type,
     size_label: meta.size_label,
     fetch_url: projectFileContentUrl({ threadId, path }),
+    workspace_path: workspaceFilePathFromHref(path) || undefined,
   };
 
   return (<AttachmentChip

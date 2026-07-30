@@ -13,11 +13,13 @@
 // no bearer); object URLs created for previews are revoked when the modal closes.
 
 import React from "react";
+import { useNavigate } from "react-router";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "../../../design-system/modal";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { workspaceViewerRouteFromFilePath } from "../../../lib/workspace-file-links";
 import { attachmentPreviewMode } from "../lib/attachments";
 
 // Cap inline text rendering so a large (but within the byte limit) text file
@@ -33,6 +35,9 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
   const [view, setView] = React.useState({});
 
   const mode = attachment ? attachmentPreviewMode(attachment.mime_type) : "download";
+  const workspaceRoute = workspaceViewerRouteFromFilePath(
+    attachment?.workspace_path,
+  );
 
   React.useEffect(() => {
     if (!attachment) return undefined;
@@ -121,6 +126,12 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         (<PreviewBody mode={view.mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
+        {workspaceRoute &&
+        (<OpenInWorkspaceButton
+          route={workspaceRoute}
+          onClose={onClose}
+          label={t("projects.openWorkspace")}
+        />)}
         {view.downloadUrl &&
         (<a
           href={view.downloadUrl}
@@ -145,6 +156,24 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
       </ModalFooter>
     </Modal>
   );
+}
+
+function OpenInWorkspaceButton({ route, onClose, label }) {
+  const navigate = useNavigate();
+  const openWorkspace = React.useCallback(() => {
+    onClose();
+    navigate(route);
+  }, [navigate, onClose, route]);
+
+  return (<button
+    type="button"
+    onClick={openWorkspace}
+    data-testid="attachment-open-workspace"
+    className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+  >
+    <Icon name="folder" className="h-3.5 w-3.5" />
+    <span>{label}</span>
+  </button>);
 }
 
 function PreviewBody({ mode, view, filename, t }) {

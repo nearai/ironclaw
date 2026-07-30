@@ -3,6 +3,7 @@ import { test } from "vitest";
 import {
   workspaceFileHrefFromPath,
   workspaceFilePathFromHref,
+  workspaceViewerRouteFromFilePath,
 } from "./workspace-file-links";
 
 test("workspaceFilePathFromHref recognizes scoped and sandbox workspace files", () => {
@@ -56,4 +57,17 @@ test("workspaceFileHrefFromPath encodes each validated path segment", () => {
     "/workspace/%E6%8A%A5%E5%91%8A/my%20report.md",
   );
   assert.equal(workspaceFileHrefFromPath("/workspace/../secret.txt"), null);
+});
+
+test("workspaceViewerRouteFromFilePath builds a selected-file SPA route", () => {
+  assert.equal(
+    workspaceViewerRouteFromFilePath(
+      "/workspace/attachments/报告 final.md",
+    ),
+    "/workspace/workspace/attachments/%E6%8A%A5%E5%91%8A%20final.md",
+  );
+  assert.equal(
+    workspaceViewerRouteFromFilePath("/workspace/../secret.txt"),
+    null,
+  );
 });

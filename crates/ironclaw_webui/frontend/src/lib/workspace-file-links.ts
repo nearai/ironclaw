@@ -59,3 +59,10 @@ export function workspaceFileHrefFromPath(path: unknown): string | null {
   const segments = path.slice(WORKSPACE_PREFIX.length).split("/");
   return `${WORKSPACE_PREFIX}${segments.map(encodeURIComponent).join("/")}`;
 }
+
+export function workspaceViewerRouteFromFilePath(
+  path: unknown,
+): string | null {
+  const fileHref = workspaceFileHrefFromPath(path);
+  return fileHref ? `/workspace${fileHref}` : null;
+}

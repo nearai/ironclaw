@@ -361,7 +361,7 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
           mime_type: "application/pdf",
           filename: "report.pdf",
           size_bytes: 2048,
-          storage_key: "attachments/2026-06-10/m1-0-report.pdf",
+          storage_key: "/workspace/attachments/2026-06-10/m1-0-report.pdf",
           extracted_text: "quarterly numbers",
         },
       ],
@@ -383,6 +383,7 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
       size_label: "2 KB",
       preview_url: null,
       fetch_url: null,
+      workspace_path: "/workspace/attachments/2026-06-10/m1-0-report.pdf",
     },
   ]);
 });

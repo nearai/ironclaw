@@ -7,10 +7,14 @@ import { test, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { fetchAttachmentBlobMock } = vi.hoisted(() => ({
+const { fetchAttachmentBlobMock, navigateMock } = vi.hoisted(() => ({
   fetchAttachmentBlobMock: vi.fn(),
+  navigateMock: vi.fn(),
 }));
 
+vi.mock("react-router", () => ({
+  useNavigate: () => navigateMock,
+}));
 vi.mock("../../../lib/i18n", () => ({
   useT: () => (key) => key,
 }));
@@ -53,6 +57,7 @@ test("fetched HTML stays inert when descriptor metadata claims it is a PDF", asy
           filename: "untrusted.html",
           mime_type: "application/pdf",
           fetch_url: "/api/test/untrusted",
+          workspace_path: "/workspace/../secret.txt",
         }}
         onClose={() => {}}
       />);
@@ -63,10 +68,61 @@ test("fetched HTML stays inert when descriptor metadata claims it is a PDF", asy
     assert.equal(container.querySelector("iframe"), null);
     assert.equal(container.querySelector("script"), null);
     assert.equal(
+      container.querySelector('[data-testid="attachment-open-workspace"]'),
+      null,
+    );
+    assert.equal(
       container.querySelector("pre")?.textContent,
       '<script>globalThis.__attachmentPreviewExecuted = true</script><h1>safe source</h1>',
     );
     assert.equal(globalThis.__attachmentPreviewExecuted, undefined);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+  }
+});
+
+test("workspace attachments can open their selected file in the workspace viewer", async () => {
+  fetchAttachmentBlobMock.mockResolvedValueOnce(
+    new Blob(["test"], { type: "text/plain" }),
+  );
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test-workspace");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  navigateMock.mockReset();
+  const onClose = vi.fn();
+
+  const { AttachmentPreviewModal } = await import("./attachment-preview");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => {
+      root.render(<AttachmentPreviewModal
+        attachment={{
+          filename: "test.txt",
+          mime_type: "text/plain",
+          fetch_url: "/api/test/workspace",
+          workspace_path:
+            "/workspace/attachments/2026-07-30/message-1-test.txt",
+        }}
+        onClose={onClose}
+      />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const button = container.querySelector(
+      '[data-testid="attachment-open-workspace"]',
+    );
+    assert.ok(button);
+    act(() => button.click());
+
+    assert.equal(onClose.mock.calls.length, 1);
+    assert.deepEqual(navigateMock.mock.calls, [[
+      "/workspace/workspace/attachments/2026-07-30/message-1-test.txt",
+    ]]);
   } finally {
     act(() => root.unmount());
     container.remove();

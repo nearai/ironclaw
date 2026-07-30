@@ -134,6 +134,7 @@ function MessageBubbleImpl({
         filename: basename(path),
         mime_type: "",
         fetch_url: projectFileContentUrl({ threadId, path }),
+        workspace_path: path,
       });
     },
     [threadId],
