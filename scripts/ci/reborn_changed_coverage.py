@@ -51,13 +51,13 @@ class Coverage:
 def repo_relative(path: str, repo_root: pathlib.Path) -> str:
     normalized = pathlib.Path(path)
     if normalized.is_absolute():
-        try:
-            return normalized.resolve().relative_to(repo_root.resolve()).as_posix()
-        except ValueError:
-            marker = "/crates/"
-            rendered = normalized.as_posix()
-            if marker in rendered:
-                return "crates/" + rendered.split(marker, 1)[1]
+        rendered = normalized.as_posix()
+        root_prefix = repo_root.as_posix().rstrip("/") + "/"
+        if rendered.startswith(root_prefix):
+            return rendered.removeprefix(root_prefix)
+        marker = "/crates/"
+        if marker in rendered:
+            return "crates/" + rendered.split(marker, 1)[1]
     return normalized.as_posix().lstrip("./")
 
 
@@ -219,6 +219,18 @@ def test_only_path(path: str) -> bool:
         any(part in path for part in TEST_PATH_PARTS)
         or path.endswith("/tests.rs")
         or path.endswith("_tests.rs")
+    )
+
+
+def mechanically_uninstrumentable_line(source_line: str) -> bool:
+    """Return whether a Rust source line is syntactic scaffolding, not behavior."""
+    stripped = source_line.strip()
+    return (
+        not stripped
+        or stripped.startswith("//")
+        or stripped.startswith("#[")
+        or re.match(r"^(?:pub(?:\([^)]*\))?\s+)?use\b", stripped) is not None
+        or re.fullmatch(r"[{}][,;]?", stripped) is not None
     )
 
 
@@ -458,6 +470,7 @@ def main() -> int:
             if not instrumented:
                 uninstrumented_files.append(path)
                 continue
+            source_lines = (repo_root / path).read_text(encoding="utf-8").splitlines()
             candidate_lines = {
                 line for line in added_lines if (path, line) not in exempt_lines
             }
@@ -468,6 +481,8 @@ def main() -> int:
                 line
                 for line in candidate_lines
                 if first_instrumented <= line <= last_instrumented
+                and line <= len(source_lines)
+                and not mechanically_uninstrumentable_line(source_lines[line - 1])
             }
             if candidate_lines_in_instrumented_span and not measured_lines:
                 empty_denominator_files.append(path)

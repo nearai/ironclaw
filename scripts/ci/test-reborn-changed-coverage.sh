@@ -319,6 +319,40 @@ run_gate
 check_rc "imports and doc comments outside the executable span pass" 0
 check_text "uninstrumentable-only additions keep an explicit empty denominator" "Changed line coverage: 100.00% (0/0)"
 
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- a/crates/ironclaw_demo/src/lib.rs
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -1,0 +2,5 @@
++
++/// Documents an item inside the executable span.
++#[derive(Debug)]
++use std::fmt::Debug;
++}
+DIFF
+printf '%s\n' \
+  'pub fn before() {}' \
+  '' \
+  '/// Documents an item inside the executable span.' \
+  '#[derive(Debug)]' \
+  'use std::fmt::Debug;' \
+  '}' \
+  'pub fn after() {}' >"${case_root}/${source_path}"
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+DA:1,1
+DA:7,1
+BRDA:7,0,0,1
+LF:2
+LH:2
+BRF:1
+BRH:1
+end_of_record
+EOF
+run_gate
+check_rc "scaffolding-only additions inside the executable span pass" 0
+check_text "in-span scaffolding cannot manufacture a denominator" "Changed line coverage: 100.00% (0/0)"
+
 echo "▶ test-only Rust changes do not dilute the production denominator"
 test_source="crates/ironclaw_demo/src/tests.rs"
 printf '%s\n' '#[test]' 'fn helper_test() {}' >"${case_root}/${test_source}"
