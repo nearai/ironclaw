@@ -28,7 +28,21 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // chat-commands.ts into command-result.tsx. What's left (~0.45 KB over the
 // previous 210.0 KB budget) is the composer menu's own necessary weight, so
 // the budget moves up instead.
-const CHAT_GZIP_BUDGET = 211_000;
+// Hosted MCP registration (custom MCP server connect) added ~44
+// `extensions.customMcp*` i18n keys plus 2 `common.*` keys to `en.ts`, the
+// fallback locale pack `i18n.tsx` (~line 36) loads eagerly in `main.tsx` so it
+// ships on every page including /chat. The other 10 locale packs are lazy
+// per-locale dynamic imports (`i18n.tsx` ~41-50) and don't count against this
+// budget, and the registration modal itself is not the cause: `ExtensionsPage`
+// is already route-level `React.lazy`'d in `app.tsx` (~49-53), outside the
+// /chat closure. Copy was trimmed first: `en.ts` went from 211,326 to 211,218
+// bytes (108 gzip bytes saved) before further cuts hit sharp diminishing
+// returns (0.39 gzip bytes saved per raw byte cut, down to 0.17) and would
+// require gutting minimal labels like "OAuth" or "Server ID". The remaining
+// growth is ~44 new i18n keys of string content for hosted MCP registration,
+// not new eager code weight, so the budget moves up to cover the measured
+// 211.2 KB with ~0.3 KB of headroom rather than trimming further.
+const CHAT_GZIP_BUDGET = 211_500;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {
