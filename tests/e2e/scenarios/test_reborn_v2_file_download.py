@@ -315,7 +315,9 @@ async def test_workspace_tree_keyboard_navigation_and_accessibility(
     await expect(report).to_have_attribute("aria-selected", "true")
     await expect(report).to_have_attribute("tabindex", "0")
     assert await tree.locator('[role="treeitem"][tabindex="0"]').count() == 1
-    await expect(guide).to_have_count(0)
+    await expect(guide).to_be_visible()
+    await expect(guide).to_have_attribute("aria-selected", "false")
+    await expect(guide).to_have_attribute("tabindex", "-1")
 
     # Directory-load errors are live alerts, so they are announced without a
     # separate pointer interaction.

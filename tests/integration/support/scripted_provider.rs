@@ -317,6 +317,7 @@ pub enum RecoverableModelFailure {
     ContextOverflow,
     ContentFiltered,
     InvalidOutput,
+    OutputTruncated,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -489,6 +490,22 @@ impl LlmProvider for RecoverableFailureLlm {
                     input_tokens: 0,
                     output_tokens: 0,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning: None,
+                    reasoning_details: None,
+                }),
+                RecoverableModelFailure::OutputTruncated => Ok(ToolCompletionResponse {
+                    content: Some(
+                        "partial response that must not be reported as complete\n\
+                         to=builtin__http weirdjson\n\
+                         {\"url\":\"https://api.example.test/partial\"}"
+                            .into(),
+                    ),
+                    tool_calls: Vec::new(),
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    finish_reason: FinishReason::Length,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,

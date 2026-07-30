@@ -155,7 +155,7 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
@@ -4196,7 +4196,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
 async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
-        in_memory_turn_state_store(),
+        in_memory_agent_turn_runtime(),
     )));
     let services = RebornServices::new(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;
@@ -13293,7 +13293,7 @@ fn service_source_avoids_forbidden_runtime_dependencies() {
         "ironclaw_capabilities",
         "ironclaw_dispatcher",
         "ironclaw_host_runtime",
-        "ironclaw_run_state",
+        "ironclaw_approvals",
         "ironclaw_storage",
         "RuntimeLane",
         "pub fn thread_service",
@@ -13324,7 +13324,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     // intentionally does NOT override the trait's default
     // `list_threads_for_scope` impl, so the service sees the
     // unimplemented-enumeration error path. The in-memory backend
-    // grew a real enumeration impl (local-dev needed working
+    // grew a real enumeration impl (standalone needed working
     // sidebar listing), so it can no longer stand in for a backend
     // without enumeration support.
     let services = RebornServices::new(

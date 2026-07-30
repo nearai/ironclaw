@@ -5,28 +5,21 @@ use ironclaw_auth::{
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, TurnGateAuthFlowQuery,
     TurnRunRef, flow_matches_turn_gate_query,
 };
+use ironclaw_processes::{
+    ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind,
+};
 use ironclaw_product::{
     AuthGateRecord, AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
     AuthInteractionService, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, ProductSurfaceFailure, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse,
 };
-use ironclaw_turns::{GateRef, TurnPersistenceSnapshot, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
 
-use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BlockedAuthRun {
-    run_id: TurnRunId,
-    gate_ref: GateRef,
-}
-
-pub(super) struct SnapshotAuthInteractionReadModel {
-    /// A trait object (not a concrete row-store type) so a
-    /// caller can substitute a different turn-state store's snapshot view —
-    /// see `turn_run_snapshot::TurnRunSnapshotSource` and
-    /// `build_webui_auth_interaction_service_with_turn_run_source`.
-    turn_state: Arc<dyn TurnRunSnapshotSource>,
+pub(super) struct ProcessGateAuthInteractionReadModel {
+    gates: Arc<dyn ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
     flow_records: Arc<dyn AuthFlowRecordSource>,
 }
 
@@ -49,50 +42,50 @@ impl AuthInteractionService for UnavailableAuthInteractionService {
     }
 }
 
-impl SnapshotAuthInteractionReadModel {
+impl ProcessGateAuthInteractionReadModel {
     pub(super) fn new(
-        turn_state: Arc<dyn TurnRunSnapshotSource>,
+        gates: Arc<dyn ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
         flow_records: Arc<dyn AuthFlowRecordSource>,
     ) -> Self {
         Self {
-            turn_state,
+            gates,
             flow_records,
         }
     }
 
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, ProductSurfaceFailure> {
-        self.turn_state.turn_run_snapshot().await.map_err(|error| {
-            tracing::debug!(
-                %error,
-                "auth interaction read model could not read turn persistence snapshot"
-            );
-            auth_read_model_unavailable()
-        })
+    async fn query(
+        &self,
+        scope: &AuthInteractionScope,
+        gate_ref: Option<GateRef>,
+        include_historical: bool,
+    ) -> Result<Vec<ironclaw_processes::ProcessGateRecord>, ProductSurfaceFailure> {
+        self.gates
+            .query_process_gates(ProcessGateQuery {
+                scope: turn_scope_for_interaction(scope).to_resource_scope(),
+                gate_kind: ProcessSuspensionKind::Authorization,
+                scope_match: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                gate_ref,
+                owner_match: Some(ProcessGateOwnerMatch::Explicit),
+                include_historical,
+            })
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    %error,
+                    "auth interaction read model could not read process gate projection"
+                );
+                auth_read_model_unavailable()
+            })
     }
 
     async fn blocked_auth_runs(
         &self,
         scope: &AuthInteractionScope,
-    ) -> Result<Vec<BlockedAuthRun>, ProductSurfaceFailure> {
-        let turn_scope = turn_scope_for_interaction(scope);
-        let snapshot = self.snapshot().await?;
-        let mut runs = snapshot
-            .runs
-            .iter()
-            .filter(|run| {
-                run.scope == turn_scope
-                    && run.status == TurnStatus::BlockedAuth
-                    && run.gate_ref.is_some()
-            })
-            .filter_map(|run| {
-                run.gate_ref.clone().map(|gate_ref| BlockedAuthRun {
-                    run_id: run.run_id,
-                    gate_ref,
-                })
-            })
-            .collect::<Vec<_>>();
-        runs.sort_by_key(|run| run.run_id.as_uuid());
-        Ok(runs)
+    ) -> Result<Vec<(TurnRunId, GateRef)>, ProductSurfaceFailure> {
+        Ok(current_turn_gate_runs(
+            self.query(scope, None, false).await?,
+        ))
     }
 
     async fn auth_run_for_gate(
@@ -100,43 +93,9 @@ impl SnapshotAuthInteractionReadModel {
         scope: &AuthInteractionScope,
         gate_ref: &GateRef,
     ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
-        let turn_scope = turn_scope_for_interaction(scope);
-        let snapshot = self.snapshot().await?;
-        let active = snapshot
-            .runs
-            .iter()
-            .find(|run| {
-                run.scope == turn_scope
-                    && run.status == TurnStatus::BlockedAuth
-                    && run.gate_ref.as_ref() == Some(gate_ref)
-            })
-            .map(|run| run.run_id);
-        if active.is_some() {
-            return Ok(active);
-        }
-
-        let mut historical = snapshot
-            .checkpoints
-            .iter()
-            .filter(|checkpoint| {
-                checkpoint.status == TurnStatus::BlockedAuth
-                    && &checkpoint.gate_ref == gate_ref
-                    && checkpoint
-                        .scope
-                        .as_ref()
-                        .is_none_or(|stored| stored == &turn_scope)
-            })
-            .filter_map(|checkpoint| {
-                snapshot
-                    .runs
-                    .iter()
-                    .find(|run| run.run_id == checkpoint.run_id && run.scope == turn_scope)
-                    .map(|run| run.run_id)
-            })
-            .collect::<Vec<_>>();
-        historical.sort_by_key(|run_id| run_id.as_uuid());
-        historical.dedup();
-        Ok(historical.into_iter().next())
+        Ok(first_turn_run_for_gate(
+            self.query(scope, Some(gate_ref.clone()), true).await?,
+        ))
     }
 
     async fn flow_for_gate(
@@ -153,7 +112,7 @@ impl SnapshotAuthInteractionReadModel {
                     %error,
                     %run_id,
                     gate_ref = %gate_ref.as_str(),
-                    "local-dev auth read model failed to query flow for turn gate"
+                    "standalone auth read model failed to query flow for turn gate"
                 );
                 auth_read_model_unavailable()
             })
@@ -197,7 +156,7 @@ async fn flows_for_owner(
                 tenant_id = %scope.tenant_id.as_str(),
                 user_id = %scope.user_id.as_str(),
                 thread_id = %scope.thread_id.as_str(),
-                "local-dev auth read model failed to query flows for owner"
+                "standalone auth read model failed to query flows for owner"
             );
             auth_read_model_unavailable()
         })
@@ -216,7 +175,7 @@ fn matching_flow_for_run(
         .cloned())
 }
 
-impl SnapshotAuthInteractionReadModel {
+impl ProcessGateAuthInteractionReadModel {
     async fn owner_flows(
         &self,
         scope: &AuthInteractionScope,
@@ -226,16 +185,16 @@ impl SnapshotAuthInteractionReadModel {
 }
 
 #[async_trait]
-impl AuthInteractionReadModel for SnapshotAuthInteractionReadModel {
+impl AuthInteractionReadModel for ProcessGateAuthInteractionReadModel {
     async fn auth_gates(
         &self,
         scope: &AuthInteractionScope,
     ) -> Result<Vec<AuthGateRecord>, ProductSurfaceFailure> {
         let mut gates = Vec::new();
         let flows = self.owner_flows(scope).await?;
-        for run in self.blocked_auth_runs(scope).await? {
-            if let Some(flow) = matching_flow_for_run(&flows, scope, run.run_id, &run.gate_ref)? {
-                gates.push(AuthGateRecord::new(run.run_id, run.gate_ref, flow)?);
+        for (run_id, gate_ref) in self.blocked_auth_runs(scope).await? {
+            if let Some(flow) = matching_flow_for_run(&flows, scope, run_id, &gate_ref)? {
+                gates.push(AuthGateRecord::new(run_id, gate_ref, flow)?);
             }
         }
         Ok(gates)

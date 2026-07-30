@@ -60,7 +60,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 |---|---|
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
-| `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
+| `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI; accepted tokens map to operator WebUI capabilities |
 | `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
@@ -72,7 +72,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `GitHubProvider` (in `auth/github.rs`) | GitHub OAuth App provider (scopes `read:user user:email`, no PKCE, verified-email preference). Built from `GitHubOAuthConfig`. |
 | `OAuthRouterConfig` | Tenant + `SignedTokenSessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
-| `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `test-support` |
+| `EmailUserDirectory` | Standalone default impl (verified email → `UserId`); gated on `test-support` |
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
@@ -323,7 +323,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - No cookie writes (the SPA stores the exchanged bearer in
   `sessionStorage`).
 - No DB schema. `UserDirectory` is host-supplied; the crate ships
-  only the local-dev `EmailUserDirectory`.
+  only the standalone `EmailUserDirectory`.
 - No retry / refresh-token handling. The callback is one-shot:
   exchange code, mint session, done. Token refresh is the host's
   job if it wants it.

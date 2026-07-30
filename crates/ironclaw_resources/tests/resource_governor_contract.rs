@@ -1698,10 +1698,10 @@ async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_app
 /// `DiskFilesystem` is used here because it is the canonical byte-only
 /// `RootFilesystem`: its `put` impl rejects entries with
 /// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`.
-/// Mirrors `ironclaw_run_state`'s
+/// Mirrors `ironclaw_approvals`'s
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend`
 /// regression
-/// (crates/ironclaw_run_state/tests/run_state_contract.rs:1027-1048) for
+/// (crates/ironclaw_approvals/tests/run_state_contract.rs:1027-1048) for
 /// the resources crate's CAS snapshot stores.
 #[tokio::test]
 async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {

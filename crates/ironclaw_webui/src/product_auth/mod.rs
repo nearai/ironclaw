@@ -2089,7 +2089,7 @@ mod tests {
 
     fn test_state() -> ProductAuthRouteState {
         ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            Arc::new(RebornProductAuthServices::in_memory_for_test(Arc::new(
                 NoopDispatcher,
             ))),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2213,7 +2213,7 @@ mod tests {
             Arc::new(RouteDcrSetupEgress),
             Arc::new(SecretStore::ephemeral()),
         );
-        let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
+        let product_auth = RebornProductAuthServices::in_memory_for_test(Arc::new(NoopDispatcher))
             .with_auth_engine(engine);
         let state = ProductAuthRouteState::new(
             Arc::new(product_auth),
@@ -2526,7 +2526,7 @@ mod tests {
     #[tokio::test]
     async fn extension_oauth_start_fails_closed_without_a_composed_engine() {
         let state = ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            Arc::new(RebornProductAuthServices::in_memory_for_test(Arc::new(
                 NoopDispatcher,
             ))),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2570,7 +2570,7 @@ mod tests {
     #[tokio::test]
     async fn installed_extension_lookup_is_required_even_in_test_builds() {
         let state = ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            Arc::new(RebornProductAuthServices::in_memory_for_test(Arc::new(
                 NoopDispatcher,
             ))),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2665,7 +2665,7 @@ mod tests {
             engine.clone(),
             secret_store.clone() as Arc<dyn SecretStorePort>,
         ));
-        let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
+        let product_auth = RebornProductAuthServices::in_memory_for_test(Arc::new(NoopDispatcher))
             .with_auth_engine(engine)
             .with_oauth_gate_driver(driver);
         let state = ProductAuthRouteState::new(

@@ -264,7 +264,7 @@ mod tests {
             "openai",
             "gpt-4o-mini",
             "https://api.openai.com/v1",
-            "local-dev",
+            "standalone",
             "acme",
             "acme-bot",
             "reborn-cli",

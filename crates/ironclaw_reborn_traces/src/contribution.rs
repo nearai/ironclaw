@@ -762,7 +762,7 @@ pub enum TraceUploadAuthMode {
     /// Operator-minted workload token read from env (legacy/back-compat path).
     #[default]
     WorkloadTokenEnv,
-    /// Self-signed workload JWTs using the local device key (agent onboarding path).
+    /// Self-signed workload JWTs using the standaloneice key (agent onboarding path).
     DeviceKey,
 }
 
@@ -5681,7 +5681,7 @@ fn build_trace_upload_claim_http_error(
 /// Returns the bearer credential to present to the upload-claim issuer.
 ///
 /// - `TraceUploadAuthMode::DeviceKey`: self-signs a short-lived workload JWT
-///   with the local device keypair for the tenant.  The context must carry a
+///   with the standaloneice keypair for the tenant.  The context must carry a
 ///   `scope_dir`.
 /// - `TraceUploadAuthMode::WorkloadTokenEnv`: reads the workload token from
 ///   the environment variable named in the policy (existing behavior, byte-for-byte
@@ -6180,7 +6180,7 @@ fn validate_trace_upload_claim_issuer_url(
     let loopback_dev = crate::onboarding::invite::is_loopback_host(&host);
     anyhow::ensure!(
         url.scheme() == "https" || (url.scheme() == "http" && loopback_dev),
-        "Trace Commons upload token issuer URL must use https (or http to a loopback host for local dev)"
+        "Trace Commons upload token issuer URL must use https (or http to a loopback host for standalone)"
     );
     anyhow::ensure!(
         url.username().is_empty() && url.password().is_none(),
@@ -6227,7 +6227,7 @@ async fn resolve_trace_upload_claim_issuer_host(
         !addrs.is_empty(),
         "Trace Commons upload token issuer host {host} resolved to no addresses"
     );
-    // For a literal-loopback host (the local-dev exception) the pinned
+    // For a literal-loopback host (the standalone exception) the pinned
     // resolution must stay on loopback — anything else is DNS tampering.
     let loopback_dev = crate::onboarding::invite::is_loopback_host(host);
     for addr in &addrs {
@@ -6661,7 +6661,7 @@ fn validate_trace_commons_ingest_url(url: &reqwest::Url) -> anyhow::Result<()> {
     let loopback_dev = crate::onboarding::invite::is_loopback_host(&host);
     anyhow::ensure!(
         url.scheme() == "https" || (url.scheme() == "http" && loopback_dev),
-        "Trace Commons ingest endpoint must use https (or http to a loopback host for local dev)"
+        "Trace Commons ingest endpoint must use https (or http to a loopback host for standalone)"
     );
     anyhow::ensure!(
         url.username().is_empty() && url.password().is_none(),
@@ -17459,9 +17459,9 @@ mod tests {
             .expect_err("link-local endpoint host must be rejected");
         assert_eq!(error.kind, TraceQueueTelemetryFailureKind::NetworkDns);
 
-        // The literal-loopback local-dev exception still applies.
+        // The literal-loopback standalone exception still applies.
         pinned_trace_remote_http_client("http://127.0.0.1:8080/v1/traces")
             .await
-            .expect("literal loopback endpoint builds (local-dev exception)");
+            .expect("literal loopback endpoint builds (standalone exception)");
     }
 }

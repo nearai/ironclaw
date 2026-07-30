@@ -3971,7 +3971,7 @@ def _capability_run_statuses(
                 FROM root_filesystem_entries
                 WHERE is_dir = 0
                   AND content_type = 'application/json'
-                  AND path LIKE '%/run-state/%'
+                  AND path LIKE '%/processes/materialized/process/%'
                 """
             ).fetchall()
     except sqlite3.Error:
@@ -3988,6 +3988,11 @@ def _capability_run_statuses(
             continue
         if not isinstance(payload, dict):
             continue
+        if payload.get("row_type") == "process":
+            metadata = payload.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            payload = {**payload, **metadata}
         capability_id = payload.get("capability_id")
         if capability_id in wanted:
             statuses[str(capability_id)].append(str(payload.get("status") or "unknown"))
@@ -4055,7 +4060,7 @@ def _current_turn_capability_evidence(
                 FROM root_filesystem_entries
                 WHERE is_dir = 0
                   AND content_type = 'application/json'
-                  AND path LIKE '%/run-state/%'
+                  AND path LIKE '%/processes/materialized/process/%'
                 """
             ).fetchall()
             display_preview_rows = db.execute(
@@ -4171,6 +4176,11 @@ def _current_turn_capability_evidence(
             continue
         if not isinstance(payload, dict):
             continue
+        if payload.get("row_type") == "process":
+            metadata = payload.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            payload = {**payload, **metadata}
         invocation_id = str(payload.get("invocation_id") or "")
         event = terminal_events.get(invocation_id)
         scope = payload.get("scope")
@@ -8493,7 +8503,7 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
 
 TRACE_EXPORT_PATH_MARKERS = (
     "/threads/agents/",
-    "/run-state/agents/",
+    "/processes/materialized/",
     "/checkpoint-state/agents/",
     "/approvals/agents/",
     "/authorization/leases/agents/",

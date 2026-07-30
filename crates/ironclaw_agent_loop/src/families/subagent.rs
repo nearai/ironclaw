@@ -22,7 +22,7 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
     "gate:DefaultGateHandlingStrategy(block),",
-    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,stale_request=iteration_retry,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),",
+    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
@@ -31,8 +31,8 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x59, 0x47, 0x28, 0x03, 0xf2, 0x2b, 0xea, 0xee, 0x0e, 0xd8, 0x26, 0x13, 0xe4, 0x6c, 0x27, 0x30,
-    0x4c, 0x33, 0x09, 0x43, 0x15, 0xe4, 0x30, 0x5e, 0x65, 0xea, 0xee, 0x8f, 0x0c, 0x56, 0xb4, 0xe9,
+    0xbb, 0xcc, 0xaf, 0x50, 0x60, 0xf4, 0x29, 0xea, 0x3a, 0x62, 0x1f, 0xe6, 0xd4, 0xfc, 0xac, 0xcf,
+    0xf0, 0xeb, 0x4a, 0xc8, 0xea, 0x53, 0x86, 0x82, 0x18, 0x68, 0xb6, 0xf4, 0x90, 0x04, 0xc8, 0x5c,
 ]);
 
 pub fn subagent() -> LoopFamily {

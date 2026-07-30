@@ -74,7 +74,7 @@ async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
     let stream = EventStreamKey::from_scope(&scope_a);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Libsql {
             path_or_url: temp.path().join("events.db").to_string_lossy().to_string(),
             auth_token: None,
@@ -128,7 +128,7 @@ async fn libsql_append_batch_groups_by_stream_and_preserves_order() {
     let stream_bob = EventStreamKey::from_scope(&scope_bob);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Libsql {
             path_or_url: temp.path().join("events.db").to_string_lossy().to_string(),
             auth_token: None,
@@ -183,7 +183,7 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
     let stream = EventStreamKey::from_scope(&scope_a);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: root.clone(),
             accept_single_node_durable: false,
@@ -222,7 +222,7 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
     drop(stores);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root,
             accept_single_node_durable: false,
@@ -270,7 +270,7 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
 async fn jsonl_runtime_log_replays_host_written_privileged_runtime_kind() {
     let temp = tempfile::tempdir().expect("tempdir");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: temp.path().join("event-store"),
             accept_single_node_durable: false,
@@ -310,7 +310,7 @@ async fn jsonl_runtime_log_replays_host_written_privileged_runtime_kind() {
 async fn jsonl_runtime_log_rejects_zero_limit_and_foreign_future_cursor() {
     let temp = tempfile::tempdir().expect("tempdir");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: temp.path().join("event-store"),
             accept_single_node_durable: false,
@@ -352,7 +352,7 @@ async fn jsonl_audit_log_survives_rebuild_and_filters_scope() {
     let stream = EventStreamKey::from_scope(&scope_a);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: root.clone(),
             accept_single_node_durable: false,
@@ -374,7 +374,7 @@ async fn jsonl_audit_log_survives_rebuild_and_filters_scope() {
     drop(stores);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root,
             accept_single_node_durable: false,
@@ -666,7 +666,7 @@ async fn jsonl_runtime_records_do_not_serialize_raw_error_sentinels() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("event-store");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: root.clone(),
             accept_single_node_durable: false,
@@ -734,7 +734,7 @@ async fn jsonl_replay_advances_next_cursor_past_trailing_filtered_records() {
     let stream = EventStreamKey::from_scope(&scope_a);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root,
             accept_single_node_durable: false,
@@ -800,7 +800,7 @@ async fn jsonl_concurrent_appenders_emit_monotonic_cursors_through_file_lock() {
     // Two independent store instances simulate two processes sharing the
     // same JSONL root. They do NOT share an in-process Tokio mutex.
     let stores_one = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: root.clone(),
             accept_single_node_durable: false,
@@ -809,7 +809,7 @@ async fn jsonl_concurrent_appenders_emit_monotonic_cursors_through_file_lock() {
     .await
     .expect("stores one");
     let stores_two = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: root.clone(),
             accept_single_node_durable: false,
@@ -843,7 +843,7 @@ async fn jsonl_concurrent_appenders_emit_monotonic_cursors_through_file_lock() {
     // `parse_jsonl_entries` would error out via `read_after_cursor` with an
     // "invalid cursor sequence" durable-log error.
     let reader = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root,
             accept_single_node_durable: false,
@@ -875,7 +875,7 @@ async fn jsonl_bounded_replay_does_not_parse_the_whole_file() {
     let stream = EventStreamKey::from_scope(&scope);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: root.clone(),
             accept_single_node_durable: false,
@@ -929,7 +929,7 @@ async fn jsonl_bounded_replay_does_not_parse_the_whole_file() {
     drop(handle);
 
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root,
             accept_single_node_durable: false,

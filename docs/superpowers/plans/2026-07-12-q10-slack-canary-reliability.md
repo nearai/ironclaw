@@ -33,7 +33,7 @@
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/list_conversations.md
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/get_conversation_history.md
 - Modify: crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+- Modify: crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
 
 **Interfaces:**
 - Consumes: OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION and the bundled Slack manifest catalog.
@@ -93,7 +93,7 @@ cargo test -p ironclaw_reborn_composition \
 git add crates/ironclaw_reborn_composition/src/outbound/outbound_delivery_capability_surface.rs \
   crates/ironclaw_first_party_extensions/assets/slack \
   crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs \
-  crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+  crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
 git commit -m "fix(reborn): clarify Slack capability selection"
 ~~~
 
@@ -104,7 +104,7 @@ git commit -m "fix(reborn): clarify Slack capability selection"
 **Files:**
 - Delete: crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs
 - Modify: crates/ironclaw_reborn_composition/src/runtime.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+- Modify: crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
 - Modify: crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
 - Modify: scripts/reborn_webui_v2_live_qa/run_live_qa.py
 - Modify: scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
@@ -152,7 +152,7 @@ cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta --lib
 python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 git add crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs \
   crates/ironclaw_reborn_composition/src/runtime.rs \
-  crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs \
+  crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs \
   scripts/reborn_webui_v2_live_qa/run_live_qa.py \
   scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 git commit -m "refactor(reborn): remove Slack policy from core runtime"

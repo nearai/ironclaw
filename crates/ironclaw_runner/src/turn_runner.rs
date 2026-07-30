@@ -2,8 +2,8 @@
 //!
 //! # Architecture boundary
 //!
-//! `ironclaw_turns` owns `TurnRunTransitionPort`, claim/heartbeat/transition
-//! DTOs, state-machine invariants, and the trusted `LoopExitApplier`.
+//! `ironclaw_processes` owns claim, heartbeat, and transition contracts.
+//! `ironclaw_turns` owns the agent-turn projection and loop-exit mapping.
 //!
 //! This module owns the `HostFactory` trait that constructs a per-run
 //! `AgentLoopDriverHost`, and the `sanitized_failure`/`sanitized_driver_failure`
@@ -15,8 +15,9 @@ use tracing::{debug, error};
 use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
 use crate::failure_categories::{
-    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -52,7 +53,11 @@ pub(crate) fn sanitized_driver_failure(
         reason_kind,
         MODEL_CREDITS_EXHAUSTED_CATEGORY
             | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+            | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
+            | CHECKPOINT_REJECTED_CATEGORY
+            | "model_context_overflow"
+            | "model_output_truncated"
             | "interrupted_unexpectedly"
     ) {
         match SanitizedFailure::new(reason_kind.to_string()) {
@@ -121,7 +126,10 @@ impl std::error::Error for HostFactoryError {}
 #[cfg(test)]
 mod tests {
     use super::sanitized_driver_failure;
-    use crate::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
+    use crate::failure_categories::{
+        BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+        MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    };
 
     #[test]
     fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {
@@ -167,5 +175,41 @@ mod tests {
             failure.detail(),
             Some("resource accounting storage is unavailable")
         );
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_spend_budget_exhaustion_category() {
+        let failure = sanitized_driver_failure(
+            MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+            Some("configured model spend budget is exhausted"),
+        )
+        .expect("spend budget category is valid");
+
+        assert_eq!(failure.category(), MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY);
+        assert_eq!(
+            failure.detail(),
+            Some("configured model spend budget is exhausted")
+        );
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_checkpoint_rejection_and_explanation() {
+        let detail = "host-authored checkpoint rejection explanation";
+        let failure = sanitized_driver_failure(CHECKPOINT_REJECTED_CATEGORY, Some(detail))
+            .expect("checkpoint rejection category is valid");
+
+        assert_eq!(failure.category(), CHECKPOINT_REJECTED_CATEGORY);
+        assert_eq!(failure.detail(), Some(detail));
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_terminal_model_recovery_categories() {
+        for category in ["model_context_overflow", "model_output_truncated"] {
+            let failure = sanitized_driver_failure(category, Some("bounded model failure"))
+                .expect("terminal model recovery category is valid");
+
+            assert_eq!(failure.category(), category);
+            assert_eq!(failure.detail(), Some("bounded model failure"));
+        }
     }
 }

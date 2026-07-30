@@ -68,7 +68,7 @@ pub struct RebornConfigFile {
     pub drivers: Option<DriversSection>,
     pub harness: Option<HarnessSection>,
     pub runner: Option<RunnerSection>,
-    /// Skill activation selection settings for local-dev runtime skill context.
+    /// Skill activation selection settings for standalone runtime skill context.
     pub skills: Option<SkillsSection>,
     /// Durable storage selection for production Reborn boot.
     ///
@@ -153,7 +153,7 @@ pub struct MemoryAdminOverride {
 #[serde(deny_unknown_fields)]
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
-    /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
+    /// against `RebornCompositionProfile`. Examples: `"standalone"`,
     /// `"local-dev-yolo"`, `"hosted-single-tenant"`,
     /// `"hosted-single-tenant-volume"`, `"production"`,
     /// `"migration-dry-run"`.
@@ -1254,7 +1254,7 @@ impl RebornConfigFile {
                     return Err(RebornConfigFileError::InvalidField {
                         path: path_str(),
                         field: format!("memory.admin_overrides[{idx}].deployment_profile"),
-                        reason: "must be a deployment profile name (local-dev, \
+                        reason: "must be a deployment profile name (standalone, \
                                  local-dev-yolo, hosted-single-tenant, production, \
                                  migration-dry-run) or '*'"
                             .to_string(),
@@ -1586,7 +1586,7 @@ max_concurrent_conversation_runs = 5
 api_version = "ironclaw.runtime/v1"
 
 [boot]
-profile = "local-dev"
+profile = "standalone"
 
 [identity]
 tenant = "acme"
@@ -1595,7 +1595,7 @@ default_owner = "acme-operator"
 
 [policy]
 deployment_mode = "local_single_user"
-default_profile = "local_dev"
+default_profile = "standalone"
 default_approval_policy = "ask_destructive"
 
 [drivers]
@@ -1633,7 +1633,7 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
         assert_eq!(
             cfg.boot.as_ref().unwrap().profile.as_deref(),
-            Some("local-dev")
+            Some("standalone")
         );
         assert_eq!(
             cfg.identity.as_ref().unwrap().tenant.as_deref(),

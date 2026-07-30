@@ -32,7 +32,7 @@ use ironclaw_threads::{
 use ironclaw_turns::{TurnActor, TurnRunState};
 use tracing::debug;
 
-use crate::thread_scope::ThreadScopeResolver;
+use ironclaw_loop_host::ThreadScopeResolver;
 
 /// Records a completed run's full ordered transcript into memory.
 ///

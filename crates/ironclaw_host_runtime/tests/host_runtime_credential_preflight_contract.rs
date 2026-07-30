@@ -169,11 +169,11 @@ fn local_manifest_trust_policy(
 /// the flow proceeds to the approval gate.
 #[tokio::test]
 async fn product_auth_account_credential_does_not_trip_preflight() {
-    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
-    let run_state = Arc::new(ironclaw_run_state::RunStateStore::new(
+    let fs = ironclaw_approvals::in_memory_backed_approval_filesystem();
+    let run_state = Arc::new(ironclaw_processes::ProcessInvocationStateStore::new(
         std::sync::Arc::clone(&fs),
     ));
-    let approval_requests = Arc::new(ironclaw_run_state::ApprovalRequestStore::new(fs));
+    let approval_requests = Arc::new(ironclaw_approvals::ApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     // Deliberately do NOT seed any secret under "google_oauth_token".
@@ -193,7 +193,7 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store));
@@ -224,11 +224,11 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
 /// for SecretHandle credentials.
 #[tokio::test]
 async fn secret_handle_credential_absent_still_trips_preflight() {
-    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
-    let run_state = Arc::new(ironclaw_run_state::RunStateStore::new(
+    let fs = ironclaw_approvals::in_memory_backed_approval_filesystem();
+    let run_state = Arc::new(ironclaw_processes::ProcessInvocationStateStore::new(
         std::sync::Arc::clone(&fs),
     ));
-    let approval_requests = Arc::new(ironclaw_run_state::ApprovalRequestStore::new(fs));
+    let approval_requests = Arc::new(ironclaw_approvals::ApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     // No secret seeded — the SecretHandle pre-flight must fire.
@@ -245,7 +245,7 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store));
@@ -281,11 +281,11 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
 /// `credential_preflight_check`, not just the `secret_owner_scope` helper.
 #[tokio::test]
 async fn tenant_shared_secret_satisfies_credential_preflight() {
-    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
-    let run_state = Arc::new(ironclaw_run_state::RunStateStore::new(
+    let fs = ironclaw_approvals::in_memory_backed_approval_filesystem();
+    let run_state = Arc::new(ironclaw_processes::ProcessInvocationStateStore::new(
         std::sync::Arc::clone(&fs),
     ));
-    let approval_requests = Arc::new(ironclaw_run_state::ApprovalRequestStore::new(fs));
+    let approval_requests = Arc::new(ironclaw_approvals::ApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
 
@@ -301,7 +301,7 @@ async fn tenant_shared_secret_satisfies_credential_preflight() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store));

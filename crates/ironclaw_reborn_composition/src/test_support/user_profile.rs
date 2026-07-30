@@ -8,7 +8,7 @@
 /// orphan-rule wrapper around `MemoryBackedUserProfileSource`) so the test path
 /// never drifts from production wiring (runtime.rs ~line 3167). When `filesystem`
 /// is `Some`, profile reads flow through the native memory service over that
-/// raw local-dev memory filesystem; `None` (non-HostRuntime backends) falls back
+/// raw standalone memory filesystem; `None` (non-HostRuntime backends) falls back
 /// to `EmptyUserProfileSource`.
 #[cfg(feature = "test-support")]
 pub fn build_user_profile_source_for_test(

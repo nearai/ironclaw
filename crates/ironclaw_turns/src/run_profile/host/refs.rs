@@ -96,10 +96,6 @@ impl LoopCheckpointStateRef {
 impl_bounded_ref_traits!(LoopCheckpointStateRef);
 
 impl LoopCheckpointStateRef {
-    pub(crate) fn legacy_unknown() -> Self {
-        Self("checkpoint:unknown".to_string())
-    }
-
     pub fn for_run(context: &LoopRunContext, token: impl Into<String>) -> Result<Self, String> {
         let token = validate_loop_opaque_token(token.into(), "loop checkpoint state token", 96)?;
         Self::new(format!("checkpoint:{}:{token}", context.run_id))
@@ -194,6 +190,12 @@ impl LoopSafeSummary {
 
     pub fn model_gateway_failed() -> Self {
         Self("model gateway failed".to_string())
+    }
+
+    /// Fixed fallback for a host-rejected checkpoint whose producer did not
+    /// supply a valid bounded cause.
+    pub fn checkpoint_rejected() -> Self {
+        Self("checkpoint was rejected and no safe explanation was available".to_string())
     }
 
     /// Sanitized summary for a primary model call that exceeded its timeout.

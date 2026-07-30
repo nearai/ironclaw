@@ -25,9 +25,9 @@ use crate::driver_registry::{
 /// Readiness mode for the Reborn loop graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornLoopReadinessMode {
-    /// Explicit local/developer/test mode. Fake, non-durable, and no-op
+    /// Non-production validation mode. Fake, non-durable, and no-op
     /// implementations are allowed but reported as degraded warnings.
-    LocalDevTest,
+    NonProduction,
     /// Production mode. Components must be production-verified; local durable
     /// implementations are valid, but fake/non-durable/no-op/unverified seams
     /// fail closed.
@@ -37,7 +37,7 @@ pub enum RebornLoopReadinessMode {
 impl From<RebornLoopReadinessMode> for DriverReadinessMode {
     fn from(mode: RebornLoopReadinessMode) -> Self {
         match mode {
-            RebornLoopReadinessMode::LocalDevTest => Self::LocalDevTest,
+            RebornLoopReadinessMode::NonProduction => Self::NonProduction,
             RebornLoopReadinessMode::Production => Self::Production,
         }
     }
@@ -64,7 +64,7 @@ impl RebornComponentSafetyClass {
         self != Self::ProductionVerified
     }
 
-    fn degraded_in_local_dev(self) -> bool {
+    fn degraded_in_non_production(self) -> bool {
         self != Self::ProductionVerified
     }
 
@@ -98,11 +98,10 @@ pub enum RebornLoopProductionComponent {
     ModelGateway,
     TranscriptStore,
     CapabilityPort,
-    CheckpointStateStorePort,
+    ProcessCheckpointPort,
     InputControl,
     LoopExitApplier,
-    TurnStateStore,
-    SubagentGoalStorePort,
+    AgentTurnRuntimePort,
     SubagentCompletionObserver,
     SubagentAwaitEdgeStore,
     WakeNotifier,
@@ -186,7 +185,7 @@ impl RebornLoopProductionIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornLoopProductionStatus {
     ProductionReady,
-    LocalDevDegraded,
+    NonProductionDegraded,
     NotReady,
 }
 
@@ -336,7 +335,7 @@ impl RebornComponentReadiness {
 
     fn available_for(self, mode: RebornLoopReadinessMode) -> bool {
         match mode {
-            RebornLoopReadinessMode::LocalDevTest => self.present(),
+            RebornLoopReadinessMode::NonProduction => self.present(),
             RebornLoopReadinessMode::Production => {
                 self.safety == Some(RebornComponentSafetyClass::ProductionVerified)
             }
@@ -351,11 +350,10 @@ pub struct RebornLoopComponentGraphReadiness {
     pub model_gateway: RebornComponentReadiness,
     pub transcript_store: RebornComponentReadiness,
     pub capability_port: RebornComponentReadiness,
-    pub checkpoint_state_store: RebornComponentReadiness,
+    pub process_checkpoint_port: RebornComponentReadiness,
     pub input_control: RebornComponentReadiness,
     pub loop_exit_applier: RebornComponentReadiness,
-    pub turn_state_store: RebornComponentReadiness,
-    pub subagent_goal_store: RebornComponentReadiness,
+    pub agent_turn_runtime: RebornComponentReadiness,
     pub subagent_completion_observer: RebornComponentReadiness,
     /// §3 replacement: the 3 dead-component readiness fields this used to
     /// sit alongside (`subagent_result_tombstone_store` — unwired dead code;
@@ -377,11 +375,10 @@ impl RebornLoopComponentGraphReadiness {
             model_gateway: RebornComponentReadiness::production_verified(required),
             transcript_store: RebornComponentReadiness::production_verified(required),
             capability_port: RebornComponentReadiness::production_verified(required),
-            checkpoint_state_store: RebornComponentReadiness::production_verified(required),
+            process_checkpoint_port: RebornComponentReadiness::production_verified(required),
             input_control: RebornComponentReadiness::production_verified(required),
             loop_exit_applier: RebornComponentReadiness::production_verified(required),
-            turn_state_store: RebornComponentReadiness::production_verified(required),
-            subagent_goal_store: RebornComponentReadiness::production_verified(required),
+            agent_turn_runtime: RebornComponentReadiness::production_verified(required),
             subagent_completion_observer: RebornComponentReadiness::production_verified(required),
             subagent_await_edge_store: RebornComponentReadiness::production_verified(required),
             wake_notifier: RebornComponentReadiness::production_verified(required),
@@ -394,7 +391,7 @@ impl RebornLoopComponentGraphReadiness {
             model: self.model_gateway.available_for(mode),
             prompt: self.prompt_port.available_for(mode),
             transcript: self.transcript_store.available_for(mode),
-            checkpoint: self.checkpoint_state_store.available_for(mode),
+            checkpoint: self.process_checkpoint_port.available_for(mode),
             input_polling: self.input_control.available_for(mode),
             capabilities: self.capability_port.available_for(mode),
             progress_events: self.progress_events.available_for(mode),
@@ -423,8 +420,8 @@ impl RebornLoopComponentGraphReadiness {
                 self.capability_port,
             ),
             (
-                RebornLoopProductionComponent::CheckpointStateStorePort,
-                self.checkpoint_state_store,
+                RebornLoopProductionComponent::ProcessCheckpointPort,
+                self.process_checkpoint_port,
             ),
             (
                 RebornLoopProductionComponent::InputControl,
@@ -435,12 +432,8 @@ impl RebornLoopComponentGraphReadiness {
                 self.loop_exit_applier,
             ),
             (
-                RebornLoopProductionComponent::TurnStateStore,
-                self.turn_state_store,
-            ),
-            (
-                RebornLoopProductionComponent::SubagentGoalStorePort,
-                self.subagent_goal_store,
+                RebornLoopProductionComponent::AgentTurnRuntimePort,
+                self.agent_turn_runtime,
             ),
             (
                 RebornLoopProductionComponent::SubagentCompletionObserver,
@@ -487,10 +480,10 @@ pub fn validate_reborn_loop_production_readiness(
 
     let status = if issues.iter().any(|issue| issue.blocks_ready) {
         RebornLoopProductionStatus::NotReady
-    } else if inputs.mode == RebornLoopReadinessMode::LocalDevTest
+    } else if inputs.mode == RebornLoopReadinessMode::NonProduction
         && issues.iter().any(|issue| !issue.blocks_ready)
     {
-        RebornLoopProductionStatus::LocalDevDegraded
+        RebornLoopProductionStatus::NonProductionDegraded
     } else {
         RebornLoopProductionStatus::ProductionReady
     };
@@ -533,8 +526,8 @@ fn push_component_issues(
                     component_subject(component),
                 ));
             }
-            (RebornLoopReadinessMode::LocalDevTest, _, Some(safety))
-                if safety.degraded_in_local_dev() =>
+            (RebornLoopReadinessMode::NonProduction, _, Some(safety))
+                if safety.degraded_in_non_production() =>
             {
                 let Some(issue_kind) = safety.issue_kind() else {
                     continue;
@@ -672,7 +665,7 @@ fn push_mapped_driver_issues(
                 RebornLoopProductionIssueKind::ActiveRunDriverUnregistered,
             ),
             DriverReadinessDiagnosticCode::ReferenceDriverNotProductionReady
-            | DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev => (
+            | DriverReadinessDiagnosticCode::ReferenceDriverAllowedForNonProduction => (
                 RebornLoopProductionComponent::LoopDriver,
                 RebornLoopProductionIssueKind::TestOnlyImplementation,
             ),
@@ -739,11 +732,10 @@ fn component_subject(component: RebornLoopProductionComponent) -> &'static str {
         RebornLoopProductionComponent::ModelGateway => "model_gateway",
         RebornLoopProductionComponent::TranscriptStore => "transcript_store",
         RebornLoopProductionComponent::CapabilityPort => "capability_port",
-        RebornLoopProductionComponent::CheckpointStateStorePort => "checkpoint_state_store",
+        RebornLoopProductionComponent::ProcessCheckpointPort => "process_checkpoint_port",
         RebornLoopProductionComponent::InputControl => "input_control",
         RebornLoopProductionComponent::LoopExitApplier => "loop_exit_applier",
-        RebornLoopProductionComponent::TurnStateStore => "turn_state_store",
-        RebornLoopProductionComponent::SubagentGoalStorePort => "subagent_goal_store",
+        RebornLoopProductionComponent::AgentTurnRuntimePort => "agent_turn_runtime",
         RebornLoopProductionComponent::SubagentCompletionObserver => "subagent_completion_observer",
         RebornLoopProductionComponent::SubagentAwaitEdgeStore => "subagent_await_edge_store",
         RebornLoopProductionComponent::WakeNotifier => "wake_notifier",

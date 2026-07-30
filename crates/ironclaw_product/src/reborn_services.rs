@@ -78,6 +78,7 @@ use crate::{
 
 mod admin_configuration;
 mod admin_users;
+mod approval_settings;
 mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
@@ -129,18 +130,18 @@ pub use trace_credits::{
     TRACE_CREDITS_VIEW,
 };
 
-pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
-pub use fs_browse::{
-    FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse,
-};
-use ironclaw_approvals::{
+use approval_settings::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
     PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
     ToolPermissionState, permission_mode_allows_persistent_approval,
+};
+pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
+pub use fs_browse::{
+    FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse,
 };
 pub use ironclaw_host_api::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;

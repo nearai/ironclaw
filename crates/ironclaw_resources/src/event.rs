@@ -93,7 +93,7 @@ impl BudgetEventSink for NoOpBudgetEventSink {
     fn emit(&self, _event: BudgetEvent) {}
 }
 
-/// In-memory sink used in tests and the local-dev gateway. Captures
+/// In-memory sink used in tests and the standalone gateway. Captures
 /// every event so assertions can inspect ordering and counts.
 #[derive(Debug, Default)]
 pub struct InMemoryBudgetEventSink {

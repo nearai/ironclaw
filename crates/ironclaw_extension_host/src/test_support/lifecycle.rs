@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval, PersistentApprovalPolicyStore};
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthSurface, RebornAuthContinuationDispatcher,
@@ -28,7 +29,6 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::LifecycleProductSurfaceContext;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 
@@ -116,7 +116,7 @@ pub async fn build_lifecycle_test_services(
     .with_runtime_credential_account_resolver(credential_resolver);
     host_services = match network_http_egress {
         Some(egress) => host_services
-            .try_with_host_http_egress(TestNetworkHttpEgress(egress))
+            .try_with_host_http_egress(egress)
             .expect("test HTTP egress wires"),
         None => host_services,
     };
@@ -291,20 +291,20 @@ pub async fn build_lifecycle_test_services(
     }
 }
 
-pub async fn invoke_json_with_local_dev_approval(
+pub async fn invoke_json_with_standalone_approval(
     services: &ExtensionLifecycleTestServices,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, FailureKind> {
-    match invoke_with_local_dev_approval(services, capability_id, context, input).await {
+    match invoke_with_standalone_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
         other => panic!("unexpected runtime outcome: {other:?}"),
     }
 }
 
-pub async fn invoke_with_local_dev_approval(
+pub async fn invoke_with_standalone_approval(
     services: &ExtensionLifecycleTestServices,
     capability_id: &str,
     context: ExecutionContext,
@@ -332,7 +332,7 @@ pub async fn invoke_with_local_dev_approval(
                 .expect("approval request persisted");
             let Action::Dispatch { .. } = approval_record.request.action.as_ref() else {
                 panic!(
-                    "unexpected local-dev lifecycle approval action: {:?}",
+                    "unexpected standalone lifecycle approval action: {:?}",
                     approval_record.request.action
                 );
             };
@@ -464,18 +464,6 @@ impl RuntimeCredentialAccountResolver for TestProductAuthRuntimeCredentialResolv
             scope: account.scope.resource,
             handle,
         })
-    }
-}
-
-struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
-
-#[async_trait]
-impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
-    async fn execute(
-        &self,
-        request: ironclaw_network::NetworkHttpRequest,
-    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
-        self.0.execute(request).await
     }
 }
 

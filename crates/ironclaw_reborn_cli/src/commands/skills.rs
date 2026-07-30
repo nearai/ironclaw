@@ -42,7 +42,7 @@ impl SkillsListCommand {
         let config = build_skill_list_config(context.boot_config())?;
         let skills = crate::runtime::block_on_cli(list_reborn_local_skills(
             config.owner_id.clone(),
-            config.local_dev_root.clone(),
+            config.standalone_root.clone(),
         ))?;
 
         if self.json {
@@ -51,7 +51,7 @@ impl SkillsListCommand {
                 output["details"] = serde_json::json!({
                     "profile": config.profile.to_string(),
                     "reborn_home": context.boot_config().home().path(),
-                    "local_dev_root": config.local_dev_root,
+                    "standalone_root": config.standalone_root,
                     "owner_id": config.owner_id,
                 });
             }
@@ -61,7 +61,7 @@ impl SkillsListCommand {
 
         println!("IronClaw Reborn skills");
         println!("configured: {}", skills.len());
-        println!("source: reborn-local-dev");
+        println!("source: standalone");
 
         if self.verbose {
             println!("profile: {}", config.profile);
@@ -69,7 +69,7 @@ impl SkillsListCommand {
                 "reborn_home: {}",
                 context.boot_config().home().path().display()
             );
-            println!("local_dev_root: {}", config.local_dev_root.display());
+            println!("standalone_root: {}", config.standalone_root.display());
             println!("owner_id: {}", config.owner_id);
         }
 
@@ -84,7 +84,7 @@ impl SkillsListCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillListConfig {
     owner_id: String,
-    local_dev_root: PathBuf,
+    standalone_root: PathBuf,
     profile: RebornProfile,
 }
 
@@ -98,7 +98,7 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
     }
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        local_dev_root: crate::runtime::local_runtime_storage_root(config, profile),
+        standalone_root: crate::runtime::local_runtime_storage_root(config, profile),
         profile,
     })
 }
@@ -146,7 +146,7 @@ fn skills_json(skills: &[RebornSkillSummary]) -> serde_json::Value {
     serde_json::json!({
         "configured": skills.len(),
         "skills": skills.iter().map(reborn_skill_summary_json).collect::<Vec<_>>(),
-        "source": "reborn-local-dev",
+        "source": "standalone",
     })
 }
 
