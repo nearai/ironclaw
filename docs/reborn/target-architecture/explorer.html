@@ -82,13 +82,13 @@
   .m-sec{margin:0 0 18px}
   .m-sec .k{font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;margin-bottom:7px}
   .m-about{font-size:.95rem;line-height:1.65;color:var(--ink);margin:0;max-width:76ch}
-  .m-grid{display:grid;grid-template-columns:1.05fr 1fr;gap:22px;align-items:start}
-  @media (max-width:760px){.m-grid{grid-template-columns:1fr}}
-  .m-owns{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px}
-  .m-owns li{font-size:.85rem;color:var(--ink);line-height:1.5}
+  .m-owns{margin:0;padding-left:18px;columns:2;column-gap:34px}
+  .m-owns li{font-size:.84rem;color:var(--ink);line-height:1.5;break-inside:avoid;margin-bottom:6px;padding-right:6px}
   .m-owns li::marker{color:var(--accent)}
-  .m-rows{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 18px}
-  @media (max-width:760px){.m-rows{grid-template-columns:1fr}}
+  @media (max-width:700px){.m-owns{columns:1}}
+  .m-rows{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:18px;margin:0 0 18px}
+  .m-rows>*{min-width:0}
+  @media (max-width:700px){.m-rows{grid-template-columns:1fr}}
   .m-foot{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:11px}
   .m-foot .fr{font-size:.85rem;color:var(--ink)}
   .m-foot .fr b{font-family:var(--mono);font-size:.64rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;display:block;margin-bottom:3px}
@@ -103,7 +103,8 @@
   .insp-field:first-child{border-top:none}
   .insp-field .k{font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;margin-bottom:6px}
   .insp-field .v{font-size:.87rem;color:var(--ink)}
-  .insp-sig{font-family:var(--mono);font-size:.76rem;line-height:1.7;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:11px 13px;overflow-x:auto;white-space:pre}
+  .insp-sig{font-family:var(--mono);font-size:.74rem;line-height:1.75;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:12px 15px;overflow-x:auto;white-space:pre;max-width:100%;min-width:0}
+  .m-body .insp-sig{white-space:pre-wrap;word-break:break-word}
   .chips2{display:flex;flex-wrap:wrap;gap:6px}
   .chip2{font-family:var(--mono);font-size:.73rem;color:var(--accent);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:6px;padding:3px 8px}
   .chip2.sub{color:var(--sub);background:var(--sub-soft);border-color:var(--sub)}
@@ -847,13 +848,15 @@ function openModal(id){
   }
   if (x.about) html += `<div class="m-sec"><div class="k">what it does</div><p class="m-about">${esc(x.about)}</p></div>`;
   const owns = (d.owns||"").split(/;\s+/).map(s=>s.trim().replace(/\.$/,"")).filter(Boolean);
-  const sig = x.sig || d.sig;
-  html += `<div class="m-grid">`;
+  const sig = (x.sig || d.sig || "").replace(/ {3,}\/\//g, "  //");
+  if (sig){
+    html += `<div class="m-sec"><div class="k">interface sketch</div><div class="insp-sig">${esc(sig)}</div>`;
+    if (d.types && d.types.length) html += `<div class="chips2" style="margin-top:10px">${d.types.map(t=>`<span class="chip2">${esc(t)}</span>`).join("")}</div>`;
+    html += `</div>`;
+  } else if (d.types && d.types.length){
+    html += `<div class="m-sec"><div class="k">key types</div><div class="chips2">${d.types.map(t=>`<span class="chip2">${esc(t)}</span>`).join("")}</div></div>`;
+  }
   if (owns.length) html += `<div class="m-sec"><div class="k">owns</div><ul class="m-owns">${owns.map(o=>`<li>${esc(o)}</li>`).join("")}</ul></div>`;
-  html += `<div>`;
-  if (sig) html += `<div class="m-sec"><div class="k">interface sketch</div><div class="insp-sig">${esc(sig)}</div></div>`;
-  if (d.types && d.types.length) html += `<div class="m-sec"><div class="k">key types</div><div class="chips2">${d.types.map(t=>`<span class="chip2">${esc(t)}</span>`).join("")}</div></div>`;
-  html += `</div></div>`;
   if (typeof DEPS !== "undefined" && DEPS && DEPS[id]){
     const deps=(DEPS[id].deps||[]).filter(k=>DEPS[k]), used=[];
     Object.keys(DEPS).forEach(k=>{ if((DEPS[k].deps||[]).includes(id)) used.push(k); });
