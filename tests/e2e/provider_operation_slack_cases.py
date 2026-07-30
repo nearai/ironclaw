@@ -17,6 +17,8 @@ SEARCH_MARKER = "ENTITYMSG_1784643032040"
 THREAD_ROOT_MARKER = "QA10 thread root"
 THREAD_REPLY_MARKER = "QA10 visible thread reply"
 SEND_MARKER = "REBORN_PROVIDER_CASE_SLACK_SEND"
+EMPTY_USER_ID = "U_EMPTY"
+EMPTY_TEAM_ID = "T_EMPTY"
 
 
 async def _channel_id(emulate_url: str) -> str:
@@ -145,7 +147,7 @@ async def _user_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _whoami_outcome(emulate_url: str, preview: dict) -> None:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         identity = await slack_post(client, emulate_url, "auth.test", {})
     output = _output(preview)
     assert output == {
@@ -204,6 +206,22 @@ async def _cleanup_send(emulate_url: str) -> None:
             )
 
 
+def _empty_auth_profile() -> ProviderFaultProfile:
+    return ProviderFaultProfile(
+        name="provider_contract_empty",
+        action="respond",
+        status=200,
+        body=json.dumps(
+            {
+                "ok": True,
+                "user_id": EMPTY_USER_ID,
+                "team_id": EMPTY_TEAM_ID,
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+
 def _setup_empty_slack_history(proxy, endpoint: str) -> None:
     history = ProviderFaultProfile(
         name="provider_contract_empty",
@@ -211,14 +229,8 @@ def _setup_empty_slack_history(proxy, endpoint: str) -> None:
         status=200,
         body='{"ok":true,"messages":[],"has_more":false}',
     )
-    auth = ProviderFaultProfile(
-        name="provider_contract_empty",
-        action="respond",
-        status=200,
-        body='{"ok":true,"user_id":"U_EMPTY","team_id":"T_EMPTY"}',
-    )
     proxy.arm(history, method="GET", path=f"/api/{endpoint}")
-    proxy.arm(auth, method="GET", path="/api/auth.test")
+    proxy.arm(_empty_auth_profile(), method="GET", path="/api/auth.test")
 
 
 def _setup_empty_history(proxy) -> None:
@@ -230,23 +242,17 @@ def _setup_empty_thread(proxy) -> None:
 
 
 def _setup_empty_whoami(proxy) -> None:
-    auth = ProviderFaultProfile(
-        name="provider_contract_empty",
-        action="respond",
-        status=200,
-        body='{"ok":true,"user_id":"U_EMPTY","team_id":"T_EMPTY"}',
-    )
     user = ProviderFaultProfile(
         name="provider_contract_empty",
         action="respond",
         status=200,
         body=(
-            '{"ok":true,"user":{"id":"U_EMPTY","name":"",'
+            f'{{"ok":true,"user":{{"id":"{EMPTY_USER_ID}","name":"",'
             '"profile":{"real_name":"","display_name":""},'
             '"is_bot":false}}'
         ),
     )
-    proxy.arm(auth, method="GET", path="/api/auth.test")
+    proxy.arm(_empty_auth_profile(), method="GET", path="/api/auth.test")
     proxy.arm(user, method="GET", path="/api/users.info")
 
 
@@ -359,7 +365,7 @@ SLACK_PROVIDER_OPERATION_CASES = (
                 "ok": True,
                 "messages": [],
                 "has_more": False,
-                "current_user_id": "U_EMPTY",
+                "current_user_id": EMPTY_USER_ID,
             }
         ),
         outcome_class="empty",
@@ -388,7 +394,7 @@ SLACK_PROVIDER_OPERATION_CASES = (
                 "ok": True,
                 "messages": [],
                 "has_more": False,
-                "current_user_id": "U_EMPTY",
+                "current_user_id": EMPTY_USER_ID,
             }
         ),
         outcome_class="empty",
@@ -409,13 +415,13 @@ SLACK_PROVIDER_OPERATION_CASES = (
         case_id="slack_get_user_info_empty",
         provider_service="slack",
         capability_id="slack.get_user_info",
-        arguments={"user_id": "U_EMPTY"},
+        arguments={"user_id": EMPTY_USER_ID},
         assert_baseline=_baseline,
         assert_outcome=exact_output(
             {
                 "ok": True,
                 "user": {
-                    "id": "U_EMPTY",
+                    "id": EMPTY_USER_ID,
                     "name": "",
                     "real_name": "",
                     "display_name": "",
@@ -430,7 +436,7 @@ SLACK_PROVIDER_OPERATION_CASES = (
             payload={
                 "ok": True,
                 "user": {
-                    "id": "U_EMPTY",
+                    "id": EMPTY_USER_ID,
                     "name": "",
                     "profile": {"real_name": "", "display_name": ""},
                     "is_bot": False,
@@ -456,7 +462,11 @@ SLACK_PROVIDER_OPERATION_CASES = (
         arguments={},
         assert_baseline=_baseline,
         assert_outcome=exact_output(
-            {"ok": True, "user_id": "U_EMPTY", "team_id": "T_EMPTY"}
+            {
+                "ok": True,
+                "user_id": EMPTY_USER_ID,
+                "team_id": EMPTY_TEAM_ID,
+            }
         ),
         outcome_class="empty",
         expected_request_count=2,

@@ -24,7 +24,6 @@ def _empty_case(
     path: str,
     payload,
     method: str = "GET",
-    expected_output=None,
 ) -> ProviderOperationCase:
     return ProviderOperationCase(
         case_id=case_id,
@@ -32,9 +31,7 @@ def _empty_case(
         capability_id=capability_id,
         arguments=arguments,
         assert_baseline=_seeded_repo_baseline,
-        assert_outcome=exact_output(
-            payload if expected_output is None else expected_output
-        ),
+        assert_outcome=exact_output(payload),
         outcome_class="empty",
         setup_provider_proxy=static_provider_json_response(
             method=method,

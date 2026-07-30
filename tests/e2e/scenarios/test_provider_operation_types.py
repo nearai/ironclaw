@@ -39,6 +39,15 @@ def test_provider_request_evidence_accepts_observed_authenticated_success():
     assert_provider_request_evidence(_case(), [_request()], expected_bearer=BEARER)
 
 
+def test_provider_request_evidence_rejects_wrong_bound_account_fingerprint():
+    with pytest.raises(AssertionError):
+        assert_provider_request_evidence(
+            _case(),
+            [_request()],
+            expected_credential_fingerprint="wrong-bound-account",
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "sabotaged"),
     [

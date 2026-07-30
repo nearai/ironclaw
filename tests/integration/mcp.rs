@@ -13,6 +13,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_network::NetworkHttpRequest;
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -48,6 +49,38 @@ fn assert_recorded_tools_call(server: &MockMcpServer, expected_tool: &str, expec
             .and_then(|q| q.as_str()),
         Some(expected_query)
     );
+}
+
+fn observed_hosted_mcp_tools_call<'a>(
+    requests: &'a [NetworkHttpRequest],
+    expected_query: &str,
+) -> (&'a NetworkHttpRequest, serde_json::Value) {
+    let (request, body) = requests
+        .iter()
+        .filter_map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .map(|body| (request, body))
+        })
+        .find(|(_, body)| {
+            body["method"] == "tools/call"
+                && body["params"]["arguments"]["query"] == expected_query
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no hosted MCP tools/call for {expected_query:?} captured across {} redacted request(s)",
+                requests.len()
+            )
+        });
+    assert!(
+        request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value.starts_with("Bearer ")
+                && value.len() > "Bearer ".len()
+        }),
+        "hosted MCP tools/call must carry a mediated bearer credential"
+    );
+    (request, body)
 }
 
 /// The bundled `nearai` package is hosted MCP rather than Emulate-backed.
@@ -103,36 +136,8 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
         .expect("hosted MCP response reached the model-facing result");
 
     let requests = h.captured_network_requests_for_test();
-    let tools_call = requests
-        .iter()
-        .find(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body)
-                .ok()
-                .and_then(|body| body["method"].as_str().map(str::to_owned))
-                .as_deref()
-                == Some("tools/call")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "no hosted MCP tools/call captured across {} redacted request(s)",
-                requests.len()
-            )
-        });
-    let body: serde_json::Value =
-        serde_json::from_slice(&tools_call.body).expect("tools/call body is JSON");
+    let (_, body) = observed_hosted_mcp_tools_call(&requests, "IronClaw capability evidence");
     assert_eq!(body["params"]["name"], "web_search");
-    assert_eq!(
-        body["params"]["arguments"]["query"],
-        "IronClaw capability evidence"
-    );
-    assert!(
-        tools_call.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization")
-                && value.starts_with("Bearer ")
-                && value.len() > "Bearer ".len()
-        }),
-        "hosted MCP tools/call must carry a mediated bearer credential"
-    );
 }
 
 /// The bundled hosted-MCP path also preserves an authenticated, successful
@@ -175,30 +180,7 @@ async fn nearai_web_search_empty_result_dispatches_through_bundled_hosted_mcp() 
         .expect("canonical NEAR AI capability dispatched");
 
     let requests = h.captured_network_requests_for_test();
-    let tools_call = requests
-        .iter()
-        .find(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body)
-                .ok()
-                .is_some_and(|body| {
-                    body["method"] == "tools/call"
-                        && body["params"]["arguments"]["query"] == "NEARAI_EMPTY_PROVIDER_RESULT"
-                })
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "no empty-result hosted MCP tools/call captured across {} redacted request(s)",
-                requests.len()
-            )
-        });
-    assert!(
-        tools_call.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization")
-                && value.starts_with("Bearer ")
-                && value.len() > "Bearer ".len()
-        }),
-        "hosted MCP tools/call must carry a mediated bearer credential"
-    );
+    observed_hosted_mcp_tools_call(&requests, "NEARAI_EMPTY_PROVIDER_RESULT");
 
     let output = h
         .tool_result_output("nearai.web_search")
@@ -257,18 +239,9 @@ async fn nearai_hosted_mcp_isolates_provider_accounts_across_actors() {
         .await
         .expect("actor A provider read completes");
 
-    let actor_a_tools_call = actor_a
-        .captured_network_requests_for_test()
-        .into_iter()
-        .find(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body)
-                .ok()
-                .is_some_and(|body| {
-                    body["method"] == "tools/call"
-                        && body["params"]["arguments"]["query"] == "actor-a-provider-query"
-                })
-        })
-        .expect("actor A provider request was observed");
+    let actor_a_requests = actor_a.captured_network_requests_for_test();
+    let (actor_a_tools_call, _) =
+        observed_hosted_mcp_tools_call(&actor_a_requests, "actor-a-provider-query");
     assert!(
         actor_a_tools_call.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("authorization")

@@ -135,10 +135,15 @@ def assert_provider_request_evidence(
     operation_case: ProviderOperationCase,
     requests: list[dict],
     *,
-    expected_bearer: str | None,
+    expected_bearer: str | None = None,
+    expected_credential_fingerprint: str | None = None,
     excluded_bearers: tuple[str, ...] = (),
 ) -> None:
     """Require exact, authenticated provider request evidence for a case."""
+    assert not (
+        expected_bearer is not None
+        and expected_credential_fingerprint is not None
+    ), "expected bearer and fingerprint are mutually exclusive"
     excluded_fingerprints = {
         hashlib.sha256(f"Bearer {bearer}".encode()).hexdigest()[:12]
         for bearer in excluded_bearers
@@ -152,7 +157,7 @@ def assert_provider_request_evidence(
         operation_case.case_id,
         requests,
     )
-    expected_fingerprint = (
+    expected_fingerprint = expected_credential_fingerprint or (
         hashlib.sha256(f"Bearer {expected_bearer}".encode()).hexdigest()[:12]
         if expected_bearer is not None
         else None

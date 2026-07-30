@@ -25,7 +25,6 @@ from emulate_provider import (
 )
 from helpers import (
     EMULATE_GITHUB_BEARER,
-    EMULATE_SLACK_BEARER,
 )
 from journey_cases import (
     PROVIDER_JOURNEY_RUN_IDS,
@@ -61,6 +60,7 @@ from reborn_webui_harness import (
 pytest_plugins = ["reborn_webui_harness"]
 
 GOOGLE_PROVIDER_OPERATION_BEARER = "mock-token-mock_auth_code"
+EMULATE_SLACK_CHANNEL_BEARER = "emulate-slack-channel-token"
 
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
@@ -204,6 +204,19 @@ async def reborn_qa_emulate_runtime(
     await _seed_github_account(base_url)
     await _seed_slack_account(base_url, emulate_slack_server["url"], slack_state)
     await _assert_extensions_active(base_url, ALL_EXTENSIONS)
+    slack_account_fingerprints = {
+        request["issued_credential_fingerprint"]
+        for request in provider_fault_proxy_world.proxies["slack"].state[
+            "requests"
+        ]
+        if request["path"] == "/api/oauth.v2.access"
+        and request["issued_credential_fingerprint"] is not None
+    }
+    assert len(slack_account_fingerprints) == 1, (
+        "Slack OAuth binding must establish exactly one provider account",
+        provider_fault_proxy_world.proxies["slack"].state["requests"],
+    )
+    slack_account_fingerprint = next(iter(slack_account_fingerprints))
     try:
         yield {
             "base_url": base_url,
@@ -212,6 +225,7 @@ async def reborn_qa_emulate_runtime(
             "emulate_slack_url": emulate_slack_server["url"],
             "provider_fault_proxies": provider_fault_proxy_world.proxies,
             "slack_state": slack_state,
+            "slack_account_fingerprint": slack_account_fingerprint,
         }
     finally:
         await close_reborn_server(proc)
@@ -257,6 +271,9 @@ async def reborn_provider_operation_server(
             ]
             await operation_case.cleanup_provider(emulate_url)
         provider_fault_proxy_world.reset()
+        # Slack's baseline workspace is seeded once after process startup, so
+        # restarting it here would erase the records later cases assert. Its
+        # only mutating operation owns an explicit provider cleanup above.
         if operation_case.provider_service != "slack":
             await resettable_emulate_provider_world.reset(
                 {operation_case.provider_service}
@@ -434,7 +451,10 @@ async def _configure_slack(base_url: str, slack_state: dict[str, str]) -> None:
             f"{base_url}/api/webchat/v2/operator/extension-configuration/extension.slack",
             json={
                 "values": [
-                    {"handle": "slack_bot_token", "value": EMULATE_SLACK_BEARER},
+                    {
+                        "handle": "slack_bot_token",
+                        "value": EMULATE_SLACK_CHANNEL_BEARER,
+                    },
                     {"handle": "slack_signing_secret", "value": "emulate-signing-secret"},
                     {"handle": "slack_team_id", "value": slack_state["team_id"]},
                     {"handle": "slack_api_app_id", "value": client_id},
@@ -1596,12 +1616,17 @@ async def test_provider_operation_case_executes_with_provider_readback(
         operation_case,
         proxy.state["requests"],
         expected_bearer=expected_bearer,
+        expected_credential_fingerprint=(
+            reborn_provider_operation_server["slack_account_fingerprint"]
+            if operation_case.provider_service == "slack"
+            else None
+        ),
         # Product Slack delivery uses the separately configured channel token
         # while extension operations use the caller's OAuth account. Exclude
         # only that known channel credential, then require every observed
         # operation request to share one non-null provider account.
         excluded_bearers=(
-            (EMULATE_SLACK_BEARER,)
+            (EMULATE_SLACK_CHANNEL_BEARER,)
             if operation_case.provider_service == "slack"
             else ()
         ),

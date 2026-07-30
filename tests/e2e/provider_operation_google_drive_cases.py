@@ -4,7 +4,6 @@ import json
 
 import httpx
 from emulate_provider import google_headers, google_json
-from provider_fault_proxy import ProviderFaultProfile
 from provider_operation_types import (
     ProviderOperationCase,
     exact_output,
@@ -165,7 +164,8 @@ async def _shared_drives_outcome(emulate_url: str, preview: dict) -> None:
     assert "Reborn Engineering" in rendered, preview
 
 
-EMPTY_FILE_QUERY = "name = 'REBORN_PROVIDER_CASE_NO_SUCH_FILE'"
+EMPTY_FILE_NAME = "REBORN_PROVIDER_CASE_NO_SUCH_FILE"
+EMPTY_FILE_QUERY = f"name = '{EMPTY_FILE_NAME}'"
 EMPTY_DOWNLOAD_ID = "drv_provider_contract_empty"
 
 
@@ -177,9 +177,7 @@ async def _list_files_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _list_files_empty_outcome(emulate_url: str, preview: dict) -> None:
-    assert await _files_named(
-        emulate_url, "REBORN_PROVIDER_CASE_NO_SUCH_FILE"
-    ) == []
+    assert await _files_named(emulate_url, EMPTY_FILE_NAME) == []
     assert preview["truncated"] is False, preview
     assert json.loads(preview["output_preview"]) == {"files": []}, preview
 
@@ -194,33 +192,6 @@ async def _download_file_outcome(emulate_url: str, preview: dict) -> None:
         preview["output_preview"]
         == "Drive content seeded by Emulate for Reborn QA."
     ), preview
-
-
-def _setup_empty_download(proxy) -> None:
-    path = f"/drive/v3/files/{EMPTY_DOWNLOAD_ID}"
-    metadata = ProviderFaultProfile(
-        name="provider_contract_empty",
-        action="respond",
-        status=200,
-        body=json.dumps(
-            {
-                "id": EMPTY_DOWNLOAD_ID,
-                "name": "Empty provider file.txt",
-                "mimeType": "text/plain",
-                "size": "0",
-            },
-            separators=(",", ":"),
-        ),
-    )
-    content = ProviderFaultProfile(
-        name="provider_contract_empty",
-        action="respond",
-        status=200,
-        body="",
-        content_type="text/plain",
-    )
-    proxy.arm(metadata, method="GET", path=path)
-    proxy.arm(content, method="GET", path=path)
 
 
 GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
@@ -253,7 +224,7 @@ GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
         case_id="google_drive_get_file_empty",
         provider_service="google",
         capability_id="google-drive.get_file",
-        arguments={"file_id": "drv_provider_contract_empty"},
+        arguments={"file_id": EMPTY_DOWNLOAD_ID},
         assert_baseline=_seeded_file_baseline,
         assert_outcome=exact_output(
             {
@@ -272,7 +243,7 @@ GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
         outcome_class="empty",
         setup_provider_proxy=static_provider_json_response(
             method="GET",
-            path="/drive/v3/files/drv_provider_contract_empty",
+            path=f"/drive/v3/files/{EMPTY_DOWNLOAD_ID}",
             payload={},
         ),
         expect_provider_forward=False,
@@ -296,9 +267,6 @@ GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
         assert_outcome=exact_text_output(""),
         outcome_class="empty",
         expected_request_count=2,
-        setup_provider_proxy=_setup_empty_download,
-        expect_provider_forward=False,
-        expected_proxy_profile="provider_contract_empty",
     ),
     ProviderOperationCase(
         case_id="google_drive_update_file",

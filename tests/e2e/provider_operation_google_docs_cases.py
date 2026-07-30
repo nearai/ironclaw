@@ -51,9 +51,7 @@ async def _get_outcome(emulate_url: str, preview: dict) -> None:
 
 async def _read_content_outcome(emulate_url: str, preview: dict) -> None:
     await _baseline(emulate_url)
-    assert preview["truncated"] is False, preview
-    assert preview["output_kind"] == "text", preview
-    assert preview["output_preview"] == SEEDED_TEXT, preview
+    await exact_text_output(SEEDED_TEXT)(emulate_url, preview)
 
 
 def _output(preview: dict) -> dict:

@@ -258,7 +258,7 @@ GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
         setup_provider_proxy=static_provider_json_response(
             method="GET",
             path=(
-                "/calendar/v3/calendars/primary/events/"
+                f"/calendar/v3/calendars/{CALENDAR_ID}/events/"
                 "evt_provider_contract_empty"
             ),
             payload={},

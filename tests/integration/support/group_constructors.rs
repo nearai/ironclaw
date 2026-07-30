@@ -18,6 +18,11 @@ use super::{
     RebornIntegrationGroupBuilder,
 };
 
+enum CapabilityDispatchScope {
+    CanonicalOwner,
+    RunOwner,
+}
+
 /// Shared "align user to the group's canonical binding subject, then build"
 /// step for the preset constructors below whose capability executes under
 /// the group's resolved binding user rather than a fixed constructor test
@@ -332,7 +337,7 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
-            false,
+            CapabilityDispatchScope::CanonicalOwner,
         )
         .await
     }
@@ -342,7 +347,7 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_lifecycle_multiuser(self) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
-            true,
+            CapabilityDispatchScope::RunOwner,
         )
         .await
     }
@@ -360,7 +365,7 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user,
-            false,
+            CapabilityDispatchScope::CanonicalOwner,
         )
         .await
     }
@@ -372,7 +377,7 @@ impl RebornIntegrationGroupBuilder {
     async fn extension_lifecycle_with_profile(
         mut self,
         profile_for_user: fn(&str) -> HarnessResult<ToolsProfile>,
-        run_owner_scoped_dispatch: bool,
+        dispatch_scope: CapabilityDispatchScope,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Build the profile with the
@@ -384,7 +389,7 @@ impl RebornIntegrationGroupBuilder {
         let subject_user = base.canonical_subject_user()?;
         let profile = profile_for_user(subject_user.as_str())?;
         let mut host_runtime = build_group_capability_with_base(profile, &base).await?;
-        if run_owner_scoped_dispatch {
+        if matches!(dispatch_scope, CapabilityDispatchScope::RunOwner) {
             host_runtime = host_runtime.with_run_owner_scoped_capability_dispatch();
         }
         // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
