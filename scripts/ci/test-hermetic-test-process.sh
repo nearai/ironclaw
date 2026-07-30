@@ -67,18 +67,6 @@ run_probe() {
         echo "deterministic Python hash seed is not injected" >&2
         exit 34
       fi
-      if [[ "${IRONCLAW_TEST_RANDOM_SEED:-}" != "6524" ]]; then
-        echo "deterministic IronClaw random seed is not injected" >&2
-        exit 35
-      fi
-      if [[ "${IRONCLAW_TEST_CLOCK:-}" != "2026-01-01T00:00:00Z" ]]; then
-        echo "controllable IronClaw test clock is not injected" >&2
-        exit 36
-      fi
-      if [[ "${SOURCE_DATE_EPOCH:-}" != "1767225600" ]]; then
-        echo "deterministic source epoch is not injected" >&2
-        exit 37
-      fi
 
       printf "%s\n" "${IRONCLAW_HERMETIC_ROOT}"
     '
@@ -117,6 +105,20 @@ network_status=$?
 set -e
 if [[ "${network_status}" -eq 0 ]]; then
   echo "unexpected non-loopback network attempt was not reported" >&2
+  exit 1
+fi
+
+# The guard applies to arbitrary launchers, not just known test executables.
+set +e
+shell_output="$(
+  IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
+    "${runner}" -- bash -c '"$1" 192.0.2.1' _ "${network_probe}" 2>&1
+)"
+shell_status=$?
+set -e
+if [[ "${shell_status}" -eq 0 || "${shell_output}" != *"non-loopback network attempt"* ]]; then
+  echo "shell-launched non-loopback network attempt was not reported" >&2
+  printf '%s\n' "${shell_output}" >&2
   exit 1
 fi
 if [[ "${network_output}" != *"non-loopback network attempt"* ]]; then

@@ -5,15 +5,33 @@ guard_library="${IRONCLAW_HERMETIC_NETWORK_GUARD_LIBRARY:?network guard library 
 hermetic_root="${IRONCLAW_HERMETIC_ROOT:?hermetic root is not configured}"
 violation_log="$(mktemp "${hermetic_root}/network-violations.XXXXXX")"
 trap 'rm -f "${violation_log}"' EXIT
+guarded_command=("$@")
 
 export IRONCLAW_HERMETIC_NETWORK_VIOLATIONS="${violation_log}"
 case "$(uname -s)" in
   Linux)
-    export LD_PRELOAD="${guard_library}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    case ":${LD_PRELOAD:-}:" in
+      *":${guard_library}:"*) ;;
+      *) export LD_PRELOAD="${guard_library}${LD_PRELOAD:+:${LD_PRELOAD}}" ;;
+    esac
     ;;
   Darwin)
-    export DYLD_INSERT_LIBRARIES="${guard_library}${DYLD_INSERT_LIBRARIES:+:${DYLD_INSERT_LIBRARIES}}"
+    case ":${DYLD_INSERT_LIBRARIES:-}:" in
+      *":${guard_library}:"*) ;;
+      *)
+        export DYLD_INSERT_LIBRARIES="${guard_library}${DYLD_INSERT_LIBRARIES:+:${DYLD_INSERT_LIBRARIES}}"
+        ;;
+    esac
     export DYLD_FORCE_FLAT_NAMESPACE=1
+    # SIP-protected Apple executables strip DYLD_* before their descendants
+    # inherit it. The process sandbox keeps the whole tree fail-closed; the
+    # interposer still records actionable diagnostics for ordinary binaries.
+    guarded_command=(
+      sandbox-exec
+      -p
+      '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))'
+      "$@"
+    )
     ;;
   *)
     echo "unsupported platform for hermetic network guard: $(uname -s)" >&2
@@ -22,7 +40,7 @@ case "$(uname -s)" in
 esac
 
 set +e
-"$@"
+"${guarded_command[@]}"
 command_status=$?
 set -e
 

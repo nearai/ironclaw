@@ -12,6 +12,12 @@ run() {
   "${hermetic}" -- "$@"
 }
 
+prepare_rust_dependencies() {
+  # Dependency acquisition is setup, not test behavior. Fetch once before the
+  # hermetic process switches Cargo into offline mode.
+  cargo fetch --locked
+}
+
 run_root_partitions() {
   local partition
   for partition in 0 1 2 3; do
@@ -111,25 +117,31 @@ case "${stage}" in
     "${repo_root}/scripts/ci/test-hermetic-test-process.sh"
     ;;
   root)
+    prepare_rust_dependencies
     run_root_partitions
     ;;
   crates)
+    prepare_rust_dependencies
     run_crate_tests
     ;;
   groups)
+    prepare_rust_dependencies
     REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
       RUST_MIN_STACK=67108864 \
       run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
     ;;
   integration)
+    prepare_rust_dependencies
     run_integration_tier
     ;;
   qa)
+    prepare_rust_dependencies
     run "${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
     run cargo test -p ironclaw_reborn_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     ;;
   rust-e2e)
+    prepare_rust_dependencies
     run "${repo_root}/scripts/reborn-e2e-rust.sh" "${1:-all}"
     ;;
   frontend)
@@ -140,6 +152,7 @@ case "${stage}" in
     ;;
   all)
     "${repo_root}/scripts/ci/test-hermetic-test-process.sh"
+    prepare_rust_dependencies
     run_crate_tests
     run_root_partitions
     REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
@@ -159,6 +172,7 @@ case "${stage}" in
       echo "command stage requires a command" >&2
       exit 2
     fi
+    prepare_rust_dependencies
     run "$@"
     ;;
   *)

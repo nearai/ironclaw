@@ -58,6 +58,21 @@ static int is_loopback(const struct sockaddr *address) {
     return 1;
 }
 
+static void write_violation(int fd, const char *message, size_t length) {
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t written = write(fd, message + offset, length - offset);
+        if (written > 0) {
+            offset += (size_t)written;
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+}
+
 static void record_violation(const struct sockaddr *address) {
     const char *path = getenv("IRONCLAW_HERMETIC_NETWORK_VIOLATIONS");
     if (path == NULL || path[0] == '\0') {
@@ -91,8 +106,9 @@ static void record_violation(const struct sockaddr *address) {
 
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd >= 0) {
-        (void)write(fd, message, (size_t)length);
-        (void)close(fd);
+        write_violation(fd, message, (size_t)length);
+        int close_status = close(fd);
+        (void)close_status;
     }
 }
 

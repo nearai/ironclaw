@@ -65,7 +65,7 @@ if [[ "${sabotage}" != "env" ]]; then
         env_args+=("-u" "${key}")
         ;;
     esac
-  done < <(env)
+  done <<<"$(env)"
 fi
 
 original_home="${HOME:-}"
@@ -91,6 +91,7 @@ env_args+=(
   "IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS=1"
   "NO_PROXY=127.0.0.1,localhost,::1"
   "no_proxy=127.0.0.1,localhost,::1"
+  "CARGO_NET_OFFLINE=true"
   "TZ=UTC"
   "LANG=C.UTF-8"
   "LC_ALL=C.UTF-8"
@@ -115,12 +116,9 @@ if [[ -n "${rustup_home}" ]]; then
   env_args+=("RUSTUP_HOME=${rustup_home}")
 fi
 
-if [[ "${sabotage}" != "clock-seed" ]]; then
+if [[ "${sabotage}" != "python-seed" ]]; then
   env_args+=(
     "PYTHONHASHSEED=0"
-    "IRONCLAW_TEST_RANDOM_SEED=6524"
-    "IRONCLAW_TEST_CLOCK=2026-01-01T00:00:00Z"
-    "SOURCE_DATE_EPOCH=1767225600"
   )
 fi
 
@@ -138,14 +136,12 @@ if [[ "${sabotage}" != "network" ]]; then
 fi
 
 command_prefix=()
-command_name="$(basename "$1")"
-case "${command_name}" in
-  python|python[0-9]*|pytest|node|nodejs|npm|npx|pnpm|hermetic-network-probe)
-    if [[ "${sabotage}" != "network" ]]; then
-      command_prefix=("${network_runner}")
-    fi
-    ;;
-esac
+if [[ "${sabotage}" != "network" ]]; then
+  command_prefix=("${network_runner}")
+  # Fetch dependencies and prepare compiler caches before this boundary.
+  # A remote compiler wrapper must not become a hidden network exception.
+  env_args+=("RUSTC_WRAPPER=")
+fi
 
 set +e
 if [[ "${#command_prefix[@]}" -gt 0 ]]; then

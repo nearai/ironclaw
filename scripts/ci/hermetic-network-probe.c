@@ -1,6 +1,8 @@
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -28,9 +30,10 @@ int main(int argc, char **argv) {
         close(fd);
         return 4;
     }
+    int network_status;
     if (use_udp) {
         const char byte = 'x';
-        (void)sendto(
+        network_status = (int)sendto(
             fd,
             &byte,
             sizeof(byte),
@@ -39,7 +42,15 @@ int main(int argc, char **argv) {
             sizeof(address)
         );
     } else {
-        (void)connect(fd, (const struct sockaddr *)&address, sizeof(address));
+        network_status = connect(fd, (const struct sockaddr *)&address, sizeof(address));
+    }
+    if (network_status < 0 && errno == EPERM) {
+        fprintf(
+            stderr,
+            "non-loopback network attempt rejected by hermetic process boundary\n"
+        );
+        close(fd);
+        return 90;
     }
     close(fd);
     return 0;
