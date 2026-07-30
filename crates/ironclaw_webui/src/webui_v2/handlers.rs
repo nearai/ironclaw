@@ -1552,7 +1552,7 @@ pub async fn list_commands(
 
 #[derive(Debug, Deserialize)]
 pub struct ExecuteCommandBody {
-    text: String,
+    pub text: String,
 }
 
 /// `POST /api/webchat/v2/threads/:thread_id/commands`

@@ -660,9 +660,11 @@ test("ChatInput ArrowDown moves the active command-menu row", () => {
 
 test("ChatInput Enter completes the active command-menu row without sending", async () => {
   const setCalls = [];
+  const refs = [];
   let sendCalls = 0;
   const { tree } = renderChatInput({
     setCalls,
+    refs,
     disabled: false,
     sendDisabled: false,
     canCancel: false,
@@ -688,13 +690,27 @@ test("ChatInput Enter completes the active command-menu row without sending", as
   assert.equal(sendCalls, 0);
   const textCalls = setCalls.filter((call) => call.index === 0);
   assert.deepEqual(textCalls, [{ index: 0, value: "/model " }]);
+  // Regression: completion must queue the same debounced draft persist
+  // handleChange uses, so a thread switch right after Enter doesn't restore
+  // the stale pre-completion prefix (see completeMenuCommand). Copy the
+  // primitive fields out before comparing — the pending-draft object is
+  // constructed inside the vm-sandboxed component source, so a direct
+  // `deepEqual` against an object literal from this (outer-realm) test file
+  // would fail on cross-realm prototype identity despite equal values.
+  const pendingDraft = refs[9].current;
+  assert.deepEqual(
+    { key: pendingDraft.key, text: pendingDraft.text, scope: pendingDraft.scope },
+    { key: "__new__", text: "/model ", scope: "test-scope" },
+  );
 });
 
 test("ChatInput Tab completes the active command-menu row", async () => {
   const setCalls = [];
+  const refs = [];
   let sendCalls = 0;
   const { tree } = renderChatInput({
     setCalls,
+    refs,
     disabled: false,
     sendDisabled: false,
     canCancel: false,
@@ -719,6 +735,13 @@ test("ChatInput Tab completes the active command-menu row", async () => {
   assert.equal(sendCalls, 0);
   const textCalls = setCalls.filter((call) => call.index === 0);
   assert.deepEqual(textCalls, [{ index: 0, value: "/model " }]);
+  // Regression: same queued-persist guarantee via the Tab completion path
+  // (see the Enter test above for why the fields are copied before compare).
+  const pendingDraft = refs[9].current;
+  assert.deepEqual(
+    { key: pendingDraft.key, text: pendingDraft.text, scope: pendingDraft.scope },
+    { key: "__new__", text: "/model ", scope: "test-scope" },
+  );
 });
 
 test("ChatInput Escape dismisses the command menu so a later Enter sends normally", async () => {

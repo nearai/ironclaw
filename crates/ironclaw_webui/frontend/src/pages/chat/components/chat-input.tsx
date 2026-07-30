@@ -394,8 +394,14 @@ export function ChatInput({
     const next = `/${command.name} `;
     textRef.current = next;
     setText(next);
+    // Queue the same debounced persist handleChange uses — without this a
+    // thread switch right after Enter/Tab/click restores the stale
+    // pre-completion prefix instead of the completed command text.
+    pendingDraftRef.current = { key: draftKey, text: next, scope: authScope() };
+    if (draftTimerRef.current) window.clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = window.setTimeout(flushDraft, 300);
     textareaRef.current?.focus();
-  }, []);
+  }, [draftKey, flushDraft]);
 
   // Hover selects a row without completing it (click still completes).
   const selectMenuIndex = React.useCallback((index) => {
