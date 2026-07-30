@@ -41,6 +41,10 @@ test("workspaceFilePathFromHref recognizes scoped and sandbox workspace files", 
     "/workspace/报告.md",
   );
   assert.equal(
+    workspaceFilePathFromHref("/workspace/100%25-ready.txt"),
+    "/workspace/100%-ready.txt",
+  );
+  assert.equal(
     workspaceFilePathFromHref("/workspace/Makefile"),
     "/workspace/Makefile",
   );
@@ -81,6 +85,10 @@ test("workspaceFileHrefFromPath encodes each validated path segment", () => {
     workspaceFileHrefFromPath(`/workspace/${"报告".repeat(1_500)}.md`),
     null,
   );
+  const percentPath = "/workspace/100%-ready.txt";
+  const percentHref = workspaceFileHrefFromPath(percentPath);
+  assert.equal(percentHref, "/workspace/100%25-ready.txt");
+  assert.equal(workspaceFilePathFromHref(percentHref), percentPath);
 });
 
 test("workspaceViewerRouteFromFilePath builds a selected-file SPA route", () => {

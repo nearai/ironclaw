@@ -8,10 +8,10 @@ const MAX_RAW_WORKSPACE_HREF_LENGTH = 8_192;
 const MAX_DECODED_WORKSPACE_PATH_LENGTH = 4_096;
 const MAX_WORKSPACE_PATH_SEGMENTS = 64;
 const SANDBOX_SCHEME = /^sandbox:/i;
-// Reject encoded percent signs as well as separators. A literal `%25` could
-// otherwise become another escape sequence if any downstream layer decoded the
-// already-validated path again.
-const AMBIGUOUS_PATH_ENCODING = /%(?:25|2f|5c)/i;
+const ENCODED_SEPARATOR = /%(?:2f|5c)/i;
+// After the one supported decode, no structural escape may remain for another
+// layer to reinterpret. Ordinary literal percent signs remain valid.
+const REMAINING_STRUCTURAL_ESCAPE = /%(?:2e|2f|5c)/i;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 function isSafeDecodedWorkspacePath(path: string): boolean {
@@ -55,7 +55,7 @@ export function workspaceFilePathFromHref(href: unknown): string | null {
     !encodedPath.startsWith(WORKSPACE_PREFIX) ||
     encodedPath.includes("?") ||
     encodedPath.includes("#") ||
-    AMBIGUOUS_PATH_ENCODING.test(encodedPath)
+    ENCODED_SEPARATOR.test(encodedPath)
   ) {
     return null;
   }
@@ -66,6 +66,7 @@ export function workspaceFilePathFromHref(href: unknown): string | null {
   } catch {
     return null;
   }
+  if (REMAINING_STRUCTURAL_ESCAPE.test(decodedPath)) return null;
   return isSafeDecodedWorkspacePath(decodedPath) ? decodedPath : null;
 }
 
