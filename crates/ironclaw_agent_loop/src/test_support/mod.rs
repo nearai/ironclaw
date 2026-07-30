@@ -1079,6 +1079,7 @@ pub fn capability_descriptor(
         runtime: RuntimeKind::FirstParty,
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
+        description_trust: Default::default(),
         concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }

@@ -6,11 +6,12 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 from emulate_provider import slack_post
-from helpers import EMULATE_SLACK_BEARER
 from reborn_webui_harness import (
     fetch_extension_oauth_requirement,
     reborn_bearer_headers,
 )
+
+EMULATE_SLACK_CHANNEL_BEARER = "emulate-slack-channel-token"
 
 
 async def seed_slack_workspace(emulate_url: str) -> dict[str, str]:
@@ -90,7 +91,10 @@ async def configure_slack(base_url: str, slack_state: dict[str, str]) -> None:
             "extension.slack",
             json={
                 "values": [
-                    {"handle": "slack_bot_token", "value": EMULATE_SLACK_BEARER},
+                    {
+                        "handle": "slack_bot_token",
+                        "value": EMULATE_SLACK_CHANNEL_BEARER,
+                    },
                     {
                         "handle": "slack_signing_secret",
                         "value": "emulate-signing-secret",

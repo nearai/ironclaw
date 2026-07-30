@@ -1022,6 +1022,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
     assert!(stdout.contains("extension"), "stdout: {stdout}");
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
+    assert!(stdout.contains("ironhub"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
     assert!(stdout.contains("onboard"), "stdout: {stdout}");
@@ -1039,6 +1040,88 @@ fn help_mentions_reborn_commands() {
     assert!(
         !stdout.to_lowercase().contains("tui"),
         "unexpected tui subcommand: {stdout}"
+    );
+}
+
+#[test]
+fn ironhub_help_lists_catalog_and_install_verbs() {
+    let output = Command::new(reborn_bin())
+        .arg("ironhub")
+        .arg("--help")
+        .output()
+        .expect("ironclaw-reborn ironhub --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for verb in ["search", "list", "info", "install"] {
+        assert!(stdout.contains(verb), "missing `{verb}` verb: {stdout}");
+    }
+    assert!(stdout.contains("--confirm-host-access"), "stdout: {stdout}");
+}
+
+#[test]
+fn ironhub_install_help_lists_safety_and_replacement_flags() {
+    let output = Command::new(reborn_bin())
+        .args(["ironhub", "install", "--help"])
+        .output()
+        .expect("ironclaw-reborn ironhub install --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--kind",
+        "--force",
+        "--acknowledge-unverified",
+        "--expected-version",
+        "--expected-artifact-digest",
+        "--json",
+    ] {
+        assert!(stdout.contains(flag), "missing `{flag}` flag: {stdout}");
+    }
+}
+
+#[test]
+fn ironhub_install_uses_reborn_state_and_rejects_insecure_catalog_url() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_home = temp.path().join("v1-home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let mut command = isolated_no_llm_command(&workspace, &reborn_home);
+    let output = command
+        .args(["ironhub", "install", "catalog-helper", "--kind", "skill"])
+        .env("IRONCLAW_BASE_DIR", &v1_home)
+        .env(
+            "IRONHUB_MANIFEST_URL",
+            "http://hub.ironclaw.com/manifest.json",
+        )
+        .output()
+        .expect("ironclaw-reborn ironhub install should run");
+
+    assert!(
+        !output.status.success(),
+        "insecure manifest URL should fail before install"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hub-manifest.manifest_url must use https"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        reborn_home.join("local-dev").exists(),
+        "IronHub should initialize only the Reborn runtime state"
+    );
+    assert!(
+        !v1_home.exists(),
+        "IronHub must not create or read legacy v1 state"
     );
 }
 

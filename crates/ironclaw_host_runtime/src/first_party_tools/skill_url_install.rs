@@ -26,6 +26,27 @@ const ALLOWED_SKILL_URL_HOSTS: [&str; 4] = [
     "github.com",
     "raw.githubusercontent.com",
 ];
+const ALLOWED_CODE_ARTIFACT_HOSTS: [&str; 4] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "raw.githubusercontent.com",
+];
+
+/// Return whether `host` is a public code-artifact host recognized by the
+/// host-owned URL installation boundary.
+///
+/// Registry clients may use this classification to narrow their own signed
+/// artifact policies without duplicating concrete code-host knowledge in a
+/// generic extension package manager.
+pub fn is_allowed_code_artifact_host(host: &str) -> bool {
+    ALLOWED_CODE_ARTIFACT_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        || host
+            .to_ascii_lowercase()
+            .ends_with(".githubusercontent.com")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SkillUrlPayload {
@@ -210,6 +231,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn code_artifact_hosts_cover_release_and_raw_downloads_only() {
+        assert!(is_allowed_code_artifact_host("github.com"));
+        assert!(is_allowed_code_artifact_host(
+            "release-assets.githubusercontent.com"
+        ));
+        assert!(!is_allowed_code_artifact_host("api.github.com"));
+        assert!(!is_allowed_code_artifact_host("github.example"));
+    }
 
     #[tokio::test]
     async fn fetch_url_response_maps_panicking_runtime_egress_to_backend_failure() {

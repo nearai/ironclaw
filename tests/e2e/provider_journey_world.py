@@ -58,8 +58,12 @@ async def build_provider_journey_world(
     slack_state = await seed_slack_workspace(emulate_slack_url)
     await configure_slack(base_url, slack_state)
     await install_extensions(base_url)
-    for extension_id in GOOGLE_EXTENSIONS:
-        await seed_google_account(base_url, extension_id)
+    for extension_index, extension_id in enumerate(GOOGLE_EXTENSIONS):
+        await seed_google_account(
+            base_url,
+            extension_id,
+            allow_existing_account=extension_index > 0,
+        )
     await seed_github_account(base_url)
     await seed_slack_account(base_url, emulate_slack_url, slack_state)
     await assert_extensions_active(base_url)

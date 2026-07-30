@@ -299,6 +299,16 @@ def test_google_account_seed_rejects_an_empty_account_list():
         require_single_google_account([], "no selectable Google account")
 
 
+def test_google_account_seed_allows_an_explicit_existing_account():
+    account = require_single_google_account(
+        [],
+        "no selectable Google account",
+        allow_existing_account=True,
+    )
+
+    assert account is None
+
+
 @pytest.mark.parametrize(
     "case",
     PROVIDER_JOURNEY_CASES,

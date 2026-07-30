@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+
 from journey_cases import ALL_JOURNEY_CASES
 from journey_types import ProviderJourneyCase
 from product_surface_coverage import (
@@ -19,13 +20,13 @@ from provider_capability_inventory import (
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_report_uses_production_capability_and_typed_journey_denominators():
+def test_report_uses_complete_production_and_typed_journey_denominators():
     report = build_report()
 
     assert report["summary"]["capabilities"] == len(CAPABILITY_OPERATION_KINDS)
     assert report["summary"]["journeys"] == len(ALL_JOURNEY_CASES)
     assert report["summary"]["missing"] == 0
-    assert report["summary"]["owned_gaps"] > 0
+    assert report["summary"]["owned_gaps"] == 0
     assert {
         row["id"] for row in report["surfaces"] if row["kind"] == "capability"
     } == set(CAPABILITY_OPERATION_KINDS)
