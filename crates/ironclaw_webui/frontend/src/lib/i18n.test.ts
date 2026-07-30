@@ -278,6 +278,22 @@ test("locale packs include lazy-route loading and recovery copy", () => {
   }
 });
 
+test("locale packs include logs pagination copy", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(
+      typeof pack["logs.loadOlder"],
+      "string",
+      `${locale} missing logs.loadOlder`,
+    );
+    assert.notEqual(
+      pack["logs.loadOlder"].trim(),
+      "",
+      `${locale} logs.loadOlder should not be empty`,
+    );
+  }
+});
+
 test("locale packs include extension setup and OAuth failure copy", () => {
   const requiredKeys = [
     "extensions.state.setup_needed",

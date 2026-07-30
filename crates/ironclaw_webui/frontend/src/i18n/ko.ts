@@ -1202,6 +1202,7 @@ registerPack("ko", {
   "logs.entryCount": "{count}개 항목",
   "logs.pausedBadge": "● 일시 중지됨",
   "logs.empty": "로그 항목 대기 중…",
+  "logs.loadOlder": "이전 로그 불러오기",
   "common.recent": "최근",
   "common.searchChats": "채팅 검색...",
   "common.gatewaySession": "게이트웨이 세션",

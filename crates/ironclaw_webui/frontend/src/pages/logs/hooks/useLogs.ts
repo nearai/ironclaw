@@ -17,6 +17,19 @@ const SCOPE_QUERY_PARAMS = [
   ["source", "source", "logs.scope.source"],
 ];
 
+function mergeLogEntries(...pages) {
+  const seen = new Set();
+  const merged = [];
+  for (const page of pages) {
+    for (const entry of page) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      merged.push(entry);
+    }
+  }
+  return merged;
+}
+
 function effectiveLocationSearch(location = globalThis.location) {
   return location?.search || globalThis.location?.search || "";
 }
@@ -56,62 +69,33 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
   const [autoScroll, setAutoScroll] = React.useState(true);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
+  const [nextCursor, setNextCursor] = React.useState(null);
+  const [isLoadingMore, setIsLoadingMore] = React.useState(false);
+  const [loadMoreError, setLoadMoreError] = React.useState(null);
   const hiddenEntryIdsRef = React.useRef(new Set());
-  const requestIdRef = React.useRef(0);
+  const generationRef = React.useRef(0);
+  const refreshRequestIdRef = React.useRef(0);
+  const nextCursorRef = React.useRef(null);
+  const olderEntriesRef = React.useRef([]);
+  const hasLoadedOlderRef = React.useRef(false);
+  const loadMoreInFlightRef = React.useRef(null);
   const needsThreadScope = !isAdmin && !threadId;
 
   React.useEffect(() => {
-    requestIdRef.current += 1;
+    generationRef.current += 1;
+    refreshRequestIdRef.current += 1;
+    nextCursorRef.current = null;
+    olderEntriesRef.current = [];
+    hasLoadedOlderRef.current = false;
+    loadMoreInFlightRef.current = null;
     setEntries([]);
     setError(null);
-  }, [isAdmin, runId, source, threadId, toolCallId, toolName, turnId]);
-
-  const loadLogs = React.useCallback(async () => {
-    if (needsThreadScope) {
-      setIsLoading(false);
-      return;
-    }
-    const requestId = ++requestIdRef.current;
-    setIsLoading(true);
-    try {
-      const request = {
-        limit: LOG_LIMIT,
-        level: levelFilter === "all" ? null : levelFilter,
-        target: targetFilter.trim() || null,
-        threadId,
-        runId,
-        turnId,
-        toolCallId,
-        toolName,
-        source,
-      };
-      let response;
-      try {
-        response = await (isAdmin ? queryOperatorLogs(request) : queryLogs(request));
-      } catch (err) {
-        if (!isAdmin || !TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
-          throw err;
-        }
-        response = await queryLogs(request);
-      }
-      if (requestId !== requestIdRef.current) return;
-      const hidden = hiddenEntryIdsRef.current;
-      const logs = normalizeOperatorLogsResponse(response);
-      const nextEntries = logs.entries.filter((entry) => !hidden.has(entry.id));
-      setEntries(nextEntries);
-      setError(null);
-    } catch (err) {
-      if (requestId !== requestIdRef.current) return;
-      setError(err);
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setIsLoading(false);
-      }
-    }
+    setNextCursor(null);
+    setIsLoadingMore(false);
+    setLoadMoreError(null);
   }, [
     isAdmin,
     levelFilter,
-    needsThreadScope,
     runId,
     source,
     targetFilter,
@@ -120,6 +104,123 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
     toolName,
     turnId,
   ]);
+
+  const queryLogPage = React.useCallback(async (request) => {
+    try {
+      return await (isAdmin ? queryOperatorLogs(request) : queryLogs(request));
+    } catch (err) {
+      if (!isAdmin || !TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
+        throw err;
+      }
+      return queryLogs(request);
+    }
+  }, [isAdmin]);
+
+  const requestForCursor = React.useCallback((cursor = null) => ({
+    limit: LOG_LIMIT,
+    cursor,
+    level: levelFilter === "all" ? null : levelFilter,
+    target: targetFilter.trim() || null,
+    threadId,
+    runId,
+    turnId,
+    toolCallId,
+    toolName,
+    source,
+  }), [
+    levelFilter,
+    runId,
+    source,
+    targetFilter,
+    threadId,
+    toolCallId,
+    toolName,
+    turnId,
+  ]);
+
+  const loadLogs = React.useCallback(async () => {
+    if (needsThreadScope) {
+      setIsLoading(false);
+      return;
+    }
+    const generation = generationRef.current;
+    const requestId = ++refreshRequestIdRef.current;
+    setIsLoading(true);
+    try {
+      const response = await queryLogPage(requestForCursor());
+      if (
+        generation !== generationRef.current ||
+        requestId !== refreshRequestIdRef.current
+      ) return;
+      const hidden = hiddenEntryIdsRef.current;
+      const logs = normalizeOperatorLogsResponse(response);
+      const nextEntries = logs.entries.filter((entry) => !hidden.has(entry.id));
+      setEntries(mergeLogEntries(nextEntries, olderEntriesRef.current));
+      if (!hasLoadedOlderRef.current) {
+        nextCursorRef.current = logs.nextCursor;
+        setNextCursor(logs.nextCursor);
+      }
+      setError(null);
+    } catch (err) {
+      if (
+        generation !== generationRef.current ||
+        requestId !== refreshRequestIdRef.current
+      ) return;
+      setError(err);
+    } finally {
+      if (
+        generation === generationRef.current &&
+        requestId === refreshRequestIdRef.current
+      ) {
+        setIsLoading(false);
+      }
+    }
+  }, [
+    needsThreadScope,
+    queryLogPage,
+    requestForCursor,
+  ]);
+
+  const loadOlder = React.useCallback(() => {
+    const cursor = nextCursorRef.current;
+    if (!cursor) return Promise.resolve();
+    if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
+
+    const generation = generationRef.current;
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    const request = queryLogPage(requestForCursor(cursor))
+      .then((response) => {
+        if (generation !== generationRef.current) return;
+        const hidden = hiddenEntryIdsRef.current;
+        const logs = normalizeOperatorLogsResponse(response);
+        const pageEntries = logs.entries.filter((entry) => !hidden.has(entry.id));
+        olderEntriesRef.current = mergeLogEntries(
+          olderEntriesRef.current,
+          pageEntries,
+        );
+        hasLoadedOlderRef.current = true;
+        nextCursorRef.current = logs.nextCursor;
+        setEntries((current) => mergeLogEntries(current, pageEntries));
+        setNextCursor(logs.nextCursor);
+        setLoadMoreError(null);
+      })
+      .catch((err) => {
+        if (generation === generationRef.current) {
+          setLoadMoreError(err);
+        }
+      })
+      .finally(() => {
+        if (loadMoreInFlightRef.current === request) {
+          loadMoreInFlightRef.current = null;
+          if (generation === generationRef.current) {
+            setIsLoadingMore(false);
+          }
+        }
+      });
+    loadMoreInFlightRef.current = request;
+    return request;
+  }, [queryLogPage, requestForCursor]);
 
   React.useEffect(() => {
     loadLogs();
@@ -141,7 +242,16 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
       ...entries.map((entry) => entry.id),
     ].slice(-HIDDEN_ENTRY_ID_CAP);
     hiddenEntryIdsRef.current = new Set(hidden);
+    generationRef.current += 1;
+    refreshRequestIdRef.current += 1;
+    nextCursorRef.current = null;
+    olderEntriesRef.current = [];
+    hasLoadedOlderRef.current = false;
+    loadMoreInFlightRef.current = null;
     setEntries([]);
+    setNextCursor(null);
+    setIsLoadingMore(false);
+    setLoadMoreError(null);
   }, [entries]);
 
   return {
@@ -163,5 +273,9 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
     status: needsThreadScope ? "needs_scope" : error ? "error" : isLoading ? "loading" : "ready",
     isLoading,
     error,
+    nextCursor,
+    isLoadingMore,
+    loadMoreError,
+    loadOlder,
   };
 }

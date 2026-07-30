@@ -1202,6 +1202,7 @@ registerPack("de", {
   "logs.entryCount": "{count} Eintraege",
   "logs.pausedBadge": "● pausiert",
   "logs.empty": "Warte auf Protokolleintraege…",
+  "logs.loadOlder": "Ältere Protokolle laden",
   "common.recent": "Kürzlich",
   "common.searchChats": "Chats durchsuchen...",
   "common.gatewaySession": "Gateway-Sitzung",

@@ -1202,6 +1202,7 @@ registerPack("pt-BR", {
   "logs.entryCount": "{count} entradas",
   "logs.pausedBadge": "● pausado",
   "logs.empty": "Aguardando entradas de log…",
+  "logs.loadOlder": "Carregar logs mais antigos",
   "common.recent": "Recente",
   "common.searchChats": "Pesquisar conversas...",
   "common.gatewaySession": "Sessão de gateway",

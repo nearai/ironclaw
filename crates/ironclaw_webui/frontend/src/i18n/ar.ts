@@ -1202,6 +1202,7 @@ registerPack("ar", {
   "logs.entryCount": "{count} إدخالات",
   "logs.pausedBadge": "● متوقف مؤقتًا",
   "logs.empty": "بانتظار إدخالات السجل…",
+  "logs.loadOlder": "تحميل سجلات أقدم",
   "common.recent": "أخيرة",
   "common.searchChats": "البحث في المحادثات...",
   "common.gatewaySession": "جلسة البوابة",

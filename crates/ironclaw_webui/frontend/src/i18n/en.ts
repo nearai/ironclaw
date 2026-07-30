@@ -1305,6 +1305,7 @@ registerPack("en", {
   "logs.entryCount": "{count} entries",
   "logs.pausedBadge": "● paused",
   "logs.empty": "Waiting for log entries…",
+  "logs.loadOlder": "Load older logs",
   "common.recent": "Recent",
   "common.searchChats": "Search chats...",
   "common.gatewaySession": "Gateway session",

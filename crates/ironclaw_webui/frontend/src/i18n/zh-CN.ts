@@ -1202,6 +1202,7 @@ registerPack("zh-CN", {
   "logs.entryCount": "{count} 条目",
   "logs.pausedBadge": "● 已暂停",
   "logs.empty": "等待日志条目…",
+  "logs.loadOlder": "加载更早的日志",
   "common.recent": "最近对话",
   "common.searchChats": "搜索对话...",
   "common.gatewaySession": "网关会话",

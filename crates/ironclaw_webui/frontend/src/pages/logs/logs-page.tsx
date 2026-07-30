@@ -151,6 +151,10 @@ export function LogsPage() {
     isLoading,
     error,
     needsThreadScope,
+    nextCursor,
+    isLoadingMore,
+    loadMoreError,
+    loadOlder,
   } = useLogs({
     isAdmin,
     defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
@@ -332,6 +336,44 @@ export function LogsPage() {
           : entries.map(
               (entry) => (<LogEntry key={entry.id} entry={entry} />)
             )}
+        {hasEntries && (nextCursor || loadMoreError)
+          ? (
+              <div
+                data-testid="logs-pagination"
+                className="flex flex-col items-center gap-2 border-t border-[var(--v2-panel-border)] px-4 py-3"
+              >
+                {loadMoreError
+                  ? (
+                      <span
+                        data-testid="logs-load-older-error"
+                        className="text-center text-xs text-red-300"
+                      >
+                        {t("error.loadFailed", {
+                          what: t("logs.loadOlder"),
+                          message:
+                            loadMoreError.message ||
+                            loadMoreError.statusText ||
+                            "Request failed",
+                        })}
+                      </span>
+                    )
+                  : null}
+                <button
+                  type="button"
+                  data-testid="logs-load-older"
+                  disabled={isLoadingMore}
+                  onClick={loadOlder}
+                  className="rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isLoadingMore
+                    ? t("common.loading")
+                    : loadMoreError
+                      ? t("ext.catalog.retry")
+                      : t("logs.loadOlder")}
+                </button>
+              </div>
+            )
+          : null}
       </div>
       <ConfirmDialog
         open={clearDialogOpen}

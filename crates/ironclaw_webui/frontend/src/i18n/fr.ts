@@ -1202,6 +1202,7 @@ registerPack("fr", {
   "logs.entryCount": "{count} entrees",
   "logs.pausedBadge": "● en pause",
   "logs.empty": "En attente d'entrees de journal…",
+  "logs.loadOlder": "Charger les journaux plus anciens",
   "common.recent": "Récent",
   "common.searchChats": "Rechercher des discussions...",
   "common.gatewaySession": "Session de passerelle",

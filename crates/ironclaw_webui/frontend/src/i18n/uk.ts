@@ -1202,6 +1202,7 @@ registerPack("uk", {
   "logs.entryCount": "{count} записів",
   "logs.pausedBadge": "● пауза",
   "logs.empty": "Очікування записів журналу…",
+  "logs.loadOlder": "Завантажити старіші журнали",
   "common.recent": "Нещодавно",
   "common.searchChats": "Пошук чатів...",
   "common.gatewaySession": "Сеанс шлюзу",

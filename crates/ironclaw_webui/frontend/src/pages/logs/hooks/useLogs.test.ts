@@ -88,9 +88,13 @@ function createHookHarness({
     React,
     clearInterval: () => {},
     globalThis: { location: { search: globalSearch } },
-    normalizeOperatorLogsResponse: (response) => ({
-      entries: response?.entries || response?.logs?.entries || [],
-    }),
+    normalizeOperatorLogsResponse: (response) => {
+      const payload = response?.logs || response || {};
+      return {
+        entries: payload.entries || [],
+        nextCursor: payload.next_cursor || null,
+      };
+    },
     queryLogs: async (request) => {
       calls.push({ endpoint: "logs", ...request });
       if (queryLogsImpl) return queryLogsImpl(request, calls.length);
@@ -224,6 +228,151 @@ test("useLogs falls back to caller-scoped logs when operator logs reject privile
   assert.equal(settled.error, null);
   assert.equal(settled.entries.length, 1);
   assert.equal(settled.entries[0].id, "fallback-entry");
+});
+
+test("useLogs requests the next cursor and merges deduplicated older entries", async () => {
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      if (!request.cursor) {
+        return {
+          entries: [{ id: "latest" }, { id: "overlap" }],
+          next_cursor: "cursor-1",
+        };
+      }
+      return {
+        entries: [{ id: "overlap" }, { id: "older" }],
+        next_cursor: null,
+      };
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  assert.equal(result.nextCursor, "cursor-1");
+
+  await result.loadOlder();
+  result = harness.render();
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[1].cursor, "cursor-1");
+  assert.deepEqual(
+    Array.from(result.entries, (entry) => entry.id),
+    ["latest", "overlap", "older"],
+  );
+  assert.equal(result.nextCursor, null);
+  assert.equal(result.loadMoreError, null);
+});
+
+test("useLogs preserves paginated entries while polling refreshes the latest page", async () => {
+  let latestPage = 0;
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      if (request.cursor) {
+        return {
+          entries: [{ id: "overlap" }, { id: "older" }],
+          next_cursor: "cursor-2",
+        };
+      }
+      latestPage += 1;
+      return latestPage === 1
+        ? {
+            entries: [{ id: "latest-1" }, { id: "overlap" }],
+            next_cursor: "cursor-1",
+          }
+        : {
+            entries: [{ id: "latest-2" }, { id: "latest-1" }],
+            next_cursor: "cursor-after-refresh",
+          };
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  await result.loadOlder();
+
+  await harness.intervals[0].fn();
+  result = harness.render();
+
+  assert.deepEqual(
+    Array.from(result.entries, (entry) => entry.id),
+    ["latest-2", "latest-1", "overlap", "older"],
+  );
+  assert.equal(
+    result.nextCursor,
+    "cursor-2",
+    "polling must not rewind the pagination cursor",
+  );
+});
+
+test("useLogs coalesces concurrent pagination requests", async () => {
+  let resolveOlder;
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      if (!request.cursor) {
+        return { entries: [{ id: "latest" }], next_cursor: "cursor-1" };
+      }
+      return new Promise((resolve) => {
+        resolveOlder = resolve;
+      });
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  const result = harness.render();
+  const first = result.loadOlder();
+  const second = result.loadOlder();
+
+  assert.equal(first, second);
+  assert.equal(harness.calls.length, 2);
+
+  resolveOlder({ entries: [{ id: "older" }], next_cursor: null });
+  await first;
+  assert.equal(harness.render().isLoadingMore, false);
+});
+
+test("useLogs exposes pagination errors and retries the same cursor", async () => {
+  let olderAttempts = 0;
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      if (!request.cursor) {
+        return { entries: [{ id: "latest" }], next_cursor: "cursor-1" };
+      }
+      olderAttempts += 1;
+      if (olderAttempts === 1) throw new Error("older logs unavailable");
+      return { entries: [{ id: "older" }], next_cursor: null };
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  await result.loadOlder();
+  result = harness.render();
+
+  assert.equal(result.loadMoreError.message, "older logs unavailable");
+  assert.equal(result.nextCursor, "cursor-1");
+
+  await result.loadOlder();
+  result = harness.render();
+
+  assert.equal(olderAttempts, 2);
+  assert.equal(result.loadMoreError, null);
+  assert.equal(result.nextCursor, null);
+  assert.deepEqual(
+    Array.from(result.entries, (entry) => entry.id),
+    ["latest", "older"],
+  );
 });
 
 test("useLogs surfaces the fallback error when caller-scoped logs also fail", async () => {

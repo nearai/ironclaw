@@ -1202,6 +1202,7 @@ registerPack("ja", {
   "logs.entryCount": "{count} 件",
   "logs.pausedBadge": "● 一時停止中",
   "logs.empty": "ログエントリを待機中…",
+  "logs.loadOlder": "過去のログを読み込む",
   "common.recent": "最近",
   "common.searchChats": "チャットを検索...",
   "common.gatewaySession": "ゲートウェイセッション",
