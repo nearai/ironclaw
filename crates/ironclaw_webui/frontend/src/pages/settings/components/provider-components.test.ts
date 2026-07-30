@@ -141,8 +141,10 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
   const ProviderCard = "ProviderCard";
   const context = {
     Button: "Button",
+    Callout: "Callout",
     Card: "Card",
     Icon: "Icon",
+    StatusDot: "StatusDot",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
     ProviderLoginStatus: "ProviderLoginStatus",
@@ -258,6 +260,7 @@ function createProviderCardHarness() {
     Button: "Button",
     Card: "Card",
     Icon: "Icon",
+    StatusDot: "StatusDot",
     React: createReactStateStub(state),
     adapterLabel: (adapter) => adapter,
     html,

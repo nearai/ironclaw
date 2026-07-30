@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { Button, Icon, Panel, cn } from "@ironclaw/ui";
+import { Button, Icon, Card, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 
@@ -69,7 +69,7 @@ export function AutomationsEmptyState() {
   const navigate = useNavigate();
 
   return (
-    <Panel className="p-6 sm:p-8">
+    <Card className="p-6 sm:p-8">
       <div className="max-w-2xl">
         <h2 className="mt-4 text-2xl font-semibold tracking-tight text-iron-100 flex items-center gap-3">
           {t("automations.empty.onboardingTitle")}
@@ -96,6 +96,6 @@ export function AutomationsEmptyState() {
           </Button>
         </div>
       </div>
-    </Panel>
+    </Card>
   );
 }

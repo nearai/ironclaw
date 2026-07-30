@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
+import { Button, Callout, SearchInput, Select, Spinner } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -11,13 +12,13 @@ const LEVEL_COLORS = {
   trace: "text-[var(--v2-text-muted)]",
   debug: "text-[color-mix(in_srgb,var(--v2-accent)_80%,white)]",
   info: "text-[var(--v2-text-strong)]",
-  warn: "text-yellow-400",
-  error: "text-red-400",
+  warn: "text-[var(--v2-warning-text)]",
+  error: "text-[var(--v2-danger-text)]",
 };
 
 const LEVEL_BG = {
-  warn: "bg-yellow-500/5",
-  error: "bg-red-500/8",
+  warn: "bg-[color-mix(in_srgb,var(--v2-warning-text)_5%,transparent)]",
+  error: "bg-[color-mix(in_srgb,var(--v2-danger-text)_7%,transparent)]",
 };
 
 function LogEntry({ entry }) {
@@ -101,17 +102,22 @@ function LogEntry({ entry }) {
   );
 }
 
-function ToolbarSelect({ value, onChange, options, labelKey, t }) {
+function ToolbarSelect({ value, onChange, options, labelKey, label, t }) {
+  // DS Select stretches to its container; the toolbar wants a fixed column.
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.currentTarget.value)}
-      className="v2-select h-8 min-w-0 rounded-[8px] px-2.5 py-0 text-xs"
-    >
-      {options.map(
-        (opt) => (<option key={opt} value={opt}>{t(labelKey(opt))}</option>)
-      )}
-    </select>
+    <div className="w-36 shrink-0">
+      <Select
+        size="sm"
+        value={value}
+        onChange={(e) => onChange(e.currentTarget.value)}
+        aria-label={label}
+        className="text-xs"
+      >
+        {options.map(
+          (opt) => (<option key={opt} value={opt}>{t(labelKey(opt))}</option>)
+        )}
+      </Select>
+    </div>
   );
 }
 
@@ -183,16 +189,17 @@ export function LogsPage() {
           onChange={setLevelFilter}
           options={LEVELS}
           labelKey={(opt) => (opt === "all" ? "logs.levelAll" : `logs.level.${opt}`)}
+          label={t("logs.levelAll")}
           t={t}
         />
 
         {/* Target filter */}
-        <input
-          type="text"
+        <SearchInput
+          label={t("logs.filterTarget")}
           value={targetFilter}
-          onInput={(e) => setTargetFilter(e.currentTarget.value)}
+          onChange={(e) => setTargetFilter(e.currentTarget.value)}
           placeholder={t("logs.filterTarget")}
-          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
+          className="min-w-[10rem] flex-1"
         />
 
         <div className="flex items-center gap-2 ml-auto">
@@ -212,28 +219,25 @@ export function LogsPage() {
           </label>
 
           {/* Pause/Resume */}
-          <button
+          <Button
+            variant={paused ? "outline" : "secondary"}
+            size="sm"
+            aria-pressed={paused}
             onClick={togglePause}
-            className={[
-              "h-8 rounded-[8px] px-3 text-xs font-medium transition-colors",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
-              paused
-                ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
-                : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-            ].join(" ")}
           >
             {paused ? t("logs.resume") : t("logs.pause")}
-          </button>
+          </Button>
 
           {/* Clear */}
-          <button
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => {
               if (confirm(t("logs.confirmClear"))) clearEntries();
             }}
-            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             {t("logs.clear")}
-          </button>
+          </Button>
         </div>
 
         {activeScope.length > 0 &&
@@ -269,7 +273,7 @@ export function LogsPage() {
             />
             <span className="ml-auto tabular-nums">
               {t("logs.entryCount", { count: totalCount })}
-              {paused ? (<span className="ml-1 text-yellow-400">{t("logs.pausedBadge")}</span>) : null}
+              {paused ? (<span className="ml-1 text-[var(--v2-warning-text)]">{t("logs.pausedBadge")}</span>) : null}
             </span>
           </div>
         )}
@@ -283,14 +287,12 @@ export function LogsPage() {
       >
         {error && hasEntries
           ? (
-              <div
-                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-xs text-red-100 backdrop-blur"
-              >
+              <Callout tone="danger" className="sticky top-2 z-10 mx-3 mt-3 backdrop-blur">
                 {t("error.loadFailed", {
                   what: t("nav.logs"),
                   message: error.message || error.statusText || "Request failed",
                 })}
-              </div>
+              </Callout>
             )
           : null}
         {needsThreadScope
@@ -305,7 +307,7 @@ export function LogsPage() {
           : error && !hasEntries
           ? (
               <div
-                className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
+                className="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--v2-danger-text)]"
               >
                 {t("error.loadFailed", {
                   what: t("nav.logs"),
@@ -316,8 +318,9 @@ export function LogsPage() {
           : isLoading && !hasEntries
             ? (
                 <div
-                  className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+                  className="flex h-full items-center justify-center gap-2 text-sm text-[var(--v2-text-muted)]"
                 >
+                  <Spinner label={t("common.loading")} />
                   {t("common.loading")}
                 </div>
               )

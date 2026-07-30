@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React from "react";
-import { Button, Card } from "@ironclaw/ui";
+import { Button, Callout, Card } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useSkills } from "../hooks/useSkills";
 import { matchesSearch } from "../lib/settings-search";
@@ -289,13 +289,8 @@ function groupSkills(skills) {
 function SkillActionResult({ error, result }) {
   if (!error && !result) return null;
   return (
-    <div
-      data-testid="skill-action-result"
-      className={error
-        ? "rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-        : "rounded-xl border border-[color-mix(in_srgb,var(--v2-positive-text)_35%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] px-4 py-3 text-sm text-[var(--v2-positive-text)]"}
-    >
+    <Callout tone={error ? "danger" : "success"} data-testid="skill-action-result">
       {error || result}
-    </div>
+    </Callout>
   );
 }

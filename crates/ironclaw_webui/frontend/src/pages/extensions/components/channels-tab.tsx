@@ -1,3 +1,4 @@
+import { Card } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
@@ -34,10 +35,8 @@ export function ChannelsTab({
     <div className="space-y-5">
       {installedChannels.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
-          >
+        <Card className="p-5 sm:p-6">
+          <h3 className="mb-4 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
             {t("channels.messaging")}
           </h3>
           <div className="grid grid-cols-1 gap-4">
@@ -53,14 +52,12 @@ export function ChannelsTab({
               )
             )}
           </div>
-        </div>
+        </Card>
       )}
       {channelRegistry.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
-          >
+        <Card className="p-5 sm:p-6">
+          <h3 className="mb-4 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
             {t("channels.availableChannels")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
@@ -75,7 +72,7 @@ export function ChannelsTab({
               )
             )}
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );

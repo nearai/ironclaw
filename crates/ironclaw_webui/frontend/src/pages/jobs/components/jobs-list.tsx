@@ -1,5 +1,14 @@
 import { useT } from "../../../lib/i18n";
-import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
+import {
+  Button,
+  EmptyPanel,
+  Card,
+  SearchInput,
+  SectionHeader,
+  Select,
+  Badge,
+  Toolbar,
+} from "@ironclaw/ui";
 import {
   canShowCancel,
   formatJobDate,
@@ -45,38 +54,42 @@ export function JobsList({
 
   return (
     <div className="space-y-5">
-      <Panel className="p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("jobs.list.explorer")}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">{t("jobs.list.queueTitle")}</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-              {t("jobs.list.queueDesc")}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
-            <span>{t("jobs.list.visible", { count: jobs.length })}</span>
-            <span>/</span>
-            <span>{isRefreshing ? t("jobs.list.state.refreshing") : t("jobs.list.state.live")}</span>
-          </div>
-        </div>
+      <Card className="p-4 sm:p-5">
+        <SectionHeader
+          eyebrow={t("jobs.list.explorer")}
+          title={t("jobs.list.queueTitle")}
+          description={t("jobs.list.queueDesc")}
+          actions={
+            <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+              <span>{t("jobs.list.visible", { count: jobs.length })}</span>
+              <span>/</span>
+              <span>{isRefreshing ? t("jobs.list.state.refreshing") : t("jobs.list.state.live")}</span>
+            </div>
+          }
+        />
 
-        <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-          <input
+        <Toolbar className="mt-5">
+          <SearchInput
+            label={t("jobs.list.searchPlaceholder")}
             value={search}
-            onInput={(event) => onSearchChange(event.currentTarget.value)}
+            onChange={(event) => onSearchChange(event.currentTarget.value)}
+            onClear={() => onSearchChange("")}
+            clearLabel={t("jobs.list.clearSearch")}
             placeholder={t("jobs.list.searchPlaceholder")}
-            className="h-11 rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
+            className="md:flex-1"
           />
-          <select
-            value={stateFilter}
-            onChange={(event) => onStateFilterChange(event.currentTarget.value)}
-            className="v2-select h-11 rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-          >
-            {FILTERS.map((filter) => (<option key={filter.value} value={filter.value}>{filter.label}</option>))}
-          </select>
-        </div>
-      </Panel>
+          <div className="md:w-[220px]">
+            <Select
+              size="sm"
+              value={stateFilter}
+              onChange={(event) => onStateFilterChange(event.currentTarget.value)}
+              aria-label={t("jobs.list.filterLabel")}
+            >
+              {FILTERS.map((filter) => (<option key={filter.value} value={filter.value}>{filter.label}</option>))}
+            </Select>
+          </div>
+        </Toolbar>
+      </Card>
 
       <div className="grid gap-3">
         {jobs.map((job) => (
@@ -93,7 +106,7 @@ export function JobsList({
               <button onClick={() => onSelectJob(job.id)} className="min-w-0 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="truncate text-lg font-semibold text-iron-100">{job.title || t("jobs.list.untitled")}</h3>
-                  <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
+                  <Badge tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
                   <span>{truncateJobId(job.id)}</span>

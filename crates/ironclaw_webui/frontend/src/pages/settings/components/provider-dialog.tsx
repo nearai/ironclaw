@@ -128,7 +128,7 @@ export function ProviderDialog({
 
         {message &&
         (
-          <div className={message.tone === "error" ? "text-sm text-red-200" : "text-sm text-mint"} role="status">
+          <div className={message.tone === "error" ? "text-sm text-[var(--v2-danger-text)]" : "text-sm text-[var(--v2-positive-text)]"} role="status">
             {message.text}
           </div>
         )}

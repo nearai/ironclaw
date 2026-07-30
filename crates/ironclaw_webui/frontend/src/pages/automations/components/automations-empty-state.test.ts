@@ -110,7 +110,7 @@ function createHarness({ clipboard = async () => {}, includeClipboard = true } =
 
   function Button() {}
   function Icon() {}
-  function Panel() {}
+  function Card() {}
 
   const React = {
     useEffect(effect) {
@@ -148,7 +148,7 @@ function createHarness({ clipboard = async () => {}, includeClipboard = true } =
     globalThis: {},
     Button,
     Icon,
-    Panel,
+    Card,
     React,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,

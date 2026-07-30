@@ -27,6 +27,7 @@ function loadConnectionStatusForTest({ expanded = false } = {}) {
     },
     html: (strings, ...values) => ({ strings, values }),
     useT: () => (key) => key,
+    StatusDot() {},
     globalThis: {},
   };
   vm.runInNewContext(

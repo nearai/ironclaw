@@ -224,8 +224,10 @@ registerPack("en", {
   "extensions.channels": "Channels",
   "extensions.tools": "Tools",
   "extensions.registry": "Registry",
+  "extensions.tabs.label": "Extension sections",
 
   // Settings tabs
+  "settings.tabsLabel": "Settings sections",
   "settings.inference": "Inference",
   "settings.appearance": "Appearance",
   "settings.agent": "Agent",
@@ -683,6 +685,7 @@ registerPack("en", {
     "This job no longer exists or is outside your access scope.",
   "jobs.returnToJobs": "Return to jobs",
   "jobs.dismiss": "Dismiss",
+  "jobs.loading": "Loading jobs",
 
   // Jobs — list
   "jobs.list.explorer": "Explorer",
@@ -693,6 +696,8 @@ registerPack("en", {
   "jobs.list.state.live": "live",
   "jobs.list.state.refreshing": "refreshing",
   "jobs.list.searchPlaceholder": "Search job title or UUID",
+  "jobs.list.clearSearch": "Clear search",
+  "jobs.list.filterLabel": "Job state filter",
   "jobs.list.empty.noMatchTitle": "No jobs match the current filters",
   "jobs.list.empty.noMatchDesc":
     "Try a broader search term or reset the state filter to see the rest of the queue.",
@@ -713,6 +718,8 @@ registerPack("en", {
 
   // Jobs — detail
   "jobs.detail.backToAll": "Back to all jobs",
+  "jobs.detail.loading": "Loading job detail",
+  "jobs.detail.tabsLabel": "Job detail sections",
   "jobs.detail.tabs.overview": "Overview",
   "jobs.detail.tabs.activity": "Activity",
   "jobs.detail.tabs.files": "Files",
@@ -721,6 +728,9 @@ registerPack("en", {
   "missions.allMissions": "All missions",
   "missions.refresh": "Refresh",
   "missions.refreshing": "Refreshing",
+  "missions.loading": "Loading missions",
+  "missions.detail.loading": "Loading mission detail",
+  "missions.clearSearch": "Clear search",
   "missions.title": "Missions",
   "missions.subtitle": "Execution loops",
   "missions.summary":
@@ -778,6 +788,7 @@ registerPack("en", {
   "automations.filter.completed": "Completed",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.loading": "Loading automations",
   "automations.error.actionFailed": "Unable to update the automation. Please try again.",
   "automations.rename.action": "Rename automation",
   "automations.rename.nameLabel": "Automation name",
@@ -931,15 +942,22 @@ registerPack("en", {
   "routines.title": "Routines",
   "routines.description":
     "Search saved routines, inspect their schedule or trigger, and run or pause them without leaving v2.",
+  "routines.loading": "Loading routines",
+  "routines.detail.loading": "Loading routine detail",
+  "routines.clearSearch": "Clear search",
+  "routines.filterLabel": "Routine status filter",
 
   // Extensions page
   "ext.installed": "Installed",
   "ext.channels": "Channels",
   "ext.mcp": "MCP",
   "ext.registry": "Registry",
+  "ext.loading": "Loading extensions",
 
   // Extensions — registry
   "ext.registry.searchPlaceholder": "Search extensions…",
+  "ext.registry.searchLabel": "Search extensions",
+  "ext.registry.clearSearch": "Clear search",
   "ext.registry.emptyTitle": "Registry is empty",
   "ext.registry.emptyDesc":
     "All available extensions are already installed, or no registry is configured.",
@@ -975,6 +993,7 @@ registerPack("en", {
   "projects.createFromChat": "Create from chat",
   "projects.startProject": "Start a project",
   "projects.searchPlaceholder": "Search projects",
+  "projects.loading": "Loading projects",
   "projects.creationDraft":
     "Create a new project for me. I want to set up a project for: ",
   "projects.chatAutoFail":
@@ -1089,6 +1108,7 @@ registerPack("en", {
     "This project does not have any missions yet. Use the chat workspace to describe the operating loop you want IronClaw to run.",
   "projects.inspector.label": "Inspector",
   "projects.inspector.clearFocus": "Clear focus",
+  "projects.inspector.loading": "Loading inspector",
   "projects.snapshot.label": "Project snapshot",
   "projects.snapshot.noDescription": "No project description yet.",
   "projects.snapshot.activePausedMissions": "{active} active missions / {paused} paused missions",
@@ -1116,6 +1136,7 @@ registerPack("en", {
   "projects.mission.runLabel": "Run {number}",
   "projects.mission.spawnedThreads": "Spawned threads",
   "projects.files.label": "Files",
+  "projects.files.loading": "Loading files",
   "projects.files.downloadError": "Unable to download file",
   "projects.files.noFilesYet": "No files yet - they appear once a thread has run in this project.",
   "projects.files.root": "workspace",
@@ -1153,6 +1174,7 @@ registerPack("en", {
   "admin.tab.users": "Users",
   "admin.tab.configuration": "Configuration",
   "admin.tab.usage": "Usage",
+  "admin.tabs.label": "Admin sections",
 
   // Admin — dashboard
   "admin.dashboard.systemOverview": "System overview",
@@ -1186,7 +1208,11 @@ registerPack("en", {
   "admin.users.user": "user",
   "admin.users.userFallback": "user",
   "admin.users.title": "Users ({count} / {total})",
+  "admin.users.loading": "Loading users",
   "admin.users.searchPlaceholder": "Search…",
+  "admin.users.searchLabel": "Search users",
+  "admin.users.clearSearch": "Clear search",
+  "admin.users.filterLabel": "Filter users",
   "admin.users.noMatch": "No users match the current filters.",
   "admin.users.filter.all": "All",
   "admin.users.filter.active": "Active",
@@ -1325,6 +1351,7 @@ registerPack("en", {
   "job.noActivityDesc": "This job has not written any persisted events for the selected filter.",
   "job.noStateTitle": "No state history yet",
   "job.followupPlaceholder": "Send a follow-up prompt to the running job",
+  "job.eventFilterLabel": "Event type filter",
   "common.noChatsMatch": "No chats match \"{query}\"",
   "chat.moreConversationsAvailable": "More conversations are available. Load older conversations to continue searching.",
   "chat.loadMoreFailed": "Couldn't load older conversations. Try again.",

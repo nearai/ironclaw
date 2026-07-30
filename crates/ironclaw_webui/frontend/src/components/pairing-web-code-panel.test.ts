@@ -75,6 +75,7 @@ function createPanelHarness({ pairingResponses = [], startResponses = [], qrResu
 
   const context = {
     Button: "button",
+    Skeleton: "skeleton",
     globalThis: {},
     Date: { now: () => nowMs, parse: (value) => Date.parse(value) },
     navigator: {

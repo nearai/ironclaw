@@ -90,6 +90,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
       },
     },
     RegistryTab,
+    SkeletonList() {},
     globalThis: {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };

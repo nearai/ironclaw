@@ -1,4 +1,4 @@
-import { Button, Card, Icon } from "@ironclaw/ui";
+import { Button, Callout, Card, Icon, StatusDot } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { ProviderCard } from "./provider-card";
@@ -9,15 +9,15 @@ import { useProviderLogin } from "../hooks/useProviderLogin";
 import { groupProvidersByStatus } from "../lib/llm-providers";
 
 const GROUP_ORDER = [
-  { key: "active", labelKey: "llm.groupActive", dotClass: "bg-[var(--v2-positive-text)]" },
-  { key: "ready", labelKey: "llm.groupReady", dotClass: "bg-[var(--v2-accent)]" },
-  { key: "setup", labelKey: "llm.groupSetup", dotClass: "bg-[var(--v2-warning-text)]" },
+  { key: "active", labelKey: "llm.groupActive", dotTone: "success" },
+  { key: "ready", labelKey: "llm.groupReady", dotTone: "accent" },
+  { key: "setup", labelKey: "llm.groupSetup", dotTone: "warning" },
 ];
 
-function GroupHeader({ label, count, dotClass }) {
+function GroupHeader({ label, count, dotTone }) {
   return (
     <div className="mb-2 mt-1 flex items-center gap-2 px-1">
-      <span className={"h-1.5 w-1.5 rounded-full " + dotClass} />
+      <StatusDot tone={dotTone} />
       <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
         {label}
       </span>
@@ -64,17 +64,12 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
 
       {actions.message &&
       (
-        <div
-          className={[
-            "mb-4 rounded-md border px-3 py-2 text-sm",
-            actions.message.tone === "error"
-              ? "border-red-400/30 bg-red-500/10 text-red-200"
-              : "border-mint/30 bg-mint/10 text-mint",
-          ].join(" ")}
-          role="status"
+        <Callout
+          tone={actions.message.tone === "error" ? "danger" : "success"}
+          className="mb-4"
         >
           {actions.message.text}
-        </div>
+        </Callout>
       )}
 
       <ProviderLoginStatus login={login} />
@@ -82,7 +77,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
       {state.isLoading
         ? (<div className="text-sm text-[var(--v2-text-muted)]">{t("common.loading")}</div>)
         : state.error
-        ? (<div className="text-sm text-red-200">{t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}</div>)
+        ? (<div className="text-sm text-[var(--v2-danger-text)]">{t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}</div>)
         : (
             <div className="space-y-1">
               {GROUP_ORDER.flatMap((group) => {
@@ -99,7 +94,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
                       <GroupHeader
                         label={t(group.labelKey)}
                         count={items.length}
-                        dotClass={group.dotClass}
+                        dotTone={group.dotTone}
                       />
                       <div className="space-y-2">
                       {items.map(

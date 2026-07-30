@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
+import { Button, CodePanel, EmptyPanel, Card, SkeletonList, Badge } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import {
   formatRoutineDate,
@@ -26,9 +26,9 @@ function JsonBlock({ title, value }) {
   return (
     <div>
       <h3 className="text-sm font-semibold text-iron-100">{title}</h3>
-      <pre
-        className="mt-3 max-h-72 overflow-auto rounded-xl border border-iron-700 bg-iron-950/70 p-4 text-xs leading-5 text-iron-200"
-      >{JSON.stringify(value || {}, null, 2)}</pre>
+      <CodePanel className="mt-3 max-h-72">
+        {JSON.stringify(value || {}, null, 2)}
+      </CodePanel>
     </div>
   );
 }
@@ -47,12 +47,10 @@ export function RoutineDetailPanel({
 
   if (isLoading) {
     return (
-      <div className="space-y-4">
-        {[1, 2, 3].map(
-          (index) =>
-            (<div key={index} className="v2-skeleton h-32 rounded-xl" />)
-        )}
-      </div>
+      <SkeletonList
+        label={t("routines.detail.loading")}
+        itemClassName="h-32 rounded-xl"
+      />
     );
   }
 
@@ -66,18 +64,18 @@ export function RoutineDetailPanel({
   }
 
   return (
-    <Panel className="p-4 sm:p-5">
+    <Card className="p-4 sm:p-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="truncate text-2xl font-semibold tracking-tight text-iron-100">
               {routine.name}
             </h2>
-            <StatusPill
+            <Badge
               tone={routineStatusTone(routine.status, routine.enabled)}
               label={routine.enabled ? routine.status : "disabled"}
             />
-            <StatusPill
+            <Badge
               tone={verificationTone(routine.verification_status)}
               label={routine.verification_status || "unknown"}
             />
@@ -125,6 +123,6 @@ export function RoutineDetailPanel({
         <h3 className="mb-3 text-sm font-semibold text-iron-100">Recent runs</h3>
         <RoutineRecentRuns runs={routine.recent_runs} />
       </div>
-    </Panel>
+    </Card>
   );
 }

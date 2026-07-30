@@ -1,4 +1,5 @@
 import React from "react";
+import { Callout, SkeletonList } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel";
 import { AutomationsList } from "./components/automations-list";
@@ -59,11 +60,9 @@ export function AutomationsPage() {
         <div className="space-y-5">
           {automationsState.error &&
           (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <Callout tone="danger">
               {t("automations.error.loadFailed")}
-            </div>
+            </Callout>
           )}
           {showErrorOnly
             ? null
@@ -72,17 +71,9 @@ export function AutomationsPage() {
                 {!automationsState.isLoading &&
                 !automationsState.schedulerEnabled &&
                 (
-                  <div
-                    role="status"
-                    className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
-                  >
-                    <div className="text-sm font-semibold text-amber-200">
-                      {t("automations.schedulerOff.title")}
-                    </div>
-                    <div className="mt-0.5 text-xs leading-5 text-amber-200/80">
-                      {t("automations.schedulerOff.description")}
-                    </div>
-                  </div>
+                  <Callout tone="warning" title={t("automations.schedulerOff.title")}>
+                    {t("automations.schedulerOff.description")}
+                  </Callout>
                 )}
                 <AutomationsSummaryStrip
                   summary={automationsState.summary}
@@ -92,17 +83,7 @@ export function AutomationsPage() {
                 <AutomationDeliveryDefaultsPanel deliveryState={deliveryState} />
 
                 {automationsState.isLoading
-                  ? (
-                      <div className="space-y-4">
-                        {[1, 2, 3].map(
-                          (index) =>
-                            (<div
-                              key={index}
-                              className="v2-skeleton h-28 rounded-[18px]"
-                            />)
-                        )}
-                      </div>
-                    )
+                  ? (<SkeletonList label={t("automations.loading")} />)
                   : (
                       <AutomationsList
                         automations={automationsState.automations}

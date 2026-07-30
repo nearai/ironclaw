@@ -1,4 +1,4 @@
-import { Badge, Button, Card, Icon } from "@ironclaw/ui";
+import { Badge, Button, Card, Icon, StatusDot } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -157,15 +157,9 @@ export function ProviderCard({
           onClick={toggle}
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 px-4 py-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)] sm:pl-5 sm:pr-3"
         >
-          <span
-            className={[
-              "h-2 w-2 shrink-0 rounded-full",
-              isActive
-                ? "bg-[var(--v2-positive-text)]"
-                : configured
-                ? "bg-[var(--v2-accent)]"
-                : "bg-[var(--v2-warning-text)]",
-            ].join(" ")}
+          <StatusDot
+            size="md"
+            tone={isActive ? "success" : configured ? "accent" : "warning"}
           />
           <span className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
             <span className="min-w-0 truncate text-sm font-semibold text-[var(--v2-text-strong)]">

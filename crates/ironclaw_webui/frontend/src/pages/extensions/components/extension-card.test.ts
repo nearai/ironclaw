@@ -99,6 +99,7 @@ function makeContext() {
   function Badge() {}
   function Button() {}
   function Icon() {}
+  function IconButton() {}
 
   return {
     globalThis: {},
@@ -107,6 +108,7 @@ function makeContext() {
     Badge,
     Button,
     Icon,
+    IconButton,
     hasAuthSurface,
     hasChannelSurface,
     primaryAuthAccount,

@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, ConfirmDialog, EmptyPanel, Icon, Input, Panel, StatusPill, cn } from "@ironclaw/ui";
+import { Button, ConfirmDialog, EmptyPanel, Icon, Input, Card, Badge, cn } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import {
   RecentRunRow,
@@ -20,7 +20,7 @@ function MetaItem({ label, value, tone = "muted" }) {
         className={cn(
           "mt-2 min-w-0 break-words text-sm text-iron-100",
           tone === "success" && "text-[var(--v2-positive-text)]",
-          tone === "danger" && "text-red-200",
+          tone === "danger" && "text-[var(--v2-danger-text)]",
           tone === "info" && "text-sky-200"
         )}
       >
@@ -53,13 +53,13 @@ export function AutomationDetailPanel({
 
   if (!automation) {
     return (
-      <Panel className="p-4 sm:p-5">
+      <Card className="p-4 sm:p-5">
         <EmptyPanel
-          boxed={false}
+          variant="plain"
           title={t("automations.detail.emptyTitle")}
           description={t("automations.detail.emptyDescription")}
         />
-      </Panel>
+      </Card>
     );
   }
 
@@ -115,7 +115,7 @@ export function AutomationDetailPanel({
   };
 
   return (
-    <Panel className="overflow-hidden" data-testid="automation-detail-panel">
+    <Card className="overflow-hidden" data-testid="automation-detail-panel">
       <div className="border-b border-[var(--v2-panel-border)] p-4 sm:p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
@@ -207,7 +207,7 @@ export function AutomationDetailPanel({
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <StatusPill
+            <Badge
               tone={automation.primary_status_tone}
               label={automation.primary_status_label}
             />
@@ -279,9 +279,7 @@ export function AutomationDetailPanel({
                 </div>
               )
             : (
-                <div className="rounded-xl border border-dashed border-[var(--v2-panel-border)] p-4 text-sm text-iron-300">
-                  {t("automations.detail.noRuns")}
-                </div>
+                <EmptyPanel variant="dashed" description={t("automations.detail.noRuns")} />
               )}
         </div>
       </div>
@@ -293,7 +291,7 @@ export function AutomationDetailPanel({
         onConfirm={handleConfirmDelete}
         onCancel={() => setDeleteDialogOpen(false)}
       />
-    </Panel>
+    </Card>
   );
 }
 

@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/ui";
+import { EmptyPanel, Card, Badge } from "@ironclaw/ui";
 import {
   formatMissionCadence,
   formatMissionStatus,
@@ -13,7 +13,7 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
   const counts = missionStatusCounts(missions);
 
   return (
-    <Panel className="p-4 sm:p-5">
+    <Card className="p-4 sm:p-5">
       <div className="flex items-end justify-between gap-4">
         <div>
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.missions.label")}</div>
@@ -44,7 +44,7 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
                     <div className="truncate text-lg font-semibold text-white">{mission.name}</div>
                     <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">{mission.goal}</p>
                   </div>
-                  <StatusPill tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />
+                  <Badge tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />
                 </div>
                 <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
                   <span>{formatMissionCadence(mission, t)}</span>
@@ -53,12 +53,8 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
                 </div>
               </button>
             ))
-          : (
-              <div className="rounded-[20px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-                {t("projects.missions.empty")}
-              </div>
-            )}
+          : (<EmptyPanel variant="dashed" description={t("projects.missions.empty")} />)}
       </div>
-    </Panel>
+    </Card>
   );
 }

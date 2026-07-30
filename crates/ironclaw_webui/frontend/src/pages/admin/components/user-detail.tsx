@@ -1,7 +1,16 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button, Panel, SelectMenu, StatusPill } from "@ironclaw/ui";
+import {
+  Button,
+  ConfirmDialog,
+  DetailList,
+  DetailRow,
+  Card,
+  SelectMenu,
+  Skeleton,
+  Badge,
+} from "@ironclaw/ui";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import { UserSecretsPanel } from "./user-secrets-panel";
@@ -17,15 +26,6 @@ import {
   buildRoleOptions,
   adminUserActionErrorMessage,
 } from "../lib/admin-presenters";
-
-function DetailRow({ label, children }) {
-  return (
-    <div className="flex items-start justify-between gap-4 border-t border-white/[0.06] py-3 first:border-0 first:pt-0">
-      <span className="text-xs text-iron-300">{label}</span>
-      <span className="text-right text-sm text-iron-100">{children}</span>
-    </div>
-  );
-}
 
 export function UserDetail({ userId, onBack }) {
   const userQuery = useAdminUserDetail(userId);
@@ -78,19 +78,19 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
   if (userQuery.isLoading) {
     return (
       <div className="space-y-5">
-        <Panel className="p-5 sm:p-6">
-          <div className="v2-skeleton mb-2 h-6 w-48 rounded" />
-          <div className="v2-skeleton h-4 w-32 rounded" />
-        </Panel>
+        <Card className="p-5 sm:p-6">
+          <Skeleton className="mb-2 h-6 w-48 rounded" />
+          <Skeleton className="h-4 w-32 rounded" />
+        </Card>
       </div>
     );
   }
 
   if (userQuery.error) {
     return (
-      <Panel className="p-5 sm:p-6">
-        <p className="text-sm text-red-200">{t("error.loadFailed", { what: t("admin.users.user"), message: userQuery.error.message })}</p>
-      </Panel>
+      <Card className="p-5 sm:p-6">
+        <p className="text-sm text-[var(--v2-danger-text)]">{t("error.loadFailed", { what: t("admin.users.user"), message: userQuery.error.message })}</p>
+      </Card>
     );
   }
 
@@ -161,13 +161,13 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
         <span>{t("admin.users.backToUsers")}</span>
       </button>
 
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 className="text-2xl font-semibold tracking-tight text-white">{user.display_name || user.id}</h2>
             <div className="mt-2 flex items-center gap-2">
-              <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
-              <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
+              <Badge tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
+              <Badge tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
@@ -186,39 +186,43 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
             </Button>
           </div>
         </div>
-      </Panel>
+      </Card>
 
       {statusError && (
-        <p className="text-sm text-red-200" role="alert" data-testid="admin-user-detail-status-error">
+        <p className="text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-detail-status-error">
           {adminUserActionErrorMessage(statusError, t)}
         </p>
       )}
 
       <div className="grid gap-5 lg:grid-cols-2">
-        <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.profile")}</h3>
-          <DetailRow label={t("admin.user.id")}>
-            <span className="font-mono text-xs">{user.id}</span>
-          </DetailRow>
-          <DetailRow label={t("admin.user.email")}>{user.email || t("admin.user.notSet")}</DetailRow>
-          <DetailRow label={t("admin.user.created")}>{formatRelativeTime(user.created_at, t)}</DetailRow>
-          <DetailRow label={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at, t)}</DetailRow>
-          {user.created_by && (
-            <DetailRow label={t("admin.user.createdBy")}>
-              <span className="font-mono text-xs">{truncateId(user.created_by)}</span>
+        <Card className="p-5 sm:p-6">
+          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.user.profile")}</h3>
+          <DetailList>
+            <DetailRow term={t("admin.user.id")}>
+              <span className="font-mono text-xs">{user.id}</span>
             </DetailRow>
-          )}
-        </Panel>
+            <DetailRow term={t("admin.user.email")}>{user.email || t("admin.user.notSet")}</DetailRow>
+            <DetailRow term={t("admin.user.created")}>{formatRelativeTime(user.created_at, t)}</DetailRow>
+            <DetailRow term={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at, t)}</DetailRow>
+            {user.created_by && (
+              <DetailRow term={t("admin.user.createdBy")}>
+                <span className="font-mono text-xs">{truncateId(user.created_by)}</span>
+              </DetailRow>
+            )}
+          </DetailList>
+        </Card>
 
-        <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.summary")}</h3>
-          <DetailRow label={t("admin.user.jobs")}>{user.job_count ?? 0}</DetailRow>
-          <DetailRow label={t("admin.user.totalCost")}>{formatCost(user.total_cost)}</DetailRow>
-          <DetailRow label={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at, t)}</DetailRow>
-        </Panel>
+        <Card className="p-5 sm:p-6">
+          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.user.summary")}</h3>
+          <DetailList>
+            <DetailRow term={t("admin.user.jobs")}>{user.job_count ?? 0}</DetailRow>
+            <DetailRow term={t("admin.user.totalCost")}>{formatCost(user.total_cost)}</DetailRow>
+            <DetailRow term={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at, t)}</DetailRow>
+          </DetailList>
+        </Card>
       </div>
 
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.roleManagement")}</h3>
         <div className="flex items-end gap-3">
           <div>
@@ -238,15 +242,15 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
           </Button>
         </div>
         {updateError && (
-          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-detail-role-error">
+          <p className="mt-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-detail-role-error">
             {adminUserActionErrorMessage(updateError, t)}
           </p>
         )}
-      </Panel>
+      </Card>
 
       <UserSecretsPanel key={user.id} userId={user.id} />
 
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.usage30Days")}</h3>
         {usageEntries.length === 0
           ? (<p className="py-4 text-sm text-iron-300">{t("admin.user.noUsage")}</p>)
@@ -278,34 +282,32 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
                 </table>
               </div>
             )}
-      </Panel>
+      </Card>
 
       {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={closeDelete}>
-          <div data-testid="admin-user-delete-dialog" className="w-full max-w-md rounded-xl border border-white/10 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-white">{t("admin.users.deleteUserTitle")}</h3>
-            <p className="mt-2 text-sm text-iron-300">
+        <ConfirmDialog
+          open
+          title={t("admin.users.deleteUserTitle")}
+          description={
+            <>
               {t("admin.users.deleteUserDesc", { name: user.display_name })}
-            </p>
-            {deleteError && (
-              <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-delete-error">
-                {adminUserActionErrorMessage(deleteError, t)}
-              </p>
-            )}
-            <div className="mt-5 flex justify-end gap-2">
-              <Button data-testid="admin-user-delete-cancel" variant="ghost" disabled={isDeleting} onClick={closeDelete}>{t("admin.users.cancel")}</Button>
-              <Button
-                variant="danger"
-                loading={isDeleting}
-                disabled={isDeleting}
-                data-testid="admin-user-delete-confirm"
-                onClick={handleDelete}
-              >
-                {isDeleting ? t("common.loading") : t("admin.users.delete")}
-              </Button>
-            </div>
-          </div>
-        </div>
+              {deleteError && (
+                <span
+                  className="mt-2 block text-[var(--v2-danger-text)]"
+                  role="alert"
+                  data-testid="admin-user-delete-error"
+                >
+                  {adminUserActionErrorMessage(deleteError, t)}
+                </span>
+              )}
+            </>
+          }
+          confirmLabel={t("admin.users.delete")}
+          cancelLabel={t("admin.users.cancel")}
+          isConfirming={isDeleting}
+          onConfirm={handleDelete}
+          onCancel={closeDelete}
+        />
       )}
     </div>
   );

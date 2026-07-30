@@ -1,44 +1,17 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Card } from "@ironclaw/ui";
+import { Card, Input, Select, Switch } from "@ironclaw/ui";
 
 function SavedIndicator({ visible }) {
   const t = useT();
   if (!visible) return null;
   return (
     <span
-      className="font-mono text-[11px] text-mint"
+      className="font-mono text-[11px] text-[var(--v2-positive-text)]"
       role="status"
     >
       {t("tools.saved")}
     </span>
-  );
-}
-
-function Toggle({ checked, onChange, label }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={[
-        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border",
-        checked
-          ? "border-signal/40 bg-signal/30"
-          : "border-white/15 bg-white/[0.06]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full",
-          checked
-            ? "translate-x-5 bg-signal"
-            : "translate-x-0 bg-iron-300",
-        ].join(" ")}
-      />
-    </button>
   );
 }
 
@@ -82,43 +55,48 @@ export function SettingsField({ field, value, onSave, isSaved }) {
       <div className="flex shrink-0 items-center gap-3">
         {field.type === "boolean"
           ? (
-              <Toggle
+              <Switch
                 checked={value === true || value === "true"}
-                onChange={(v) => onSave(field.key, v ? "true" : "false")}
-                label={label}
+                onCheckedChange={(v) => onSave(field.key, v ? "true" : "false")}
+                aria-label={label}
               />
             )
           : field.type === "select"
           ? (
-              <select
-                value={localValue}
-                onChange={(e) => {
-                  setLocalValue(e.currentTarget.value);
-                  handleCommit(e.currentTarget.value);
-                }}
-                aria-label={label}
-                className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-              >
-                <option value="">{t("tools.default")}</option>
-                {field.options.map(
-                  (opt) => (<option key={opt} value={opt}>{opt}</option>)
-                )}
-              </select>
+              <div className="w-40 shrink-0">
+                <Select
+                  size="sm"
+                  value={localValue}
+                  onChange={(e) => {
+                    setLocalValue(e.currentTarget.value);
+                    handleCommit(e.currentTarget.value);
+                  }}
+                  aria-label={label}
+                >
+                  <option value="">{t("tools.default")}</option>
+                  {field.options.map(
+                    (opt) => (<option key={opt} value={opt}>{opt}</option>)
+                  )}
+                </Select>
+              </div>
             )
           : (
-              <input
-                type={field.type === "float" || field.type === "number" ? "number" : "text"}
-                value={localValue}
-                onChange={(e) => setLocalValue(e.currentTarget.value)}
-                onBlur={(e) => handleCommit(e.currentTarget.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCommit(e.currentTarget.value)}
-                step={field.step !== undefined ? String(field.step) : field.type === "float" ? "any" : "1"}
-                min={field.min !== undefined ? String(field.min) : undefined}
-                max={field.max !== undefined ? String(field.max) : undefined}
-                placeholder={t("tools.default")}
-                aria-label={label}
-                className="h-9 w-36 rounded-md border border-white/12 bg-white/[0.04] px-3 text-right font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
-              />
+              <div className="w-36 shrink-0">
+                <Input
+                  size="sm"
+                  type={field.type === "float" || field.type === "number" ? "number" : "text"}
+                  value={localValue}
+                  onChange={(e) => setLocalValue(e.currentTarget.value)}
+                  onBlur={(e) => handleCommit(e.currentTarget.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCommit(e.currentTarget.value)}
+                  step={field.step !== undefined ? String(field.step) : field.type === "float" ? "any" : "1"}
+                  min={field.min !== undefined ? String(field.min) : undefined}
+                  max={field.max !== undefined ? String(field.max) : undefined}
+                  placeholder={t("tools.default")}
+                  aria-label={label}
+                  className="text-right font-mono"
+                />
+              </div>
             )}
         <SavedIndicator visible={isSaved} />
       </div>

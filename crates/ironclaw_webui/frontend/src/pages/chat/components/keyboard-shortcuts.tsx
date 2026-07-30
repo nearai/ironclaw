@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Icon } from "@ironclaw/ui";
+import { Modal, ModalBody } from "@ironclaw/ui";
 
 const SHORTCUTS = [
   { keys: ["Enter"], descKey: "shortcuts.send" },
@@ -10,40 +10,16 @@ const SHORTCUTS = [
 
 export function KeyboardShortcuts({ open, onClose }) {
   const t = useT();
-  if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("shortcuts.title")}
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t("shortcuts.title")}
+      closeLabel={t("shortcuts.close")}
+      size="sm"
     >
-      <button
-        type="button"
-        aria-label={t("shortcuts.close")}
-        onClick={onClose}
-        className="absolute inset-0 bg-black/50"
-      ></button>
-      <div
-        className="relative w-full max-w-md rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-5 shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]"
-      >
-        <div className="mb-4 flex items-center gap-2">
-          <span className="grid h-8 w-8 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
-            <Icon name="bolt" className="h-4 w-4" />
-          </span>
-          <h2 className="text-base font-semibold text-[var(--v2-text-strong)]">
-            {t("shortcuts.title")}
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("shortcuts.close")}
-            className="ml-auto grid h-7 w-7 place-items-center rounded-md text-[var(--v2-text-faint)] transition-colors hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
-          >
-            <Icon name="close" className="h-4 w-4" />
-          </button>
-        </div>
+      <ModalBody>
         <ul className="flex flex-col gap-2">
           {SHORTCUTS.map(
             (shortcut, index) => (
@@ -64,7 +40,7 @@ export function KeyboardShortcuts({ open, onClose }) {
             )
           )}
         </ul>
-      </div>
-    </div>
+      </ModalBody>
+    </Modal>
   );
 }

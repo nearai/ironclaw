@@ -95,7 +95,7 @@ function loadComponents() {
   function Button() {}
   function Icon() {}
   function Link() {}
-  function StatusPill() {}
+  function Badge() {}
   function buildScopedLogsPath({ threadId, runId }) {
     const params = new URLSearchParams();
     if (threadId) params.set("thread_id", threadId);
@@ -108,7 +108,7 @@ function loadComponents() {
     Button,
     Icon,
     Link,
-    StatusPill,
+    Badge,
     URLSearchParams,
     buildScopedLogsPath,
     cn: (...parts) => parts.filter(Boolean).join(" "),

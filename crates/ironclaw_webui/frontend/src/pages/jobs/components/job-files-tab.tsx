@@ -1,4 +1,4 @@
-import { EmptyPanel, Panel } from "@ironclaw/ui";
+import { Callout, CodePanel, EmptyPanel, Card, Skeleton } from "@ironclaw/ui";
 
 function TreeNodes({ nodes, depth = 0, selectedPath, expandingPath, onToggleDirectory, onSelectPath }) {
   return (
@@ -59,16 +59,16 @@ export function JobFilesTab({
 
   return (
     <div className="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
-      <Panel className="min-h-[440px] p-4">
+      <Card className="min-h-[440px] p-4">
         <div className="border-b border-white/10 px-2 pb-3">
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Workspace tree</div>
           <p className="mt-2 text-sm leading-6 text-iron-300">Browse the sandbox output and inspect generated files inline.</p>
         </div>
 
         <div className="mt-3 max-h-[60vh] overflow-y-auto">
-          {treeError && (<div className="mx-2 mb-3 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{treeError}</div>)}
+          {treeError && (<Callout tone="danger" className="mx-2 mb-3">{treeError}</Callout>)}
           {isLoadingTree
-            ? (<div className="space-y-2 px-2">{[1, 2, 3, 4].map((i) => (<div key={i} className="v2-skeleton h-8 rounded-md" />))}</div>)
+            ? (<div className="space-y-2 px-2">{[1, 2, 3, 4].map((i) => (<Skeleton key={i} className="h-8 rounded-md" />))}</div>)
             : tree.length
               ? (
                   <TreeNodes
@@ -81,27 +81,27 @@ export function JobFilesTab({
                 )
               : (<div className="px-2 py-6 text-sm text-iron-300">No files were recorded for this workspace.</div>)}
         </div>
-      </Panel>
+      </Card>
 
-      <Panel className="min-h-[440px] p-5 sm:p-6">
+      <Card className="min-h-[440px] p-5 sm:p-6">
         <div className="border-b border-white/10 pb-3">
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">File preview</div>
           <p className="mt-2 break-all text-sm leading-6 text-iron-300">{selectedFile?.path || selectedPath || "Select a file from the tree to inspect its contents."}</p>
         </div>
 
         {fileError && !isLoadingFile
-          ? (<div className="mt-5 rounded-md border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{fileError}</div>)
+          ? (<Callout tone="danger" className="mt-5">{fileError}</Callout>)
           : isLoadingFile
-          ? (<div className="mt-5 space-y-3">{[1, 2, 3, 4, 5].map((i) => (<div key={i} className="v2-skeleton h-4 rounded" />))}</div>)
+          ? (<div className="mt-5 space-y-3">{[1, 2, 3, 4, 5].map((i) => (<Skeleton key={i} className="h-4 rounded" />))}</div>)
           : selectedFile
-            ? (<pre className="mt-5 max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-[18px] border border-white/10 bg-iron-950/90 p-4 font-mono text-xs leading-6 text-iron-100">{selectedFile.content}</pre>)
+            ? (<CodePanel wrap className="mt-5 max-h-[60vh]">{selectedFile.content}</CodePanel>)
             : (
                 <EmptyPanel
                   title="No file selected"
                   description="Pick a concrete file from the workspace tree to render it here."
                 />
               )}
-      </Panel>
+      </Card>
     </div>
   );
 }

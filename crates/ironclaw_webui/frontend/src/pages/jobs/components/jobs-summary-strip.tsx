@@ -1,4 +1,4 @@
-import { Panel, StatCard, type BadgeTone } from "@ironclaw/ui";
+import { StatStrip, StatTile, type BadgeTone } from "@ironclaw/ui";
 
 const SUMMARY_CARDS: { key: string; label: string; tone: BadgeTone; detail: string }[] = [
   { key: "total", label: "Total jobs", tone: "muted", detail: "All tracked work across agent and sandbox execution." },
@@ -11,24 +11,16 @@ const SUMMARY_CARDS: { key: string; label: string; tone: BadgeTone; detail: stri
 
 export function JobsSummaryStrip({ summary }) {
   return (
-    <Panel className="p-4 sm:p-5">
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        {SUMMARY_CARDS.map((card) => (
-          <div
-            key={card.key}
-            className="rounded-2xl border border-white/8 bg-white/[0.03] p-4"
-          >
-            <StatCard
-              label={card.label}
-              value={summary?.[card.key] ?? 0}
-              tone={card.tone}
-              detail={card.detail}
-              showDivider={false}
-              className="px-0 py-0"
-            />
-          </div>
-        ))}
-      </div>
-    </Panel>
+    <StatStrip columns={3}>
+      {SUMMARY_CARDS.map((card) => (
+        <StatTile
+          key={card.key}
+          label={card.label}
+          value={summary?.[card.key] ?? 0}
+          tone={card.tone}
+          detail={card.detail}
+        />
+      ))}
+    </StatStrip>
   );
 }

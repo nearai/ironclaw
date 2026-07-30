@@ -1,4 +1,4 @@
-import { Badge, Button, Icon, Panel, cn } from "@ironclaw/ui";
+import { Badge, Button, Icon, Card, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 
@@ -135,7 +135,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
   );
 
   return (
-    <Panel className="p-5 sm:p-6">
+    <Card className="p-5 sm:p-6">
       <div className="flex flex-col gap-5">
 
         {/* ── Header ──────────────────────────────────────────────── */}
@@ -348,6 +348,6 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
         )}
 
       </div>
-    </Panel>
+    </Card>
   );
 }

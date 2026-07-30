@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { Button, Icon } from "@ironclaw/ui";
+import { Button, Icon, Card, SearchInput, Toolbar, ToolbarGroup } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";
@@ -100,8 +100,8 @@ export function SettingsToolbar({
   );
 
   return (
-    <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+    <Card radius="sm" className="px-3 py-3">
+      <Toolbar>
         <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
           {canGoBack &&
           (
@@ -117,34 +117,18 @@ export function SettingsToolbar({
             </Button>
           )}
 
-          <label className="relative min-w-0 flex-1">
-            <span className="sr-only">{t("settings.searchPlaceholder")}</span>
-            <Icon
-              name="search"
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--v2-text-faint)]"
-            />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(event) => onSearchChange(event.currentTarget.value)}
-              placeholder={t("settings.searchPlaceholder")}
-              className="h-9 w-full rounded-md border border-white/12 bg-white/[0.04] pl-9 pr-9 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
-            />
-            {searchQuery &&
-            (
-              <button
-                type="button"
-                onClick={onSearchClear}
-                aria-label={t("settings.clearSearch")}
-                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] transition-colors hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
-              >
-                <Icon name="close" className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </label>
+          <SearchInput
+            className="min-w-0 flex-1"
+            label={t("settings.searchPlaceholder")}
+            value={searchQuery}
+            onChange={(event) => onSearchChange(event.currentTarget.value)}
+            onClear={onSearchClear}
+            clearLabel={t("settings.clearSearch")}
+            placeholder={t("settings.searchPlaceholder")}
+          />
         </div>
 
-        <div className="flex shrink-0 flex-wrap gap-2">
+        <ToolbarGroup>
           <Button
             type="button"
             variant="secondary"
@@ -174,8 +158,8 @@ export function SettingsToolbar({
             className="hidden"
             onChange={handleImportFile}
           />
-        </div>
-      </div>
+        </ToolbarGroup>
+      </Toolbar>
 
       <div className="mt-2 min-w-0">
         <div className="text-xs font-medium text-iron-400">{t("settings.manageJson")}</div>
@@ -185,13 +169,15 @@ export function SettingsToolbar({
             role="status"
             className={[
               "mt-1 text-xs",
-              message.tone === "error" ? "text-red-200" : "text-mint",
+              message.tone === "error"
+                ? "text-[var(--v2-danger-text)]"
+                : "text-[var(--v2-positive-text)]",
             ].join(" ")}
           >
             {message.text}
           </div>
         )}
       </div>
-    </div>
+    </Card>
   );
 }

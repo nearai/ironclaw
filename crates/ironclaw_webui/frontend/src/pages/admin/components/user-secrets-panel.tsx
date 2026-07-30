@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button, Input, Modal, ModalBody, ModalFooter, Panel } from "@ironclaw/ui";
+import { Button, Input, Modal, ModalBody, ModalFooter, Card, SkeletonList } from "@ironclaw/ui";
 import { useAdminUserSecrets } from "../hooks/useAdminUsers";
 
 export function UserSecretsPanel({ userId }) {
@@ -79,7 +79,7 @@ export function UserSecretsPanelView({
   };
 
   return (
-    <Panel className="p-5 sm:p-6" data-testid="admin-user-secrets-panel">
+    <Card className="p-5 sm:p-6" data-testid="admin-user-secrets-panel">
       <div className="mb-4">
         <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
           {t("admin.user.secrets.title")}
@@ -90,12 +90,14 @@ export function UserSecretsPanelView({
       </div>
 
       {query.isLoading ? (
-        <div className="space-y-2" aria-label={t("admin.user.secrets.loading")}>
-          <div className="v2-skeleton h-9 rounded" />
-          <div className="v2-skeleton h-9 rounded" />
-        </div>
+        <SkeletonList
+          label={t("admin.user.secrets.loading")}
+          count={2}
+          itemClassName="h-9 rounded"
+          className="space-y-2"
+        />
       ) : query.error ? (
-        <p className="text-sm text-red-200" role="alert">
+        <p className="text-sm text-[var(--v2-danger-text)]" role="alert">
           {t("admin.user.secrets.loadFailed", { message: query.error.message })}
         </p>
       ) : (
@@ -211,7 +213,7 @@ export function UserSecretsPanelView({
         </p>
       )}
       {putError && (
-        <p className="mt-4 text-sm text-red-200" role="alert">
+        <p className="mt-4 text-sm text-[var(--v2-danger-text)]" role="alert">
           {t("admin.user.secrets.actionFailed", { message: putError.message })}
         </p>
       )}
@@ -229,7 +231,7 @@ export function UserSecretsPanelView({
                 {t("admin.user.secrets.deleteDesc", { handle: pendingDelete })}
               </p>
               {deleteError && (
-                <p className="mt-4 text-sm text-red-200" role="alert">
+                <p className="mt-4 text-sm text-[var(--v2-danger-text)]" role="alert">
                   {t("admin.user.secrets.actionFailed", { message: deleteError.message })}
                 </p>
               )}
@@ -260,6 +262,6 @@ export function UserSecretsPanelView({
           </ModalFooter>
         </Modal>
       )}
-    </Panel>
+    </Card>
   );
 }

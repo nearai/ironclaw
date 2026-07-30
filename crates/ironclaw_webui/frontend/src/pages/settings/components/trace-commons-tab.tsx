@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Card } from "@ironclaw/ui";
+import { Callout, Card } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
 import { useAccountTraces } from "../hooks/useAccountTraces";
@@ -159,11 +159,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
     );
   } else if (query.isError) {
     body = (
-      <div
-        className="mt-4 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-      >
+      <Callout tone="danger" className="mt-4">
         {t("traceCommons.loadFailed")}
-      </div>
+      </Callout>
     );
   } else if (!credits || (!credits.enrolled && !(credits.submissions_total > 0))) {
     body = (
@@ -292,11 +290,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
           {t("traceCommons.submittedTracesTitle")}
         </h4>
         {tracesMode === "error" ? (
-          <div
-            className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-          >
+          <Callout tone="danger">
             {t("traceCommons.tracesLoadFailed")}
-          </div>
+          </Callout>
         ) : (
         <ul className="space-y-2">
           {traces.map(

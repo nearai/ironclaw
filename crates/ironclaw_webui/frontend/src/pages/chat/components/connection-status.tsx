@@ -1,4 +1,5 @@
 import React from "react";
+import { StatusDot } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { CONNECTION_STATUS, type ConnectionStatus } from "../lib/connection-status";
 
@@ -71,15 +72,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
               statusStyle,
             ].join(" ")}
           >
-            <span
-              aria-hidden="true"
-              className={[
-                "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
-                status === CONNECTION_STATUS.RECONNECTING
-                  ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
-                  : "",
-              ].join(" ")}
-            />
+            <StatusDot pulse={status === CONNECTION_STATUS.RECONNECTING} />
             <span className="max-w-40 truncate">{statusLabel}</span>
           </span>
           <button
@@ -95,15 +88,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
               dotStyle,
             ].join(" ")}
           >
-            <span
-              aria-hidden="true"
-              className={[
-                "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
-                status === CONNECTION_STATUS.RECONNECTING
-                  ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
-                  : "",
-              ].join(" ")}
-            />
+            <StatusDot pulse={status === CONNECTION_STATUS.RECONNECTING} />
           </button>
           <div
             id={disclosureId}

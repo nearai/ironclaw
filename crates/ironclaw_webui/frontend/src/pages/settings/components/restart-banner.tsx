@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { Button, Icon, Modal, ModalBody, ModalFooter } from "@ironclaw/ui";
+import { Button, Callout, Icon, Modal, ModalBody, ModalFooter } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useGatewayRestart } from "../hooks/useGatewayRestart";
 
@@ -12,57 +12,53 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
   return (
     <>
     <div className="space-y-3">
-      <div
+      <Callout
+        tone="warning"
         role="alert"
-        className="flex flex-col gap-3 rounded-xl border border-copper/30 bg-copper/10 px-4 py-3 sm:flex-row sm:items-center"
+        actions={
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={!restart.restartEnabled || restart.isRestarting}
+            onClick={restart.openConfirm}
+            title={!restart.restartEnabled ? restart.unavailableReason : undefined}
+            className="w-full sm:w-auto"
+          >
+            <Icon name={restart.isRestarting ? "pulse" : "bolt"} className="h-4 w-4" />
+            {restart.isRestarting ? t("settings.restartStarting") : t("settings.restartNow")}
+          </Button>
+        }
       >
-        <div className="flex min-w-0 flex-1 items-start gap-3">
-          <Icon name="bolt" className="mt-0.5 h-4 w-4 shrink-0 text-copper" />
-          <div className="min-w-0">
-            <p className="text-sm text-copper">
-              {t("settings.restartRequired")}
-            </p>
-            {!restart.restartEnabled &&
-            (
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
-                {restart.unavailableReason}
-              </p>
-            )}
-            {restart.isRestarting &&
-            (
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
-                {restart.progressLabel}
-              </p>
-            )}
-          </div>
-        </div>
-
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={!restart.restartEnabled || restart.isRestarting}
-          onClick={restart.openConfirm}
-          title={!restart.restartEnabled ? restart.unavailableReason : undefined}
-          className="w-full sm:w-auto"
-        >
-          <Icon name={restart.isRestarting ? "pulse" : "bolt"} className="h-4 w-4" />
-          {restart.isRestarting ? t("settings.restartStarting") : t("settings.restartNow")}
-        </Button>
-      </div>
+        <p className="text-sm">
+          {t("settings.restartRequired")}
+        </p>
+        {!restart.restartEnabled &&
+        (
+          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+            {restart.unavailableReason}
+          </p>
+        )}
+        {restart.isRestarting &&
+        (
+          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+            {restart.progressLabel}
+          </p>
+        )}
+      </Callout>
 
       {restart.error &&
       (
-        <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+        <Callout tone="danger">
           {restart.error}
-        </div>
+        </Callout>
       )}
 
       {restart.message &&
       (
-        <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-positive-text)_35%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] px-4 py-3 text-sm text-[var(--v2-positive-text)]">
+        <Callout tone="success">
           {restart.message}
-        </div>
+        </Callout>
       )}
     </div>
 
@@ -76,9 +72,9 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
         <p className="text-sm text-[var(--v2-text)]">
           {t("restart.description")}
         </p>
-        <div className="rounded-xl border border-copper/25 bg-copper/10 px-3 py-2 text-xs text-copper">
+        <Callout tone="warning">
           {t("restart.warning")}
-        </div>
+        </Callout>
       </ModalBody>
       <ModalFooter>
         <Button

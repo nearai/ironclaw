@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/ui";
+import { StatStrip, StatTile } from "@ironclaw/ui";
 import { formatCurrency, summarizeOverview } from "../lib/projects-presenters";
 
 const metricTone = {
@@ -38,19 +38,17 @@ export function ProjectsSummaryStrip({ overview }) {
   ];
 
   return (
-    <Panel className="p-4 sm:p-5">
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {cards.map((card) => (
-          <div key={card.key} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{card.label}</div>
-              <StatusPill tone={metricTone[card.key]} label={card.badgeLabel} />
-            </div>
-            <div className="mt-4 text-3xl font-semibold tracking-tight text-white">{card.value}</div>
-            <p className="mt-2 text-sm leading-6 text-iron-300">{card.detail}</p>
-          </div>
-        ))}
-      </div>
-    </Panel>
+    <StatStrip columns={3}>
+      {cards.map((card) => (
+        <StatTile
+          key={card.key}
+          label={card.label}
+          value={card.value}
+          tone={metricTone[card.key]}
+          badgeLabel={card.badgeLabel}
+          detail={card.detail}
+        />
+      ))}
+    </StatStrip>
   );
 }

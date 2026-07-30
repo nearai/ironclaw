@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Badge, Button } from "@ironclaw/ui";
+import { Badge, Button, Callout, SectionHeader } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
@@ -27,39 +27,27 @@ export function WorkspacePage() {
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="flex h-full min-h-0 flex-col space-y-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h1
-                  data-testid="workspace-heading"
-                  className="text-lg font-semibold text-[var(--v2-text-strong)]"
-                >{t("workspace.title")}</h1>
+          <SectionHeader
+            titleAs="h1"
+            title={<span data-testid="workspace-heading">{t("workspace.title")}</span>}
+            description={t("workspace.subtitle")}
+            actions={
+              <>
                 <Badge tone="muted" label={t("workspace.readOnly")} />
-              </div>
-              <p className="mt-0.5 text-sm text-[var(--v2-text-muted)]">{t("workspace.subtitle")}</p>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={workspace.refresh}
-              disabled={workspace.isFetching}
-            >
-              {workspace.isFetching ? t("workspace.refreshing") : t("workspace.refresh")}
-            </Button>
-          </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={workspace.refresh}
+                  disabled={workspace.isFetching}
+                >
+                  {workspace.isFetching ? t("workspace.refreshing") : t("workspace.refresh")}
+                </Button>
+              </>
+            }
+          />
 
           {workspace.error &&
-          (
-            // Main's exact banner (red-* literals, no flex row) — Callout's
-            // danger tone renders different colors, and this extraction must
-            // not change rendered output.
-            <div
-              role="alert"
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
-              {workspace.error.message}
-            </div>
-          )}
+          (<Callout tone="danger">{workspace.error.message}</Callout>)}
           <FeedbackBanner
             result={workspace.result}
             onDismiss={workspace.clearResult}

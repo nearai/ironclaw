@@ -44,6 +44,7 @@ function renderCard({ gate, blockPopup = false } = {}) {
     useT: () => (key, params) =>
       params ? `${key}:${JSON.stringify(params)}` : key,
     Button() {},
+    Callout() {},
     Icon() {},
     Spinner() {},
     AuthGateShell() {},
@@ -217,6 +218,7 @@ function renderCardWithStates(states, gate = defaultGate()) {
     useT: () => (key, params) =>
       params ? `${key}:${JSON.stringify(params)}` : key,
     Button() {},
+    Callout() {},
     Icon() {},
     Spinner() {},
     AuthGateShell() {},

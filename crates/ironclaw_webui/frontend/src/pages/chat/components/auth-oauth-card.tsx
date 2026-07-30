@@ -26,7 +26,7 @@
  */
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button, Icon } from "@ironclaw/ui";
+import { Button, Callout, Icon } from "@ironclaw/ui";
 import { openAuthPopup } from "../../../lib/product-auth-oauth-events";
 import { AuthGateShell } from "./auth-gate-shell";
 
@@ -184,22 +184,16 @@ export function AuthOauthCard({ gate, onCancel }) {
 
       {error &&
       (
-        <div
-          className="mt-3 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-          role="alert"
-        >
+        <Callout tone="danger" className="mt-3">
           {error}
-        </div>
+        </Callout>
       )}
       {closedNotice &&
       (
-        <div
-          className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
-          role="status"
-        >
+        <Callout tone="warning" className="mt-3">
           The {providerLabel} authorization window closed before you finished
           connecting. Re-open it above to try again.
-        </div>
+        </Callout>
       )}
     </AuthGateShell>
   );

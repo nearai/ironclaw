@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Badge, Button, Icon } from "@ironclaw/ui";
+import { Badge, Button, Icon, IconButton } from "@ironclaw/ui";
 import {
   RUNTIME_LABELS,
   STATE_TONES,
@@ -29,7 +29,7 @@ const META = "mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] t
 const DESC = "mt-2 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-[var(--v2-text-muted)]";
 const FOOTER = "mt-3 flex items-center gap-2 border-t border-[var(--v2-panel-border)] pt-3";
 const DISCLOSURE =
-  "v2-button inline-flex items-center gap-1.5 rounded border-0 bg-transparent p-0 " +
+  "inline-flex cursor-pointer items-center gap-1.5 rounded border-0 bg-transparent p-0 " +
   "font-mono text-[11px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-accent-text)] " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]";
 const CHIP =
@@ -78,19 +78,17 @@ function OverflowMenu({ actions, isBusy }) {
 
   return (
     <div ref={ref} className="relative shrink-0">
-      <button
+      <IconButton
         ref={triggerRef}
-        type="button"
         aria-label={t("extensions.moreActions")}
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
         data-extension-return-focus="true"
         disabled={isBusy}
         onClick={() => setOpen((v) => !v)}
-        className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] transition-colors hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Icon name="more" className="h-4 w-4" strokeWidth={2.4} />
-      </button>
+      </IconButton>
       {open &&
       (
         <div

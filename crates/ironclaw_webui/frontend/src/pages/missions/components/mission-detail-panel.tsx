@@ -1,16 +1,15 @@
 import { useT } from "../../../lib/i18n";
-import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
+import {
+  Button,
+  DetailList,
+  DetailRow,
+  EmptyPanel,
+  Card,
+  SkeletonList,
+  Badge,
+} from "@ironclaw/ui";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
-
-function MetaCard({ label, value }) {
-  return (
-    <div className="rounded-xl border border-white/8 bg-iron-950/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value}</div>
-    </div>
-  );
-}
 
 function ActionButtons({ mission, isBusy, onFire, onPause, onResume }) {
   const t = useT();
@@ -49,9 +48,10 @@ export function MissionDetailPanel({
   const t = useT();
   if (isLoading) {
     return (
-      <div className="space-y-4">
-        {[1, 2, 3].map((index) => (<div key={index} className="v2-skeleton h-36 rounded-xl" />))}
-      </div>
+      <SkeletonList
+        label={t("missions.detail.loading")}
+        itemClassName="h-36 rounded-xl"
+      />
     );
   }
 
@@ -66,7 +66,7 @@ export function MissionDetailPanel({
 
   return (
     <div className="space-y-4">
-      <Panel className="p-4 sm:p-5">
+      <Card className="p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.dossier")}</div>
@@ -81,15 +81,23 @@ export function MissionDetailPanel({
               </button>
             )}
           </div>
-          <StatusPill tone={missionTone(mission.status)} label={mission.status} />
+          <Badge tone={missionTone(mission.status)} label={mission.status} />
         </div>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <MetaCard label={t("missions.meta.cadence")} value={mission.cadence_description || mission.cadence_type || t("missions.meta.manual")} />
-          <MetaCard label={t("missions.meta.threadsToday")} value={`${mission.threads_today || 0} / ${mission.max_threads_per_day || t("missions.meta.unlimited")}`} />
-          <MetaCard label={t("missions.meta.nextFire")} value={formatMissionDate(mission.next_fire_at)} />
-          <MetaCard label={t("missions.meta.updated")} value={formatMissionDate(mission.updated_at)} />
-        </div>
+        <DetailList className="mt-2 grid gap-x-6 sm:grid-cols-2">
+          <DetailRow layout="stacked" term={t("missions.meta.cadence")}>
+            {mission.cadence_description || mission.cadence_type || t("missions.meta.manual")}
+          </DetailRow>
+          <DetailRow layout="stacked" term={t("missions.meta.threadsToday")}>
+            {`${mission.threads_today || 0} / ${mission.max_threads_per_day || t("missions.meta.unlimited")}`}
+          </DetailRow>
+          <DetailRow layout="stacked" term={t("missions.meta.nextFire")}>
+            {formatMissionDate(mission.next_fire_at)}
+          </DetailRow>
+          <DetailRow layout="stacked" term={t("missions.meta.updated")}>
+            {formatMissionDate(mission.updated_at)}
+          </DetailRow>
+        </DetailList>
 
         <div className="mt-5 flex flex-wrap gap-2">
           <ActionButtons
@@ -100,35 +108,35 @@ export function MissionDetailPanel({
             onResume={onResume}
           />
         </div>
-      </Panel>
+      </Card>
 
-      <Panel className="p-4 sm:p-5">
+      <Card className="p-4 sm:p-5">
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.brief")}</div>
         <div className="mt-4 text-sm leading-6 text-iron-200">
           <MarkdownRenderer content={mission.goal || t("missions.noGoal")} />
         </div>
-      </Panel>
+      </Card>
 
       {mission.current_focus && (
-        <Panel className="p-4 sm:p-5">
+        <Card className="p-4 sm:p-5">
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.currentFocus")}</div>
           <div className="mt-4 text-sm leading-6 text-iron-200">
             <MarkdownRenderer content={mission.current_focus} />
           </div>
-        </Panel>
+        </Card>
       )}
 
       {mission.success_criteria && (
-        <Panel className="p-4 sm:p-5">
+        <Card className="p-4 sm:p-5">
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.successCriteria")}</div>
           <div className="mt-4 text-sm leading-6 text-iron-200">
             <MarkdownRenderer content={mission.success_criteria} />
           </div>
-        </Panel>
+        </Card>
       )}
 
       {mission.threads?.length ? (
-        <Panel className="p-4 sm:p-5">
+        <Card className="p-4 sm:p-5">
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.spawnedThreads")}</div>
           <div className="mt-4 space-y-3">
             {mission.threads.map((thread) => (
@@ -140,12 +148,12 @@ export function MissionDetailPanel({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0 truncate text-sm font-semibold text-white">{thread.title || thread.goal}</div>
-                  <StatusPill tone={missionTone(thread.state === "Running" ? "Active" : thread.state === "Failed" ? "Failed" : "Completed")} label={thread.state} />
+                  <Badge tone={missionTone(thread.state === "Running" ? "Active" : thread.state === "Failed" ? "Failed" : "Completed")} label={thread.state} />
                 </div>
               </button>
             ))}
           </div>
-        </Panel>
+        </Card>
       ) : null}
     </div>
   );

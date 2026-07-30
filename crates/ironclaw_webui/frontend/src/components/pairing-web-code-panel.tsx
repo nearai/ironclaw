@@ -2,7 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import React from "react";
-import { Button } from "@ironclaw/ui";
+import { Button, Skeleton } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 import { notifyChannelConnected } from "../lib/channel-connection-events";
 import {
@@ -282,7 +282,7 @@ export function PairingWebCodePanel({
                 </Button>
               </div>
             )
-          : (<div className="v2-skeleton h-3 w-24 rounded" />)}
+          : (<Skeleton className="h-3 w-24 rounded" />)}
       </div>
     );
   }

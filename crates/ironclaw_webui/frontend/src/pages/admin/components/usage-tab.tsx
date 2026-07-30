@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard } from "@ironclaw/ui";
+import { Card, Skeleton, StatCard } from "@ironclaw/ui";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
   formatCost,
@@ -43,18 +43,18 @@ export function UsageTab({ onSelectUser }) {
 
   if (usageQuery.isLoading) {
     return (
-      <Panel className="p-5 sm:p-6">
-        <div className="v2-skeleton mb-4 h-4 w-32 rounded" />
+      <Card className="p-5 sm:p-6">
+        <Skeleton className="mb-4 h-4 w-32 rounded" />
         <div className="grid gap-4 sm:grid-cols-4">
-          {[1, 2, 3, 4].map((i) => (<div key={i} className="v2-skeleton h-28 rounded-lg" />))}
+          {[1, 2, 3, 4].map((i) => (<Skeleton key={i} className="h-28 rounded-lg" />))}
         </div>
-      </Panel>
+      </Card>
     );
   }
 
   return (
     <div className="space-y-5">
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.usage.overview")}</h3>
           <div className="flex gap-1">
@@ -88,10 +88,10 @@ export function UsageTab({ onSelectUser }) {
                 <StatCard label={t("admin.usage.totalCost")} value={formatCost(totals.cost.toFixed(2))} tone="signal" />
               </div>
             )}
-      </Panel>
+      </Card>
 
       {byUser.length > 0 && (
-        <Panel className="p-5 sm:p-6">
+        <Card className="p-5 sm:p-6">
           <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.usage.perUser")}</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -130,11 +130,11 @@ export function UsageTab({ onSelectUser }) {
               </tbody>
             </table>
           </div>
-        </Panel>
+        </Card>
       )}
 
       {byModel.length > 0 && (
-        <Panel className="p-5 sm:p-6">
+        <Card className="p-5 sm:p-6">
           <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.usage.perModel")}</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -162,7 +162,7 @@ export function UsageTab({ onSelectUser }) {
               </tbody>
             </table>
           </div>
-        </Panel>
+        </Card>
       )}
     </div>
   );

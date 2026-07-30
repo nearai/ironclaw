@@ -91,9 +91,11 @@ function renderToolsModule({
   };
   const context = {
     Badge: "Badge",
+    Callout: "Callout",
     Card: "Card",
     Icon: "Icon",
     SelectMenu: "SelectMenu",
+    Switch: "Switch",
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
@@ -109,7 +111,7 @@ function renderToolsModule({
   };
   const exports = runVmModuleForTest(
     "./tools-tab.tsx",
-    ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"],
+    ["ToolsTab", "AutoApproveCard", "ToolRow"],
     context,
     import.meta.url
   );
@@ -124,11 +126,14 @@ test("Tools tab renders global auto-approve control and saves the operator key",
     onSave: (key, value) => saved.push({ key, value }),
   });
 
-  assert.match(collectTemplateText(exports.Switch({ checked: false, label: "x", onChange: () => {} })), /role="switch"/);
-  const switchNode = findComponentNode(rendered, exports.Switch);
-  assert.ok(switchNode, "expected auto-approve card to render a switch");
+  const switchNode = findComponentNode(rendered, "Switch");
+  assert.ok(switchNode, "expected auto-approve card to render a DS switch");
 
-  componentProps(switchNode, exports.Switch).onChange(true);
+  const props = componentProps(switchNode, "Switch");
+  assert.equal(props.checked, false);
+  // aria-label is captured under "label" by the prop-name matcher.
+  assert.equal(props.label, "settings.field.autoApproveEligibleTools");
+  props.onCheckedChange(true);
   assert.deepEqual(saved, [{ key: "agent.auto_approve_tools", value: true }]);
 });
 
@@ -136,8 +141,8 @@ test("Auto-approve toggle defaults ON when unset and reads present values strict
   const { exports } = renderToolsModule();
   const checkedFor = (settings) => {
     const rendered = exports.AutoApproveCard({ settings, savedKeys: {}, onSave: () => {} });
-    const node = findComponentNode(rendered, exports.Switch);
-    return componentProps(node, exports.Switch).checked;
+    const node = findComponentNode(rendered, "Switch");
+    return componentProps(node, "Switch").checked;
   };
   // Absent → default ON.
   assert.equal(checkedFor({}), true, "unset must default ON");
@@ -372,8 +377,9 @@ test("Tools tab surfaces permission save failures", () => {
 
   const rendered = exports.ToolsTab({});
 
-  assert.match(collectTemplateText(rendered), /role="alert"/);
-  assert.match(collectTemplateText(rendered), /var\(--v2-danger-text\)/);
+  const callout = findComponentNode(rendered, "Callout");
+  assert.ok(callout, "expected the save failure to render as a Callout");
+  assert.equal(componentProps(callout, "Callout").tone, "danger");
   assert.doesNotMatch(collectTemplateText(rendered), /text-red-|bg-red-|border-red-/);
   assert.ok(collectScalars(rendered).includes("Save failed: permission denied"));
 });

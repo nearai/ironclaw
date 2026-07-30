@@ -387,7 +387,7 @@ const eventsByJob: Record<string, JobEvent[]> = {
       {
         role: "assistant",
         content:
-          "Prop tables extracted for all 34 components. Rendering MDX pages now — Button, Panel, and StatusPill get hand-written usage examples.",
+          "Prop tables extracted for all 34 components. Rendering MDX pages now — Button, Card, and Badge get hand-written usage examples.",
       },
       9 * MINUTE
     ),
@@ -457,7 +457,7 @@ const filesByJob: Record<string, JobFileNode[]> = {
       path: "docgen.config.json",
       is_dir: false,
       content:
-        '{\n  "source": "packages/ui/src",\n  "out": "docs/",\n  "examples": ["Button", "Panel", "StatusPill"]\n}\n',
+        '{\n  "source": "packages/ui/src",\n  "out": "docs/",\n  "examples": ["Button", "Card", "Badge"]\n}\n',
     },
   ],
 };

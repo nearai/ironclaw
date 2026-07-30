@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/ui";
+import { Callout, Card, Badge } from "@ironclaw/ui";
 
 function attentionTone(item) {
   return item?.type === "failure" ? "danger" : "warning";
@@ -14,14 +14,11 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
   if (!items?.length) return null;
 
   return (
-    <Panel className="overflow-hidden border-amber-300/10 p-0">
-      <div className="border-b border-amber-300/10 px-5 py-4 sm:px-6">
-        <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-copper">{t("projects.attention.title")}</div>
-        <p className="mt-2 max-w-[70ch] text-sm leading-6 text-iron-200">
-          {t("projects.attention.desc")}
-        </p>
-      </div>
-      <div className="grid gap-3 p-4 sm:p-5 xl:grid-cols-2">
+    <Card className="p-4 sm:p-5">
+      <Callout tone="warning" title={t("projects.attention.title")}>
+        {t("projects.attention.desc")}
+      </Callout>
+      <div className="mt-4 grid gap-3 xl:grid-cols-2">
         {items.map((item) => (
           <button
             key={`${item.project_id}-${item.thread_id || item.message}`}
@@ -37,7 +34,7 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
                     : t("projects.attention.projectLabel")}
                 </div>
               </div>
-              <StatusPill tone={attentionTone(item)} label={attentionLabel(item, t)} />
+              <Badge tone={attentionTone(item)} label={attentionLabel(item, t)} />
             </div>
             <p className="mt-3 text-sm leading-6 text-iron-200">{item.message}</p>
             <div className="mt-4 text-xs uppercase tracking-[0.16em] text-signal group-hover:text-white">
@@ -46,6 +43,6 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
           </button>
         ))}
       </div>
-    </Panel>
+    </Card>
   );
 }

@@ -1,6 +1,6 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
-import { ConfirmDialog } from "@ironclaw/ui";
+import { ConfirmDialog, SkeletonList } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
@@ -163,22 +163,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (
       <div className="flex h-full flex-col overflow-y-auto">
         <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-          <div className="space-y-5">
-            {[1, 2, 3].map(
-              (i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between border-t border-white/[0.06] py-4 first:border-0"
-                >
-                  <div>
-                    <div className="v2-skeleton h-4 w-40 rounded" />
-                    <div className="v2-skeleton mt-2 h-3 w-56 rounded" />
-                  </div>
-                  <div className="v2-skeleton h-7 w-16 rounded-full" />
-                </div>
-              )
-            )}
-          </div>
+          <SkeletonList label={t("ext.loading")} className="space-y-5" itemClassName="h-16 rounded-[14px]" />
         </div>
       </div>
     );

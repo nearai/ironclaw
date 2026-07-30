@@ -1,5 +1,14 @@
 import { useT } from "../../../lib/i18n";
-import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
+import {
+  Button,
+  EmptyPanel,
+  Card,
+  SearchInput,
+  SectionHeader,
+  Select,
+  Badge,
+  Toolbar,
+} from "@ironclaw/ui";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
 
 function buildStatusOptions(t) {
@@ -16,13 +25,13 @@ function FilterSelect({ value, onChange, children, label }) {
   return (
     <label className="min-w-[160px] flex-1 sm:flex-none">
       <span className="sr-only">{label}</span>
-      <select
+      <Select
+        size="sm"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
-        className="v2-select h-11 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none focus:border-signal/40"
       >
         {children}
-      </select>
+      </Select>
     </label>
   );
 }
@@ -45,7 +54,7 @@ function MissionRow({ mission, selectedMissionId, onSelectMission, onOpenProject
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <div className="min-w-0 truncate text-lg font-semibold text-iron-100">{mission.name}</div>
-              <StatusPill tone={missionTone(mission.status)} label={mission.status} />
+              <Badge tone={missionTone(mission.status)} label={mission.status} />
             </div>
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">{mission.goal || t("missions.noGoal")}</p>
           </div>
@@ -91,23 +100,23 @@ export function MissionsList({
   const t = useT();
   const statusOptions = buildStatusOptions(t);
   return (
-    <Panel className="p-4 sm:p-5">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.title")}</div>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-iron-100">{t("missions.subtitle")}</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-            {t("missions.summary", { missions: totalMissions, projects: projectOptions.length })}
-          </p>
-        </div>
-      </div>
+    <Card className="p-4 sm:p-5">
+      <SectionHeader
+        eyebrow={t("missions.title")}
+        title={t("missions.subtitle")}
+        titleAs="h1"
+        description={t("missions.summary", { missions: totalMissions, projects: projectOptions.length })}
+      />
 
-      <div className="mt-5 flex flex-wrap gap-3">
-        <input
+      <Toolbar className="mt-5">
+        <SearchInput
+          label={t("missions.searchPlaceholder")}
           value={search}
           onChange={(event) => onSearchChange(event.currentTarget.value)}
+          onClear={() => onSearchChange("")}
+          clearLabel={t("missions.clearSearch")}
           placeholder={t("missions.searchPlaceholder")}
-          className="h-11 min-w-[220px] flex-1 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/40"
+          className="min-w-[220px] md:flex-1"
         />
         <FilterSelect value={statusFilter} onChange={onStatusFilterChange} label={t("missions.filter.status")}>
           {statusOptions.map((status) => (<option key={status.value} value={status.value}>{status.label}</option>))}
@@ -116,7 +125,7 @@ export function MissionsList({
           <option value="all">{t("missions.filter.allProjects")}</option>
           {projectOptions.map((project) => (<option key={project.id} value={project.id}>{project.name}</option>))}
         </FilterSelect>
-      </div>
+      </Toolbar>
 
       <div className="mt-5 space-y-3">
         {missions.length
@@ -133,10 +142,10 @@ export function MissionsList({
               <EmptyPanel
                 title={t("missions.emptyTitle")}
                 description={t("missions.emptyDesc")}
-                boxed={false}
+                variant="plain"
               />
             )}
       </div>
-    </Panel>
+    </Card>
   );
 }

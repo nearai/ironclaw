@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React from "react";
+import { Callout } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { toast } from "../../lib/toast";
 import {
@@ -325,12 +326,9 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         {historyLoadError &&
         (
-          <div
-            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
-            role="alert"
-          >
+          <Callout tone="danger" className="mx-4 mt-3">
             {t(historyLoadError)}
-          </div>
+          </Callout>
         )}
 
         {showLanding &&

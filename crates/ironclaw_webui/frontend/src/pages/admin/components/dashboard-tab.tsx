@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard, StatusPill } from "@ironclaw/ui";
+import { Card, Skeleton, StatCard, Badge } from "@ironclaw/ui";
 import { useUsageSummary } from "../hooks/useAdminUsage";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
@@ -53,8 +53,8 @@ function RecentUsersTable({ users, onSelectUser }) {
                     {u.display_name || u.id}
                   </button>
                 </td>
-                <td className="py-3 pr-4"><StatusPill tone={roleTone(u.role)} label={formatUserRole(u.role, t)} /></td>
-                <td className="py-3 pr-4"><StatusPill tone={statusTone(u.status)} label={formatUserStatus(u.status, t)} /></td>
+                <td className="py-3 pr-4"><Badge tone={roleTone(u.role)} label={formatUserRole(u.role, t)} /></td>
+                <td className="py-3 pr-4"><Badge tone={statusTone(u.status)} label={formatUserStatus(u.status, t)} /></td>
                 <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{u.job_count ?? 0}</td>
                 <td className="py-3 text-xs text-iron-300">{formatRelativeTime(u.last_active_at, t)}</td>
               </tr>
@@ -80,19 +80,19 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
   if (isLoading) {
     return (
       <div className="space-y-5">
-        <Panel className="p-5 sm:p-6">
-          <div className="v2-skeleton mb-4 h-4 w-32 rounded" />
+        <Card className="p-5 sm:p-6">
+          <Skeleton className="mb-4 h-4 w-32 rounded" />
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {[1, 2, 3, 4].map((i) => (<div key={i} className="v2-skeleton h-28 rounded-lg" />))}
+            {[1, 2, 3, 4].map((i) => (<Skeleton key={i} className="h-28 rounded-lg" />))}
           </div>
-        </Panel>
+        </Card>
       </div>
     );
   }
 
   return (
     <div className="space-y-5">
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.dashboard.systemOverview")}</h3>
           {summary.uptime_seconds != null && (
@@ -121,9 +121,9 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
             tone="signal"
           />
         </div>
-      </Panel>
+      </Card>
 
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <h3 className="mb-5 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.dashboard.usage30d")}</h3>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
@@ -147,9 +147,9 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
             tone={(jobs.in_progress || 0) > 0 ? "success" : "muted"}
           />
         </div>
-      </Panel>
+      </Card>
 
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.dashboard.recentUsers")}</h3>
           <button
@@ -160,7 +160,7 @@ export function DashboardTab({ onSelectUser, onNavigateTab }) {
           </button>
         </div>
         <RecentUsersTable users={users} onSelectUser={onSelectUser} />
-      </Panel>
+      </Card>
     </div>
   );
 }

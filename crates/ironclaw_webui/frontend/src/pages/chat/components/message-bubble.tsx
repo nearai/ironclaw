@@ -1,7 +1,7 @@
 import React from "react";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
-import { Icon } from "@ironclaw/ui";
+import { Icon, IconButton } from "@ironclaw/ui";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
@@ -311,39 +311,35 @@ function MessageBubbleImpl({
           {(showActions || showRetryAction) && (
             <div className="flex shrink-0 items-center gap-1">
             {showActions && (
-              <button
-                type="button"
+              <IconButton
                 onClick={copy}
                 title={copied ? t("common.copied") : t("chat.copyMessage")}
                 aria-label={copied ? t("common.copied") : t("chat.copyMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 transition-colors hover:bg-[var(--v2-surface-soft)] hover:text-iron-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
               >
                 <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />
-              </button>
+              </IconButton>
             )}
             {showArtifactAction && (
-              <button
-                type="button"
+              <IconButton
                 onClick={downloadArtifact}
                 disabled={artifactDownloading}
                 title={artifactDownloading ? t("common.loading") : t("common.download")}
                 aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
                 data-testid="download-run-artifact"
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 transition-colors hover:bg-[var(--v2-surface-soft)] hover:text-iron-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
-              </button>
+              </IconButton>
             )}
             {showRetryAction && (
-              <button
-                type="button"
+              <IconButton
+                variant="plain"
                 onClick={() => onRetry?.(message)}
                 title={t("chat.retryMessage")}
                 aria-label={t("chat.retryMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 transition-colors hover:bg-[var(--v2-surface-soft)] hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
+                className="text-[var(--v2-danger-text)] hover:bg-[var(--v2-surface-soft)] hover:opacity-80"
               >
                 <Icon name="retry" className="h-3.5 w-3.5" />
-              </button>
+              </IconButton>
             )}
             </div>
           )}

@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge, Button, Card, EmptyPanel, Skeleton } from "@ironclaw/ui";
+import { Badge, Button, Card, CodePanel, EmptyPanel, Skeleton } from "@ironclaw/ui";
 import { useI18n, useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
@@ -37,7 +37,7 @@ function FileBody({ path, file }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-6 sm:py-4">
         {isMarkdownPath(path)
           ? (<MarkdownRenderer content={file.content} className="max-w-4xl text-base leading-7" />)
-          : (<pre className="overflow-x-auto whitespace-pre-wrap font-mono text-sm leading-6 text-[var(--v2-text-strong)]">{file.content}</pre>)}
+          : (<CodePanel wrap>{file.content}</CodePanel>)}
       </div>
     );
   }

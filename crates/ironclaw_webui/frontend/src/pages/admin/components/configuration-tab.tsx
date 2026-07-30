@@ -1,16 +1,16 @@
 // @ts-nocheck
 import React from "react";
-import { Button, Input, Panel } from "@ironclaw/ui";
+import { Button, Input, Card, SkeletonList } from "@ironclaw/ui";
 import { clientActionId } from "../../../lib/api";
 import { useAdminConfiguration } from "../hooks/useAdminConfiguration";
 
 export function AdminConfigurationTab() {
   const state = useAdminConfiguration();
   if (state.query.isLoading) {
-    return <div className="v2-skeleton h-48 rounded-xl" aria-label="Loading configuration" />;
+    return <SkeletonList label="Loading configuration" count={1} itemClassName="h-48 rounded-xl" />;
   }
   if (state.query.error) {
-    return <p className="text-sm text-red-200" role="alert">Unable to load extension configuration.</p>;
+    return <p className="text-sm text-[var(--v2-danger-text)]" role="alert">Unable to load extension configuration.</p>;
   }
   return (
     <section className="space-y-5" data-testid="admin-configuration-page">
@@ -23,7 +23,7 @@ export function AdminConfigurationTab() {
         </p>
       </header>
       {state.groups.length === 0 ? (
-        <Panel className="p-6 text-sm text-iron-300">No extensions require deployment configuration.</Panel>
+        <Card className="p-6 text-sm text-iron-300">No extensions require deployment configuration.</Card>
       ) : state.groups.map((group) => (
         <ConfigurationGroup key={group.group_id} group={group} state={state} />
       ))}
@@ -96,7 +96,7 @@ export function ConfigurationGroup({ group, state }) {
   };
 
   return (
-    <Panel className="p-5 sm:p-6" data-testid="admin-configuration-group">
+    <Card className="p-5 sm:p-6" data-testid="admin-configuration-group">
       <form onSubmit={submit}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -154,10 +154,10 @@ export function ConfigurationGroup({ group, state }) {
           </Button>
           {saved && <span className="text-sm text-signal" role="status">Configuration saved.</span>}
           {state.saveError && state.savingGroupId === group.group_id && (
-            <span className="text-sm text-red-200" role="alert">Unable to save configuration.</span>
+            <span className="text-sm text-[var(--v2-danger-text)]" role="alert">Unable to save configuration.</span>
           )}
         </div>
       </form>
-    </Panel>
+    </Card>
   );
 }

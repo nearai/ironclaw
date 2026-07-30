@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useNavigate, useParams } from "react-router";
-import { Button, EmptyPanel } from "@ironclaw/ui";
+import { Button, Callout, EmptyPanel, SkeletonList } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { JobActivityTab } from "./components/job-activity-tab";
@@ -13,31 +13,24 @@ import { useJobDetail } from "./hooks/useJobDetail";
 import { useJobFiles } from "./hooks/useJobFiles";
 import { useJobs } from "./hooks/useJobs";
 
+const RESULT_TONES = {
+  success: "success",
+  error: "danger",
+  info: "info",
+};
+
 function FeedbackBanner({ result, onDismiss }) {
   const t = useT();
   if (!result) return null;
 
-  const tone = {
-    success: "border-mint/30 bg-mint/10 text-mint",
-    error: "border-red-400/30 bg-red-500/10 text-red-200",
-    info: "border-signal/30 bg-signal/10 text-signal",
-  };
-
   return (
-    <div
-      className={[
-        "flex items-center gap-3 rounded-xl border px-4 py-3 text-sm",
-        tone[result.type] || tone.info,
-      ].join(" ")}
+    <Callout
+      tone={RESULT_TONES[result.type] || RESULT_TONES.info}
+      onDismiss={onDismiss}
+      dismissLabel={t("jobs.dismiss")}
     >
-      <span className="min-w-0 flex-1">{result.message}</span>
-      <button
-        onClick={onDismiss}
-        className="shrink-0 rounded opacity-70 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
-      >
-        {t("jobs.dismiss")}
-      </button>
-    </div>
+      {result.message}
+    </Callout>
   );
 }
 
@@ -114,12 +107,10 @@ export function JobsPage() {
   if (jobId) {
     if (detailState.isLoading) {
       detailContent = (
-        <div className="space-y-4">
-          {[1, 2, 3].map(
-            (i) =>
-              (<div key={i} className="v2-skeleton h-32 rounded-[18px]" />)
-          )}
-        </div>
+        <SkeletonList
+          label={t("jobs.detail.loading")}
+          itemClassName="h-32 rounded-[18px]"
+        />
       );
     } else if (detailState.error || !detailState.job) {
       detailContent = (
@@ -175,17 +166,7 @@ export function JobsPage() {
     }
   } else {
     detailContent = jobsState.isLoading
-      ? (
-          <div className="space-y-4">
-            {[1, 2, 3].map(
-              (i) =>
-                (<div
-                  key={i}
-                  className="v2-skeleton h-28 rounded-[18px]"
-                />)
-            )}
-          </div>
-        )
+      ? (<SkeletonList label={t("jobs.loading")} />)
       : (
           <JobsList
             jobs={filteredJobs}
@@ -213,11 +194,9 @@ export function JobsPage() {
           </div>)}
           {jobsState.error &&
           (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <Callout tone="danger">
               {jobsState.error.message}
-            </div>
+            </Callout>
           )}
           <FeedbackBanner
             result={jobsState.actionResult}

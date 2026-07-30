@@ -1,6 +1,7 @@
 import { useNavigate, useParams } from "react-router";
-import { Button } from "@ironclaw/ui";
+import { Button, Callout, SkeletonList } from "@ironclaw/ui";
 import React from "react";
+import { useT } from "../../lib/i18n";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
 import { RoutineDetailPanel } from "./components/routine-detail-panel";
 import { RoutinesList } from "./components/routines-list";
@@ -10,6 +11,7 @@ import { useRoutineDetail } from "./hooks/useRoutineDetail";
 import { useRoutines } from "./hooks/useRoutines";
 
 export function RoutinesPage() {
+  const t = useT();
   const navigate = useNavigate();
   const { routineId = null } = useParams();
   const routinesState = useRoutines();
@@ -100,11 +102,9 @@ export function RoutinesPage() {
 
           {routinesState.error &&
           (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <Callout tone="danger">
               {routinesState.error.message}
-            </div>
+            </Callout>
           )}
 
           <FeedbackBanner
@@ -118,14 +118,7 @@ export function RoutinesPage() {
           <RoutinesSummaryStrip summary={routinesState.summary} />
 
           {routinesState.isLoading
-            ? (
-                <div className="space-y-4">
-                  {[1, 2, 3].map(
-                    (index) =>
-                      (<div key={index} className="v2-skeleton h-32 rounded-xl" />)
-                  )}
-                </div>
-              )
+            ? (<SkeletonList label={t("routines.loading")} itemClassName="h-32 rounded-xl" />)
             : detailContent}
         </div>
       </div>

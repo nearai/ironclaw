@@ -134,11 +134,11 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   function EmptyPanel() {}
   function Icon() {}
   function Input() {}
-  function Panel() {}
+  function Card() {}
   function RecentRunRow() {}
   function RunDots() {}
   function RunHistorySummary() {}
-  function StatusPill() {}
+  function Badge() {}
 
   const React = {
     useEffect(effect, deps) {
@@ -176,12 +176,12 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     EmptyPanel,
     Icon,
     Input,
-    Panel,
+    Card,
     RecentRunRow,
     React,
     RunDots,
     RunHistorySummary,
-    StatusPill,
+    Badge,
     TextEncoder,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,

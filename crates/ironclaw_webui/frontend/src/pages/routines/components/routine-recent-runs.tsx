@@ -1,4 +1,4 @@
-import { StatusPill } from "@ironclaw/ui";
+import { Badge } from "@ironclaw/ui";
 import { formatRoutineDate } from "../lib/routines-presenters";
 
 function runTone(status) {
@@ -22,7 +22,7 @@ export function RoutineRecentRuns({ runs }) {
         (run) => (
           <div key={run.id} className="rounded-xl border border-iron-700 bg-iron-950/40 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <StatusPill tone={runTone(run.status)} label={run.status} />
+              <Badge tone={runTone(run.status)} label={run.status} />
               <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
                 {formatRoutineDate(run.started_at)}
               </span>

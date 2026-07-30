@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { Navigate, useOutletContext, useParams } from "react-router";
 import React from "react";
+import { Callout } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { RouteLoadBoundary } from "../../app/route-load-boundary";
 import { RestartBanner } from "./components/restart-banner";
@@ -110,11 +111,9 @@ export function SettingsPage() {
 
             {saveError &&
             (
-              <div
-                className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-              >
+              <Callout tone="danger">
                 {t("error.saveFailed", { message: saveError.message })}
-              </div>
+              </Callout>
             )}
 
             <SettingsToolbar

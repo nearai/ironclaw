@@ -1,5 +1,14 @@
 import { useT } from "../../../lib/i18n";
-import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
+import {
+  Button,
+  EmptyPanel,
+  Card,
+  SearchInput,
+  SectionHeader,
+  Badge,
+  Toolbar,
+  ToolbarGroup,
+} from "@ironclaw/ui";
 import {
   formatCurrency,
   formatProjectHealth,
@@ -35,7 +44,7 @@ function ProjectCard({ project, onOpen, t }) {
             {project.description || t("projects.noDescription")}
           </p>
         </div>
-        <StatusPill tone={healthTone(project.health)} label={formatProjectHealth(project.health, t)} />
+        <Badge tone={healthTone(project.health)} label={formatProjectHealth(project.health, t)} />
       </div>
 
       {project.goals?.length
@@ -86,7 +95,7 @@ function ProjectCard({ project, onOpen, t }) {
 
 function GeneralProjectCard({ project, onOpen, t }) {
   return (
-    <Panel
+    <Card
       data-testid="project-card"
       data-project-id={project.id}
       onClick={() => onOpen(project.id)}
@@ -105,29 +114,27 @@ function GeneralProjectCard({ project, onOpen, t }) {
       }}
       className="cursor-pointer overflow-hidden p-5 transition hover:border-signal/30 sm:p-6"
     >
-      <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
-        <div className="max-w-3xl">
-          <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-signal">{t("projects.general.label")}</div>
-          <h2 className="mt-3 font-serif text-4xl font-semibold tracking-[-0.04em] text-iron-100">{t("projects.general.title")}</h2>
-          <p className="mt-3 text-sm leading-6 text-iron-200">
-            {t("projects.general.desc")}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-3">
-          <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
-            {t("projects.general.threadsToday", { count: project.threads_today || 0 })}
-          </div>
-          <Button
-            data-testid="project-open-workspace"
-            variant="secondary"
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpen(project.id);
-            }}
-          >{t("projects.openGeneralWorkspace")}</Button>
-        </div>
-      </div>
-    </Panel>
+      <SectionHeader
+        eyebrow={t("projects.general.label")}
+        title={t("projects.general.title")}
+        description={t("projects.general.desc")}
+        actions={
+          <>
+            <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
+              {t("projects.general.threadsToday", { count: project.threads_today || 0 })}
+            </div>
+            <Button
+              data-testid="project-open-workspace"
+              variant="secondary"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpen(project.id);
+              }}
+            >{t("projects.openGeneralWorkspace")}</Button>
+          </>
+        }
+      />
+    </Card>
   );
 }
 
@@ -159,27 +166,28 @@ export function ProjectsGrid({
     <div data-testid="projects-grid" className="space-y-5">
       {defaultProject && (<GeneralProjectCard project={defaultProject} onOpen={onOpenProject} t={t} />)}
 
-      <Panel className="p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.explorer")}</div>
-            <h2 className="mt-2 font-serif text-3xl font-semibold tracking-[-0.04em] text-iron-100">{t("projects.scoped.title")}</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-              {t("projects.scoped.desc")}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <input
-              data-testid="projects-search-input"
-              value={search}
-              onInput={(event) => onSearchChange(event.currentTarget.value)}
-              placeholder={t("projects.searchPlaceholder")}
-              className="h-11 min-w-[220px] rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-            />
-            <Button onClick={onCreateProject}>{isPreparingChat ? t("projects.preparingChat") : t("projects.newProject")}</Button>
-          </div>
-        </div>
-      </Panel>
+      <Card className="p-4 sm:p-5">
+        <SectionHeader
+          eyebrow={t("projects.explorer")}
+          title={t("projects.scoped.title")}
+          description={t("projects.scoped.desc")}
+          actions={
+            <Toolbar>
+              <SearchInput
+                data-testid="projects-search-input"
+                label={t("projects.searchPlaceholder")}
+                value={search}
+                onInput={(event) => onSearchChange(event.currentTarget.value)}
+                placeholder={t("projects.searchPlaceholder")}
+                className="min-w-[220px]"
+              />
+              <ToolbarGroup>
+                <Button onClick={onCreateProject}>{isPreparingChat ? t("projects.preparingChat") : t("projects.newProject")}</Button>
+              </ToolbarGroup>
+            </Toolbar>
+          }
+        />
+      </Card>
 
       {scopedProjects.length
         ? (<div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">

@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Button } from "@ironclaw/ui";
+import { Button, Callout, SkeletonList } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
@@ -142,11 +142,9 @@ export function MissionsPage() {
 
           {missionsState.error &&
           (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <Callout tone="danger">
               {missionsState.error.message}
-            </div>
+            </Callout>
           )}
 
           <FeedbackBanner
@@ -156,17 +154,7 @@ export function MissionsPage() {
           <MissionsSummaryStrip summary={missionsState.summary} />
 
           {missionsState.isLoading
-            ? (
-                <div className="space-y-4">
-                  {[1, 2, 3].map(
-                    (index) =>
-                      (<div
-                        key={index}
-                        className="v2-skeleton h-32 rounded-xl"
-                      />)
-                  )}
-                </div>
-              )
+            ? (<SkeletonList label={t("missions.loading")} itemClassName="h-32 rounded-xl" />)
             : content}
         </div>
       </div>

@@ -16,15 +16,28 @@ test.describe("Callout", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
 
-  test("tones story renders info/success/danger with alert semantics", async ({ page }) => {
+  test("tones story renders info/success/warning/danger with alert semantics", async ({ page }) => {
     await gotoStory(page, "components-callout--tones");
     await expect(page.getByText("Something informational happened.")).toBeVisible();
     await expect(page.getByText("Saved successfully.")).toBeVisible();
+    await expect(
+      page.getByText("Scheduler is off — automations will not run.")
+    ).toBeVisible();
     const alert = page.getByRole("alert");
     await expect(alert).toContainText("Failed to reach the gateway.");
     const infoCallout = page.getByRole("status").first();
     const infoBackground = await computedStyle(infoCallout, "background-color");
     await expect(alert).not.toHaveCSS("background-color", infoBackground);
+  });
+
+  test("titled callout renders the title, body and action slot", async ({ page }) => {
+    await gotoStory(page, "components-callout--titled-with-actions");
+    const callout = page.getByRole("status");
+    await expect(callout).toContainText("Restart required");
+    await expect(callout).toContainText(
+      "Networking changes take effect after the gateway restarts."
+    );
+    await expect(page.getByRole("button", { name: "Restart now" })).toBeVisible();
   });
 
   test("dismiss button brightens on hover", async ({ page }) => {

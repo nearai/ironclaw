@@ -2,7 +2,7 @@
 import { useNavigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { Button, EmptyPanel } from "@ironclaw/ui";
+import { Button, Callout, EmptyPanel, SkeletonList } from "@ironclaw/ui";
 import { useProjectsOverview } from "./hooks/useProjectsOverview";
 import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
 import { useProjectInspector } from "./hooks/useProjectInspector";
@@ -112,9 +112,7 @@ export function ProjectsPage() {
   if (projectId) {
     if (workspaceState.isLoading) {
       content = (
-        <div className="space-y-4">
-          {[1, 2, 3].map((index) => (<div key={index} className="v2-skeleton h-48 rounded-[20px]" />))}
-        </div>
+        <SkeletonList label={t("projects.loading")} itemClassName="h-48 rounded-[20px]" />
       );
     } else if (workspaceState.error || (!workspaceState.project && !selectedOverviewProject)) {
       content = (
@@ -139,11 +137,7 @@ export function ProjectsPage() {
     }
   } else {
     content = overviewState.isLoading
-      ? (
-          <div className="space-y-4">
-            {[1, 2, 3].map((index) => (<div key={index} className="v2-skeleton h-40 rounded-[20px]" />))}
-          </div>
-        )
+      ? (<SkeletonList label={t("projects.loading")} itemClassName="h-40 rounded-[20px]" />)
       : (
           <ProjectsGrid
             projects={filteredProjects}
@@ -165,9 +159,7 @@ export function ProjectsPage() {
             {headerActions}
           </div>
           {overviewState.error && (
-            <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-              {overviewState.error.message}
-            </div>
+            <Callout tone="danger">{overviewState.error.message}</Callout>
           )}
           <FeedbackBanner result={chatFlowError} onDismiss={() => setChatFlowError(null)} />
           <FeedbackBanner result={inspectorState.actionResult} onDismiss={inspectorState.clearActionResult} />

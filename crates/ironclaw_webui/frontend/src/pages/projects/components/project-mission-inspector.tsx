@@ -1,4 +1,4 @@
-import { Button, Panel, StatusPill } from "@ironclaw/ui";
+import { Button, DetailList, DetailRow, Card, SectionHeader, Badge } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
@@ -7,15 +7,6 @@ import {
   formatProjectDate,
   missionTone,
 } from "../lib/projects-presenters";
-
-function MetaCard({ label, value }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-iron-950/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value}</div>
-    </div>
-  );
-}
 
 export function ProjectMissionInspector({
   mission,
@@ -39,57 +30,55 @@ export function ProjectMissionInspector({
 
   return (
     <div className="space-y-4">
-      <Panel className="p-4 sm:p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.dossier")}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{mission.name}</h2>
-          </div>
-          <StatusPill tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />
-        </div>
+      <Card className="p-4 sm:p-5">
+        <SectionHeader
+          eyebrow={t("projects.mission.dossier")}
+          title={mission.name}
+          actions={<Badge tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />}
+        />
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <MetaCard label={t("projects.mission.cadence")} value={formatMissionCadence(mission, t)} />
-          <MetaCard label={t("projects.mission.threadsToday")} value={t("projects.mission.threadsTodayValue", { count: mission.threads_today || 0, max: mission.max_threads_per_day || "∞" })} />
-          <MetaCard label={t("projects.mission.nextFire")} value={mission.next_fire_at ? formatProjectDate(mission.next_fire_at, t) : t("projects.mission.notScheduled")} />
-          <MetaCard label={t("projects.mission.created")} value={formatProjectDate(mission.created_at, t)} />
-        </div>
+        <DetailList className="mt-4">
+          <DetailRow layout="stacked" term={t("projects.mission.cadence")}>{formatMissionCadence(mission, t)}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.mission.threadsToday")}>{t("projects.mission.threadsTodayValue", { count: mission.threads_today || 0, max: mission.max_threads_per_day || "∞" })}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.mission.nextFire")}>{mission.next_fire_at ? formatProjectDate(mission.next_fire_at, t) : t("projects.mission.notScheduled")}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.mission.created")}>{formatProjectDate(mission.created_at, t)}</DetailRow>
+        </DetailList>
 
         <div className="mt-5 flex flex-wrap gap-2">{actionButtons}</div>
-      </Panel>
+      </Card>
 
-      <Panel className="p-4 sm:p-5">
+      <Card className="p-4 sm:p-5">
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.brief")}</div>
         <div className="mt-4 text-sm leading-6 text-iron-200">
           <MarkdownRenderer content={mission.goal || t("projects.mission.noGoal")} />
         </div>
-      </Panel>
+      </Card>
 
       {mission.current_focus
         ? (
-            <Panel className="p-4 sm:p-5">
+            <Card className="p-4 sm:p-5">
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.currentFocus")}</div>
               <div className="mt-4 text-sm leading-6 text-iron-200">
                 <MarkdownRenderer content={mission.current_focus} />
               </div>
-            </Panel>
+            </Card>
           )
         : null}
 
       {mission.success_criteria
         ? (
-            <Panel className="p-4 sm:p-5">
+            <Card className="p-4 sm:p-5">
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.successCriteria")}</div>
               <div className="mt-4 text-sm leading-6 text-iron-200">
                 <MarkdownRenderer content={mission.success_criteria} />
               </div>
-            </Panel>
+            </Card>
           )
         : null}
 
       {mission.approach_history?.length
         ? (
-            <Panel className="p-4 sm:p-5">
+            <Card className="p-4 sm:p-5">
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.approachHistory")}</div>
               <div className="mt-4 space-y-3">
                 {mission.approach_history.map((entry, index) => (
@@ -99,13 +88,13 @@ export function ProjectMissionInspector({
                   </div>
                 ))}
               </div>
-            </Panel>
+            </Card>
           )
         : null}
 
       {mission.threads?.length
         ? (
-            <Panel className="p-4 sm:p-5">
+            <Card className="p-4 sm:p-5">
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.spawnedThreads")}</div>
               <div className="mt-4 space-y-3">
                 {mission.threads.map((thread) => {
@@ -118,13 +107,13 @@ export function ProjectMissionInspector({
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 truncate text-sm font-semibold text-white">{thread.goal}</div>
-                        <StatusPill tone={missionTone(status)} label={formatMissionStatus(status, t)} />
+                        <Badge tone={missionTone(status)} label={formatMissionStatus(status, t)} />
                       </div>
                     </button>
                   );
                 })}
               </div>
-            </Panel>
+            </Card>
           )
         : null}
     </div>

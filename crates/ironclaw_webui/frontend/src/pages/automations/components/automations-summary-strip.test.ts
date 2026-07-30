@@ -46,28 +46,29 @@ function html(strings, ...values) {
   return { strings: Array.from(strings), values };
 }
 
-function visit(node, fn) {
+function visit(node, fn, seen = new Set()) {
   if (Array.isArray(node)) {
-    for (const item of node) visit(item, fn);
+    for (const item of node) visit(item, fn, seen);
     return;
   }
-  if (!node || typeof node !== "object") return;
+  if (!node || typeof node !== "object" || seen.has(node)) return;
+  seen.add(node);
   fn(node);
   if (Array.isArray(node.values)) {
-    for (const value of node.values) visit(value, fn);
+    for (const value of node.values) visit(value, fn, seen);
+  }
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) visit(child, fn, seen);
+  }
+  if (node.props && typeof node.props === "object") {
+    visit(node.props.children, fn, seen);
   }
 }
 
-function nativeProps(root, tagName) {
+function componentProps(root, type) {
   const props = [];
   visit(root, (node) => {
-    if (!Array.isArray(node.strings) || !node.strings.join("").includes(`<${tagName}`)) return;
-    const current = {};
-    node.strings.forEach((part, index) => {
-      const name = part.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
-      if (name) current[name] = node.values[index];
-    });
-    props.push(current);
+    if (node.type === type && node.props) props.push(node.props);
   });
   return props;
 }
@@ -77,22 +78,22 @@ function t(key, vars = {}) {
 }
 
 function loadComponent() {
-  function Panel() {}
-  function StatCard() {}
+  function StatStrip() {}
+  function StatTile() {}
   const context = {
     globalThis: {},
-    Panel,
-    StatCard,
+    StatStrip,
+    StatTile,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
     useT: () => t,
   };
   vm.runInNewContext(sourceForTest(), context);
-  return context.globalThis.__testExports.AutomationsSummaryStrip;
+  return { AutomationsSummaryStrip: context.globalThis.__testExports.AutomationsSummaryStrip, StatTile };
 }
 
-test("summary cards filter all, active, running, and nonzero failures", () => {
-  const AutomationsSummaryStrip = loadComponent();
+test("summary tiles filter all, active, running, and nonzero failures", () => {
+  const { AutomationsSummaryStrip, StatTile } = loadComponent();
   const selected = [];
 
   const rendered = AutomationsSummaryStrip({
@@ -107,23 +108,37 @@ test("summary cards filter all, active, running, and nonzero failures", () => {
     onSelectFilter: (filter) => selected.push(filter),
   });
 
-  const buttons = nativeProps(rendered, "button");
-  assert.equal(buttons.length, 4);
-  assert.deepEqual(buttons.map((button) => button["aria-pressed"]), [false, false, true, false]);
-  assert.deepEqual(buttons.map((button) => button.title), [
-    "Filter by Scheduled",
-    "Filter by Active",
-    "Filter by Running",
-    "Filter by Failures",
-  ]);
+  const tiles = componentProps(rendered, StatTile);
+  assert.equal(tiles.length, 5);
 
-  for (const button of buttons) button.onClick();
+  const interactive = tiles.filter((tile) => typeof tile.onSelect === "function");
+  assert.equal(interactive.length, 4);
+  assert.deepEqual(
+    interactive.map((tile) => tile.isActive),
+    [false, false, true, false]
+  );
+  assert.deepEqual(
+    interactive.map((tile) => tile.selectTitle),
+    [
+      "Filter by Scheduled",
+      "Filter by Active",
+      "Filter by Running",
+      "Filter by Failures",
+    ]
+  );
 
+  // The NEXT RUN tile is informational: no filter, smaller value type.
+  const nextRun = tiles[4];
+  assert.equal(nextRun.onSelect, undefined);
+  assert.equal(nextRun.value, "Jun 24");
+  assert.match(nextRun.valueClassName, /text-lg/);
+
+  for (const tile of interactive) tile.onSelect();
   assert.deepEqual(selected, ["all", "active", "running", "failures"]);
 });
 
-test("zero-failure summary card is not interactive", () => {
-  const AutomationsSummaryStrip = loadComponent();
+test("zero-failure summary tile is not interactive", () => {
+  const { AutomationsSummaryStrip, StatTile } = loadComponent();
   const selected = [];
 
   const rendered = AutomationsSummaryStrip({
@@ -138,10 +153,10 @@ test("zero-failure summary card is not interactive", () => {
     onSelectFilter: (filter) => selected.push(filter),
   });
 
-  const buttons = nativeProps(rendered, "button");
-  assert.equal(buttons.length, 3);
+  const tiles = componentProps(rendered, StatTile);
+  const interactive = tiles.filter((tile) => typeof tile.onSelect === "function");
+  assert.equal(interactive.length, 3);
 
-  for (const button of buttons) button.onClick();
-
+  for (const tile of interactive) tile.onSelect();
   assert.deepEqual(selected, ["all", "active", "running"]);
 });

@@ -105,7 +105,10 @@ test("workspace filter and breadcrumb have accessible names and landmarks", () =
     <WorkspaceBreadcrumb path="workspace/reports" onNavigate={() => {}} />,
   );
 
-  assert.match(sidebar, /aria-label="Nach Namen filtern…"/);
+  // The filter is the DS SearchInput: a <label> wrapping an sr-only name and
+  // a type="search" input.
+  assert.match(sidebar, /sr-only">Nach Namen filtern…</);
+  assert.match(sidebar, /type="search"[^>]*placeholder="Nach Namen filtern…"/);
   assert.match(breadcrumb, /<nav aria-label="Arbeitsbereich"/);
 });
 

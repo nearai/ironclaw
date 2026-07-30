@@ -49,6 +49,11 @@ function renderLogsPage(overrides = {}) {
     useT: () => (key) => key,
     useOutletContext: () => ({ isAdmin: true, threadsState: null }),
     useLogs: () => logs,
+    Button() {},
+    Callout() {},
+    SearchInput() {},
+    Select() {},
+    Spinner() {},
   };
   vm.runInNewContext(logsPageSourceForTest(), context);
   return context.globalThis.__testExports.LogsPage();
@@ -88,6 +93,11 @@ function renderLogEntry(entry, { expanded = false, window: windowStub } = {}) {
     useOutletContext: () => ({ isAdmin: true, threadsState: null }),
     useLogs: () => ({}),
   };
+  context.Button = function Button() {};
+  context.Callout = function Callout() {};
+  context.SearchInput = function SearchInput() {};
+  context.Select = function Select() {};
+  context.Spinner = function Spinner() {};
   if (windowStub) context.window = windowStub;
   vm.runInNewContext(logsPageSourceForTest(), context);
   const node = context.globalThis.__testExports.LogEntry({ entry });

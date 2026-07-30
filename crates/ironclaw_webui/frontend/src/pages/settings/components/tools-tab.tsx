@@ -1,4 +1,4 @@
-import { Badge, Card, Icon, SelectMenu, type SelectMenuOption } from "@ironclaw/ui";
+import { Badge, Callout, Card, Icon, SelectMenu, Switch, type SelectMenuOption } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";
@@ -18,35 +18,6 @@ function SavedIndicator({ visible }) {
     <span className="font-mono text-[11px] text-[var(--v2-accent-text)]" role="status">
       {t("tools.saved")}
     </span>
-  );
-}
-
-function Switch({ checked, disabled = false, label, onChange }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => !disabled && onChange(!checked)}
-      className={[
-        "relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition",
-        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
-        checked
-          ? "border-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--v2-accent)_22%,transparent)]"
-          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full transition",
-          checked
-            ? "translate-x-5 bg-[var(--v2-accent-text)]"
-            : "translate-x-1 bg-[var(--v2-text-muted)]",
-        ].join(" ")}
-      />
-    </button>
   );
 }
 
@@ -72,8 +43,8 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
         <Switch
           checked={checked}
           disabled={isLoading}
-          label={label}
-          onChange={(value) => onSave(AUTO_APPROVE_KEY, value)}
+          aria-label={label}
+          onCheckedChange={(value) => onSave(AUTO_APPROVE_KEY, value)}
         />
       </div>
     </Card>
@@ -264,12 +235,9 @@ export function ToolsTab({
 
       {permissionError &&
       (
-        <div
-          className="rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
-          role="alert"
-        >
+        <Callout tone="danger">
           {t("error.saveFailed", { message: permissionError.message })}
-        </div>
+        </Callout>
       )}
 
       {searchQuery &&

@@ -25,7 +25,9 @@ function sourceForTest() {
 function renderTab(overrides = {}) {
   const context = {
     ExtensionCard() {},
+    Card() {},
     RegistryCard() {},
+    SectionHeader() {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,

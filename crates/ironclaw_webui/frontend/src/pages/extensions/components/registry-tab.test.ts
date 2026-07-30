@@ -24,10 +24,17 @@ function registryTabSourceForTest() {
 
 function renderRegistryTab(props, filter = "") {
   const context = {
+    Button() {},
     ExtensionCard() {},
+    Icon() {},
+    Card() {},
     RegistryCard() {},
+    SearchInput() {},
+    SectionHeader() {},
     React: {
       useState: () => [filter, () => {}],
+      useRef: () => ({ current: null }),
+      useCallback: (fn) => fn,
     },
     globalThis: {},
     html(strings, ...values) {

@@ -1,7 +1,20 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button, Icon, Panel, SelectMenu, StatusPill } from "@ironclaw/ui";
+import {
+  Button,
+  Callout,
+  ConfirmDialog,
+  FormField,
+  Icon,
+  Input,
+  Card,
+  SearchInput,
+  SegmentedControl,
+  SelectMenu,
+  SkeletonList,
+  Badge,
+} from "@ironclaw/ui";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -38,25 +51,27 @@ function TokenBanner({ token, onDismiss }) {
   };
 
   return (
-    <div className="rounded-xl border border-signal/30 bg-signal/10 p-4 sm:p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
-          <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
-          <div className="mt-3 flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
-              {token}
-            </code>
-            <Button variant="secondary" onClick={handleCopy}>
-              {copied ? t("admin.users.copied") : t("admin.users.copy")}
-            </Button>
-          </div>
-        </div>
-        <button onClick={onDismiss} className="text-iron-300 hover:text-iron-100">
-          <Icon name="close" className="h-4 w-4" />
-        </button>
-      </div>
-    </div>
+    <Callout
+      tone="info"
+      title={t("admin.users.tokenCreated")}
+      onDismiss={onDismiss}
+      dismissLabel={
+        <>
+          <span className="sr-only">{t("common.dismiss")}</span>
+          <Icon name="close" className="h-4 w-4" aria-hidden="true" />
+        </>
+      }
+    >
+      {t("admin.users.tokenCreatedDesc")}
+      <span className="mt-3 flex items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 font-mono text-xs text-[var(--v2-text-strong)]">
+          {token}
+        </code>
+        <Button variant="secondary" onClick={handleCopy}>
+          {copied ? t("admin.users.copied") : t("admin.users.copy")}
+        </Button>
+      </span>
+    </Callout>
   );
 }
 
@@ -92,31 +107,31 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   }
 
   return (
-    <Panel className="p-5 sm:p-6">
+    <Card className="p-5 sm:p-6">
       <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.users.createUser")}</h3>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.displayName")}</label>
-            <input
+          <FormField label={t("admin.users.displayName")} htmlFor="admin-user-display-name">
+            <Input
+              id="admin-user-display-name"
+              size="sm"
               type="text"
               value={name}
               onChange={(e) => setName(e.currentTarget.value)}
               required
-              className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
               placeholder={t("admin.users.displayNamePlaceholder")}
             />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.email")}</label>
-            <input
+          </FormField>
+          <FormField label={t("admin.users.email")} htmlFor="admin-user-email">
+            <Input
+              id="admin-user-email"
+              size="sm"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.currentTarget.value)}
-              className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
               placeholder={t("admin.users.emailPlaceholder")}
             />
-          </div>
+          </FormField>
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.users.role")}</label>
             <SelectMenu
@@ -137,36 +152,7 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
           <Button variant="ghost" type="button" onClick={() => setIsOpen(false)}>{t("admin.users.cancel")}</Button>
         </div>
       </form>
-    </Panel>
-  );
-}
-
-export function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel, isPending, error }) {
-  const t = useT();
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
-      <div data-testid="admin-user-confirm-dialog" className="w-full max-w-md rounded-xl border border-iron-700 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold text-iron-100">{title}</h3>
-        <p className="mt-2 text-sm text-iron-300">{message}</p>
-        {error && (
-          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-confirm-error">
-            {adminUserActionErrorMessage(error, t)}
-          </p>
-        )}
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="ghost" disabled={isPending} onClick={onCancel}>{t("admin.users.cancel")}</Button>
-          <Button
-            variant="danger"
-            loading={isPending}
-            disabled={isPending}
-            data-testid="admin-user-confirm-submit"
-            onClick={onConfirm}
-          >
-            {isPending ? t("common.loading") : confirmLabel}
-          </Button>
-        </div>
-      </div>
-    </div>
+    </Card>
   );
 }
 
@@ -192,8 +178,8 @@ export function UserRow({
           >
             {user.display_name || user.id}
           </button>
-          <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
-          <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
+          <Badge tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
+          <Badge tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
           {user.email && (<span className="font-mono text-xs text-iron-300">{user.email}</span>)}
@@ -208,19 +194,42 @@ export function UserRow({
         <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 transition-colors hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
-            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 transition-colors hover:border-signal/30 hover:text-signal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
-          <button
+            ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="admin-user-suspend"
+                  disabled={isActionPending}
+                  loading={isSuspending}
+                  onClick={() => onSuspend(user.id)}
+                >
+                  {isSuspending ? t("common.loading") : t("admin.users.suspend")}
+                </Button>
+              )
+            : (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="admin-user-activate"
+                  disabled={isActionPending}
+                  loading={isActivating}
+                  onClick={() => onActivate(user.id)}
+                >
+                  {isActivating ? t("common.loading") : t("admin.users.activate")}
+                </Button>
+              )}
+          <Button
+            variant="secondary"
+            size="sm"
             data-testid="admin-user-role"
             disabled={isActionPending}
-            aria-busy={isUpdating || undefined}
+            loading={isUpdating}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
-            className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 transition-colors hover:border-iron-700 hover:text-iron-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isUpdating
               ? t("common.saving")
               : user.role === "admin" ? t("admin.users.demote") : t("admin.users.promote")}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -309,21 +318,19 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
 
   if (query.isLoading) {
     return (
-      <Panel className="p-5 sm:p-6">
-        <div className="v2-skeleton mb-4 h-3 w-24 rounded" />
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="flex items-center justify-between border-t border-iron-700 py-3.5 first:border-0">
-            <div className="v2-skeleton h-4 w-32 rounded" />
-            <div className="v2-skeleton h-6 w-20 rounded-full" />
-          </div>
-        ))}
-      </Panel>
+      <Card className="p-5 sm:p-6">
+        <SkeletonList
+          label={t("admin.users.loading")}
+          itemClassName="h-10 rounded"
+          className="space-y-3"
+        />
+      </Card>
     );
   }
 
   if (isForbidden) {
     return (
-      <Panel className="p-6 sm:p-8">
+      <Card className="p-6 sm:p-8">
         <div className="flex items-center gap-3">
           <Icon name="lock" className="h-5 w-5 text-iron-700" />
           <h3 className="text-lg font-semibold text-iron-100">{t("users.adminRequired")}</h3>
@@ -331,7 +338,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
           {t("users.adminRequiredDesc")}
         </p>
-      </Panel>
+      </Card>
     );
   }
 
@@ -351,43 +358,32 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
         resetError={resetCreate}
       />
 
-      <Panel className="p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("admin.users.title", { count: filtered.length, total: users.length })}
           </h3>
           <div className="flex items-center gap-2">
-            <input
-              type="text"
+            <SearchInput
+              label={t("admin.users.searchLabel")}
               placeholder={t("admin.users.searchPlaceholder")}
               value={search}
               onChange={(e) => setSearch(e.currentTarget.value)}
-              className="h-8 w-48 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-xs text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+              onClear={() => setSearch("")}
+              clearLabel={t("admin.users.clearSearch")}
+              className="w-48"
             />
-            <div className="flex gap-1">
-              {FILTERS.map(
-                (f) => (
-                  <button
-                    key={f.value}
-                    onClick={() => setFilter(f.value)}
-                    className={[
-                      "rounded-md px-2.5 py-1.5 text-[11px] font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]",
-                      filter === f.value
-                        ? "border border-signal/35 bg-signal/10 text-iron-100"
-                        : "border border-transparent text-iron-300 hover:text-iron-100",
-                    ].join(" ")}
-                  >
-                    {f.label}
-                  </button>
-                )
-              )}
-            </div>
+            <SegmentedControl
+              label={t("admin.users.filterLabel")}
+              options={FILTERS}
+              value={filter}
+              onChange={setFilter}
+            />
           </div>
         </div>
 
         {actionError && (
-          <p className="mb-4 text-sm text-red-200" role="alert" data-testid="admin-user-action-error">
+          <p className="mb-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-action-error">
             {adminUserActionErrorMessage(actionError, t)}
           </p>
         )}
@@ -410,17 +406,31 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
                 />
               )
             )}
-      </Panel>
+      </Card>
 
       {confirm && (
-        <ConfirmModal
+        <ConfirmDialog
+          open
           title={confirm.title}
-          message={confirm.message}
+          description={
+            <>
+              {confirm.message}
+              {suspendError && (
+                <span
+                  className="mt-2 block text-[var(--v2-danger-text)]"
+                  role="alert"
+                  data-testid="admin-user-confirm-error"
+                >
+                  {adminUserActionErrorMessage(suspendError, t)}
+                </span>
+              )}
+            </>
+          }
           confirmLabel={confirm.confirmLabel}
+          cancelLabel={t("admin.users.cancel")}
+          isConfirming={isSuspending}
           onConfirm={confirmSuspend}
           onCancel={closeConfirm}
-          isPending={isSuspending}
-          error={suspendError}
         />
       )}
     </div>

@@ -1,4 +1,12 @@
-import { EmptyPanel, FlowList, Panel, StatusPill } from "@ironclaw/ui";
+import {
+  DetailList,
+  DetailRow,
+  EmptyPanel,
+  FlowList,
+  Card,
+  SectionHeader,
+  Badge,
+} from "@ironclaw/ui";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
   formatDuration,
@@ -6,15 +14,6 @@ import {
   stateLabel,
   statusToneForState,
 } from "../lib/jobs-presenters";
-
-function MetaItem({ label, value }) {
-  return (
-    <div className="border-t border-white/10 py-4">
-      <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value || "Not available"}</div>
-    </div>
-  );
-}
 
 export function JobOverviewTab({ job }) {
   const transitions = (job.transitions || []).map((transition) => ({
@@ -24,43 +23,40 @@ export function JobOverviewTab({ job }) {
 
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-      <Panel className="p-5 sm:p-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Execution context</div>
-            <h3 className="mt-2 text-xl font-semibold text-white">Timing, state, and runtime shape</h3>
-          </div>
-          <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
-        </div>
+      <Card className="p-5 sm:p-6">
+        <SectionHeader
+          eyebrow="Execution context"
+          title="Timing, state, and runtime shape"
+          titleAs="h3"
+          actions={<Badge tone={statusToneForState(job.state)} label={stateLabel(job.state)} />}
+        />
 
-        <div className="mt-5 grid gap-x-6 md:grid-cols-2">
-          <MetaItem label="Created" value={formatJobDate(job.created_at)} />
-          <MetaItem label="Started" value={formatJobDate(job.started_at)} />
-          <MetaItem label="Completed" value={formatJobDate(job.completed_at)} />
-          <MetaItem label="Duration" value={formatDuration(job.elapsed_secs)} />
-          <MetaItem label="Kind" value={job.job_kind ? `${job.job_kind} job` : null} />
-          <MetaItem label="Mode" value={job.job_mode || "Default worker"} />
-        </div>
-      </Panel>
+        <DetailList className="mt-3 grid gap-x-6 md:grid-cols-2">
+          <DetailRow layout="stacked" term="Created">{formatJobDate(job.created_at) || "Not available"}</DetailRow>
+          <DetailRow layout="stacked" term="Started">{formatJobDate(job.started_at) || "Not available"}</DetailRow>
+          <DetailRow layout="stacked" term="Completed">{formatJobDate(job.completed_at) || "Not available"}</DetailRow>
+          <DetailRow layout="stacked" term="Duration">{formatDuration(job.elapsed_secs) || "Not available"}</DetailRow>
+          <DetailRow layout="stacked" term="Kind">{job.job_kind ? `${job.job_kind} job` : "Not available"}</DetailRow>
+          <DetailRow layout="stacked" term="Mode">{job.job_mode || "Default worker"}</DetailRow>
+        </DetailList>
+      </Card>
 
       <div className="space-y-5">
-        <Panel className="p-5 sm:p-6">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Description</div>
-          <h3 className="mt-2 text-xl font-semibold text-white">Mission brief</h3>
+        <Card className="p-5 sm:p-6">
+          <SectionHeader eyebrow="Description" title="Mission brief" titleAs="h3" />
           {job.description
             ? (<MarkdownRenderer content={job.description} className="mt-4 text-sm leading-7 text-iron-200" />)
             : (<p className="mt-4 text-sm leading-6 text-iron-300">This job did not record a long-form description.</p>)}
-        </Panel>
+        </Card>
 
         {transitions.length
           ? (
-              <Panel className="p-5 sm:p-6">
-                <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Transitions</div>
-                <h3 className="mt-2 text-xl font-semibold text-white">State timeline</h3>
+              <Card className="p-5 sm:p-6">
+                <SectionHeader eyebrow="Transitions" title="State timeline" titleAs="h3" />
                 <div className="mt-3">
                   <FlowList items={transitions} />
                 </div>
-              </Panel>
+              </Card>
             )
           : (
               <EmptyPanel

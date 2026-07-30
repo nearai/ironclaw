@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { Button, Icon, StatusPill, cn } from "@ironclaw/ui";
+import { Button, Icon, Badge, cn } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { runSummaryView } from "../lib/automations-presenters";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data";
@@ -106,7 +106,7 @@ export function RecentRunRow({ run }) {
   return (
     <div className="grid gap-3 border-b border-[var(--v2-panel-border)] py-3 last:border-0 sm:grid-cols-[6.5rem_minmax(0,1fr)_auto] sm:items-center">
       <div>
-        <StatusPill tone={run.status_tone} label={run.status_label} />
+        <Badge tone={run.status_tone} label={run.status_label} />
       </div>
       <div className="min-w-0">
         <div className="text-sm font-semibold text-iron-100">{run.fired_label}</div>

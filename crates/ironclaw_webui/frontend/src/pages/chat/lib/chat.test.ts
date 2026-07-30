@@ -91,6 +91,7 @@ function renderChat({
     AuthGenericCard() {},
     AuthOauthCard() {},
     AuthTokenCard() {},
+    Callout() {},
     ChatInput() {},
     ConnectionStatus() {},
     EmptyState() {},
@@ -782,11 +783,15 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
     },
   });
 
-  const alert = findNode(tree, (node) =>
-    node.strings.some((part) => part.includes('role="alert"')),
+  // The failure banner is a DS Callout with the danger tone (which renders
+  // role="alert" internally).
+  const callout = findComponent(tree, components.Callout);
+  assert.ok(callout, "history load failure should render a danger Callout");
+  assert.ok(
+    callout.strings.some((part) => part.includes('tone="danger"')),
+    "the failure Callout uses the danger tone",
   );
-  assert.ok(alert, "history load failure should render a role=alert banner");
-  assert.ok(alert.values.includes(historyLoadError));
+  assert.ok(callout.values.includes(historyLoadError));
   assert.equal(findComponent(tree, components.EmptyState), null);
 });
 

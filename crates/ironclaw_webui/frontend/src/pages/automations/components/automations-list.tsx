@@ -1,4 +1,13 @@
-import { Button, EmptyPanel, Icon, Panel, StatusPill, cn } from "@ironclaw/ui";
+import {
+  Button,
+  EmptyPanel,
+  Icon,
+  Card,
+  SectionHeader,
+  SegmentedControl,
+  Badge,
+  cn,
+} from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters";
 import { AutomationDetailPanel } from "./automation-detail-panel";
@@ -32,62 +41,40 @@ export function AutomationsList({
 
   return (
     <div className="space-y-5">
-      <Panel className="p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
-              {t("automations.eyebrow")}
-            </div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">
-              {t("automations.title")}
-            </h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-              {t("automations.description")}
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]"
-              role="group"
-              aria-label={t("automations.filterLabel")}
-            >
-              {AUTOMATION_FILTERS.map((item) => (
-                <button
-                  key={item.value}
-                  type="button"
-                  data-testid="automation-filter"
-                  data-filter={item.value}
-                  aria-pressed={filter === item.value}
-                  onClick={() => onFilterChange(item.value)}
-                  className={cn(
-                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--v2-focus-ring)]",
-                    filter === item.value
-                      ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-                      : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-                  )}
-                >
-                  {t(item.labelKey)}
-                </button>
-              ))}
-            </div>
-            <Button
-              variant="secondary"
-              size="icon-sm"
-              aria-label={t("automations.refresh")}
-              title={isRefreshing ? t("automations.refreshing") : t("automations.refresh")}
-              disabled={isRefreshing}
-              onClick={onRefresh}
-            >
-              <Icon
-                name="retry"
-                className={cn("h-4 w-4", isRefreshing && "v2-spin")}
+      <Card className="p-4 sm:p-5">
+        <SectionHeader
+          eyebrow={t("automations.eyebrow")}
+          title={t("automations.title")}
+          description={t("automations.description")}
+          actions={
+            <>
+              <SegmentedControl
+                label={t("automations.filterLabel")}
+                optionTestId="automation-filter"
+                options={AUTOMATION_FILTERS.map((item) => ({
+                  value: item.value,
+                  label: t(item.labelKey),
+                }))}
+                value={filter}
+                onChange={onFilterChange}
               />
-            </Button>
-          </div>
-        </div>
-      </Panel>
+              <Button
+                variant="secondary"
+                size="icon-sm"
+                aria-label={t("automations.refresh")}
+                title={isRefreshing ? t("automations.refreshing") : t("automations.refresh")}
+                disabled={isRefreshing}
+                onClick={onRefresh}
+              >
+                <Icon
+                  name="retry"
+                  className={cn("h-4 w-4", isRefreshing && "v2-spin")}
+                />
+              </Button>
+            </>
+          }
+        />
+      </Card>
 
       {!filtered.length
         ? hasAutomations
@@ -100,7 +87,7 @@ export function AutomationsList({
           : (<AutomationsEmptyState />)
         : (
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1.12fr)_minmax(22rem,0.88fr)]">
-              <Panel className="overflow-hidden">
+              <Card className="overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[900px] border-collapse">
                     <thead>
@@ -166,7 +153,7 @@ export function AutomationsList({
                               </div>
                             </td>
                             <td className="px-5 py-4 align-top">
-                              <StatusPill
+                              <Badge
                                 tone={automation.primary_status_tone}
                                 label={automation.primary_status_label}
                               />
@@ -177,7 +164,7 @@ export function AutomationsList({
                     </tbody>
                   </table>
                 </div>
-              </Panel>
+              </Card>
 
               <AutomationDetailPanel
                 automation={selectedAutomation}

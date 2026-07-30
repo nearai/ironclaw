@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "@ironclaw/ui";
+import { DetailList, DetailRow, EmptyPanel, Card, SectionHeader, Badge } from "@ironclaw/ui";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
   formatMessageRole,
@@ -12,29 +12,18 @@ import {
   threadTone,
 } from "../lib/projects-presenters";
 
-function MetaCard({ label, value }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-iron-950/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value}</div>
-    </div>
-  );
-}
-
 export function ProjectThreadInspector({ thread }) {
   const t = useT();
   const presentation = threadPresentation(thread, t);
 
   return (
     <div className="space-y-4">
-      <Panel className="p-4 sm:p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{presentation.subtitle}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{presentation.title}</h2>
-          </div>
-          <StatusPill tone={threadTone(thread.state)} label={formatThreadState(thread.state, t)} />
-        </div>
+      <Card className="p-4 sm:p-5">
+        <SectionHeader
+          eyebrow={presentation.subtitle}
+          title={presentation.title}
+          actions={<Badge tone={threadTone(thread.state)} label={formatThreadState(thread.state, t)} />}
+        />
 
         {presentation.brief
           ? (
@@ -47,17 +36,17 @@ export function ProjectThreadInspector({ thread }) {
             )
           : null}
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <MetaCard label={t("projects.thread.type")} value={formatThreadType(thread.thread_type, t)} />
-          <MetaCard label={t("projects.thread.steps")} value={thread.step_count || 0} />
-          <MetaCard label={t("projects.thread.tokens")} value={(thread.total_tokens || 0).toLocaleString()} />
-          <MetaCard label={t("projects.thread.spend")} value={thread.total_cost_usd ? formatCurrency(thread.total_cost_usd) : t("projects.thread.notMeasured")} />
-          <MetaCard label={t("projects.thread.created")} value={formatProjectDate(thread.created_at, t)} />
-          <MetaCard label={t("projects.thread.completed")} value={thread.completed_at ? formatProjectDate(thread.completed_at, t) : t("projects.thread.stillRunning")} />
-        </div>
-      </Panel>
+        <DetailList className="mt-5">
+          <DetailRow layout="stacked" term={t("projects.thread.type")}>{formatThreadType(thread.thread_type, t)}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.thread.steps")}>{thread.step_count || 0}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.thread.tokens")}>{(thread.total_tokens || 0).toLocaleString()}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.thread.spend")}>{thread.total_cost_usd ? formatCurrency(thread.total_cost_usd) : t("projects.thread.notMeasured")}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.thread.created")}>{formatProjectDate(thread.created_at, t)}</DetailRow>
+          <DetailRow layout="stacked" term={t("projects.thread.completed")}>{thread.completed_at ? formatProjectDate(thread.completed_at, t) : t("projects.thread.stillRunning")}</DetailRow>
+        </DetailList>
+      </Card>
 
-      <Panel className="p-4 sm:p-5">
+      <Card className="p-4 sm:p-5">
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.thread.timeline")}</div>
         <div className="mt-4 space-y-3">
           {thread.messages?.length
@@ -69,13 +58,9 @@ export function ProjectThreadInspector({ thread }) {
                   </div>
                 </article>
               ))
-            : (
-                <div className="rounded-2xl border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-                  {t("projects.thread.noMessages")}
-                </div>
-              )}
+            : (<EmptyPanel variant="dashed" description={t("projects.thread.noMessages")} />)}
         </div>
-      </Panel>
+      </Card>
     </div>
   );
 }

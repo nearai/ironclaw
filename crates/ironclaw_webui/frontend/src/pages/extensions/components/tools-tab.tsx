@@ -1,3 +1,4 @@
+import { Card } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
@@ -32,12 +33,12 @@ export function ToolsTab({
   const t = useT();
   if (tools.length === 0 && toolRegistry.length === 0) {
     return (
-      <div className="v2-panel rounded-[18px] p-6 sm:p-8">
+      <Card className="p-6 sm:p-8">
         <h3 className="text-lg font-semibold text-white">{t("extensions.emptyToolsTitle")}</h3>
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
           {t("extensions.emptyToolsDesc")}
         </p>
-      </div>
+      </Card>
     );
   }
 
@@ -45,10 +46,8 @@ export function ToolsTab({
     <div className="space-y-5">
       {tools.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
-          >
+        <Card className="p-5 sm:p-6">
+          <h3 className="mb-4 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
             {t("tools.installed")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
@@ -64,14 +63,12 @@ export function ToolsTab({
               )
             )}
           </div>
-        </div>
+        </Card>
       )}
       {toolRegistry.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
-          >
+        <Card className="p-5 sm:p-6">
+          <h3 className="mb-4 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
             {t("tools.available")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
@@ -86,7 +83,7 @@ export function ToolsTab({
               )
             )}
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );

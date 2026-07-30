@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard, cn, type BadgeTone } from "@ironclaw/ui";
+import { StatStrip, StatTile, type BadgeTone } from "@ironclaw/ui";
 
 type SummaryCard = {
   key: string;
@@ -63,47 +63,28 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
   ];
 
   return (
-    <Panel className="p-4 sm:p-5">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {cards.map((card) => {
-          const interactive = Boolean(card.filter && onSelectFilter);
-          const isActive = interactive && activeFilter === card.filter;
-          const inner = (
-            <StatCard
-              label={card.label}
-              value={card.value}
-              tone={card.tone}
-              badgeLabel={t(`automations.badge.${card.tone}`)}
-              detail={card.detail}
-              valueClassName={card.valueClassName}
-              showDivider={false}
-              className="px-0 py-0"
-            />
-          );
-          const baseClass =
-            "rounded-[14px] border border-white/8 bg-white/[0.03] p-4 text-left";
-          if (!interactive) {
-            return (<div key={card.key} className={baseClass}>{inner}</div>);
-          }
-          return (
-            <button
-              key={card.key}
-              type="button"
-              aria-pressed={isActive}
-              title={t("automations.summary.filterAction", { label: card.label })}
-              onClick={() => onSelectFilter(card.filter)}
-              className={cn(
-                baseClass,
-                "transition-colors hover:border-white/20 hover:bg-white/[0.05]",
-                "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
-                isActive && "border-[var(--v2-accent)]/60 bg-[var(--v2-accent-soft)]/30"
-              )}
-            >
-              {inner}
-            </button>
-          );
-        })}
-      </div>
-    </Panel>
+    <StatStrip columns={3}>
+      {cards.map((card) => {
+        const interactive = Boolean(card.filter && onSelectFilter);
+        return (
+          <StatTile
+            key={card.key}
+            label={card.label}
+            value={card.value}
+            tone={card.tone}
+            badgeLabel={t(`automations.badge.${card.tone}`)}
+            detail={card.detail}
+            valueClassName={card.valueClassName}
+            onSelect={interactive ? () => onSelectFilter(card.filter) : undefined}
+            isActive={interactive && activeFilter === card.filter}
+            selectTitle={
+              interactive
+                ? t("automations.summary.filterAction", { label: card.label })
+                : undefined
+            }
+          />
+        );
+      })}
+    </StatStrip>
   );
 }

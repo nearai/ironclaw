@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Icon } from "@ironclaw/ui";
+import { Button, Icon, Card, SearchInput } from "@ironclaw/ui";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
   ConfigureFocusHandler,
@@ -31,15 +31,16 @@ function ImportButton({ onImport, isImporting, isBusy }) {
 
   return (
     <div>
-      <button
+      <Button
         type="button"
+        variant="secondary"
+        size="sm"
         onClick={() => fileInputRef.current?.click()}
         disabled={isBusy || isImporting}
-        className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <Icon name="upload" className="h-3 w-3" />
+        <Icon name="upload" className="mr-1.5 h-3 w-3" />
         {isImporting ? t("ext.registry.importing") : t("ext.registry.import")}
-      </button>
+      </Button>
       <input
         ref={fileInputRef}
         type="file"
@@ -107,7 +108,7 @@ export function RegistryTab({
 
   if (catalogEntries.length === 0) {
     return (
-      <div className="v2-panel rounded-[18px] p-6 sm:p-8">
+      <Card className="p-6 sm:p-8">
         <div className="flex items-start justify-between gap-4">
           <h3 className="text-lg font-semibold text-white">
             {t("ext.registry.emptyTitle")}
@@ -117,32 +118,34 @@ export function RegistryTab({
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
           {t("ext.registry.emptyDesc")}
         </p>
-      </div>
+      </Card>
     );
   }
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <input
-          type="text"
+        <SearchInput
+          label={t("ext.registry.searchLabel")}
           value={filter}
           onChange={(e) => setFilter(e.currentTarget.value)}
+          onClear={() => setFilter("")}
+          clearLabel={t("ext.registry.clearSearch")}
           placeholder={t("ext.registry.searchPlaceholder")}
-          className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          className="flex-1"
         />
         <span className="font-mono text-[11px] text-iron-700">
           {filtered.length} / {catalogEntries.length}
         </span>
       </div>
 
-      <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+      <Card className="p-5 sm:p-6">
         {installedCount > 0 &&
         (
           <>
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
-          >
+          {/* Eyebrow-styled real heading: navigation/e2e address these
+              sections by heading role, so the kicker stays an h3. */}
+          <h3 className="mb-4 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
             {t("extensions.installed")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
@@ -176,11 +179,11 @@ export function RegistryTab({
           <>
           <div
             className={[
-              "mb-4 flex items-center justify-between",
+              "mb-4 flex flex-wrap items-center justify-between gap-3",
               installedCount > 0 ? "mt-6" : "",
             ].join(" ")}
           >
-            <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+            <h3 className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
               {t("ext.registry.availableTitle")}
             </h3>
             {importControl}
@@ -207,7 +210,7 @@ export function RegistryTab({
         (<p className="py-4 text-sm text-iron-300">
           {t("ext.registry.noMatch")}
         </p>)}
-      </div>
+      </Card>
     </div>
   );
 }

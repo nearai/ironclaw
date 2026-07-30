@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel } from "@ironclaw/ui";
+import { Callout, Card, SectionHeader } from "@ironclaw/ui";
 
 declare global {
   interface Window {
@@ -51,7 +51,7 @@ function ProjectWidgetMount({ widget, projectId }) {
         <div className="mt-1 text-lg font-semibold tracking-tight text-white">{widget.manifest?.name || widget.manifest?.id}</div>
       </div>
       {errorName !== undefined
-        ? (<p className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{t("projects.widgets.mountFailed", { name: errorName || t("projects.widgets.fallbackSlot") })}</p>)
+        ? (<Callout tone="danger">{t("projects.widgets.mountFailed", { name: errorName || t("projects.widgets.fallbackSlot") })}</Callout>)
         : null}
       <div ref={containerRef} className={errorName !== undefined ? "hidden" : ""} />
     </div>
@@ -63,14 +63,15 @@ export function ProjectWidgets({ widgets, projectId }) {
   if (!widgets?.length) return null;
 
   return (
-    <Panel className="p-4 sm:p-5">
-      <div className="mb-4">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.widgets.title")}</div>
-        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{t("projects.widgets.instrumentation")}</h2>
-      </div>
+    <Card className="p-4 sm:p-5">
+      <SectionHeader
+        className="mb-4"
+        eyebrow={t("projects.widgets.title")}
+        title={t("projects.widgets.instrumentation")}
+      />
       <div className="grid gap-4 xl:grid-cols-2">
         {widgets.map((widget) => (<ProjectWidgetMount key={widget.manifest?.id} widget={widget} projectId={projectId} />))}
       </div>
-    </Panel>
+    </Card>
   );
 }

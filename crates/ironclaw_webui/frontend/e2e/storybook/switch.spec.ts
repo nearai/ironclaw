@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { computedStyle, gotoStory } from "./helpers";
 
-const DEFAULT_STORY = "extras-switch--default";
-const STATES_STORY = "extras-switch--states";
+const DEFAULT_STORY = "components-switch--default";
+const STATES_STORY = "components-switch--states";
 
-test.describe("extras/switch", () => {
+test.describe("components/switch", () => {
   test("renders checked by default and toggles on click", async ({ page }) => {
     await gotoStory(page, DEFAULT_STORY);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");

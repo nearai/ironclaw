@@ -1,4 +1,4 @@
-import { Badge, Button, Card, FormField, Icon, Input, Label } from "@ironclaw/ui";
+import { Badge, Button, Card, FormField, Icon, Input, Label, Select } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { useUsers } from "../hooks/useUsers";
@@ -63,15 +63,15 @@ function CreateUserForm({ onCreate, isCreating, error }) {
           </FormField>
         </div>
         <FormField label={t("users.role")} htmlFor="user-role">
-          <select
+          <Select
             id="user-role"
+            size="sm"
             value={role}
             onChange={(e) => setRole(e.currentTarget.value)}
-            className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
           >
             <option value="member">{t("users.member")}</option>
             <option value="admin">{t("users.admin")}</option>
-          </select>
+          </Select>
         </FormField>
         {error &&
         ( <p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p> )}

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
-import { Button, Icon } from "@ironclaw/ui";
+import { Button, Callout, Icon, Input, Skeleton } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -132,9 +132,9 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         <div className="space-y-3">
           {[1, 2].map(
             (i) =>
-              (<div
+              (<Skeleton
                 key={i}
-                className="v2-skeleton h-10 w-full rounded-md"
+                className="h-10 w-full rounded-md"
               />)
           )}
         </div>
@@ -149,7 +149,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <p className="text-sm text-red-200">
+        <p className="text-sm text-[var(--v2-danger-text)]">
           {t("extensions.loadFailed")} {error.message}
         </p>
       </ModalShell>
@@ -239,8 +239,9 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
                   )
                 : (
               <>
-              <input
+              <Input
                 type="password"
+                size="sm"
                 placeholder={secret.provided
                   ? t("extensions.keepSecretPlaceholder")
                   : ""}
@@ -253,7 +254,6 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
                   }));
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
               />
               {secret.auto_generate &&
               !secret.provided &&
@@ -277,46 +277,36 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
       )}
       {isActive &&
       (
-        <div
-          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
-        >
+        <Callout tone="success" className="mt-4">
           {t("extensions.activeConfigured")}
-        </div>
+        </Callout>
       )}
       {submitMutation.error &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <Callout tone="danger" className="mt-4">
           {submitMutation.error.message}
-        </div>
+        </Callout>
       )}
       {oauthMutation.error &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <Callout tone="danger" className="mt-4">
           {oauthMutation.error.message}
-        </div>
+        </Callout>
       )}
       {!oauthMutation.error &&
       oauthMutation.authError &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <Callout tone="danger" className="mt-4">
           {oauthMutation.authError}
-        </div>
+        </Callout>
       )}
       {!oauthMutation.error &&
       !oauthMutation.authError &&
       popupBlockedError &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <Callout tone="danger" className="mt-4">
           {popupBlockedError}
-        </div>
+        </Callout>
       )}
 
       <div className="mt-6 flex items-center justify-end gap-3">

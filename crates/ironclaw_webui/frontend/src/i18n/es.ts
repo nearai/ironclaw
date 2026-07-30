@@ -1048,7 +1048,7 @@ registerPack("es", {
   "pairing.connect": "Conectar",
 
   // Admin — tabs
-  "admin.tab.dashboard": "Panel de control",
+  "admin.tab.dashboard": "Card de control",
   "admin.tab.users": "Usuarios",
   "admin.tab.configuration": "Configuración",
   "admin.tab.usage": "Uso",

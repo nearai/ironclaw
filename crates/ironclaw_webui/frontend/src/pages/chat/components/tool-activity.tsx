@@ -208,7 +208,7 @@ function ToolActivityCard({ activity, nested = false }) {
   );
 }
 
-/* Tabbed Panel — Details / Parameters / Result / Error. Only tabs that have
+/* Tabbed Card — Details / Parameters / Result / Error. Only tabs that have
    content are shown; the first available tab is selected by default (Error
    first when present so failures surface immediately). */
 function ToolDetailPanel({

@@ -87,19 +87,19 @@ test.describe("modals and confirm dialogs (demo mode)", () => {
       );
     await expect(row.getByText("Active", { exact: true })).toBeVisible();
 
-    const dialog = page.getByTestId("admin-user-confirm-dialog");
+    const dialog = page.getByRole("dialog", { name: "Suspend user" });
 
     // Cancel: no state change.
     await row.getByTestId("admin-user-suspend").click();
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Suspend user")).toBeVisible();
-    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await dialog.getByTestId("confirm-dialog-cancel").click();
     await expect(dialog).toBeHidden();
     await expect(row.getByText("Active", { exact: true })).toBeVisible();
 
     // Confirm: the row flips to Suspended and offers Activate.
     await row.getByTestId("admin-user-suspend").click();
-    await dialog.getByTestId("admin-user-confirm-submit").click();
+    await dialog.getByTestId("confirm-dialog-confirm").click();
     await expect(dialog).toBeHidden();
     await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
     await expect(row.getByTestId("admin-user-activate")).toBeVisible();

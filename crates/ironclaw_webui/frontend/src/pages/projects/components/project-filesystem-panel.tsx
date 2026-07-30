@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
-import { Button, Icon, Panel, StatusPill } from "@ironclaw/ui";
+import { Button, Callout, EmptyPanel, Icon, Card, SkeletonList, Badge } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import {
   fetchAttachmentBlob,
@@ -88,7 +88,7 @@ export function ProjectFilesystemPanel({ threadId }) {
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
           {t("projects.files.label")}
         </div>
-        <StatusPill tone="muted" label={t("workspace.readOnly")} />
+        <Badge tone="muted" label={t("workspace.readOnly")} />
       </div>
       <Button
         variant="secondary"
@@ -103,17 +103,19 @@ export function ProjectFilesystemPanel({ threadId }) {
 
   if (!threadId) {
     return (
-      <Panel className="p-4 sm:p-5">
+      <Card className="p-4 sm:p-5">
         {header}
-        <div className="mt-4 rounded-[16px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-          {t("projects.files.noFilesYet")}
-        </div>
-      </Panel>
+        <EmptyPanel
+          variant="dashed"
+          className="mt-4"
+          description={t("projects.files.noFilesYet")}
+        />
+      </Card>
     );
   }
 
   return (
-    <Panel className="p-4 sm:p-5">
+    <Card className="p-4 sm:p-5">
       {header}
 
       <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5 font-mono text-xs text-iron-400">
@@ -143,21 +145,26 @@ export function ProjectFilesystemPanel({ threadId }) {
 
       {downloadError &&
       (
-        <div className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+        <Callout tone="danger" className="mt-3">
           {downloadError}
-        </div>
+        </Callout>
       )}
       {listing.error &&
       (
-        <div className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+        <Callout tone="danger" className="mt-3">
           {listing.error.message}
-        </div>
+        </Callout>
       )}
 
       <div className="mt-3 space-y-1">
         {listing.isLoading
-          ? [1, 2, 3, 4].map(
-              (index) => (<div key={index} className="v2-skeleton h-9 rounded-[12px]" />)
+          ? (
+              <SkeletonList
+                label={t("projects.files.loading")}
+                count={4}
+                itemClassName="h-9 rounded-[12px]"
+                className="space-y-1"
+              />
             )
           : entries.length
           ? entries.map(
@@ -182,12 +189,8 @@ export function ProjectFilesystemPanel({ threadId }) {
                 </button>
               )
             )
-          : (
-              <div className="rounded-[16px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-                {t("projects.files.folderEmpty")}
-              </div>
-            )}
+          : (<EmptyPanel variant="dashed" description={t("projects.files.folderEmpty")} />)}
       </div>
-    </Panel>
+    </Card>
   );
 }

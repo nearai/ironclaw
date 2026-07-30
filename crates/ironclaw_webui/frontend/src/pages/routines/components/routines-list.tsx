@@ -1,4 +1,11 @@
-import { EmptyPanel, Panel } from "@ironclaw/ui";
+import {
+  EmptyPanel,
+  Card,
+  SearchInput,
+  SectionHeader,
+  Select,
+  Toolbar,
+} from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { RoutineRow } from "./routine-row";
 
@@ -40,42 +47,42 @@ export function RoutinesList({
 
   return (
     <div className="space-y-5">
-      <Panel className="p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
-              {t("routines.explorer")}
+      <Card className="p-4 sm:p-5">
+        <SectionHeader
+          eyebrow={t("routines.explorer")}
+          title={t("routines.title")}
+          description={t("routines.description")}
+          actions={
+            <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+              <span>{routines.length} visible</span>
+              <span>/</span>
+              <span>{isRefreshing ? "refreshing" : "live"}</span>
             </div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">
-              {t("routines.title")}
-            </h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-              {t("routines.description")}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
-            <span>{routines.length} visible</span>
-            <span>/</span>
-            <span>{isRefreshing ? "refreshing" : "live"}</span>
-          </div>
-        </div>
+          }
+        />
 
-        <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-          <input
+        <Toolbar className="mt-5">
+          <SearchInput
+            label="Search routine name, trigger, or action"
             value={search}
-            onInput={(event) => onSearchChange(event.currentTarget.value)}
+            onChange={(event) => onSearchChange(event.currentTarget.value)}
+            onClear={() => onSearchChange("")}
+            clearLabel={t("routines.clearSearch")}
             placeholder="Search routine name, trigger, or action"
-            className="h-11 rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
+            className="md:flex-1"
           />
-          <select
-            value={statusFilter}
-            onChange={(event) => onStatusFilterChange(event.currentTarget.value)}
-            className="v2-select h-11 rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-          >
-            {FILTERS.map((filter) => (<option key={filter.value} value={filter.value}>{filter.label}</option>))}
-          </select>
-        </div>
-      </Panel>
+          <div className="md:w-[220px]">
+            <Select
+              size="sm"
+              value={statusFilter}
+              onChange={(event) => onStatusFilterChange(event.currentTarget.value)}
+              aria-label={t("routines.filterLabel")}
+            >
+              {FILTERS.map((filter) => (<option key={filter.value} value={filter.value}>{filter.label}</option>))}
+            </Select>
+          </div>
+        </Toolbar>
+      </Card>
 
       <div className="grid gap-3">
         {routines.map(
