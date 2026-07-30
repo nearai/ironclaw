@@ -25,7 +25,7 @@ async function loadRenderMarkdown({
     marked: { parse },
   }));
   vi.doMock("dompurify", () => ({
-    default: { addHook, sanitize },
+    default: () => ({ addHook, sanitize }),
   }));
 
   const mod = await import("./markdown");
@@ -98,6 +98,41 @@ test("renderMarkdown installs workspace and external-link hooks once", async () 
 
   assert.equal(attrs.get("target"), "_blank");
   assert.equal(attrs.get("rel"), "noopener noreferrer");
+});
+
+test("renderMarkdown isolates sanitizers by workspace-link capability", async () => {
+  vi.resetModules();
+  const created = [];
+  vi.doMock("marked", () => ({
+    marked: {
+      parse: (content) => `<p>${content}</p>`,
+    },
+  }));
+  vi.doMock("dompurify", () => ({
+    default: () => {
+      const hooks = [];
+      created.push(hooks);
+      return {
+        addHook: (name) => hooks.push(name),
+        sanitize: (raw) => raw,
+      };
+    },
+  }));
+
+  const { renderMarkdown } = await import("./markdown");
+  renderMarkdown("default");
+  renderMarkdown("preview", { workspaceFileLinks: true });
+  renderMarkdown("default again");
+
+  assert.equal(created.length, 2, "each capability mode reuses its own sanitizer");
+  assert.deepEqual(created[0], [
+    "uponSanitizeAttribute",
+    "afterSanitizeAttributes",
+  ]);
+  assert.deepEqual(created[1], [
+    "uponSanitizeAttribute",
+    "afterSanitizeAttributes",
+  ]);
 });
 
 test("renderMarkdown returns an empty string for falsy content", async () => {

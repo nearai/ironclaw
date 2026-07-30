@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
+  isValidWorkspaceFilePath,
   workspaceFileHrefFromPath,
   workspaceFilePathFromHref,
   workspaceViewerRouteFromFilePath,
 } from "./workspace-file-links";
+
+test("isValidWorkspaceFilePath rejects paths outside the scoped root", () => {
+  assert.equal(isValidWorkspaceFilePath("/workspace/reports/final.csv"), true);
+  assert.equal(isValidWorkspaceFilePath("/workspace/reports/../secret.txt"), false);
+  assert.equal(isValidWorkspaceFilePath("/project/reports/final.csv"), false);
+});
 
 test("workspaceFilePathFromHref recognizes scoped and sandbox workspace files", () => {
   assert.equal(

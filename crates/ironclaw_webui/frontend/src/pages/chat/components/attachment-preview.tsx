@@ -35,6 +35,9 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
   const [view, setView] = React.useState({});
 
   const mode = attachment ? attachmentPreviewMode(attachment.mime_type) : "download";
+  // This is a navigation target, not an authorization decision. The workspace
+  // viewer fetches through caller-scoped server APIs that re-authorize access;
+  // this client-side helper only rejects malformed path syntax.
   const workspaceRoute = workspaceViewerRouteFromFilePath(
     attachment?.workspace_path,
   );

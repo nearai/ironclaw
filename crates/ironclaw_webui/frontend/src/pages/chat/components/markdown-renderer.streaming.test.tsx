@@ -224,3 +224,39 @@ test("workspace links reject forged preview metadata", async () => {
     container.remove();
   }
 });
+
+test("workspace links reject matching non-workspace href metadata", async () => {
+  renderMarkdownMock.mockReset();
+  renderMarkdownMock.mockImplementation(
+    () =>
+      '<p><a href="https://example.com" data-workspace-path="https://example.com">external</a></p>',
+  );
+  const onWorkspaceFileOpen = vi.fn();
+  const { MarkdownRenderer } = await import("./markdown-renderer");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => {
+      root.render(<MarkdownRenderer
+        content="external"
+        onWorkspaceFileOpen={onWorkspaceFileOpen}
+      />);
+    });
+
+    const link = container.querySelector("a");
+    assert.ok(link);
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+    });
+    link.dispatchEvent(click);
+
+    assert.equal(click.defaultPrevented, false);
+    assert.deepEqual(onWorkspaceFileOpen.mock.calls, []);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});

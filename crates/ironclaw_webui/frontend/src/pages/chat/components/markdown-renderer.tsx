@@ -23,8 +23,22 @@ function codeBlockLabels(t) {
 }
 
 function enhanceCodeBlocks(root, t) {
-  if (!root) return;
+  if (!root) return () => {};
   const labels = codeBlockLabels(t);
+  const cleanups = [];
+  const resetTimers = new Set();
+  const listen = (target, type, handler) => {
+    target.addEventListener(type, handler);
+    cleanups.push(() => target.removeEventListener(type, handler));
+  };
+  const resetCopyLabelLater = (button) => {
+    const timer = setTimeout(() => {
+      resetTimers.delete(timer);
+      button.dataset.copied = "0";
+      button.textContent = button.dataset.labelCopy || labels.copy;
+    }, 1400);
+    resetTimers.add(timer);
+  };
   root.querySelectorAll("pre").forEach((pre) => {
     if (pre.dataset.enhanced === "1") {
       syncCodeBlockLabels(pre, labels);
@@ -43,8 +57,8 @@ function enhanceCodeBlocks(root, t) {
     const bar = document.createElement("div");
     bar.style.cssText =
       "position:absolute;top:6px;right:6px;display:flex;gap:4px;opacity:0";
-    wrap.addEventListener("mouseenter", () => (bar.style.opacity = "1"));
-    wrap.addEventListener("mouseleave", () => (bar.style.opacity = "0"));
+    listen(wrap, "mouseenter", () => (bar.style.opacity = "1"));
+    listen(wrap, "mouseleave", () => (bar.style.opacity = "0"));
 
     const mkBtn = (label) => {
       const b = document.createElement("button");
@@ -57,7 +71,7 @@ function enhanceCodeBlocks(root, t) {
 
     const wrapBtn = mkBtn(labels.wrap);
     wrapBtn.dataset.codeBlockRole = "wrap";
-    wrapBtn.addEventListener("click", () => {
+    listen(wrapBtn, "click", () => {
       const wrapped = pre.dataset.wrapped !== "1";
       pre.dataset.wrapped = wrapped ? "1" : "0";
       pre.style.whiteSpace = wrapped ? "pre-wrap" : "";
@@ -68,16 +82,13 @@ function enhanceCodeBlocks(root, t) {
 
     const copyBtn = mkBtn(labels.copy);
     copyBtn.dataset.codeBlockRole = "copy";
-    copyBtn.addEventListener("click", async () => {
+    listen(copyBtn, "click", async () => {
       try {
         await navigator.clipboard.writeText(codeEl ? codeEl.innerText : pre.innerText);
         copyBtn.dataset.copied = "1";
         copyBtn.textContent = copyBtn.dataset.labelCopied || labels.copied;
         toast(copyBtn.dataset.labelCodeCopied || labels.codeCopied, { tone: "success" });
-        setTimeout(() => {
-          copyBtn.dataset.copied = "0";
-          copyBtn.textContent = copyBtn.dataset.labelCopy || labels.copy;
-        }, 1400);
+        resetCopyLabelLater(copyBtn);
       } catch {
         // clipboard unavailable
       }
@@ -98,7 +109,7 @@ function enhanceCodeBlocks(root, t) {
       toggle.textContent = labels.showMore;
       toggle.style.cssText =
         "display:block;width:100%;text-align:center;font-family:var(--font-mono,monospace);font-size:11px;color:var(--v2-accent-text);background:var(--v2-surface-soft);border:0;border-top:1px solid var(--v2-panel-border);padding:5px;cursor:pointer";
-      toggle.addEventListener("click", () => {
+      listen(toggle, "click", () => {
         const expanded = toggle.dataset.expanded !== "1";
         toggle.dataset.expanded = expanded ? "1" : "0";
         pre.style.maxHeight = expanded ? "none" : `${COLLAPSE_PX}px`;
@@ -110,6 +121,19 @@ function enhanceCodeBlocks(root, t) {
       wrap.appendChild(toggle);
     }
     syncCodeBlockLabels(pre, labels);
+  });
+  return () => {
+    cleanups.forEach((cleanup) => cleanup());
+    resetTimers.forEach((timer) => clearTimeout(timer));
+    resetTimers.clear();
+  };
+}
+
+function syncCodeBlockLabelsInRoot(root, t) {
+  if (!root) return;
+  const labels = codeBlockLabels(t);
+  root.querySelectorAll("pre").forEach((pre) => {
+    if (pre.dataset.enhanced === "1") syncCodeBlockLabels(pre, labels);
   });
 }
 
@@ -169,7 +193,7 @@ function MarkdownRendererImpl({
           : null;
       const path = anchor?.getAttribute("data-workspace-path");
       const hrefPath = workspaceFilePathFromHref(anchor?.getAttribute("href"));
-      if (!path || hrefPath !== path) return;
+      if (!path || !hrefPath || hrefPath !== path) return;
       event.preventDefault();
       onWorkspaceFileOpen(path);
     },
@@ -237,9 +261,9 @@ function MarkdownRendererImpl({
 
   React.useEffect(() => {
     if (streaming || renderedHtml === null) return undefined;
-    enhanceCodeBlocks(ref.current, t);
     const root = ref.current;
-    if (!root?.querySelector("pre code")) return undefined;
+    const cleanupCodeBlocks = enhanceCodeBlocks(root, t);
+    if (!root?.querySelector("pre code")) return cleanupCodeBlocks;
 
     let active = true;
     import("../../../lib/syntax-highlighting")
@@ -251,7 +275,13 @@ function MarkdownRendererImpl({
       });
     return () => {
       active = false;
+      cleanupCodeBlocks();
     };
+  }, [renderedHtml, streaming]);
+
+  React.useEffect(() => {
+    if (streaming || renderedHtml === null) return;
+    syncCodeBlockLabelsInRoot(ref.current, t);
   }, [renderedHtml, streaming, t]);
 
   React.useEffect(() => {

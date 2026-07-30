@@ -71,6 +71,15 @@ test("still extracts a real reference alongside a code span", () => {
   );
 });
 
+test("rejects bare paths containing traversal segments", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      "Do not expose /workspace/reports/../secret.txt as a file chip.",
+    ),
+    [],
+  );
+});
+
 test("handles empty / non-string content", () => {
   assert.deepEqual(extractWorkspaceFilePaths(""), []);
   assert.deepEqual(extractWorkspaceFilePaths(null), []);

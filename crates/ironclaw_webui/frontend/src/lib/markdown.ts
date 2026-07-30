@@ -5,8 +5,7 @@ import {
   workspaceFilePathFromHref,
 } from "./workspace-file-links";
 
-let linkHooksInstalled = false;
-let workspaceFileLinksEnabled = false;
+const sanitizers = new Map<boolean, ReturnType<typeof DOMPurify>>();
 
 // Normalize the product's scoped `sandbox:/workspace/...` references before
 // DOMPurify applies its URI allowlist. Only the strict workspace-file grammar is
@@ -15,11 +14,13 @@ let workspaceFileLinksEnabled = false;
 // After sanitization, mark workspace anchors for the chat renderer's delegated
 // click handler. Keep the existing external-link hardening attributes as a safe
 // fallback for renderer call sites that do not install that handler.
-function ensureLinkHooks(): void {
-  if (linkHooksInstalled) return;
-  DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+function createSanitizer(workspaceFileLinks: boolean) {
+  // Each capability mode owns an isolated DOMPurify instance. Hook behavior is
+  // closure-captured and cannot be changed by another render.
+  const sanitizer = DOMPurify(window);
+  sanitizer.addHook("uponSanitizeAttribute", (node, data) => {
     if (
-      !workspaceFileLinksEnabled ||
+      !workspaceFileLinks ||
       node.tagName !== "A" ||
       data.attrName !== "href"
     ) {
@@ -29,14 +30,14 @@ function ensureLinkHooks(): void {
     const canonicalHref = workspaceFileHrefFromPath(workspacePath);
     if (canonicalHref) data.attrValue = canonicalHref;
   });
-  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  sanitizer.addHook("afterSanitizeAttributes", (node) => {
     if (node.tagName !== "A") return;
     // DOMPurify intentionally preserves data-* attributes, so remove any
     // assistant-authored preview metadata before deriving the trusted value.
     node.removeAttribute("data-workspace-path");
     const href = node.getAttribute("href");
     if (!href) return;
-    if (workspaceFileLinksEnabled) {
+    if (workspaceFileLinks) {
       const workspacePath = workspaceFilePathFromHref(href);
       if (workspacePath) {
         node.setAttribute("data-workspace-path", workspacePath);
@@ -45,7 +46,15 @@ function ensureLinkHooks(): void {
     node.setAttribute("target", "_blank");
     node.setAttribute("rel", "noopener noreferrer");
   });
-  linkHooksInstalled = true;
+  return sanitizer;
+}
+
+function sanitizerForWorkspaceFileLinks(workspaceFileLinks: boolean) {
+  const existing = sanitizers.get(workspaceFileLinks);
+  if (existing) return existing;
+  const sanitizer = createSanitizer(workspaceFileLinks);
+  sanitizers.set(workspaceFileLinks, sanitizer);
+  return sanitizer;
 }
 
 type RenderMarkdownOptions = {
@@ -57,17 +66,10 @@ export function renderMarkdown(
   { workspaceFileLinks = false }: RenderMarkdownOptions = {},
 ): string {
   if (!content) return "";
-  ensureLinkHooks();
-  const previousWorkspaceFileLinksEnabled = workspaceFileLinksEnabled;
-  workspaceFileLinksEnabled = workspaceFileLinks;
-  try {
-    const raw = marked.parse(content, {
-      async: false,
-      gfm: true,
-      breaks: true,
-    }) as string;
-    return DOMPurify.sanitize(raw);
-  } finally {
-    workspaceFileLinksEnabled = previousWorkspaceFileLinksEnabled;
-  }
+  const raw = marked.parse(content, {
+    async: false,
+    gfm: true,
+    breaks: true,
+  }) as string;
+  return sanitizerForWorkspaceFileLinks(workspaceFileLinks).sanitize(raw);
 }

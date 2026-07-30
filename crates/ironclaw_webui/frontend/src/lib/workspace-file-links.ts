@@ -3,12 +3,6 @@
 // paths have no query/fragment, decode exactly once, and stay below the scoped
 // root after decoding.
 
-// Bare-path extraction still needs a bounded token grammar so prose punctuation
-// does not become part of a generated chip. Markdown href recognition below is
-// broader because the Markdown parser gives us an exact URL boundary.
-export const WORKSPACE_FILE_PATH_SOURCE =
-  String.raw`\/workspace\/[A-Za-z0-9._\-/]+\.[A-Za-z0-9]+`;
-
 const WORKSPACE_PREFIX = "/workspace/";
 const SANDBOX_SCHEME = /^sandbox:/i;
 const ENCODED_SEPARATOR = /%(?:2f|5c)/i;
@@ -25,6 +19,10 @@ function isSafeDecodedWorkspacePath(path: string): boolean {
       segment.includes("\\") ||
       CONTROL_CHARACTER.test(segment),
   );
+}
+
+export function isValidWorkspaceFilePath(path: unknown): path is string {
+  return typeof path === "string" && isSafeDecodedWorkspacePath(path);
 }
 
 export function workspaceFilePathFromHref(href: unknown): string | null {
@@ -55,7 +53,7 @@ export function workspaceFilePathFromHref(href: unknown): string | null {
 }
 
 export function workspaceFileHrefFromPath(path: unknown): string | null {
-  if (typeof path !== "string" || !isSafeDecodedWorkspacePath(path)) return null;
+  if (!isValidWorkspaceFilePath(path)) return null;
   const segments = path.slice(WORKSPACE_PREFIX.length).split("/");
   return `${WORKSPACE_PREFIX}${segments.map(encodeURIComponent).join("/")}`;
 }

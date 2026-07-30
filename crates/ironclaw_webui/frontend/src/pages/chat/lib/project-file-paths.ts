@@ -3,13 +3,14 @@
 // Kept free of browser/React imports so the path-extraction logic — which gates
 // the download side effect — is unit-testable on its own.
 
-import { WORKSPACE_FILE_PATH_SOURCE } from "../../../lib/workspace-file-links";
+import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 
 // Match scoped workspace paths with a file extension. These are the paths the
 // `/files/content` endpoint serves and that the agent's file tools emit. Both a
 // bare mention (`/workspace/report.csv`) and a markdown link href
 // (`[report.csv](/workspace/report.csv)`) are caught by the same scan.
-const WORKSPACE_FILE_PATH = new RegExp(WORKSPACE_FILE_PATH_SOURCE, "g");
+const WORKSPACE_FILE_PATH =
+  /\/workspace\/[A-Za-z0-9._\-/]+\.[A-Za-z0-9]+/g;
 
 // Strip fenced (```…```) and inline (`…`) code spans. A path that the assistant
 // only *displays* in a shell snippet (`cat /workspace/.env`) must not become a
@@ -30,6 +31,7 @@ export function extractWorkspaceFilePaths(content) {
     // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
     // is never captured and needs no stripping here.
     const path = match[0];
+    if (!isValidWorkspaceFilePath(path)) continue;
     if (!seen.has(path)) {
       seen.add(path);
       paths.push(path);
