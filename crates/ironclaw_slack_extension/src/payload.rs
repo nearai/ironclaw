@@ -61,6 +61,8 @@ pub fn parse_slack_url_verification_challenge(
 pub enum SlackPayloadParseError {
     #[error("invalid Slack event JSON: {reason}")]
     InvalidJson { reason: String },
+    #[error("invalid Slack slash-command form: {reason}")]
+    InvalidForm { reason: String },
     #[error("invalid external reference: {kind}: {reason}")]
     InvalidExternalRef { kind: &'static str, reason: String },
     #[error(
@@ -117,7 +119,13 @@ pub fn parse_slack_event(
 /// the shared host sink applies the channel-neutral interaction grammar.
 #[derive(Debug)]
 pub enum SlackInboundEvent {
-    UrlVerification { challenge: String },
+    UrlVerification {
+        challenge: String,
+    },
+    /// Slack's one-time endpoint-verification probe for a native slash
+    /// command (distinct from the Events API's `UrlVerification` challenge).
+    /// Any 200 response satisfies it; the body is ignored.
+    SslCheck,
     Ignore,
     Message(Box<NormalizedInboundMessage>),
 }
@@ -214,6 +222,134 @@ pub fn normalize_slack_event(
         // NoOp — authenticated no-ops for the channel contract.
         _ => Ok(SlackInboundEvent::Ignore),
     }
+}
+
+/// Parse one host-verified Slack inbound request that may be EITHER the
+/// Events API's JSON envelope or a native slash-command form POST — Slack
+/// registers both against the identical Request URL (one ingress route per
+/// extension), distinguished only by the (host-forwarded, verification-
+/// exempt) Content-Type header. The JSON branch delegates verbatim to
+/// [`normalize_slack_event`] so the two entry points share exactly one JSON
+/// parsing implementation; this function adds no new behavior to that path.
+pub(crate) fn normalize_slack_inbound(
+    raw_payload: &[u8],
+    headers: &[(String, String)],
+    installation_id: &AdapterInstallationId,
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    if is_form_urlencoded_content_type(headers) {
+        return normalize_slack_slash_command(raw_payload, installation_id);
+    }
+    normalize_slack_event(raw_payload, installation_id)
+}
+
+/// Case-insensitive Content-Type match for Slack's slash-command / ssl_check
+/// form encoding. Absent or non-matching headers fall through to the JSON
+/// path — the pre-existing default behavior.
+fn is_form_urlencoded_content_type(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value
+                .to_ascii_lowercase()
+                .contains("application/x-www-form-urlencoded")
+    })
+}
+
+/// Parse one native Slack slash-command form POST (`ssl_check` handshake or
+/// a real `/ironclaw ...` invocation) into its normalized channel form.
+fn normalize_slack_slash_command(
+    raw_payload: &[u8],
+    installation_id: &AdapterInstallationId,
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    if raw_payload.len() > MAX_SLACK_PAYLOAD_BYTES {
+        return Err(SlackPayloadParseError::InvalidForm {
+            reason: "payload exceeds size limit".into(),
+        });
+    }
+
+    // Slack's ssl_check verification probe carries ONLY `ssl_check` +
+    // `token` — never the slash command's mandatory fields. Check for it
+    // via a minimal, all-Option probe BEFORE parsing the full form (which
+    // requires channel_id/user_id/command/trigger_id), or the probe would
+    // always fail mandatory-field validation.
+    let probe: SlackSlashCommandProbe =
+        serde_urlencoded::from_bytes(raw_payload).map_err(|err| {
+            SlackPayloadParseError::InvalidForm {
+                reason: err.to_string(),
+            }
+        })?;
+    if probe.ssl_check.is_some() {
+        return Ok(SlackInboundEvent::SslCheck);
+    }
+
+    let form: SlackSlashCommandForm = serde_urlencoded::from_bytes(raw_payload).map_err(|err| {
+        SlackPayloadParseError::InvalidForm {
+            reason: err.to_string(),
+        }
+    })?;
+
+    let event_id = build_slash_event_id(installation_id, &form.trigger_id)?;
+    let actor = build_actor_ref(Some(&form.user_id))?;
+    let conversation =
+        build_conversation_ref(form.team_id.as_deref(), Some(&form.channel_id), None, None)?;
+    let is_dm = form.channel_name.as_deref() == Some("directmessage")
+        || is_dm_channel(&form.channel_id, None);
+    let trigger = if is_dm {
+        ProductTriggerReason::DirectChat
+    } else {
+        ProductTriggerReason::BotCommand
+    };
+    let text = slash_command_dispatch_text(&form.command, form.text.as_deref());
+
+    Ok(SlackInboundEvent::Message(Box::new(
+        NormalizedInboundMessage {
+            actor,
+            conversation,
+            event_id,
+            text,
+            trigger,
+            attachments: Vec::new(),
+            reply_context: None,
+        },
+    )))
+}
+
+/// Map a slash command's `command` + `text` fields to the dispatcher's
+/// invocation text. `/ironclaw` is this extension's own registered command:
+/// empty or `help` text becomes `/help`; otherwise the text becomes the
+/// dispatched command, defensively stripped of a leading `/` first so a
+/// user typing `/ironclaw /status` does not double it to `//status`. A
+/// DIFFERENT registered command name (an app-config mistake pointing a
+/// second slash command at this same URL) is passed through verbatim as
+/// `"{command} {text}"` — the generic classifier/admission layer rejects it
+/// as undeclared, with help, rather than this adapter guessing intent.
+fn slash_command_dispatch_text(command: &str, text: Option<&str>) -> String {
+    let text = text.unwrap_or_default().trim();
+    if command != "/ironclaw" {
+        return format!("{command} {text}").trim().to_string();
+    }
+    if text.is_empty() || text.eq_ignore_ascii_case("help") {
+        return "/help".to_string();
+    }
+    let stripped = text.strip_prefix('/').unwrap_or(text);
+    format!("/{stripped}")
+}
+
+fn build_slash_event_id(
+    installation_id: &AdapterInstallationId,
+    trigger_id: &str,
+) -> Result<ExternalEventId, SlackPayloadParseError> {
+    // Namespaced separately from the Events API's `event_callback` id space
+    // (same defensive rationale as build_event_id's own `-noop-` namespace):
+    // a slash invocation and an Events API callback must never collide on
+    // dedup key even if some future id happened to coincide.
+    ExternalEventId::new(format!(
+        "slack-{}-slash-{trigger_id}",
+        installation_id.as_str()
+    ))
+    .map_err(|err| SlackPayloadParseError::InvalidExternalRef {
+        kind: "external_event_id",
+        reason: err.to_string(),
+    })
 }
 
 /// Classify a normalized message's text as a gate-resolution interaction
@@ -715,6 +851,36 @@ struct SlackFile {
     mimetype: Option<String>,
     name: Option<String>,
     size: Option<u64>,
+}
+
+/// Minimal probe for Slack's `ssl_check` endpoint-verification POST, which
+/// carries only `ssl_check` + `token` — never a slash command's mandatory
+/// fields. Parsed before [`SlackSlashCommandForm`] so the probe never trips
+/// that struct's required-field validation.
+#[derive(Debug, Clone, Deserialize)]
+struct SlackSlashCommandProbe {
+    ssl_check: Option<String>,
+}
+
+/// One native Slack slash-command form POST
+/// (`application/x-www-form-urlencoded`). Liberal on purpose — Slack adds
+/// fields across API versions and this is a public untrusted-ingress
+/// boundary — so only the fields the dispatcher mapping cannot proceed
+/// without are mandatory; everything else is `Option`. There is no
+/// `deny_unknown_fields`, so fields this crate does not yet consume
+/// (`response_url` — future out-of-DM delivery; `ssl_check` — already
+/// resolved by [`SlackSlashCommandProbe`] before this struct is parsed;
+/// `token` — Slack's legacy verification field, superseded here by HMAC
+/// signing) arrive and are silently dropped rather than declared dead.
+#[derive(Debug, Clone, Deserialize)]
+struct SlackSlashCommandForm {
+    channel_id: String,
+    user_id: String,
+    command: String,
+    trigger_id: String,
+    text: Option<String>,
+    channel_name: Option<String>,
+    team_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -1281,6 +1447,138 @@ mod tests {
                 assert_eq!(payload.trigger, ProductTriggerReason::BotMention);
             }
             other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    // ── native slash-command form transport (PR-3) ──────────────────────────
+
+    fn form_headers() -> Vec<(String, String)> {
+        vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )]
+    }
+
+    #[test]
+    fn normalize_slack_inbound_maps_dm_slash_command_to_direct_chat_message() {
+        let body = b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&team_id=T1&trigger_id=111.222.abc";
+        let event = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect("slash command form parses");
+        let SlackInboundEvent::Message(message) = event else {
+            panic!("expected Message, got {event:?}");
+        };
+        assert_eq!(message.text, "/status");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+        assert_eq!(message.actor.id(), "U123");
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-slack_install_beta-slash-111.222.abc"
+        );
+        assert_eq!(message.conversation.conversation_id(), "D123");
+        assert_eq!(message.conversation.space_id(), Some("T1"));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_non_dm_channel_maps_to_bot_command_trigger() {
+        let body = b"command=%2Fironclaw&text=status&channel_id=C777&channel_name=general&user_id=U123&team_id=T1&trigger_id=111.222.def";
+        let event = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect("slash command form parses");
+        let SlackInboundEvent::Message(message) = event else {
+            panic!("expected Message, got {event:?}");
+        };
+        assert_eq!(message.trigger, ProductTriggerReason::BotCommand);
+    }
+
+    #[test]
+    fn normalize_slack_inbound_ssl_check_short_circuits_before_mandatory_field_validation() {
+        // Slack's ssl_check probe carries ONLY ssl_check + token — none of the
+        // slash command's mandatory fields (channel_id/user_id/command/trigger_id).
+        // This must succeed anyway: the ssl_check test has to run before the
+        // mandatory-field validation, not after it.
+        let body = b"ssl_check=1&token=deprecated-verification-token";
+        let event = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect("ssl_check probe parses even without mandatory slash fields");
+        assert!(matches!(event, SlackInboundEvent::SslCheck));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_malformed_form_missing_user_id_is_typed_parse_error() {
+        let body = b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&team_id=T1&trigger_id=111.222.ghi";
+        let err = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect_err("missing user_id must fail");
+        assert!(matches!(err, SlackPayloadParseError::InvalidForm { .. }));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_oversized_slash_form_is_rejected() {
+        let mut oversized = Vec::with_capacity(MAX_SLACK_PAYLOAD_BYTES + 32);
+        oversized.extend_from_slice(b"command=%2Fironclaw&text=");
+        oversized.resize(MAX_SLACK_PAYLOAD_BYTES + 16, b'a');
+        let err = normalize_slack_inbound(&oversized, &form_headers(), &installation_id())
+            .expect_err("an over-limit slash form must be rejected");
+        assert!(matches!(err, SlackPayloadParseError::InvalidForm { .. }));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_json_content_type_is_byte_identical_to_normalize_slack_event() {
+        let body = br#"{
+            "type": "event_callback",
+            "event_id": "Ev123",
+            "team_id": "T-A",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "D123",
+                "channel_type": "im",
+                "text": "hello there",
+                "ts": "1710000000.000100"
+            }
+        }"#;
+        let json_headers = vec![("content-type".to_string(), "application/json".to_string())];
+        let via_inbound = normalize_slack_inbound(body, &json_headers, &installation_id())
+            .expect("json parses through the header-aware helper");
+        let via_event =
+            normalize_slack_event(body, &installation_id()).expect("json parses directly");
+        let (SlackInboundEvent::Message(a), SlackInboundEvent::Message(b)) =
+            (via_inbound, via_event)
+        else {
+            panic!("expected both paths to normalize to Message");
+        };
+        assert_eq!(a, b);
+
+        // No Content-Type header at all must also fall through to the JSON
+        // path (the default when the header is absent, not just when it's
+        // explicitly "application/json").
+        let via_no_headers = normalize_slack_inbound(body, &[], &installation_id())
+            .expect("json parses with no content-type header");
+        let SlackInboundEvent::Message(c) = via_no_headers else {
+            panic!("expected Message");
+        };
+        assert_eq!(c, a);
+    }
+
+    #[test]
+    fn slash_command_dispatch_text_mapping() {
+        let cases: &[(&str, Option<&str>, &str)] = &[
+            (
+                "/ironclaw",
+                Some("model set-provider openai"),
+                "/model set-provider openai",
+            ),
+            ("/ironclaw", Some("/status"), "/status"),
+            ("/ironclaw", Some(""), "/help"),
+            ("/ironclaw", None, "/help"),
+            ("/ironclaw", Some("help"), "/help"),
+            ("/ironclaw", Some("HELP"), "/help"),
+            ("/ironclaw", Some("  "), "/help"),
+            ("/somethingelse", Some("hi"), "/somethingelse hi"),
+        ];
+        for (command, text, expected) in cases {
+            assert_eq!(
+                &slash_command_dispatch_text(command, *text),
+                expected,
+                "command={command:?} text={text:?}"
+            );
         }
     }
 }
