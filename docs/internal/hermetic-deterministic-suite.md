@@ -42,9 +42,10 @@ Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. That boundar
   attempts on Linux and ordinary macOS binaries; macOS additionally uses the
   process sandbox so SIP-protected launchers remain fail-closed. On Linux,
   route-only UDP association is permitted because it sends no packet; explicit
-  and connected UDP sends remain blocked. This lets Chromium inspect a
-  route/source address without weakening the egress boundary. The coarser macOS
-  process sandbox may reject the harmless association as well.
+  and connected UDP transmission through `send`, `sendto`, `sendmsg`,
+  `sendmmsg`, `write`, and `writev` remains blocked. This lets Chromium inspect
+  a route/source address without weakening the egress boundary. The coarser
+  macOS process sandbox may reject the harmless association as well.
 
 Rust wall-clock and random behavior is not overridden through process-global
 environment variables. Time-sensitive domain tests use their owning typed

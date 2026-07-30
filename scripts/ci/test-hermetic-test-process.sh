@@ -162,18 +162,24 @@ else
     exit 1
   fi
 fi
-set +e
-connected_udp_output="$(
-  IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
-    "${runner}" -- "${network_probe}" 192.0.2.1 udp-connected 2>&1
-)"
-connected_udp_status=$?
-set -e
-if [[ "${connected_udp_status}" -eq 0 || "${connected_udp_output}" != *"non-loopback network attempt"* ]]; then
-  echo "unexpected connected non-loopback UDP send was not reported" >&2
-  printf '%s\n' "${connected_udp_output}" >&2
-  exit 1
+connected_udp_modes=(udp-connected udp-write udp-writev)
+if [[ "$(uname -s)" == "Linux" ]]; then
+  connected_udp_modes+=(udp-sendmmsg)
 fi
+for connected_udp_mode in "${connected_udp_modes[@]}"; do
+  set +e
+  connected_udp_output="$(
+    IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
+      "${runner}" -- "${network_probe}" 192.0.2.1 "${connected_udp_mode}" 2>&1
+  )"
+  connected_udp_status=$?
+  set -e
+  if [[ "${connected_udp_status}" -eq 0 || "${connected_udp_output}" != *"non-loopback network attempt"* ]]; then
+    echo "unexpected ${connected_udp_mode} non-loopback UDP send was not reported" >&2
+    printf '%s\n' "${connected_udp_output}" >&2
+    exit 1
+  fi
+done
 
 # Deliberate localhost fakes remain usable. A refused port is sufficient: the
 # guard must allow the connect syscall to reach the kernel rather than report it.

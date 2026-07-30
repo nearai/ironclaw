@@ -11,13 +11,17 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #if !defined(__APPLE__)
 typedef int (*connect_fn)(int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*send_fn)(int, const void *, size_t, int);
+typedef int (*sendmmsg_fn)(int, struct mmsghdr *, unsigned int, int);
 typedef ssize_t (*sendmsg_fn)(int, const struct msghdr *, int);
 typedef ssize_t (*sendto_fn)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+typedef ssize_t (*write_fn)(int, const void *, size_t);
+typedef ssize_t (*writev_fn)(int, const struct iovec *, int);
 static connect_fn real_connect(void) {
     return (connect_fn)dlsym(RTLD_NEXT, "connect");
 }
@@ -26,12 +30,24 @@ static send_fn real_send(void) {
     return (send_fn)dlsym(RTLD_NEXT, "send");
 }
 
+static sendmmsg_fn real_sendmmsg(void) {
+    return (sendmmsg_fn)dlsym(RTLD_NEXT, "sendmmsg");
+}
+
 static sendmsg_fn real_sendmsg(void) {
     return (sendmsg_fn)dlsym(RTLD_NEXT, "sendmsg");
 }
 
 static sendto_fn real_sendto(void) {
     return (sendto_fn)dlsym(RTLD_NEXT, "sendto");
+}
+
+static write_fn real_write(void) {
+    return (write_fn)dlsym(RTLD_NEXT, "write");
+}
+
+static writev_fn real_writev(void) {
+    return (writev_fn)dlsym(RTLD_NEXT, "writev");
 }
 #endif
 
@@ -82,7 +98,8 @@ static const struct sockaddr *non_loopback_destination(
 static void write_violation(int fd, const char *message, size_t length) {
     size_t offset = 0;
     while (offset < length) {
-        ssize_t written = write(fd, message + offset, length - offset);
+        ssize_t written =
+            (ssize_t)syscall(SYS_write, fd, message + offset, length - offset);
         if (written > 0) {
             offset += (size_t)written;
             continue;
@@ -185,6 +202,35 @@ static ssize_t guarded_send(
 #endif
 }
 
+#if !defined(__APPLE__)
+static int guarded_sendmmsg(
+    int socket_fd,
+    struct mmsghdr *messages,
+    unsigned int message_count,
+    int flags
+) {
+    for (unsigned int index = 0; index < message_count; index++) {
+        const struct sockaddr *address =
+            (const struct sockaddr *)messages[index].msg_hdr.msg_name;
+        struct sockaddr_storage peer;
+        const struct sockaddr *blocked =
+            non_loopback_destination(socket_fd, address, &peer);
+        if (blocked != NULL) {
+            record_violation(blocked);
+            errno = EPERM;
+            return -1;
+        }
+    }
+
+    sendmmsg_fn function = real_sendmmsg();
+    if (function == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(socket_fd, messages, message_count, flags);
+}
+#endif
+
 static ssize_t guarded_sendmsg(int socket_fd, const struct msghdr *message, int flags) {
     const struct sockaddr *address =
         message == NULL ? NULL : (const struct sockaddr *)message->msg_name;
@@ -244,6 +290,50 @@ static ssize_t guarded_sendto(
 #endif
 }
 
+static ssize_t guarded_write(int fd, const void *buffer, size_t length) {
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked = non_loopback_destination(fd, NULL, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
+        errno = EPERM;
+        return -1;
+    }
+#if defined(__APPLE__)
+    return (ssize_t)syscall(SYS_write, fd, buffer, length);
+#else
+    write_fn function = real_write();
+    if (function == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(fd, buffer, length);
+#endif
+}
+
+static ssize_t guarded_writev(
+    int fd,
+    const struct iovec *iovecs,
+    int iovec_count
+) {
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked = non_loopback_destination(fd, NULL, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
+        errno = EPERM;
+        return -1;
+    }
+#if defined(__APPLE__)
+    return (ssize_t)syscall(SYS_writev, fd, iovecs, iovec_count);
+#else
+    writev_fn function = real_writev();
+    if (function == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(fd, iovecs, iovec_count);
+#endif
+}
+
 #if defined(__APPLE__)
 #define DYLD_INTERPOSE(replacement, replacee)                                      \
     __attribute__((used)) static struct {                                          \
@@ -258,6 +348,8 @@ DYLD_INTERPOSE(guarded_connect, connect);
 DYLD_INTERPOSE(guarded_send, send);
 DYLD_INTERPOSE(guarded_sendmsg, sendmsg);
 DYLD_INTERPOSE(guarded_sendto, sendto);
+DYLD_INTERPOSE(guarded_write, write);
+DYLD_INTERPOSE(guarded_writev, writev);
 #else
 int connect(int socket_fd, const struct sockaddr *address, socklen_t address_length) {
     return guarded_connect(socket_fd, address, address_length);
@@ -265,6 +357,15 @@ int connect(int socket_fd, const struct sockaddr *address, socklen_t address_len
 
 ssize_t send(int socket_fd, const void *buffer, size_t length, int flags) {
     return guarded_send(socket_fd, buffer, length, flags);
+}
+
+int sendmmsg(
+    int socket_fd,
+    struct mmsghdr *messages,
+    unsigned int message_count,
+    int flags
+) {
+    return guarded_sendmmsg(socket_fd, messages, message_count, flags);
 }
 
 ssize_t sendmsg(int socket_fd, const struct msghdr *message, int flags) {
@@ -280,5 +381,13 @@ ssize_t sendto(
     socklen_t address_length
 ) {
     return guarded_sendto(socket_fd, buffer, length, flags, address, address_length);
+}
+
+ssize_t write(int fd, const void *buffer, size_t length) {
+    return guarded_write(fd, buffer, length);
+}
+
+ssize_t writev(int fd, const struct iovec *iovecs, int iovec_count) {
+    return guarded_writev(fd, iovecs, iovec_count);
 }
 #endif
