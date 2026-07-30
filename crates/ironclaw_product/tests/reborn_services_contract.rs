@@ -27,15 +27,25 @@ use ironclaw_auth::{
     CredentialAccountStatus,
 };
 use ironclaw_host_api::{
-    ActivityId, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
-    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    capability::{EffectKind, PermissionMode},
+    ids::{
+        ActivityId, AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ProjectId,
+        ResultRef, SecretHandle, TenantId, ThreadId, UserId,
+    },
+    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
+    resource::ResourceScope,
+    result_meta::{ResultProgress, TerminateHint},
+    safe_summary::SafeSummary,
+    scope::Principal,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, InstallationState, LifecyclePublicState, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest, ProductSurfaceValidationCode,
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
+        ProductSurfaceValidationCode,
+    },
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -2458,7 +2468,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let response = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::ProductSurfaceInvokeRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
             operation_id: operation_id.clone(),
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: uuid::Uuid::new_v4().to_string(),
@@ -2476,7 +2486,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let error = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::ProductSurfaceInvokeRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
             operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
@@ -3661,7 +3671,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone())
         .with_skill_activation_recorder(|_, _, _| {
-            Err(ironclaw_host_api::ProductSurfaceError {
+            Err(ironclaw_host_api::product_surface::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
@@ -10493,7 +10503,7 @@ struct StaticOperatorToolCatalogForTest {
 impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
     async fn list_operator_tools(
         &self,
-        _caller: &ironclaw_host_api::UserId,
+        _caller: &ironclaw_host_api::ids::UserId,
     ) -> Vec<RebornOperatorToolInfo> {
         // Ownership filtering is exercised by the composition-tier catalog
         // test; this static catalog is caller-agnostic on purpose.
@@ -10703,7 +10713,7 @@ impl OperatorConfigAutoApproveInvoker {
                         capability_id: tool.capability_id.clone(),
                         grantee: Principal::Extension(tool.provider.clone()),
                         approved_by: Principal::User(caller.user_id.clone()),
-                        constraints: ironclaw_host_api::GrantConstraints {
+                        constraints: ironclaw_host_api::capability::GrantConstraints {
                             allowed_effects: tool.effects.as_ref().to_vec(),
                             mounts: Default::default(),
                             network: Default::default(),
@@ -10918,7 +10928,7 @@ async fn query_product_surface_page<S: ProductSurface + ?Sized>(
     let page = services
         .query(
             caller,
-            ironclaw_host_api::ProductSurfaceQueryRequest {
+            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -10995,7 +11005,7 @@ where
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::ProductSurfaceInvokeRequest {
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(capability_id).expect("capability id"),
                 input: serde_json::to_value(input).expect("capability input"),
                 activity_id: ActivityId::new(),
@@ -11068,7 +11078,7 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::ProductSurfaceInvokeRequest {
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
                     .expect("capability id"),
                 input,
@@ -11272,7 +11282,7 @@ async fn operator_config_reads_provider_grantee_policies_as_always_allow() {
                 capability_id: CapabilityId::new(capability_id).expect("capability id"),
                 grantee: Principal::Extension(ExtensionId::new(provider).expect("extension id")),
                 approved_by: Principal::User(UserId::new("user-alpha").expect("user id")),
-                constraints: ironclaw_host_api::GrantConstraints {
+                constraints: ironclaw_host_api::capability::GrantConstraints {
                     allowed_effects: vec![EffectKind::DispatchCapability],
                     mounts: Default::default(),
                     network: Default::default(),
@@ -13178,7 +13188,7 @@ async fn seed_thread_messages(
     count: usize,
 ) {
     let scope = thread_scope_for(caller);
-    let parsed_thread_id = ironclaw_host_api::ThreadId::new(thread_id).expect("thread id");
+    let parsed_thread_id = ironclaw_host_api::ids::ThreadId::new(thread_id).expect("thread id");
     for index in 0..count {
         threads
             .accept_inbound_message(AcceptInboundMessageRequest {

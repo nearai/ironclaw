@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
@@ -54,7 +54,7 @@ impl RebornIntegrationGroupBuilder {
     pub fn with_bound_memory_provider(
         mut self,
         provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
-        lifecycle: ironclaw_host_api::MemoryDescriptor,
+        lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
     ) -> Self {
         self.bound_memory = Some((provider, lifecycle));
         self

@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::error::HostApiError;
 use serde::{Deserialize, Serialize};
 
 /// Name of an index registered on a mount prefix.

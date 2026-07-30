@@ -4,7 +4,7 @@ use std::{
 };
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
-use ironclaw_host_api::ScopedPath;
+use ironclaw_host_api::path::ScopedPath;
 
 use crate::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,

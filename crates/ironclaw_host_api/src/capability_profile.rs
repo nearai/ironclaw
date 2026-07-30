@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 fn validate_schema_ref(value: &str) -> Result<(), HostApiError> {
     if value.is_empty() {

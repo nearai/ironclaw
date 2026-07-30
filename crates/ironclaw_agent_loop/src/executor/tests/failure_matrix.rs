@@ -742,14 +742,19 @@ fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageR
     }
 }
 
-fn batch_outcome(outcome: ironclaw_host_api::Resolution) -> ironclaw_host_api::ResolutionBatch {
-    ironclaw_host_api::ResolutionBatch {
+fn batch_outcome(
+    outcome: ironclaw_host_api::resolution::Resolution,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![outcome],
         stopped_on_suspension: false,
     }
 }
 
-fn failed_capability(error_kind: FailureKind, safe_summary: &str) -> ironclaw_host_api::Resolution {
+fn failed_capability(
+    error_kind: FailureKind,
+    safe_summary: &str,
+) -> ironclaw_host_api::resolution::Resolution {
     resolution::failed(
         error_kind,
         safe_summary.to_string(),
@@ -760,15 +765,15 @@ fn failed_capability(error_kind: FailureKind, safe_summary: &str) -> ironclaw_ho
 }
 
 fn batch_outcome_stopped(
-    outcome: ironclaw_host_api::Resolution,
-) -> ironclaw_host_api::ResolutionBatch {
-    ironclaw_host_api::ResolutionBatch {
+    outcome: ironclaw_host_api::resolution::Resolution,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![outcome],
         stopped_on_suspension: true,
     }
 }
 
-fn no_change_result(result_ref: &str) -> ironclaw_host_api::Resolution {
+fn no_change_result(result_ref: &str) -> ironclaw_host_api::resolution::Resolution {
     resolution::completed(
         LoopResultRef::new(result_ref).expect("valid"),
         "completed without progress".to_string(),

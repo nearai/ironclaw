@@ -11,7 +11,7 @@ use super::reborn_support::reply::RebornScriptedReply;
 use super::reborn_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
 use axum::http::StatusCode;
 use chrono::Duration;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_product::RebornServices;
 use ironclaw_triggers::{ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, TriggerId};
 use ironclaw_turns::TurnStatus;

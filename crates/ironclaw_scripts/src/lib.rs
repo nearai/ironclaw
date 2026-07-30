@@ -16,9 +16,16 @@ use std::{
 use futures_util::FutureExt as _;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, MountView,
-    ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope, ResourceUsage,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
+    http::{
+        CapabilityHostHttpRequest, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, ResourceReservationId},
+    mount::MountView,
+    resource::{
+        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+    },
+    runtime::RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -592,7 +599,10 @@ mod tests {
     use super::{
         ScriptBackendRequest, docker_run_args, read_bounded, validate_docker_image_reference,
     };
-    use ironclaw_host_api::{CapabilityId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+    };
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -728,7 +738,7 @@ mod tests {
 
     fn sample_docker_request() -> ScriptBackendRequest {
         ScriptBackendRequest {
-            provider: ironclaw_host_api::ExtensionId::new("script").unwrap(),
+            provider: ironclaw_host_api::ids::ExtensionId::new("script").unwrap(),
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope: ResourceScope {
                 tenant_id: TenantId::new("tenant1").unwrap(),

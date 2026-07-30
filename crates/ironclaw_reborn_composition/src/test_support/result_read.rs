@@ -18,7 +18,7 @@ pub const RESULT_READ_CAPABILITY_ID: &str = crate::runtime::RESULT_READ_CAPABILI
 pub fn wrap_result_read_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
     input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,

@@ -1,6 +1,12 @@
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    capability::CapabilitySet,
+    decision::DenyReason,
+    ids::RunId,
+    invocation::{Actor, InvocationOrigin},
+    resource::ResourceEstimate,
+};
 use serde_json::json;
 
 mod support;

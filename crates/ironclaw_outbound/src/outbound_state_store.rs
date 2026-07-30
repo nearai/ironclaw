@@ -4,9 +4,9 @@
 //! Persists outbound metadata under a fixed [`ScopedPath`] tree rooted at the
 //! `/outbound` mount alias, using the unified
 //! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) surface accessed
-//! through a [`ScopedFilesystem`]. The [`MountView`](ironclaw_host_api::MountView)
+//! through a [`ScopedFilesystem`]. The [`MountView`](ironclaw_host_api::mount::MountView)
 //! wired by composition resolves `/outbound` to a tenant/user-scoped
-//! [`VirtualPath`](ironclaw_host_api::VirtualPath) (e.g.
+//! [`VirtualPath`](ironclaw_host_api::path::VirtualPath) (e.g.
 //! `/tenants/<tenant_id>/users/<user_id>/outbound`) and enforces per-grant ACL
 //! before any backend dispatch — so tenant isolation is structural rather than
 //! a convention this code has to remember.
@@ -55,7 +55,11 @@ use ironclaw_filesystem::{
     Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RootFilesystem,
     ScopedFilesystem, VersionedEntry, cas_update,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ids::{TenantId, ThreadId, UserId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
 use ironclaw_turns::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -140,7 +144,7 @@ struct RunDeliveryCleanupSnapshot {
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
 /// HSM-decorated, …) — the store doesn't care which. Tenant isolation is
-/// enforced by the [`MountView`](ironclaw_host_api::MountView) the
+/// enforced by the [`MountView`](ironclaw_host_api::mount::MountView) the
 /// composition layer hands the scoped filesystem at construction time.
 pub struct OutboundStateStore<F>
 where
@@ -1997,8 +2001,9 @@ mod tests {
     use chrono::{Duration, Utc};
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_turns::{TurnRunId, TurnScope};
 

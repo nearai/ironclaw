@@ -58,7 +58,8 @@ pub(super) struct GateInput {
     pub(super) call: CapabilityCallCandidate,
     pub(super) kind: GateKind,
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
-    pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    pub(super) credential_requirements:
+        Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
     pub(super) approval_resume: Option<CapabilityApprovalResume>,
     pub(super) auth_resume: Option<ironclaw_turns::run_profile::CapabilityAuthResume>,
 }

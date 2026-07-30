@@ -30,7 +30,9 @@ use ironclaw_auth::{
 };
 use ironclaw_first_party_extensions::GoogleCredentialResolver;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, Principal, ResourceScope, SecretHandle, TenantId, UserId,
+    ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
+    scope::Principal,
 };
 use ironclaw_llm::{
     LlmConfig, LlmProvider, NearAiConfig, ProviderProtocol, RegistryProviderConfig, SessionConfig,
@@ -1876,7 +1878,9 @@ fn nearai_llm_config(api_key: String, model: &str) -> LlmConfig {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, TenantId, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
     };
     use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelRequest,

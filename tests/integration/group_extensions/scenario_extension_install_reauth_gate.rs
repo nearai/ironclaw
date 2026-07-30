@@ -68,7 +68,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             .into());
     }
     let notion_provider =
-        ironclaw_host_api::VendorId::new("notion").map_err(|error| error.to_string())?;
+        ironclaw_host_api::ids::VendorId::new("notion").map_err(|error| error.to_string())?;
     if !state
         .credential_requirements
         .iter()

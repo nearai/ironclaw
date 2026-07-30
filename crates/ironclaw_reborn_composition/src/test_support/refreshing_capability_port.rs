@@ -29,11 +29,11 @@ pub struct RefreshingCapabilityPortTestParts {
     /// through (harness passes a recording double).
     pub runtime: std::sync::Arc<dyn ironclaw_host_runtime::HostRuntime>,
     pub run_context: ironclaw_turns::run_profile::LoopRunContext,
-    pub fallback_user_id: ironclaw_host_api::UserId,
-    pub workspace_mounts: ironclaw_host_api::MountView,
-    pub skill_mounts: ironclaw_host_api::MountView,
-    pub memory_mounts: ironclaw_host_api::MountView,
-    pub system_extensions_lifecycle_mounts: ironclaw_host_api::MountView,
+    pub fallback_user_id: ironclaw_host_api::ids::UserId,
+    pub workspace_mounts: ironclaw_host_api::mount::MountView,
+    pub skill_mounts: ironclaw_host_api::mount::MountView,
+    pub memory_mounts: ironclaw_host_api::mount::MountView,
+    pub system_extensions_lifecycle_mounts: ironclaw_host_api::mount::MountView,
     /// Input resolver AND [`result_writer`](Self::result_writer) must be two
     /// `Arc::clone`s of the SAME shared io object — production assigns one
     /// `StagedCapabilityIo` to both roles so input-ref/result-ref
@@ -92,21 +92,26 @@ pub struct RefreshingCapabilityPortTestParts {
     pub replay_payload_store: std::sync::Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingCapabilityPortConfig::capability_execution_mount_overrides`.
-    pub capability_execution_mount_overrides:
-        std::collections::HashMap<ironclaw_host_api::CapabilityId, ironclaw_host_api::MountView>,
+    pub capability_execution_mount_overrides: std::collections::HashMap<
+        ironclaw_host_api::ids::CapabilityId,
+        ironclaw_host_api::mount::MountView,
+    >,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingCapabilityPortConfig::additional_provider_trust`.
-    pub additional_provider_trust:
-        std::collections::BTreeMap<ironclaw_host_api::ExtensionId, ironclaw_trust::TrustDecision>,
+    pub additional_provider_trust: std::collections::BTreeMap<
+        ironclaw_host_api::ids::ExtensionId,
+        ironclaw_trust::TrustDecision,
+    >,
     /// Test-only config extension (`None` = production behavior, i.e. no
     /// filtering). See `RefreshingCapabilityPortConfig::capability_id_filter`.
-    pub capability_id_filter: Option<std::collections::HashSet<ironclaw_host_api::CapabilityId>>,
+    pub capability_id_filter:
+        Option<std::collections::HashSet<ironclaw_host_api::ids::CapabilityId>>,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingCapabilityPortConfig::additional_capability_grants`
     /// — hand-minted grants for capability ids an ad-hoc test-only
     /// `HostRuntime` backend (mock MCP, GitHub/web-access WASM) dispatches
     /// without a real extension activation.
-    pub additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
+    pub additional_capability_grants: Vec<ironclaw_host_api::capability::CapabilityGrant>,
 }
 
 /// Reads the same `runtime_surfaces.extension_management` handle production's

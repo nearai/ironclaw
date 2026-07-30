@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use ironclaw_libsql_runtime::{
     LibSqlCheckoutFailureReason, LibSqlLane, LibSqlReadConnectionLease, LibSqlRuntime,
     LibSqlRuntimeError, LibSqlWriteConnectionLease,
@@ -2787,7 +2787,7 @@ mod tests {
 
     use super::*;
     use crate::{CasExpectation, Entry, IndexName, RecordKind};
-    use ironclaw_host_api::VirtualPath;
+    use ironclaw_host_api::path::VirtualPath;
 
     struct DeleteIfVersionCancellationGate {
         runtime_id: usize,

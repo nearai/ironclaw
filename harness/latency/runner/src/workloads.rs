@@ -282,7 +282,7 @@ fn control_plane_scope(
         project_id: Some(ProjectId::new(format!("latency-control-project-{scope}"))?),
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     })
 }
 

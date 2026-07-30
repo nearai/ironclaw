@@ -7,10 +7,19 @@
 //! ratchet, so this is where the seal's own test authorizer belongs.
 
 use ironclaw_host_api::{
-    ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityId,
-    CorrelationId, DenyRef, GateRef, GateWaypoint, Invocation, InvocationOrigin, MountView,
-    ProcessAuthorizedContinuation, ProcessId, ProductKind, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, RuntimeLane, Timestamp, UserId,
+    Timestamp,
+    authorized::{
+        AuthorizeResult, Authorized, CapabilityAuthorizer, ProcessAuthorizedContinuation,
+    },
+    ids::{
+        ActivityId, CapabilityId, CorrelationId, DenyRef, GateRef, ProcessId, ProductKind,
+        ResourceReservationId, UserId,
+    },
+    invocation::{Actor, Invocation, InvocationOrigin},
+    lane::RuntimeLane,
+    mount::MountView,
+    resolution::{Blocked, GateWaypoint},
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
 };
 
 /// A stand-in kernel authorizer. In production the sole impl lives in

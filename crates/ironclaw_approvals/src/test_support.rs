@@ -17,7 +17,10 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 
 use crate::{
     ApprovalRequestStore, AutoApproveSettingStore, CapabilityPermissionOverrideStore,

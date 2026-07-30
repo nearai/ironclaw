@@ -42,7 +42,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use ironclaw_host_api::ResourceUsage;
+use ironclaw_host_api::resource::ResourceUsage;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,

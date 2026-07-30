@@ -42,13 +42,15 @@ impl ProcessRuntimeSystem {
     }
 
     pub fn in_memory_ephemeral() -> Result<Self, String> {
-        let mounts = ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
-            ironclaw_host_api::MountAlias::new("/processes")
-                .map_err(|error| format!("process mount alias: {error}"))?,
-            ironclaw_host_api::VirtualPath::new("/engine/processes")
-                .map_err(|error| format!("process mount path: {error}"))?,
-            ironclaw_host_api::MountPermissions::read_write_list_delete(),
-        )])
+        let mounts = ironclaw_host_api::mount::MountView::new(vec![
+            ironclaw_host_api::mount::MountGrant::new(
+                ironclaw_host_api::path::MountAlias::new("/processes")
+                    .map_err(|error| format!("process mount alias: {error}"))?,
+                ironclaw_host_api::path::VirtualPath::new("/engine/processes")
+                    .map_err(|error| format!("process mount path: {error}"))?,
+                ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+            ),
+        ])
         .map_err(|error| format!("process mount view: {error}"))?;
         let filesystem = Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
             Arc::new(ironclaw_filesystem::InMemoryBackend::new()),

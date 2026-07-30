@@ -17,4 +17,4 @@
 //!   it in `ironclaw_auth::AuthAccountState`.
 
 pub use ironclaw_auth::AuthAccountState;
-pub use ironclaw_host_api::InstallationState;
+pub use ironclaw_host_api::state::InstallationState;

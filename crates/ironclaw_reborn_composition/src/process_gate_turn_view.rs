@@ -1,4 +1,7 @@
-use ironclaw_host_api::{ProcessId, ResourceScope, SYSTEM_RESERVED_ID};
+use ironclaw_host_api::{
+    ids::ProcessId,
+    resource::{ResourceScope, SYSTEM_RESERVED_ID},
+};
 use ironclaw_processes::ProcessGateRecord;
 use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
 

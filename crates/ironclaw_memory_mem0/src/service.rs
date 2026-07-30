@@ -40,7 +40,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_memory::{
     MemoryInvocation, MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceProfileReadResponse,
@@ -587,7 +587,10 @@ fn result_path(item: &Value) -> String {
 mod tests {
     use super::*;
     use crate::transport::{Mem0HttpMethod, MockMem0Transport};
-    use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{CorrelationId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+    };
     use ironclaw_memory::{MemoryContextProfileId, MemoryServiceErrorKind};
     use serde_json::Map;
 

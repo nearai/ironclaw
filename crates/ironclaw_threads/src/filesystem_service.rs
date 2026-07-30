@@ -3,12 +3,12 @@
 //!
 //! Records live under the `/threads` mount alias on a
 //! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The paths in
-//! this module are alias-relative [`ScopedPath`](ironclaw_host_api::ScopedPath)
+//! this module are alias-relative [`ScopedPath`](ironclaw_host_api::path::ScopedPath)
 //! strings — at every op the [`ScopedFilesystem`] resolves the alias against
-//! its caller-supplied [`MountView`](ironclaw_host_api::MountView) and enforces
+//! its caller-supplied [`MountView`](ironclaw_host_api::mount::MountView) and enforces
 //! per-grant ACL before backend dispatch. The composition layer wires the
 //! alias to a tenant/user-scoped
-//! [`VirtualPath`](ironclaw_host_api::VirtualPath), so tenant isolation is
+//! [`VirtualPath`](ironclaw_host_api::path::VirtualPath), so tenant isolation is
 //! structural rather than something this crate must re-derive from
 //! `ThreadScope.tenant_id`.
 //!
@@ -49,7 +49,12 @@ use ironclaw_filesystem::{
     OrderedPage, OrderedQueryCursor, Page, RecordKind, RecordVersion, RootFilesystem,
     ScopedFilesystem, SortDirection, cas_update,
 };
-use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
+use ironclaw_host_api::{
+    error::HostApiError,
+    ids::{InvocationId, ThreadId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -160,8 +165,8 @@ struct InboundIdempotencyRecord {
 /// Construct with an [`Arc<ScopedFilesystem<F>>`](ScopedFilesystem) over
 /// any [`RootFilesystem`]. The [`ScopedFilesystem`] resolves the
 /// `/threads` alias to a tenant/user-scoped
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
-/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-op ACL
 /// before backend dispatch — so tenant isolation is structural rather
 /// than something this crate must re-derive from
 /// `ThreadScope.tenant_id`. Within-tenant axes (`agent_id`,
@@ -3270,7 +3275,7 @@ impl From<FilesystemError> for SessionThreadError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     use super::{InboundIdempotencyKey, idempotency_record_key};
     use crate::ThreadScope;
@@ -3305,7 +3310,9 @@ mod tests {
     async fn reserve_sequence_resumes_existing_thread_counter_not_native_restart() {
         use ironclaw_filesystem::{CasExpectation, InMemoryBackend, ScopedFilesystem};
         use ironclaw_host_api::{
-            MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
+            ids::ThreadId,
+            mount::{MountGrant, MountPermissions, MountView},
+            path::{MountAlias, VirtualPath},
         };
 
         use super::{FilesystemSessionThreadService, thread_record_path};

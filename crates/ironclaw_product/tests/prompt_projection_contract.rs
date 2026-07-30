@@ -3,8 +3,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, TenantId,
-    ThreadId, UserId, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, TenantId, ThreadId, UserId, VendorId},
 };
 use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_product::{

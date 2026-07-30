@@ -173,7 +173,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::{
         LoopGateRef, LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId,
         TurnRunId, TurnScope,

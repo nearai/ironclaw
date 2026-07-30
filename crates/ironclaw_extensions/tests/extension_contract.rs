@@ -1,7 +1,16 @@
 // arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{ExtensionLifecycleOperation, NetworkScheme, NetworkTargetPattern},
+    capability::{EffectKind, PermissionMode},
+    host_port::{HostPortCatalog, HostPortCatalogEntry, HostPortId},
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    path::{HostPath, VirtualPath},
+    runtime::{RuntimeKind, TrustClass},
+    trust::{PackageSource, RequestedTrustClass},
+};
 use ironclaw_trust::TrustPolicyInput;
 use tempfile::tempdir;
 

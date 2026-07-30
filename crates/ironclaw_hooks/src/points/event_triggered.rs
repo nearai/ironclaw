@@ -16,7 +16,7 @@
 //! receive the full event. Tracked as issue #3690.
 
 use ironclaw_events::{EventCursor, RuntimeEvent};
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 
 /// Read-only context handed to an event-triggered hook.
 ///

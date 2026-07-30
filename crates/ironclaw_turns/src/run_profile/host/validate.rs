@@ -1,7 +1,7 @@
 //! Shared validators, secret/marker-detection heuristics, and model-visible
 //! text sanitization for host-owned loop-ref newtypes and DTOs.
 
-use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
+use ironclaw_host_api::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
 
 use crate::run_profile::prompt_text::{PromptTextSurface, validate_prompt_text};
 
@@ -123,12 +123,12 @@ pub(crate) fn validate_loop_safe_identifier(
 pub(crate) fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     // Loop-input-encoding sentinel bypass: a host-authored fixed literal that is
     // not a redaction concern. Everything else delegates to the single canonical
-    // redaction rule owned by `ironclaw_host_api::SafeSummary` (see that type's
+    // redaction rule owned by `ironclaw_host_api::safe_summary::SafeSummary` (see that type's
     // module docs) — this validator must never diverge from it.
     if value == INPUT_ENCODE_HUMAN_SUMMARY {
         return Ok(value);
     }
-    ironclaw_host_api::SafeSummary::new(value)
+    ironclaw_host_api::safe_summary::SafeSummary::new(value)
         .map(|summary| summary.into_inner())
         .map_err(|error| error.to_string())
 }

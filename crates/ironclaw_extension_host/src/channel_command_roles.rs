@@ -4,8 +4,9 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ProductSurfaceError, RebornUserIdentityLookup, TenantId, UserId,
-    installation_scoped_provider_user_id,
+    ids::{TenantId, UserId},
+    product_surface::ProductSurfaceError,
+    user_identity::{RebornUserIdentityLookup, installation_scoped_provider_user_id},
 };
 use ironclaw_product::{
     AdminUserError, AdminUserRole, AdminUserService, AdminUserStatus, CommandActorRoleResolver,
@@ -44,7 +45,7 @@ impl ChannelActorRoleResolver {
 
     fn unavailable() -> ProductSurfaceError {
         ProductSurfaceError::from_status(
-            ironclaw_host_api::ProductSurfaceErrorCode::Unavailable,
+            ironclaw_host_api::product_surface::ProductSurfaceErrorCode::Unavailable,
             503,
             true,
         )
@@ -107,7 +108,7 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
                     "channel-command role resolver: admin-users lookup failed"
                 );
                 Err(ProductSurfaceError::from_status(
-                    ironclaw_host_api::ProductSurfaceErrorCode::Internal,
+                    ironclaw_host_api::product_surface::ProductSurfaceErrorCode::Internal,
                     500,
                     false,
                 ))
@@ -120,9 +121,12 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-        ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload,
-        ProtocolAuthEvidence, RebornUserIdentityLookupError, TrustedInboundContext,
+        product_adapter::{
+            AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+            ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload,
+            ProtocolAuthEvidence, TrustedInboundContext,
+        },
+        user_identity::RebornUserIdentityLookupError,
     };
     use ironclaw_product::{
         ActionFingerprintKey, AdminCreateUserFields, AdminCreatedUser, AdminUserRecord,
@@ -359,7 +363,7 @@ mod tests {
             &self,
             _tenant: &TenantId,
             _user_id: &UserId,
-            _handle: ironclaw_host_api::SecretHandle,
+            _handle: ironclaw_host_api::ids::SecretHandle,
             _material: SecretString,
         ) -> Result<AdminUserSecretMeta, AdminUserError> {
             Err(AdminUserError::Internal)
@@ -369,7 +373,7 @@ mod tests {
             &self,
             _tenant: &TenantId,
             _user_id: &UserId,
-            _handle: ironclaw_host_api::SecretHandle,
+            _handle: ironclaw_host_api::ids::SecretHandle,
         ) -> Result<bool, AdminUserError> {
             Err(AdminUserError::Internal)
         }

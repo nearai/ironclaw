@@ -13,7 +13,10 @@ use super::super::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::MountPermissions,
+    runtime::RuntimeKind,
 };
 
 /// Wire a single MCP capability backed by the loopback mock server.

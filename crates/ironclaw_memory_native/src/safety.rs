@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use ironclaw_safety::{Sanitizer, Severity};
 
 use crate::chunking::content_sha256;

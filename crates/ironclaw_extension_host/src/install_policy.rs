@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use ironclaw_product::{LifecycleInstallScope, ProductSurfaceFailure};
 
 /// Derive who a NEW install belongs to (#6520): every lifecycle install,
@@ -51,7 +51,7 @@ pub fn ensure_caller_may_operate(
 /// retired. Tenant compatibility rows remain "already installed" until restore
 /// narrows them to explicit membership.
 pub fn decide_install_on_existing(
-    extension_id: &ironclaw_host_api::ExtensionId,
+    extension_id: &ironclaw_host_api::ids::ExtensionId,
     existing_owner: &InstallationOwner,
     caller: &UserId,
     _tenant_operator: &UserId,
@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use ironclaw_extensions::{ExtensionInstallationId, ExtensionManifestRef};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     fn user(id: &str) -> UserId {
         UserId::new(id).expect("valid user")

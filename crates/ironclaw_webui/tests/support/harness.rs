@@ -26,8 +26,8 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 use ironclaw_host_api::{
-    AgentId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProjectId, TenantId,
-    ThreadId, UserId,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
 };
 use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -59,8 +59,9 @@ impl ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         if request.operation_id.as_str() != "thread.create" {
             return Err(ProductSurfaceError::service_unavailable(false));
         }
@@ -90,14 +91,15 @@ impl ProductSurface for StubServices {
             },
         })
         .map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         // Record the caller so the `?token=` shim test can assert the
         // query token was consumed as the session credential and stamped
         // as that user. Returns an empty event page so a polled SSE
@@ -107,18 +109,21 @@ impl ProductSurface for StubServices {
             .lock()
             .expect("lock")
             .push(caller);
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events: Vec::new(),
-            next_cursor: None,
-            subscription: None,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                events: Vec::new(),
+                next_cursor: None,
+                subscription: None,
+            },
+        )
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         Err(ProductSurfaceError::service_unavailable(false))
     }
 }

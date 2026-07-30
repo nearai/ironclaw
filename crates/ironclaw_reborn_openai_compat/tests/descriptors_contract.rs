@@ -6,7 +6,7 @@ use ironclaw_host_api::ingress::{
     IngressAuthScheme, IngressRouteDescriptor, ListenerClass, RateLimitPolicy, RateLimitScope,
     StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
+use ironclaw_host_api::{action::NetworkMethod, ingress::IngressScopeSource};
 use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS, OPENAI_COMPAT_ROUTE_MODELS_API_LIST,
     OPENAI_COMPAT_ROUTE_MODELS_LIST, OPENAI_COMPAT_ROUTE_RESPONSES_API_CANCEL,

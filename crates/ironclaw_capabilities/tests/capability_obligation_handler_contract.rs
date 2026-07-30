@@ -8,7 +8,25 @@ use std::sync::{
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_capabilities::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    Timestamp,
+    action::NetworkPolicy,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    dispatch::{CapabilityDispatchResult, DispatchFailureKind, RuntimeDispatchErrorKind},
+    ids::{
+        ActivityId, CapabilityGrantId, ExtensionId, ProcessId, ProductKind, ResourceReservationId,
+        UserId,
+    },
+    invocation::{Actor, InvocationOrigin},
+    lane::RuntimeLane,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceReservation},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_processes::*;
 use ironclaw_trust::TrustDecision;
 use serde_json::json;

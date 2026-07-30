@@ -11,7 +11,7 @@
 // arch-exempt: large_file, keep recovery policy beside its exhaustive mapping tests until the item-7 conformance-matrix extraction, plan #6284
 
 use async_trait::async_trait;
-use ironclaw_host_api::{FailureFate, FailureKind};
+use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
 use ironclaw_turns::{
     LoopFailureKind, ModelInvalidOutputDetailReason,
     run_profile::{LoopSafeSummary, ModelVisibleToolObservation},
@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     mod default_recovery_strategy {
-        use ironclaw_host_api::{TenantId, ThreadId};
+        use ironclaw_host_api::ids::{TenantId, ThreadId};
         use ironclaw_turns::{
             AgentLoopDriverDescriptor, ModelInvalidOutputDetailReason, RunProfileId,
             RunProfileVersion, TurnId, TurnRunId, TurnScope,
@@ -1108,7 +1108,7 @@ mod tests {
             LoopExecutionState, ModelErrorObservationClass, ModelErrorRecoveryObservation,
             RecoveryAttemptClass, RecoveryStrategyState,
         };
-        use ironclaw_host_api::{FailureFate, FailureKind};
+        use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
         use ironclaw_turns::LoopFailureKind;
 
         fn test_run_context() -> LoopRunContext {

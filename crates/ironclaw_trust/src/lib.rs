@@ -65,7 +65,10 @@ mod tests {
 
     #[test]
     fn fail_closed_policy_returns_default_for_local_manifest() {
-        use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
+        use ironclaw_host_api::{
+            ids::PackageId,
+            trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+        };
         let policy = HostTrustPolicy::fail_closed();
         let identity = PackageIdentity::new(
             PackageId::new("any").unwrap(),
@@ -85,7 +88,7 @@ mod tests {
         assert!(!decision.effective_trust.is_privileged());
         assert_eq!(
             decision.effective_trust.class(),
-            ironclaw_host_api::TrustClass::Sandbox
+            ironclaw_host_api::runtime::TrustClass::Sandbox
         );
         assert!(decision.authority_ceiling.allowed_effects.is_empty());
         assert_eq!(decision.provenance, TrustProvenance::Default);
@@ -93,7 +96,10 @@ mod tests {
 
     #[test]
     fn empty_policy_alias_is_fail_closed() {
-        use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
+        use ironclaw_host_api::{
+            ids::PackageId,
+            trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+        };
         let identity = PackageIdentity::new(
             PackageId::new("any").unwrap(),
             PackageSource::Admin,

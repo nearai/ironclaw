@@ -179,7 +179,7 @@ impl fmt::Display for HookVersion {
 ///
 /// **Two `ExtensionId` types coexist in the system, by design**:
 ///
-/// - [`ironclaw_host_api::ExtensionId`] is the *authority-bearing* identifier:
+/// - [`ironclaw_host_api::ids::ExtensionId`] is the *authority-bearing* identifier:
 ///   validated at construction, compared and trusted across the host.
 /// - `ironclaw_hooks::identity::ExtensionId` (this type) is a transparent
 ///   string newtype consumed by [`HookId::derive`] as input to the blake3
@@ -191,7 +191,7 @@ impl fmt::Display for HookVersion {
 /// outside the registrar) can use the [`From`] impl to convert:
 ///
 /// ```ignore
-/// let host_ext: ironclaw_host_api::ExtensionId = /* ... */;
+/// let host_ext: ironclaw_host_api::ids::ExtensionId = /* ... */;
 /// let identity_ext: ironclaw_hooks::identity::ExtensionId = (&host_ext).into();
 /// let id = HookId::derive(&identity_ext, "1.0.0", &local, HookVersion::ONE);
 /// ```
@@ -258,8 +258,8 @@ impl TryFrom<&str> for ExtensionId {
     }
 }
 
-impl From<&ironclaw_host_api::ExtensionId> for ExtensionId {
-    fn from(host: &ironclaw_host_api::ExtensionId) -> Self {
+impl From<&ironclaw_host_api::ids::ExtensionId> for ExtensionId {
+    fn from(host: &ironclaw_host_api::ids::ExtensionId) -> Self {
         // The host-api `ExtensionId` is already validated against the same
         // segment grammar that `validate_identity_segment` enforces here
         // (both mirror `ironclaw_host_api::ids::validate_name_segment`).
@@ -268,7 +268,8 @@ impl From<&ironclaw_host_api::ExtensionId> for ExtensionId {
         // and `extension_id_from_host_api_round_trips_grammar_corners` below;
         // if the two grammars ever diverge those tests will fail before this
         // call site can panic in production.
-        let msg = "ironclaw_host_api::ExtensionId is pre-validated and shares the identity grammar";
+        let msg =
+            "ironclaw_host_api::ids::ExtensionId is pre-validated and shares the identity grammar";
         Self::new(host.as_str().to_string()).expect(msg) // safety: host-api ExtensionId shares identity grammar; round-trip covered by unit tests above.
     }
 }
@@ -595,7 +596,8 @@ mod tests {
 
     #[test]
     fn extension_id_from_host_api_round_trips() {
-        let host = ironclaw_host_api::ExtensionId::new("github-mcp.v1").expect("valid host id");
+        let host =
+            ironclaw_host_api::ids::ExtensionId::new("github-mcp.v1").expect("valid host id");
         let mirrored: ExtensionId = (&host).into();
         assert_eq!(mirrored.as_str(), "github-mcp.v1");
     }
@@ -604,7 +606,7 @@ mod tests {
     /// `validate_identity_segment` both accept, asserting the host-api ->
     /// identity round-trip is infallible at each boundary. This is the
     /// regression guard that backs the `expect()` in
-    /// `From<&ironclaw_host_api::ExtensionId> for ExtensionId`: if the two
+    /// `From<&ironclaw_host_api::ids::ExtensionId> for ExtensionId`: if the two
     /// validators ever drift apart, one of these constructions will fail
     /// the host-api `::new` call (because that path runs first) and surface
     /// the divergence here instead of panicking in production.
@@ -623,7 +625,7 @@ mod tests {
             &"a".repeat(MAX_IDENTITY_BYTES), // max length
         ];
         for raw in corners {
-            let host = ironclaw_host_api::ExtensionId::new(raw)
+            let host = ironclaw_host_api::ids::ExtensionId::new(raw)
                 .unwrap_or_else(|e| panic!("host-api rejected corner {raw:?}: {e}"));
             let mirrored: ExtensionId = (&host).into();
             assert_eq!(mirrored.as_str(), raw);

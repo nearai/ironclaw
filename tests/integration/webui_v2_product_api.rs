@@ -28,8 +28,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceStreamRequest, SecretHandle, TenantId, UserId,
+    capability::{EffectKind, PermissionMode},
+    ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
+    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest},
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -184,7 +185,7 @@ impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
     // composition-tier catalog test (#5459 P1).
     async fn list_operator_tools(
         &self,
-        _caller: &ironclaw_host_api::UserId,
+        _caller: &ironclaw_host_api::ids::UserId,
     ) -> Vec<RebornOperatorToolInfo> {
         vec![RebornOperatorToolInfo {
             capability_id: CapabilityId::new("builtin.http").expect("capability id"),
@@ -734,7 +735,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     let orphan_manifest = ExtensionManifestRecord::from_toml(
         orphan_raw_toml,
         catalog_manifest.manifest().source,
-        &ironclaw_host_api::HostPortCatalog::empty(),
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         catalog_manifest.manifest_hash().cloned(),
         &contracts,
         None,

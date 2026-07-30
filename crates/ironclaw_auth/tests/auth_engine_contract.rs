@@ -23,9 +23,13 @@ use ironclaw_auth::{
     ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 use ironclaw_host_api::{
-    InvocationId, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
-    UserId, VendorAuthRecipe,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{InvocationId, SecretHandle, UserId},
+    recipe::{RecipeClientCredentials, VendorAuthRecipe},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use secrecy::{ExposeSecret, SecretString};

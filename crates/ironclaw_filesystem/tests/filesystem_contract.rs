@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
+};
 use tempfile::tempdir;
 
 #[tokio::test]

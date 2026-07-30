@@ -14,8 +14,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
-    MountView, RuntimeKind, TrustClass, UserId,
+    capability::{CapabilitySet, EffectKind},
+    ids::{CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
@@ -926,7 +929,8 @@ pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> Capa
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputPreview, InvocationId, ProviderToolName, TenantId, ThreadId,
+        dispatch::CapabilityDisplayOutputPreview,
+        ids::{AgentId, InvocationId, ProviderToolName, TenantId, ThreadId},
     };
     use ironclaw_loop_host::DurablePersistence;
     use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;

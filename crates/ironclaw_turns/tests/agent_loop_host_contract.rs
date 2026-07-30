@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
-    AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
+    ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    resolution::{Blocked, Resolution},
+    runtime::RuntimeKind,
 };
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
@@ -3173,7 +3175,7 @@ struct RecordingAgentLoopHost {
     effects: Mutex<Vec<String>>,
     context_requests: Mutex<Vec<LoopContextRequest>>,
     model_responses: Mutex<Vec<LoopModelResponse>>,
-    capability_outcomes: Mutex<Vec<ironclaw_host_api::Resolution>>,
+    capability_outcomes: Mutex<Vec<ironclaw_host_api::resolution::Resolution>>,
     visible_surface: VisibleCapabilitySurface,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     context_message_safe_summary: String,
@@ -3290,7 +3292,7 @@ impl RecordingAgentLoopHost {
         self.model_responses.lock().unwrap().push(response);
     }
 
-    fn push_capability_outcome(&self, outcome: ironclaw_host_api::Resolution) {
+    fn push_capability_outcome(&self, outcome: ironclaw_host_api::resolution::Resolution) {
         self.capability_outcomes.lock().unwrap().push(outcome);
     }
 
@@ -3469,7 +3471,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
                 .visible_surface
@@ -3498,8 +3500,8 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability_batch(
         &self,
         _request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
-        Ok(ironclaw_host_api::ResolutionBatch {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
+        Ok(ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: Vec::new(),
             stopped_on_suspension: false,
         })

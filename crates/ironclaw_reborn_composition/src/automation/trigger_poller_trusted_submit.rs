@@ -6,7 +6,10 @@ use ironclaw_conversations::{
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, UserId},
+};
 use ironclaw_product::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
@@ -478,7 +481,7 @@ mod tests {
     use ironclaw_conversations::{
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
-    use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_product::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use ironclaw_host_api::ResourceUsage;
+use ironclaw_host_api::resource::ResourceUsage;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings;

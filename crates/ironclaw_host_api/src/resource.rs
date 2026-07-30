@@ -10,7 +10,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, HostApiError, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId,
+    error::HostApiError,
+    ids::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
 };
 
 /// Canonical local/single-user tenant id.
@@ -383,7 +384,7 @@ pub struct SandboxQuota {
 /// Active reservation returned by a resource governor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceReservation {
-    pub id: crate::ResourceReservationId,
+    pub id: crate::ids::ResourceReservationId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
 }
@@ -404,7 +405,7 @@ pub enum ReservationStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityHostResult {
     pub output: serde_json::Value,
-    pub reservation_id: crate::ResourceReservationId,
+    pub reservation_id: crate::ids::ResourceReservationId,
     pub usage: ResourceUsage,
     pub output_bytes: u64,
 }
@@ -412,7 +413,7 @@ pub struct CapabilityHostResult {
 /// Receipt returned when a reservation is reconciled or released.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceReceipt {
-    pub id: crate::ResourceReservationId,
+    pub id: crate::ids::ResourceReservationId,
     pub scope: ResourceScope,
     pub status: ReservationStatus,
     pub estimate: ResourceEstimate,

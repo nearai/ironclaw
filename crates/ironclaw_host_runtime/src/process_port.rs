@@ -9,7 +9,7 @@
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{mount::MountView, resource::ResourceScope};
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
 use thiserror::Error;

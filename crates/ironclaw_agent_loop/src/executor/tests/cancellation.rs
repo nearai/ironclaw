@@ -562,7 +562,7 @@ async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
 #[tokio::test]
 async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::Cancelled,
                 "capability cancelled".to_string(),
@@ -691,7 +691,7 @@ async fn cancellation_after_before_side_effect_checkpoint_skips_capability_call(
 async fn cancellation_after_capability_batch_preserves_completed_result() {
     let result_ref = LoopResultRef::new("result:late-cancel").expect("valid");
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed before cancellation".to_string(),

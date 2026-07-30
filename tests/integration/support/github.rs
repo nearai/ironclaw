@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    SecretHandle, VirtualPath,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    path::VirtualPath,
 };
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 

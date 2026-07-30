@@ -5,7 +5,9 @@ use crate::{
     LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller};
+use ironclaw_host_api::{
+    product_surface::ProductSurfaceCaller, state::InstallationState, surface::CapabilitySurfaceKind,
+};
 use ironclaw_turns::{
     run_profile::{
         CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
@@ -238,9 +240,13 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller,
-        ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, TenantId,
-        UserId,
+        ids::{AgentId, ProjectId, TenantId, UserId},
+        product_surface::{
+            ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+            ProductSurfaceErrorKind,
+        },
+        state::InstallationState,
+        surface::CapabilitySurfaceKind,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
@@ -254,7 +260,7 @@ mod tests {
             tenant_id: TenantId::new("tenant-test").unwrap(),
             agent_id: Some(AgentId::new("agent-test").unwrap()),
             project_id: Some(ProjectId::new("project-test").unwrap()),
-            thread_id: ironclaw_host_api::ThreadId::new("thread-test").unwrap(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new("thread-test").unwrap(),
             thread_owner: Default::default(),
         }
     }
@@ -548,7 +554,7 @@ mod tests {
             TenantId::new("tenant-test").unwrap(),
             Some(AgentId::new("agent-test").unwrap()),
             Some(ProjectId::new("project-test").unwrap()),
-            ironclaw_host_api::ThreadId::new("thread-test").unwrap(),
+            ironclaw_host_api::ids::ThreadId::new("thread-test").unwrap(),
             Some(UserId::new("owner-test").unwrap()),
         );
 
@@ -679,12 +685,13 @@ mod tests {
         // is included; github (non-channel) and slack (inactive channel) are not.
         // The telegram summary also carries a declared presentation (OUT-11).
         let mut telegram = channel_extension("telegram");
-        telegram.summary.channel_presentation = Some(ironclaw_host_api::ChannelPresentation {
-            supports_markdown: true,
-            supports_threads: false,
-            max_message_chars: Some(4096),
-            command_prefix: None,
-        });
+        telegram.summary.channel_presentation =
+            Some(ironclaw_host_api::channel::ChannelPresentation {
+                supports_markdown: true,
+                supports_threads: false,
+                max_message_chars: Some(4096),
+                command_prefix: None,
+            });
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
                 .with_lifecycle_service(Arc::new(ChannelListLifecycleService {
@@ -713,7 +720,7 @@ mod tests {
         // onto the connected-channel summary that prompt construction renders.
         assert_eq!(
             channels[0].presentation,
-            Some(ironclaw_host_api::ChannelPresentation {
+            Some(ironclaw_host_api::channel::ChannelPresentation {
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),

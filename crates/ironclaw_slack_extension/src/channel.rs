@@ -17,7 +17,9 @@ use ironclaw_host_api::product_adapter::{
     TargetCandidate, TargetQuery, VerifiedInbound, render_channel_auth_prompt,
 };
 use ironclaw_host_api::{
-    NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
+    action::NetworkMethod,
+    ids::SecretHandle,
+    tool_adapter::{RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest},
 };
 use serde::Deserialize;
 
@@ -745,7 +747,7 @@ mod tests {
     use std::sync::Mutex;
 
     use ironclaw_host_api::product_adapter::{OutboundPart, PartDeliveryOutcome};
-    use ironclaw_host_api::{
+    use ironclaw_host_api::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
 

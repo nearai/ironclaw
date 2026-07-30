@@ -5,13 +5,24 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
-    ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
-    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VendorId, VirtualPath,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::CapabilitySet,
+    decision::Obligation,
+    dispatch::CredentialStageError,
+    http::{
+        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
+        RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget,
+    },
+    ids::{
+        AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, SecretHandle, TenantId,
+        UserId, VendorId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -265,7 +276,7 @@ async fn host_http_egress_consumes_staged_obligation_secret_once() {
         .expect_err("staged secret must not be reusable");
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
 }
@@ -721,7 +732,7 @@ async fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
 
         assert!(matches!(
             error,
-            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+            ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
         ));
         assert!(
             network_recorder.lock().unwrap().is_empty(),
@@ -753,7 +764,7 @@ async fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_t
 
         assert!(matches!(
             error,
-            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+            ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
         ));
         assert!(error.to_string().contains("path value is invalid"));
         assert!(
@@ -775,7 +786,7 @@ async fn host_http_egress_requires_https_for_path_placeholder_before_transport()
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(error.to_string().contains("requires HTTPS"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -793,7 +804,7 @@ async fn host_http_egress_rejects_multiple_path_placeholder_occurrences_before_t
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(error.to_string().contains("exactly once"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -873,7 +884,7 @@ async fn host_http_egress_rejects_mixed_placeholder_forms_before_transport() {
     .expect_err("mixed placeholder forms must be rejected");
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(error.to_string().contains("exactly once"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -897,7 +908,7 @@ async fn host_http_egress_rejects_path_placeholder_target_url_errors_before_tran
 
         assert!(matches!(
             error,
-            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+            ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
         ));
         assert!(error.to_string().contains(expected_reason));
         assert!(
@@ -956,7 +967,7 @@ async fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() 
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
@@ -1019,7 +1030,7 @@ async fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
@@ -1082,7 +1093,7 @@ async fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
@@ -1139,7 +1150,7 @@ async fn host_http_egress_removes_staged_secret_before_network_errors() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Network { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Network { .. }
     ));
     assert!(!error.to_string().contains("sk-staged-secret"));
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
@@ -1262,7 +1273,7 @@ async fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
@@ -1318,7 +1329,7 @@ async fn host_http_egress_rejects_header_injection_prefix_control_chars() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(!error.to_string().contains("sk-test-secret"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -1498,7 +1509,7 @@ async fn host_http_egress_requires_available_required_credentials_before_network
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
@@ -2598,7 +2609,8 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
                 Obligation::InjectCredentialAccountOnce {
                     handle: runtime_slot_handle.clone(),
                     provider: VendorId::new("mcp").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                    setup:
+                        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("mcp").unwrap(),
                 },
@@ -3750,7 +3762,7 @@ async fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails()
     let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects/workspace").unwrap(),
-        ironclaw_host_api::HostPath::from_path_buf(temp.path().to_path_buf()),
+        ironclaw_host_api::path::HostPath::from_path_buf(temp.path().to_path_buf()),
     )
     .unwrap();
     let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
@@ -3951,7 +3963,7 @@ async fn host_http_egress_blocks_credential_shaped_response_body() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Response { ref reason, .. }
             if reason == "response_leak_blocked"
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
@@ -4160,7 +4172,7 @@ async fn host_http_egress_blocks_percent_encoded_credential_path_before_network(
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { ref reason, .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Request { ref reason, .. }
             if reason == "credential_leak_blocked"
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -4201,7 +4213,7 @@ async fn host_http_egress_blocks_credential_shaped_runtime_request_before_networ
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { ref reason, .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Request { ref reason, .. }
             if reason == "credential_leak_blocked"
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
@@ -4246,7 +4258,7 @@ async fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_netwo
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Request { .. }
     ));
     assert!(error.to_string().contains("sensitive_header"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -4289,7 +4301,7 @@ async fn host_http_egress_blocks_leaky_response_header_values() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Response { ref reason, .. }
             if reason == "response_leak_blocked"
     ));
 }
@@ -4329,7 +4341,7 @@ async fn host_http_egress_blocks_runtime_supplied_credential_query_before_networ
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Request { .. }
     ));
     assert!(error.to_string().contains("manual_credentials"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -4370,7 +4382,7 @@ async fn host_http_egress_blocks_percent_encoded_credential_values_before_networ
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Request { .. }
     ));
     assert!(!error.to_string().contains("AKIAIOSFODNN7EXAMPLE"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -4411,7 +4423,7 @@ async fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_netwo
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Request { .. }
     ));
     assert!(error.to_string().contains("manual_credentials"));
     assert!(network_recorder.lock().unwrap().is_empty());
@@ -4446,7 +4458,7 @@ async fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Network { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Network { .. }
     ));
     assert!(error.to_string().contains("transport_failed"));
     assert!(!error.to_string().contains("raw-secret"));

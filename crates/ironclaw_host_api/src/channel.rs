@@ -8,8 +8,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HostApiError, IngressVerificationRecipe, NetworkScheme, RecipeValidationError, SecretHandle,
-    VendorId,
+    action::NetworkScheme,
+    error::HostApiError,
+    ids::{SecretHandle, VendorId},
+    recipe::{IngressVerificationRecipe, RecipeValidationError},
 };
 
 const MAX_CHANNEL_COMMANDS: usize = 32;
@@ -181,19 +183,19 @@ impl ChannelDescriptor {
                     });
                 }
                 let well_formed = match injection {
-                    crate::RuntimeCredentialTarget::Header { name, .. } => {
-                        crate::valid_http_field_name(name)
+                    crate::http::RuntimeCredentialTarget::Header { name, .. } => {
+                        crate::http::valid_http_field_name(name)
                     }
-                    crate::RuntimeCredentialTarget::QueryParam { name } => {
+                    crate::http::RuntimeCredentialTarget::QueryParam { name } => {
                         !name.trim().is_empty() && !name.contains(char::is_whitespace)
                     }
-                    crate::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+                    crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
                         !placeholder.is_empty()
                             && placeholder
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
-                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+                    crate::http::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
                         pointer.starts_with('/')
                     }
                 };
@@ -365,7 +367,7 @@ pub struct ChannelEgressDescriptor {
     #[serde(default = "default_https")]
     pub scheme: NetworkScheme,
     pub host: String,
-    pub methods: Vec<crate::NetworkMethod>,
+    pub methods: Vec<crate::action::NetworkMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_handle: Option<SecretHandle>,
     /// How the host injects the declared credential into vendor requests.
@@ -374,7 +376,7 @@ pub struct ChannelEgressDescriptor {
     /// path (the adapter writes `{placeholder}` into the path; the host
     /// substitutes the secret — bytes never reach the adapter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub injection: Option<crate::RuntimeCredentialTarget>,
+    pub injection: Option<crate::http::RuntimeCredentialTarget>,
     /// Body credentials the host may inject for this target: each entry binds
     /// a secret handle to the RFC 6901 JSON pointer where its resolved value
     /// is inserted in the request's JSON body (e.g. a vendor
@@ -713,7 +715,7 @@ max_message_chars = 40000
         channel.validate().unwrap();
         assert!(matches!(
             channel.egress[0].injection,
-            Some(crate::RuntimeCredentialTarget::PathPlaceholder { .. })
+            Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { .. })
         ));
 
         // Header injection stays expressible explicitly too.

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use ironclaw_host_api::ChannelPresentation;
+use ironclaw_host_api::channel::ChannelPresentation;
 use tracing;
 
 use crate::{ProductTurnContext, TurnOriginKind};
@@ -582,7 +582,7 @@ mod tests {
     use super::*;
     use crate::TurnOwner;
     use chrono::TimeZone;
-    use ironclaw_host_api::UserId;
+    use ironclaw_host_api::ids::UserId;
 
     fn stamp() -> chrono::DateTime<chrono::Utc> {
         chrono::Utc

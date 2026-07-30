@@ -1,5 +1,8 @@
 // arch-exempt: large_file, validator+markers+schema checks pending split, plan #6310
-use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
+use ironclaw_host_api::{
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{CapabilityId, ProviderToolName},
+};
 use ironclaw_safety::{
     PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
     validate_provider_arguments, validate_provider_identity, validate_provider_token,
@@ -1006,7 +1009,7 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     // Deserializing the real type makes that drift impossible: a variant added
     // in `host_api` is accepted here the moment it exists.
     let retry = required_string(object, "same_call_retry", "model observation recovery")?;
-    serde_json::from_value::<ironclaw_host_api::SameCallRetryConstraint>(
+    serde_json::from_value::<ironclaw_host_api::result_meta::SameCallRetryConstraint>(
         serde_json::Value::String(retry.to_string()),
     )
     .map_err(|_| format!("model observation same-call retry `{retry}` is unsupported"))?;
@@ -1014,9 +1017,9 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
         validate_model_observation_repairs(repairs)?;
     }
     let hint = required_string(object, "recovery_hint", "model observation recovery")?;
-    serde_json::from_value::<ironclaw_host_api::CapabilityRecoveryHint>(serde_json::Value::String(
-        hint.to_string(),
-    ))
+    serde_json::from_value::<ironclaw_host_api::result_meta::CapabilityRecoveryHint>(
+        serde_json::Value::String(hint.to_string()),
+    )
     .map_err(|_| format!("model observation recovery hint `{hint}` is unsupported"))?;
     Ok(())
 }
@@ -1239,7 +1242,7 @@ fn is_disallowed_control_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, ProviderToolName};
+    use ironclaw_host_api::ids::{CapabilityId, ProviderToolName};
     use ironclaw_safety::PROVIDER_METADATA_TEXT_MAX_BYTES;
 
     use super::{

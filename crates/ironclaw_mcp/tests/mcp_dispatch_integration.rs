@@ -5,7 +5,15 @@ use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
     HostApiContractRegistry, ManifestSource,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{
+        AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, TenantId, ThreadId,
+        UserId, VendorId,
+    },
+    path::VirtualPath,
+    resource::{ReservationStatus, ResourceEstimate, ResourceScope, ResourceUsage},
+};
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use serde_json::json;

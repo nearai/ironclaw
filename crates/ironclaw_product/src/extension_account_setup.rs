@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, btree_map::Entry as MapEntry};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ExtensionId, RuntimeCredentialAuthRequirement, UserId};
+use ironclaw_host_api::{
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, UserId},
+};
 use thiserror::Error;
 
 use crate::ChannelConnectionRequirement;

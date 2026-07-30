@@ -1,4 +1,7 @@
-use ironclaw_host_api::{FailureKind, Resolution, ToolVerdict};
+use ironclaw_host_api::{
+    resolution::{Resolution, ToolVerdict},
+    result_meta::FailureKind,
+};
 use ironclaw_turns::{
     LoopBlockedKind, SanitizedFailure,
     run_profile::{
@@ -472,7 +475,7 @@ mod tests {
     ///   sole Terminal-fated kind.
     #[test]
     fn every_failure_kind_has_a_deliberate_failure_category() {
-        use ironclaw_host_api::FailureFate;
+        use ironclaw_host_api::result_meta::FailureFate;
 
         const ALL_CATEGORIES: [&str; 7] = [
             "capability_transient",

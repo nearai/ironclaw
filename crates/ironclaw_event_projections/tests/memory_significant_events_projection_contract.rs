@@ -7,8 +7,10 @@ use ironclaw_event_projections::{
 use ironclaw_events::{AuditSink, DurableAuditSink};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{
-    AgentId, AuditStage, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope,
-    TenantId, ThreadId, UserId, VirtualPath,
+    audit::AuditStage,
+    ids::{AgentId, CorrelationId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+    path::VirtualPath,
+    resource::ResourceScope,
 };
 use ironclaw_memory_native::{
     ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository,

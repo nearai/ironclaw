@@ -30,7 +30,10 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
     CredentialRefreshRequest,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_reborn_composition::{RebornRuntimeInput, build_reborn_runtime};
 
 #[tokio::test]

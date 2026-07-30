@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_turns::TurnRunId;
 
 pub(super) fn trace_runtime_latency_ok(

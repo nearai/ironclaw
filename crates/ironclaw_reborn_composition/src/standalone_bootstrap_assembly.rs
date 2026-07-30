@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 
 use crate::RebornBuildError;
 use crate::root::default_system_prompt::seed_default_system_prompt;

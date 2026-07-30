@@ -19,8 +19,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, ProductSurfaceCaller, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ProjectId, TenantId, ThreadId, Timestamp, UserId,
+    Timestamp,
+    ids::{AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    product_surface::{ProductSurfaceCaller, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
 };
 use ironclaw_threads::{
     EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,

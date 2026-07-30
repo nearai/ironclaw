@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use ironclaw_host_api::{
-    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
-    SYSTEM_RESERVED_ID, UserId,
+    ids::{InvocationId, ResourceReservationId, UserId},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage, SYSTEM_RESERVED_ID},
 };
 use ironclaw_resources::{
     BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
@@ -806,7 +806,10 @@ mod tests {
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
-    use ironclaw_host_api::{ResourceReceipt, ResourceReservation, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        ids::{TenantId, ThreadId},
+        resource::{ResourceReceipt, ResourceReservation},
+    };
     use ironclaw_resources::{
         AccountSnapshot, BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor,
         ReservationOutcome, ResourceAccount, ResourceLimits,

@@ -22,7 +22,7 @@ use bollard::{
     models::HostConfig,
 };
 use futures_util::StreamExt;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 
 use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
@@ -185,7 +185,7 @@ impl RebornSandboxConfig {
 
     pub fn with_local_mount_source(
         mut self,
-        virtual_root: ironclaw_host_api::VirtualPath,
+        virtual_root: ironclaw_host_api::path::VirtualPath,
         host_root: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
         self.mount_sources
@@ -650,7 +650,10 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     #[test]
     fn relative_workdir_rejects_escape() {

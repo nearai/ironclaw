@@ -1,4 +1,7 @@
-use ironclaw_host_api::{ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    ids::ExtensionId,
+};
 
 use super::manifest::{CALENDAR_EXTENSION_ID, GMAIL_EXTENSION_ID};
 

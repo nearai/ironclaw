@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, Resolution, ResolutionBatch,
-    TenantId, ThreadId,
+    ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
+    resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
@@ -760,7 +760,7 @@ impl ToolDisclosureCapabilityPort {
             tool_call.name.as_str(),
             &tool_call.arguments,
         );
-        let digest = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
+        let digest = ironclaw_host_api::approval::sha256_digest_token(digest_input.as_bytes());
         let input_ref = CapabilityInputRef::new(format!("{DISCLOSURE_INPUT_PREFIX}{digest}"))
             .map_err(|e| {
                 invalid_invocation(format!("bridge input ref could not be represented: {e}"))
@@ -860,7 +860,7 @@ impl ToolDisclosureCapabilityPort {
             target_name,
             &tool_call.arguments,
         );
-        let digest = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
+        let digest = ironclaw_host_api::approval::sha256_digest_token(digest_input.as_bytes());
         let input_ref = CapabilityInputRef::new(format!("{DISCLOSURE_INPUT_PREFIX}{digest}"))
             .map_err(|e| {
                 invalid_invocation(format!(
@@ -1075,7 +1075,7 @@ impl ToolDisclosureCapabilityPort {
     ) -> ProviderToolCall {
         let digest_input =
             provider_call_digest_input(&tool_call.id, target.name.as_str(), &arguments);
-        let target_id = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
+        let target_id = ironclaw_host_api::approval::sha256_digest_token(digest_input.as_bytes());
         ProviderToolCall {
             provider_id: tool_call.provider_id.clone(),
             provider_model_id: tool_call.provider_model_id.clone(),
@@ -1308,7 +1308,7 @@ fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Va
 
 fn failed_invalid_input(summary: &'static str) -> Resolution {
     resolution::failed(
-        ironclaw_host_api::FailureKind::InputEncode,
+        ironclaw_host_api::result_meta::FailureKind::InputEncode,
         summary.to_string(),
         CapabilityFailureDetail::Diagnostic {
             text: summary.to_string(),
@@ -1361,7 +1361,11 @@ mod tests {
         ));
     }
 
-    use ironclaw_host_api::{AgentId, FailureKind, ProjectId, TenantId, ThreadId, ToolVerdict};
+    use ironclaw_host_api::{
+        ids::{AgentId, ProjectId, TenantId, ThreadId},
+        resolution::ToolVerdict,
+        result_meta::FailureKind,
+    };
     use ironclaw_loop_host::CapabilityWriteResult;
     use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopResultRef, RunProfileResolver, TurnRunId, TurnScope,
@@ -1470,7 +1474,7 @@ mod tests {
                     .map(|definition| CapabilityDescriptorView {
                         capability_id: definition.capability_id.clone(),
                         provider: None,
-                        runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                        runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description.clone(),
                         description_trust: Default::default(),
@@ -1534,9 +1538,10 @@ mod tests {
             &self,
             write: CapabilityResultWrite<'_>,
         ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
-            let result_digest =
-                ironclaw_host_api::sha256_digest_token(write.input_ref.as_str().as_bytes())
-                    .replace(':', ".");
+            let result_digest = ironclaw_host_api::approval::sha256_digest_token(
+                write.input_ref.as_str().as_bytes(),
+            )
+            .replace(':', ".");
             Ok(CapabilityWriteResult::without_output_digest(
                 LoopResultRef::new(format!("result:{result_digest}")).expect("valid result ref"),
                 write.output.to_string().len() as u64,

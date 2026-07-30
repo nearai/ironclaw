@@ -15,11 +15,21 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    ActivityId, Actor, Authorized, CapabilityId, CorrelationId, EffectKind, ExtensionId, HostPath,
-    Invocation, InvocationOrigin, MountView, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    ProcessId, ProductKind, ReservationStatus, ResourceEstimate, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    RuntimeKind, RuntimeLane, SecretHandle, TenantId, Timestamp, UserId, VendorId, VirtualPath,
+    Timestamp,
+    action::{NetworkScheme, NetworkTargetPattern},
+    authorized::Authorized,
+    capability::{EffectKind, PermissionMode, RuntimeCredentialRequirementSource},
+    http::RuntimeCredentialTarget,
+    ids::{
+        ActivityId, CapabilityId, CorrelationId, ExtensionId, ProcessId, ProductKind,
+        ResourceReservationId, SecretHandle, TenantId, UserId, VendorId,
+    },
+    invocation::{Actor, Invocation, InvocationOrigin},
+    lane::RuntimeLane,
+    mount::MountView,
+    path::{HostPath, VirtualPath},
+    resource::{ReservationStatus, ResourceEstimate, ResourceScope, ResourceUsage},
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -746,7 +756,7 @@ fn sample_scope() -> ResourceScope {
         project_id: None,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 

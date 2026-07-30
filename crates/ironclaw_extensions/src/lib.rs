@@ -7,8 +7,13 @@
 
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError, HostPortCatalog,
-    RequestedTrustClass, RuntimeKind, TrustClass, VirtualPath,
+    action::ExtensionLifecycleOperation,
+    error::HostApiError,
+    host_port::HostPortCatalog,
+    ids::{CapabilityId, ExtensionId},
+    path::VirtualPath,
+    runtime::{RuntimeKind, TrustClass},
+    trust::RequestedTrustClass,
 };
 use thiserror::Error;
 

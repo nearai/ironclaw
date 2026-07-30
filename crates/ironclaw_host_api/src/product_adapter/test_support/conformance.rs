@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::{
+use crate::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use async_trait::async_trait;

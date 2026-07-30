@@ -5,7 +5,7 @@
 //! the product surface that produced the command.
 
 use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::error::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;

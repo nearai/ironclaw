@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::{ResourceScope, UserId};
+use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
 use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
@@ -848,7 +848,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// wires. Default `None` (no memory consumers, today's behavior).
     bound_memory: Option<(
         Arc<dyn ironclaw_memory::MemoryService>,
-        ironclaw_host_api::MemoryDescriptor,
+        ironclaw_host_api::memory::MemoryDescriptor,
     )>,
 }
 

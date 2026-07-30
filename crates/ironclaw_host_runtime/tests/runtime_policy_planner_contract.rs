@@ -23,8 +23,9 @@ use ironclaw_host_api::runtime_policy::{
     DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile,
 };
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, RuntimeKind,
-    TrustClass,
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    ids::{CapabilityId, ExtensionId},
+    runtime::{RuntimeKind, TrustClass},
 };
 use ironclaw_host_runtime::{SHELL_CAPABILITY_ID, builtin_first_party_package};
 use ironclaw_runtime_policy::{

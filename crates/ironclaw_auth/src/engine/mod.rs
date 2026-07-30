@@ -3,7 +3,7 @@
 //! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
 //! registration for vendors whose recipe carries no deployment client
 //! credentials. Vendors differ only in recipe **data**
-//! (`ironclaw_host_api::VendorAuthRecipe`); there is no auth trait in the
+//! (`ironclaw_host_api::recipe::VendorAuthRecipe`); there is no auth trait in the
 //! extension ABI and no per-vendor code path here.
 //!
 //! Engine-owned, for every vendor:
@@ -31,8 +31,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
-    VendorAuthRecipe,
+    http::RuntimeHttpEgress,
+    recipe::{OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, VendorAuthRecipe},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
@@ -476,7 +477,7 @@ fn build_recipe_authorization_url(
     // The endpoint may not predefine reserved parameters (host-owned).
     for (name, _) in url.query_pairs() {
         let name = name.to_ascii_lowercase();
-        if ironclaw_host_api::RESERVED_AUTHORIZE_PARAMS.contains(&name.as_str())
+        if ironclaw_host_api::recipe::RESERVED_AUTHORIZE_PARAMS.contains(&name.as_str())
             || name == recipe.scope_param()
         {
             return Err(AuthProductError::MalformedConfig);

@@ -7,7 +7,11 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, Filter, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind,
     RecordVersion, RootFilesystem, ScopedFilesystem, SortDirection, StorageTxn, VersionedEntry,
 };
-use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath, UserId, VirtualPath};
+use ironclaw_host_api::{
+    ids::{ProcessId, UserId},
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{ProcessJournalMaterializedState, ProcessJournalStoreError};

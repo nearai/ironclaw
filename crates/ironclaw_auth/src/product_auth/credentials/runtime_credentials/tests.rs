@@ -6,9 +6,14 @@ use crate::{
 use chrono::Utc;
 use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
-    AgentId, CredentialStageError, ExtensionId, InvocationId, MissionId, ProjectId, ResourceScope,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, TenantId,
-    ThreadId, UserId, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::CredentialStageError,
+    ids::{
+        AgentId, ExtensionId, InvocationId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId,
+        UserId, VendorId,
+    },
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort as _};
 

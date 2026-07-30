@@ -2,7 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem, SeqNo};
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
+    ids::TenantId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_resources::{
     FilesystemResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,

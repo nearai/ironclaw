@@ -8,7 +8,7 @@ use ironclaw_extension_host::{
 };
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 
 /// The GSuite family's catalog search aliases, folded into the neutral bundle so
 /// composition search never special-cases a concrete id.
