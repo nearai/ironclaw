@@ -1,8 +1,7 @@
 """Executable classification of the shipped provider capability surface."""
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = ROOT / "tests/e2e/fixtures/provider_capability_coverage.toml"

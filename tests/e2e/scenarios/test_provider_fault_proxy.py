@@ -8,6 +8,7 @@ import gzip
 import httpx
 import pytest
 from aiohttp import web
+
 from helpers import AUTH_TOKEN
 from provider_fault_proxy import (
     PROVIDER_FAULT_PROFILES,

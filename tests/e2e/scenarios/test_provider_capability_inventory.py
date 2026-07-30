@@ -3,10 +3,11 @@
 import ast
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
+
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     COVERAGE_BACKLOG,

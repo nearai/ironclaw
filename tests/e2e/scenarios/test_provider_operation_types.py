@@ -5,6 +5,7 @@ import hashlib
 from types import SimpleNamespace
 
 import pytest
+
 from provider_operation_types import assert_provider_request_evidence
 
 BEARER = "provider-operation-evidence-token"
