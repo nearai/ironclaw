@@ -501,6 +501,11 @@ fn lifecycle_command_metadata(
     kind: LifecycleCommandKind,
 ) -> (&'static str, &'static str, &'static str) {
     match kind {
+        LifecycleCommandKind::ExtensionRegisterHostedMcp => (
+            "Register hosted MCP",
+            "Register a hosted MCP endpoint",
+            "/extension_register_hosted_mcp <json>",
+        ),
         LifecycleCommandKind::ExtensionSearch => (
             "Search extensions",
             "Search the extension registry",
