@@ -1046,6 +1046,14 @@ impl RebornIntegrationHarness {
         ))
     }
 
+    /// Exact governor used by this thread's production-composed capability
+    /// path. Intended for invariant sabotage/read-back only.
+    pub(crate) fn capability_resource_governor_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.capability_recorder.resource_governor()
+    }
+
     /// Register a scripted model gateway for a scope OTHER than this
     /// harness thread's own (which is registered at build time): delivery
     /// proofs pre-resolve the vendor conversation's binding and register its
@@ -2155,7 +2163,7 @@ impl RebornIntegrationHarness {
 /// (`assert_reply_persists_after_reopen`, `assert_gate_survives_reopen`) —
 /// each builds its own higher-level store (thread service, turn-state store)
 /// over the fresh composite this returns.
-async fn reopen_fresh_libsql_composite(
+pub(crate) async fn reopen_fresh_libsql_composite(
     db_path: &Path,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
     let db = Arc::new(
@@ -2290,8 +2298,9 @@ pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgr
         .map_err(|error| format!("Postgres pool must build: {error}").into())
 }
 
-/// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
-/// `binding` inside the production composite.
+/// Build a `ScopedFilesystem` that maps `/processes` and the compatibility
+/// `/turns` alias to the row-native process path for `binding` inside the
+/// composite.
 ///
 /// Uses the production path prefix `""` (no `/engine` prefix) so turn state
 /// lands under `/tenants/...` inside the composite, where the database backend

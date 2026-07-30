@@ -111,6 +111,69 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
         .expect("scripted MCP search result surfaced back to the model");
 }
 
+/// An empty Exa search is a successful provider outcome, not a transport
+/// failure. The contract observes all three wire requests and the structured
+/// empty result returned through the production executor.
+#[tokio::test]
+async fn web_search_empty_result_dispatches_through_scripted_exa_mcp() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(""),
+        ])
+        .script([
+            RebornScriptedReply::tool_call(
+                "web-access.search",
+                json!({"query": "provider-empty-search-sentinel"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("search for the provider-empty-search-sentinel")
+        .await
+        .expect("empty search turn completes");
+
+    harness
+        .assert_tool_invoked("web-access.search")
+        .await
+        .expect("capability dispatched through the real executor");
+    harness
+        .assert_egress_count(3)
+        .await
+        .expect("initialize, initialized, and tools/call were observed");
+    harness
+        .assert_egress_body_contains_any(
+            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            "web_search_exa",
+        )
+        .await
+        .expect("observed request names the provider operation");
+    harness
+        .assert_egress_body_contains_any(
+            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            "provider-empty-search-sentinel",
+        )
+        .await
+        .expect("observed request carries the exact query");
+
+    let output = harness
+        .tool_result_output("web-access.search")
+        .await
+        .expect("empty provider result was recorded");
+    assert_eq!(output["provider_used"], "exa_mcp");
+    assert_eq!(
+        output["queries"][0]["query"],
+        "provider-empty-search-sentinel"
+    );
+    assert_eq!(output["queries"][0]["answer"], "");
+    assert_eq!(output["queries"][0]["results"], json!([]));
+}
+
 /// `web-access.get_content` dispatches through the real `WebAccessExecutor`
 /// (the `web_fetch_exa` MCP tool) over the same scripted handshake shape.
 #[tokio::test]
@@ -162,6 +225,61 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .assert_tool_result_contains("This domain is for illustrative examples in documents.")
         .await
         .expect("scripted MCP fetch result surfaced back to the model");
+}
+
+/// A fetched document with no body remains a successful, observed provider
+/// response and preserves the requested destination with empty content.
+#[tokio::test]
+async fn get_content_empty_result_dispatches_through_scripted_exa_mcp() {
+    let url = "https://empty.example/provider-contract";
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(&format!("# Empty Provider Document\nURL: {url}\n")),
+        ])
+        .script([
+            RebornScriptedReply::tool_call("web-access.get_content", json!({"url": url})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("fetch the empty provider contract document")
+        .await
+        .expect("empty content turn completes");
+
+    harness
+        .assert_tool_invoked("web-access.get_content")
+        .await
+        .expect("capability dispatched through the real executor");
+    harness
+        .assert_egress_count(3)
+        .await
+        .expect("initialize, initialized, and tools/call were observed");
+    harness
+        .assert_egress_body_contains_any(
+            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            "web_fetch_exa",
+        )
+        .await
+        .expect("observed request names the provider operation");
+    harness
+        .assert_egress_body_contains_any(ironclaw_first_party_extensions::EXA_MCP_HOST, url)
+        .await
+        .expect("observed request carries the exact destination");
+
+    let output = harness
+        .tool_result_output("web-access.get_content")
+        .await
+        .expect("empty provider content was recorded");
+    assert_eq!(output["provider_used"], "exa_mcp");
+    assert_eq!(output["title"], "Empty Provider Document");
+    assert_eq!(output["url"], url);
+    assert_eq!(output["content"], "");
+    assert_eq!(output["contents"][0]["content"], "");
 }
 
 /// Format-matrix regression (C-WIREFMT): the Exa MCP server answers

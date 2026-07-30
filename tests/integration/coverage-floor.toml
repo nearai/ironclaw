@@ -55,42 +55,44 @@
 
 [global]
 enforce = true
-# Recaptured from PR #6696's successful merged CI artifact before the behavioral
-# coverage additions in this PR: aggregate 307208 / 360961 = 85.11%. New tests
-# may raise this value; this floor prevents either test removal or denominator
-# shrinkage from returning to the previous permissive 80.81% baseline.
-floor_percent = 85.11
+# Recaptured from PR #6886's successful merged CI artifact at df5081ad4 after
+# the generated lifecycle, restart, and double-submit coverage additions:
+# aggregate 315436 / 368757 = 85.54%.
+floor_percent = 85.54
 tolerance_percent = 0.5
-captured_total_lines = 360961
-captured_date = "2026-07-28"
-captured_from = "cef5eab53f47b2fc603a6dffc6cdeb7e12ed9ef5"
+captured_total_lines = 368757
+captured_date = "2026-07-30"
+captured_from = "df5081ad4539e14da07a3b041735c35e6a795ac8"
 
 [[crate]]
 name = "ironclaw_runner"
-floor_percent = 83.58
-floor_covered_lines = 13083
+floor_percent = 86.87
+floor_covered_lines = 14669
 tolerance_percent = 0.5
 tolerance_lines = 20
-captured_total_lines = 15653
-captured_date = "2026-07-28"
-rationale = "Protects runner orchestration and await-edge caller paths after the process-journal migration."
+captured_total_lines = 16887
+captured_date = "2026-07-30"
+rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration after the process-journal migration."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_processes"
-floor_percent = 82.29
-floor_covered_lines = 5140
+floor_percent = 88.07
+floor_covered_lines = 5839
 tolerance_percent = 0.5
 tolerance_lines = 20
-captured_total_lines = 6246
-captured_date = "2026-07-28"
-rationale = "Protects the process journal state machine with both percentage and deletion-resistant covered-line floors."
+captured_total_lines = 6630
+captured_date = "2026-07-30"
+rationale = "Protects generated per-transition ownership checks in the process journal state machine."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_turns"
-floor_percent = 85.36
-floor_covered_lines = 9181
+floor_percent = 86.21
+floor_covered_lines = 9453
 tolerance_percent = 0.5
 tolerance_lines = 20
-captured_total_lines = 10755
-captured_date = "2026-07-28"
-rationale = "Protects child submission, retry, admission, and process-projection behavior."
+captured_total_lines = 10965
+captured_date = "2026-07-30"
+rationale = "Protects generated restart, same-thread admission, retry, and process-projection behavior."
+issue = "https://github.com/nearai/ironclaw/issues/6524"

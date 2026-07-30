@@ -147,6 +147,27 @@ impl ScopedSkillManagementPort {
         .await?)
     }
 
+    pub async fn install_from_url_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: Option<&str>,
+        content: &str,
+        source_url: &str,
+    ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
+        let context = self.context_for_scope(scope)?;
+        Ok(install_skill(
+            &context,
+            SkillInstallRequest {
+                name,
+                content,
+                files: &[],
+                source: SkillInstallSource::InstalledUrl,
+                source_url: Some(source_url),
+            },
+        )
+        .await?)
+    }
+
     pub async fn remove_for_scope(
         &self,
         scope: ResourceScope,
