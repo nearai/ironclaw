@@ -767,7 +767,6 @@ jobs:
             --manifest tests/integration/changed-coverage-exemptions.toml \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
-            --threshold 85 \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
 

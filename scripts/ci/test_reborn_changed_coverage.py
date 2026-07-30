@@ -38,6 +38,15 @@ class ChangedCoverageWorkflowTests(unittest.TestCase):
         self.assertNotIn('--head "$(git rev-parse HEAD)"', workflow)
         self.assertIn("github.event.merge_group.base_sha", workflow)
         self.assertIn("reborn-changed-coverage.json", workflow)
+        gate_step = workflow.split(
+            "- name: Gate changed Reborn lines and branches", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        self.assertIn('--head "$HEAD_SHA"', gate_step)
+        self.assertNotIn(
+            "--threshold",
+            gate_step,
+            "the strict line/branch gate has no threshold CLI and must gate every denominator",
+        )
         self.assertRegex(
             workflow,
             re.compile(
