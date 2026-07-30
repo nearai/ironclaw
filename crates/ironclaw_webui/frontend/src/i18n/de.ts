@@ -1087,6 +1087,7 @@ registerPack("de", {
   "admin.users.title": "Benutzer ({count} / {total})",
   "admin.users.searchPlaceholder": "Suchen…",
   "admin.users.noMatch": "Keine Benutzer passen zu den aktuellen Filtern.",
+  "admin.users.loadMoreFailed": "Weitere Benutzer konnten nicht geladen werden. Versuchen Sie es erneut.",
   "admin.users.filter.all": "Alle",
   "admin.users.filter.active": "Aktiv",
   "admin.users.filter.suspended": "Suspendiert",

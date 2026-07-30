@@ -91,6 +91,10 @@ function baseAdminState(overrides = {}) {
     }],
     query: { isLoading: false, error: null },
     isForbidden: false,
+    hasMore: false,
+    isLoadingMore: false,
+    loadMoreError: null,
+    loadMore: async () => {},
     createUser: async () => {},
     isCreating: false,
     createError: null,
@@ -228,6 +232,56 @@ test("users list shows activate and role failures and disables actions while pen
   assert.equal(findByTestId(pendingRow, "admin-user-role").props.disabled, true);
   assert.equal(findByTestId(pendingRow, "admin-user-role").props["aria-busy"], true);
   assert.ok(collectScalars(findByTestId(pendingRow, "admin-user-role")).includes("common.saving"));
+});
+
+test("users list renders load-more progress, retry, and final-page states", async () => {
+  const harness = createReactHarness();
+  const { AdminUsersTabView: View } = loadUsersView(harness);
+  let loadMoreCalls = 0;
+  const loadMore = async () => {
+    loadMoreCalls += 1;
+  };
+
+  const available = harness.render(View, {
+    onSelectUser: () => {},
+    adminState: baseAdminState({ hasMore: true, loadMore }),
+  });
+  const availableButton = findByTestId(available, "admin-users-load-more");
+  assert.ok(availableButton);
+  assert.equal(availableButton.props.disabled, false);
+  assert.ok(collectScalars(availableButton).includes("common.loadMore"));
+  await availableButton.props.onClick();
+  assert.equal(loadMoreCalls, 1);
+
+  const loading = harness.render(View, {
+    onSelectUser: () => {},
+    adminState: baseAdminState({
+      hasMore: true,
+      isLoadingMore: true,
+      loadMore,
+    }),
+  });
+  const loadingButton = findByTestId(loading, "admin-users-load-more");
+  assert.equal(loadingButton.props.disabled, true);
+  assert.equal(loadingButton.props.loading, true);
+  assert.ok(collectScalars(loadingButton).includes("common.loading"));
+
+  const failed = harness.render(View, {
+    onSelectUser: () => {},
+    adminState: baseAdminState({
+      hasMore: true,
+      loadMoreError: new Error("next page failed"),
+      loadMore,
+    }),
+  });
+  assert.ok(findByTestId(failed, "admin-users-load-more-error"));
+  assert.ok(findByTestId(failed, "admin-users-load-more"));
+
+  const finalPage = harness.render(View, {
+    onSelectUser: () => {},
+    adminState: baseAdminState({ hasMore: false }),
+  });
+  assert.equal(findByTestId(finalPage, "admin-users-load-more"), null);
 });
 
 test("suspend failure stays in the confirmation dialog with retry context", async () => {

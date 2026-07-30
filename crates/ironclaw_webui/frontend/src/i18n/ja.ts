@@ -1087,6 +1087,7 @@ registerPack("ja", {
   "admin.users.title": "ユーザー ({count} / {total})",
   "admin.users.searchPlaceholder": "検索…",
   "admin.users.noMatch": "現在のフィルタに一致するユーザーがいません。",
+  "admin.users.loadMoreFailed": "さらにユーザーを読み込めませんでした。もう一度お試しください。",
   "admin.users.filter.all": "すべて",
   "admin.users.filter.active": "アクティブ",
   "admin.users.filter.suspended": "停止",

@@ -1188,6 +1188,7 @@ registerPack("en", {
   "admin.users.title": "Users ({count} / {total})",
   "admin.users.searchPlaceholder": "Search…",
   "admin.users.noMatch": "No users match the current filters.",
+  "admin.users.loadMoreFailed": "Couldn't load more users. Try again.",
   "admin.users.filter.all": "All",
   "admin.users.filter.active": "Active",
   "admin.users.filter.suspended": "Suspended",

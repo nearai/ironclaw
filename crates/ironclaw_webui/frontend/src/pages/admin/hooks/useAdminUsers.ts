@@ -1,6 +1,11 @@
 // @ts-nocheck
 import React from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   fetchAdminUsers,
   fetchAdminUser,
@@ -17,14 +22,39 @@ import {
 export function useAdminUsers() {
   const queryClient = useQueryClient();
 
-  const query = useQuery({
+  const query = useInfiniteQuery({
     queryKey: ["admin", "users"],
-    queryFn: fetchAdminUsers,
+    queryFn: ({ pageParam, signal }) =>
+      fetchAdminUsers({ cursor: pageParam || undefined, signal }),
+    initialPageParam: null,
+    getNextPageParam: (lastPage) => lastPage?.nextCursor || undefined,
     refetchInterval: 10_000,
   });
 
-  const rawUsers = query.data;
-  const users = Array.isArray(rawUsers) ? rawUsers : rawUsers?.users || [];
+  const users = React.useMemo(() => {
+    const seen = new Set();
+    return (query.data?.pages || []).flatMap((page) =>
+      (page?.users || []).filter((user) => {
+        const id = user?.id || user?.user_id;
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }),
+    );
+  }, [query.data]);
+  const loadMoreInFlightRef = React.useRef(null);
+  const loadMore = React.useCallback(() => {
+    if (!query.hasNextPage) return Promise.resolve();
+    if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
+
+    const request = query.fetchNextPage().finally(() => {
+      if (loadMoreInFlightRef.current === request) {
+        loadMoreInFlightRef.current = null;
+      }
+    });
+    loadMoreInFlightRef.current = request;
+    return request;
+  }, [query.fetchNextPage, query.hasNextPage]);
   // Detect the forbidden state from the structured `ApiError` (see
   // `lib/api.ts`), not the humanized message: a non-admin caller gets HTTP 403
   // whose body kind is humanized to "Participant denied", so a string match on
@@ -87,6 +117,10 @@ export function useAdminUsers() {
     users,
     query,
     isForbidden,
+    hasMore: Boolean(query.hasNextPage),
+    isLoadingMore: query.isFetchingNextPage,
+    loadMoreError: query.isFetchNextPageError ? query.error : null,
+    loadMore,
     createUser: createMut.mutateAsync,
     isCreating: createMut.isPending,
     createError: createMut.error,

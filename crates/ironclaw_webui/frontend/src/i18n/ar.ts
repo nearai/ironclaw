@@ -1087,6 +1087,7 @@ registerPack("ar", {
   "admin.users.title": "المستخدمون ({count} / {total})",
   "admin.users.searchPlaceholder": "بحث…",
   "admin.users.noMatch": "لا يوجد مستخدمون يطابقون المرشحات الحالية.",
+  "admin.users.loadMoreFailed": "تعذر تحميل المزيد من المستخدمين. حاول مرة أخرى.",
   "admin.users.filter.all": "الكل",
   "admin.users.filter.active": "نشط",
   "admin.users.filter.suspended": "موقوف",

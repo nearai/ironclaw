@@ -1087,6 +1087,7 @@ registerPack("hi", {
   "admin.users.title": "उपयोगकर्ता ({count} / {total})",
   "admin.users.searchPlaceholder": "खोजें…",
   "admin.users.noMatch": "कोई भी उपयोगकर्ता वर्तमान फ़िल्टर से मेल नहीं खाता।",
+  "admin.users.loadMoreFailed": "और उपयोगकर्ता लोड नहीं हो सके। फिर से कोशिश करें।",
   "admin.users.filter.all": "All",
   "admin.users.filter.active": "सक्रिय",
   "admin.users.filter.suspended": "निलंबित",

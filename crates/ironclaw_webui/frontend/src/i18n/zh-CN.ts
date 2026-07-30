@@ -1087,6 +1087,7 @@ registerPack("zh-CN", {
   "admin.users.title": "用户（{count} / {total}）",
   "admin.users.searchPlaceholder": "搜索…",
   "admin.users.noMatch": "没有用户符合当前筛选条件。",
+  "admin.users.loadMoreFailed": "无法加载更多用户，请重试。",
   "admin.users.filter.all": "全部",
   "admin.users.filter.active": "活跃",
   "admin.users.filter.suspended": "已停用",
