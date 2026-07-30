@@ -11,6 +11,8 @@ init_repo() {
   local repo="$1"
   mkdir -p "$repo/src"
   git -C "$repo" init -q
+  git -C "$repo" config commit.gpgsign false
+  git -C "$repo" config core.hooksPath /dev/null
   git -C "$repo" config user.email "regression-check@example.invalid"
   git -C "$repo" config user.name "Regression Check Self-Test"
   printf 'pub fn value() -> i32 { 1 }\n' > "$repo/src/lib.rs"
@@ -203,6 +205,19 @@ printf 'pub fn value() -> i32 { 1 }\n' > "$revision_target/src/lib.rs"
 expect_pass "revision detection reads the requested Rust blob" \
   python3 "$CHECKER" --repo "$revision_target" --base HEAD^ --head HEAD \
   --title "fix: committed regression"
+
+later_fix="$TMP_ROOT/later-fix"
+init_repo "$later_fix"
+printf 'pub fn value() -> i32 { 2 }\n' > "$later_fix/src/lib.rs"
+git -C "$later_fix" add src/lib.rs
+git -C "$later_fix" commit -qm "chore: prepare change"
+printf 'pub fn value() -> i32 { 3 }\n' > "$later_fix/src/lib.rs"
+git -C "$later_fix" add src/lib.rs
+git -C "$later_fix" commit -qm "fix: correct later commit"
+expect_fail "fix subject in a later commit triggers the gate" \
+  "no meaningful changed regression assertion" \
+  python3 "$CHECKER" --repo "$later_fix" --base HEAD~2 --head HEAD \
+  --title "chore: neutral pull request title"
 
 comment_only="$TMP_ROOT/comment-only"
 init_repo "$comment_only"

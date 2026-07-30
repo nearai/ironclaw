@@ -1667,6 +1667,13 @@ fn route_lookup() -> HashMap<String, IngressRouteDescriptor> {
         .collect()
 }
 
+fn default_route_lookup() -> HashMap<String, IngressRouteDescriptor> {
+    webui_v2_routes()
+        .into_iter()
+        .map(|descriptor| (descriptor.route_id().as_str().to_string(), descriptor))
+        .collect()
+}
+
 #[test]
 fn automation_resource_descriptor_pattern_is_dual_method_only() {
     let mut matching_routes = Vec::new();
@@ -1714,6 +1721,38 @@ fn route_table_has_exactly_the_expected_routes() {
             "expected route {} missing from {:?}",
             row.route_id,
             actual_ids
+        );
+    }
+}
+
+#[test]
+fn default_route_table_preserves_every_non_artifact_descriptor_policy() {
+    let default = default_route_lookup();
+    let enabled = route_lookup();
+    assert_eq!(
+        default.len() + 2,
+        enabled.len(),
+        "enabling regression exports must add exactly the run and thread artifact routes"
+    );
+
+    for (route_id, descriptor) in &default {
+        let enabled_descriptor = enabled
+            .get(route_id)
+            .unwrap_or_else(|| panic!("default route {route_id} missing when exports are enabled"));
+        assert_eq!(
+            descriptor.method(),
+            enabled_descriptor.method(),
+            "route {route_id}: method changed between deployment modes"
+        );
+        assert_eq!(
+            descriptor.route_pattern(),
+            enabled_descriptor.route_pattern(),
+            "route {route_id}: pattern changed between deployment modes"
+        );
+        assert_eq!(
+            descriptor.policy(),
+            enabled_descriptor.policy(),
+            "route {route_id}: policy changed between deployment modes"
         );
     }
 }

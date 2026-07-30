@@ -18,9 +18,10 @@ use ironclaw_host_api::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,
     BoundedThreadMessagesRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, MessageContent, MessageStatus, RedactMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
-    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
+    FilesystemSessionThreadService, InMemorySessionThreadService, MessageContent, MessageStatus,
+    RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest,
+    ThreadScope,
 };
 
 #[tokio::test]
@@ -157,6 +158,104 @@ async fn filesystem_store_bounded_read_classifies_message_and_byte_budgets() {
         panic!("messages should fit within the export budget");
     };
     assert_eq!(messages.history.messages.len(), 3);
+}
+
+#[tokio::test]
+async fn bounded_read_byte_budget_matches_between_filesystem_and_in_memory() {
+    let filesystem = RangeFixture::new("fs-byte-parity", "tenant-byte-parity").await;
+    let filesystem_message = filesystem.seed_messages("byte-parity", 1).await[0];
+
+    let memory = InMemorySessionThreadService::default();
+    let memory_scope = scope("memory-byte-parity");
+    let memory_thread_id = ThreadId::new("thread-memory-byte-parity").unwrap();
+    memory
+        .ensure_thread(EnsureThreadRequest {
+            scope: memory_scope.clone(),
+            thread_id: Some(memory_thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    memory
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: memory_scope.clone(),
+            thread_id: memory_thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("byte-parity-1".into()),
+            content: MessageContent::text("message 1"),
+        })
+        .await
+        .unwrap();
+
+    let memory_history = memory
+        .list_thread_history(ThreadHistoryRequest {
+            scope: memory_scope.clone(),
+            thread_id: memory_thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let compact_memory_bytes = serde_json::to_vec(&memory_history.messages[0])
+        .expect("message serializes")
+        .len();
+    assert!(
+        compact_memory_bytes < filesystem.stored_message_len(&filesystem_message).await,
+        "fixture must distinguish compact transcript JSON from the stored filesystem row"
+    );
+
+    let filesystem_result = filesystem
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: filesystem.scope.clone(),
+            thread_id: filesystem.thread_id.clone(),
+            max_messages: 1,
+            max_bytes: compact_memory_bytes,
+        })
+        .await
+        .unwrap();
+    let memory_result = memory
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: memory_scope.clone(),
+            thread_id: memory_thread_id.clone(),
+            max_messages: 1,
+            max_bytes: compact_memory_bytes,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(filesystem_result, BoundedThreadMessages::LimitExceeded);
+    assert_eq!(memory_result, BoundedThreadMessages::LimitExceeded);
+
+    let filesystem_complete = filesystem
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: filesystem.scope.clone(),
+            thread_id: filesystem.thread_id.clone(),
+            max_messages: 1,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    let memory_complete = memory
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: memory_scope,
+            thread_id: memory_thread_id,
+            max_messages: 1,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        filesystem_complete,
+        BoundedThreadMessages::Complete(_)
+    ));
+    assert!(matches!(
+        memory_complete,
+        BoundedThreadMessages::Complete(_)
+    ));
 }
 
 #[tokio::test]
@@ -596,6 +695,20 @@ impl RangeFixture {
             .await
             .unwrap()
             .is_some()
+    }
+
+    async fn stored_message_len(&self, message_id: &ThreadMessageId) -> usize {
+        self.scoped
+            .get(
+                &self.scope.to_resource_scope(),
+                &self.message_path(&message_id.to_string()),
+            )
+            .await
+            .unwrap()
+            .expect("stored message row")
+            .entry
+            .body
+            .len()
     }
 
     async fn delete_message(&self, message_id: ThreadMessageId) {

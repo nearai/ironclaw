@@ -9,6 +9,7 @@ use ironclaw_host_api::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::filesystem_service::serialize_stored_thread_message;
 use crate::identifiers::SummaryArtifactId;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
@@ -842,11 +843,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         }
         let mut bytes = 0_usize;
         for message in &thread.messages {
-            bytes = bytes.saturating_add(
-                serde_json::to_vec(message)
-                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?
-                    .len(),
-            );
+            bytes = bytes.saturating_add(serialize_stored_thread_message(message)?.len());
             if bytes > request.max_bytes {
                 return Ok(BoundedThreadMessages::LimitExceeded);
             }

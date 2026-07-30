@@ -4,7 +4,7 @@
 //! handler from [`crate::webui_v2::handlers`] under each descriptor's pattern. The
 //! descriptor is the contract: changing a route's policy here changes what
 //! host composition enforces before the handler runs.
-// arch-exempt: large_file, regression export descriptors stay in the canonical route policy table, plan #6524
+// arch-exempt: large_file, missing aggregation is a typed route-family registry that can assemble split descriptor modules into this canonical policy table, plan #6524
 
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,

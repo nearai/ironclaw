@@ -331,7 +331,9 @@ def main() -> int:
         commit_bodies = args.commit_bodies
 
     commit_subjects = "\n".join(
-        body.splitlines()[0] for body in commit_bodies.split("\0") if body.strip()
+        body.strip().splitlines()[0]
+        for body in commit_bodies.split("\0")
+        if body.strip()
     )
     is_fix = bool(FIX_RE.search(args.title) or FIX_RE.search(commit_subjects))
     high_risk_matches = [

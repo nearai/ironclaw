@@ -252,7 +252,7 @@ where
     }
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
-        let body = serialize_pretty(&StoredThreadMessageRecord::from(record))?;
+        let body = serialize_stored_thread_message(record)?;
         let kind = RecordKind::new(THREAD_MESSAGE_KIND).map_err(|error| {
             SessionThreadError::Backend(format!("invalid thread_message record kind: {error}"))
         })?;
@@ -1261,6 +1261,12 @@ where
         })
         .await
     }
+}
+
+pub(crate) fn serialize_stored_thread_message(
+    record: &ThreadMessageRecord,
+) -> Result<Vec<u8>, SessionThreadError> {
+    serialize_pretty(&StoredThreadMessageRecord::from(record))
 }
 
 #[async_trait]
