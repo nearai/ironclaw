@@ -1,4 +1,4 @@
-//! Project-scoped inbound attachment landing for the WebUI v2 facade.
+//! Project-scoped inbound attachment landing for product adapters.
 //!
 //! Implements the [`InboundAttachmentLander`] port the facade calls before
 //! accepting a user message: it writes attachment bytes through the
@@ -233,13 +233,14 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
         let attachment_prefix = format!("{}/", attachment_root.as_str());
         let mut referenced_batches = HashSet::new();
         for storage_key in referenced_storage_keys {
-            let relative = storage_key
-                .strip_prefix(&attachment_prefix)
-                .ok_or_else(|| {
-                    ProductSurfaceError::internal_from(
-                        "stale attachment cleanup received a reference outside the attachment root",
-                    )
-                })?;
+            // Thread history also contains structured outbound attachments,
+            // whose storage keys legitimately point at agent-created workspace
+            // files rather than the inbound landing area. They are outside
+            // this reconciler's ownership and must not make an otherwise
+            // exhaustive inbound snapshot fail.
+            let Some(relative) = storage_key.strip_prefix(&attachment_prefix) else {
+                continue;
+            };
             // Legacy flat keys are `<date>/<file>` and cannot name a message
             // directory. New keys are exactly `<date>/<message>/<file>`.
             if relative.split('/').count() != 3 {
@@ -248,6 +249,11 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
                 ));
             }
             referenced_batches.insert(attachment_batch_parent(storage_key)?.as_str().to_string());
+        }
+        // Preserve the same fail-closed behavior as an empty snapshot when the
+        // scan contains only attachment domains this reconciler does not own.
+        if referenced_batches.is_empty() {
+            return Ok(AttachmentCleanupReport::default());
         }
 
         let scope = thread_scope.to_resource_scope();
@@ -622,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_cleanup_with_empty_or_invalid_snapshot_deletes_nothing() {
+    async fn stale_cleanup_with_empty_or_unowned_snapshot_deletes_nothing() {
         let fs = workspace_fs(MountPermissions::read_write_list_delete());
         let scope = thread_scope();
         let old_date = (chrono::Utc::now() - chrono::Duration::days(3))
@@ -654,15 +660,87 @@ mod tests {
                 .expect("empty snapshot fails closed"),
             AttachmentCleanupReport::default()
         );
-        assert!(
+        assert_eq!(
             lander
                 .cleanup_stale(&scope, &["/workspace/not-attachments/file.txt".to_string()])
                 .await
-                .is_err()
+                .expect("unowned attachment references are ignored"),
+            AttachmentCleanupReport::default()
         );
         assert!(
             fs.stat(&scope.to_resource_scope(), &path).await.is_ok(),
             "incomplete cleanup snapshots must not delete the batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_ignores_outbound_workspace_references_in_a_complete_snapshot() {
+        let fs = workspace_fs(MountPermissions::read_write_list_delete());
+        let scope = thread_scope();
+        let resource_scope = scope.to_resource_scope();
+        let old_date = (chrono::Utc::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let orphan = land_inbound_attachments(
+            fs.as_ref(),
+            &resource_scope,
+            WORKSPACE_ALIAS,
+            &old_date,
+            "orphan-message",
+            vec![InboundAttachment {
+                id: "orphan".to_string(),
+                mime_type: "text/plain".to_string(),
+                filename: Some("orphan.txt".to_string()),
+                bytes: b"orphan".to_vec(),
+            }],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("seed orphan batch");
+        let protected = land_inbound_attachments(
+            fs.as_ref(),
+            &resource_scope,
+            WORKSPACE_ALIAS,
+            &old_date,
+            "referenced-message",
+            vec![InboundAttachment {
+                id: "protected".to_string(),
+                mime_type: "text/plain".to_string(),
+                filename: Some("protected.txt".to_string()),
+                bytes: b"protected".to_vec(),
+            }],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("seed referenced batch");
+        let protected_key = protected[0].storage_key.clone().expect("storage key");
+        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
+
+        let report = lander
+            .cleanup_stale(
+                &scope,
+                &[
+                    "/workspace/agent-created-reply.txt".to_string(),
+                    protected_key.clone(),
+                ],
+            )
+            .await
+            .expect("outbound references do not poison inbound reconciliation");
+
+        assert_eq!(report.deleted_batches, 1);
+        assert!(matches!(
+            fs.stat(
+                &resource_scope,
+                &ScopedPath::new(orphan[0].storage_key.clone().expect("orphan storage key"))
+                    .unwrap()
+            )
+            .await,
+            Err(FilesystemError::NotFound { .. })
+        ));
+        assert!(
+            fs.stat(&resource_scope, &ScopedPath::new(protected_key).unwrap())
+                .await
+                .is_ok()
         );
     }
 }

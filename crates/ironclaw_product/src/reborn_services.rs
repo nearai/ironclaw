@@ -2317,9 +2317,12 @@ pub trait InboundAttachmentLander: Send + Sync {
     /// attachment storage keys for this exact thread scope.
     ///
     /// Callers must skip this operation when their reference scan was
-    /// truncated. Implementations keep a reconciliation window and bounded
-    /// filesystem scan so recent in-flight work and unrelated workspace paths
-    /// are never removed.
+    /// truncated. The complete snapshot may include attachment domains the
+    /// implementation does not own, such as agent-created outbound workspace
+    /// files; implementations ignore those references and fail closed when no
+    /// owned reference proves the snapshot usable. Implementations keep a
+    /// reconciliation window and bounded filesystem scan so recent in-flight
+    /// work and unrelated workspace paths are never removed.
     async fn cleanup_stale(
         &self,
         thread_scope: &ThreadScope,
