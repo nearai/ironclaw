@@ -140,12 +140,20 @@ export function ChatInput({
   // Tracks the token as of the last `handleChange` (or mount), so typing that
   // changes the filtered set can reset the selection — see `handleChange`.
   const commandTokenRef = React.useRef(commandToken);
-  const menuOpen = menuCommands.length > 0 && !menuSelection.dismissed;
+  const hasMenuMatches = menuCommands.length > 0;
+  // Broader than "has matches": the popover renders (with an intentional
+  // empty state — see the JSX below) for any bare command prefix, not only
+  // once something matches it. Keyboard interception (arrows/Tab/Enter)
+  // stays gated on `hasMenuMatches` alone (recomputed fresh from refs inside
+  // onKeyDown) so an empty result list never hijacks a key that would
+  // otherwise edit the textarea.
+  const menuVisible = commandToken !== null && !menuSelection.dismissed;
   const activeMenuIndex = Math.max(
     0,
     Math.min(menuSelection.index, menuCommands.length - 1)
   );
-  const activeMenuCommand = menuOpen ? menuCommands[activeMenuIndex] : null;
+  const activeMenuCommand =
+    menuVisible && hasMenuMatches ? menuCommands[activeMenuIndex] : null;
 
   // Shared by every place `text` is set PROGRAMMATICALLY rather than via
   // `handleChange` (draft restore on a thread switch, an explicit
@@ -430,14 +438,14 @@ export function ChatInput({
   const onKeyDown = React.useCallback(
     (e) => {
       // Layer the command-menu's own keyboard handling before the
-      // Enter-to-send path below, but only while the menu is actually open —
-      // read live refs (not the `menuOpen`/`menuCommands` closed over at the
-      // last render) so a keystroke right after typing still sees the
-      // current matches.
+      // Enter-to-send path below, but only while the menu actually has
+      // matches to navigate — read live refs (not the `menuVisible`/
+      // `menuCommands` closed over at the last render) so a keystroke right
+      // after typing still sees the current matches.
       const openMenuCommands = menuCommandsRef.current;
-      const menuIsOpen =
+      const menuHasMatches =
         openMenuCommands.length > 0 && !menuSelectionRef.current.dismissed;
-      if (menuIsOpen) {
+      if (menuHasMatches) {
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
           const delta = e.key === "ArrowDown" ? 1 : -1;
@@ -493,6 +501,24 @@ export function ChatInput({
           setMenuSelection(next);
           return;
         }
+      }
+      // A bare command prefix with zero matches still renders the popover
+      // (an intentional "no matches" state — see the JSX below), so Escape
+      // must still be able to dismiss it even though there's nothing to
+      // navigate/complete above.
+      if (
+        !menuHasMatches &&
+        e.key === "Escape" &&
+        !menuSelectionRef.current.dismissed &&
+        commandMenuToken(textRef.current) !== null
+      ) {
+        e.preventDefault();
+        const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+          type: "dismiss",
+        });
+        menuSelectionRef.current = next;
+        setMenuSelection(next);
+        return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -582,56 +608,127 @@ export function ChatInput({
             {t("chat.attachmentDropHint")}
           </div>
         )}
-        {menuOpen &&
+        {menuVisible &&
         (
           // Anchored above the composer (not in normal flow) so the menu
           // floats over the canvas instead of shoving the send button down
-          // as rows come and go while typing.
-          <div
-            id="chat-command-menu-listbox"
-            role="listbox"
-            aria-label={t("chat.commandMenu")}
-            className="absolute bottom-full left-0 right-0 z-20 mb-2 max-h-64 overflow-y-auto rounded-md border border-iron-700 bg-iron-900/95 text-xs shadow-[0_18px_40px_-18px_rgba(0,0,0,0.7)]"
-          >
-            {menuCommands.map(
-              (command, index) => {
-                const isActive = index === activeMenuIndex;
-                const prefixLength = Math.min(commandToken.length, command.name.length);
-                const matchedPrefix = command.name.slice(0, prefixLength);
-                const restOfName = command.name.slice(prefixLength);
-                return (
-                  // A non-focusable row: the textarea drives selection via
-                  // `aria-activedescendant`, so a row must not be its own
-                  // tab stop (a focusable <button> here would be a second,
-                  // competing stop inside role="listbox"). Mouse handlers
-                  // (click-to-complete, hover-to-select, focus-steal
-                  // prevention) still work on a plain element.
-                  <div
-                    key={command.name}
-                    id={`chat-command-option-${command.name}`}
-                    role="option"
-                    aria-selected={isActive}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onMouseEnter={() => selectMenuIndex(index)}
-                    onClick={() => completeMenuCommand(command)}
-                    className={[
-                      "flex w-full flex-col gap-0.5 px-3 py-1.5 text-left",
-                      isActive ? "bg-iron-800" : "hover:bg-iron-800",
-                    ].join(" ")}
-                  >
-                    <span className="flex min-w-0 items-baseline gap-2">
-                      <span className="shrink-0 font-mono text-iron-100">
+          // as rows come and go while typing. Header/footer chrome is
+          // `shrink-0`; only the option list scrolls, so both stay pinned
+          // while the admin's full ~12-entry inventory scrolls between them.
+          <div className="absolute bottom-full left-0 right-0 z-20 mb-2 flex max-h-80 flex-col overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-xs shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
+            <div className="flex shrink-0 items-center gap-2 border-b border-[var(--v2-panel-border)] px-3 py-2">
+              <Icon name="terminal" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]" />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+                {t("chat.commandMenu")}
+              </span>
+              <span
+                data-testid="chat-command-menu-count"
+                aria-hidden="true"
+                className="ml-auto shrink-0 rounded-full bg-[var(--v2-surface-soft)] px-2 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]"
+              >
+                {menuCommands.length}/{commands.length}
+              </span>
+            </div>
+
+            <div
+              id="chat-command-menu-listbox"
+              role="listbox"
+              aria-label={t("chat.commandMenu")}
+              className="min-h-0 flex-1 overflow-y-auto p-1.5"
+            >
+              {!hasMenuMatches &&
+              (
+                <div
+                  data-testid="chat-command-menu-empty"
+                  className="px-3 py-6 text-center text-[var(--v2-text-faint)]"
+                >
+                  {t("command.noMatches")}
+                </div>
+              )}
+              {menuCommands.map(
+                (command, index) => {
+                  const isActive = index === activeMenuIndex;
+                  const prefixLength = Math.min(commandToken.length, command.name.length);
+                  const matchedPrefix = command.name.slice(0, prefixLength);
+                  const restOfName = command.name.slice(prefixLength);
+                  return (
+                    // A non-focusable row: the textarea drives selection via
+                    // `aria-activedescendant`, so a row must not be its own
+                    // tab stop (a focusable <button> here would be a second,
+                    // competing stop inside role="listbox"). Mouse handlers
+                    // (click-to-complete, hover-to-select, focus-steal
+                    // prevention) still work on a plain element.
+                    <div
+                      key={command.name}
+                      id={`chat-command-option-${command.name}`}
+                      role="option"
+                      aria-selected={isActive}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseEnter={() => selectMenuIndex(index)}
+                      onClick={() => completeMenuCommand(command)}
+                      className={[
+                        "flex w-full items-start gap-2.5 rounded-lg border-l-2 px-2.5 py-2 text-left",
+                        isActive
+                          ? "border-[var(--v2-accent)] bg-[var(--v2-accent-soft)]"
+                          : "border-transparent hover:bg-[var(--v2-surface-soft)]",
+                      ].join(" ")}
+                    >
+                      <span
+                        className={[
+                          "shrink-0 rounded-md border px-1.5 py-0.5 font-mono leading-4 text-[var(--v2-text-strong)]",
+                          isActive
+                            ? "border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] bg-[var(--v2-surface)]"
+                            : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
+                        ].join(" ")}
+                      >
                         /<span className="text-signal">{matchedPrefix}</span>{restOfName}
                       </span>
-                      <span className="shrink-0 font-medium text-iron-100">{command.title}</span>
-                      <span className="min-w-0 truncate text-iron-400">{command.description}</span>
-                    </span>
-                    {isActive &&
-                    (<span className="text-iron-400">{command.usage}</span>)}
-                  </div>
-                );
-              }
-            )}
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span
+                          className={[
+                            "truncate text-sm font-medium",
+                            isActive ? "text-[var(--v2-accent-text)]" : "text-[var(--v2-text-strong)]",
+                          ].join(" ")}
+                        >
+                          {command.title}
+                        </span>
+                        <span className="truncate text-[var(--v2-text-muted)]">{command.description}</span>
+                      </span>
+                    </div>
+                  );
+                }
+              )}
+            </div>
+
+            <div className="flex shrink-0 flex-wrap items-center gap-3 border-t border-[var(--v2-panel-border)] px-3 py-1.5">
+              {activeMenuCommand &&
+              (
+                <span
+                  data-testid="chat-command-menu-usage"
+                  className="min-w-0 flex-1 truncate font-mono text-[var(--v2-text-muted)]"
+                >
+                  {activeMenuCommand.usage}
+                </span>
+              )}
+              <span className="ml-auto hidden shrink-0 items-center gap-3 text-[var(--v2-text-faint)] sm:flex">
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">↑↓</kbd>
+                  {t("command.group.navigate")}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">↵</kbd>
+                  {t("chat.commandMenuHintRun")}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">Tab</kbd>
+                  {t("chat.commandMenuHintComplete")}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">Esc</kbd>
+                  {t("common.dismiss")}
+                </span>
+              </span>
+            </div>
           </div>
         )}
         {attachmentError &&
@@ -705,8 +802,8 @@ export function ChatInput({
           placeholder={placeholder}
           rows={1}
           disabled={disabled}
-          aria-expanded={menuOpen}
-          aria-controls={menuOpen ? "chat-command-menu-listbox" : undefined}
+          aria-expanded={menuVisible}
+          aria-controls={menuVisible ? "chat-command-menu-listbox" : undefined}
           aria-activedescendant={
             activeMenuCommand
               ? `chat-command-option-${activeMenuCommand.name}`

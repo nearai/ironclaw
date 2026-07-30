@@ -100,6 +100,8 @@ registerPack("fr", {
   "chat.attachmentDropHint": "Déposez des fichiers pour les joindre",
   "chat.commandMenu": "Commandes",
   "chat.commandFailed": "Impossible d'exécuter cette commande.",
+  "chat.commandMenuHintRun": "Exécution",
+  "chat.commandMenuHintComplete": "Compléter",
   "chat.attachmentTooMany": "Vous pouvez joindre au maximum {max} fichiers par message.",
   "chat.attachmentTooLarge": "{name} est trop volumineux (max {max} par fichier).",
   "chat.attachmentTotalTooLarge": "Les pièces jointes dépassent la limite totale de {max}.",

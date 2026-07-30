@@ -262,7 +262,12 @@ test("locale packs include client-generated chat failure copy", () => {
 });
 
 test("locale packs include composer command menu and command failure copy", () => {
-  const requiredKeys = ["chat.commandMenu", "chat.commandFailed"];
+  const requiredKeys = [
+    "chat.commandMenu",
+    "chat.commandFailed",
+    "chat.commandMenuHintRun",
+    "chat.commandMenuHintComplete",
+  ];
 
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);

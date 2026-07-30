@@ -100,6 +100,8 @@ registerPack("ja", {
   "chat.attachmentDropHint": "ファイルをドロップして添付",
   "chat.commandMenu": "コマンド",
   "chat.commandFailed": "そのコマンドを実行できませんでした。",
+  "chat.commandMenuHintRun": "実行",
+  "chat.commandMenuHintComplete": "補完",
   "chat.attachmentTooMany": "1 つのメッセージに添付できるファイルは最大 {max} 件です。",
   "chat.attachmentTooLarge": "{name} は大きすぎます (1 ファイルあたり最大 {max})。",
   "chat.attachmentTotalTooLarge": "添付ファイルが合計の上限 {max} を超えています。",

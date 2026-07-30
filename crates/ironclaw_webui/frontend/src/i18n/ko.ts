@@ -100,6 +100,8 @@ registerPack("ko", {
   "chat.attachmentDropHint": "파일을 끌어다 놓아 첨부",
   "chat.commandMenu": "명령어",
   "chat.commandFailed": "해당 명령어를 실행할 수 없습니다.",
+  "chat.commandMenuHintRun": "실행",
+  "chat.commandMenuHintComplete": "완성",
   "chat.attachmentTooMany": "메시지당 최대 {max}개의 파일을 첨부할 수 있습니다.",
   "chat.attachmentTooLarge": "{name}이(가) 너무 큽니다 (파일당 최대 {max}).",
   "chat.attachmentTotalTooLarge": "첨부 파일이 총 {max} 한도를 초과합니다.",

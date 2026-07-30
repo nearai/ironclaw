@@ -1025,7 +1025,13 @@ test("ChatInput command-menu rows render the title and description", () => {
   assert.ok(rowText.includes(MENU_COMMANDS[0].description));
 });
 
-test("ChatInput command-menu shows the usage hint only for the active row", () => {
+test("ChatInput command-menu footer shows the usage hint for the active row only", () => {
+  // The usage hint moved from an inline line inside the active row (which
+  // made that one row taller than its neighbors — see the visual-design
+  // pass on the command menu) to a single footer slot shared by whichever
+  // row is active. This pins the same behavior the row-level version
+  // protected: exactly one command's usage is visible, and it's the active
+  // row's, never an inactive row's.
   const { tree } = renderChatInput({
     disabled: false,
     sendDisabled: false,
@@ -1035,11 +1041,152 @@ test("ChatInput command-menu shows the usage hint only for the active row", () =
   });
 
   // Row 0 ("model") is active by default (no ArrowDown pressed yet).
-  const activeRowText = extractText(findCommandOption(tree, "model"));
-  assert.ok(activeRowText.includes(MENU_COMMANDS[0].usage));
+  const usageHint = findNode(
+    tree,
+    (node) => node.props?.["data-testid"] === "chat-command-menu-usage",
+  );
+  assert.ok(usageHint, "expected a usage hint in the command-menu footer");
+  assert.equal(extractText(usageHint), MENU_COMMANDS[0].usage);
+  assert.notEqual(extractText(usageHint), MENU_COMMANDS[1].usage);
 
-  const inactiveRowText = extractText(findCommandOption(tree, "modelinfo"));
-  assert.ok(!inactiveRowText.includes(MENU_COMMANDS[1].usage));
+  // Rows themselves no longer render usage text at all.
+  const modelRow = findCommandOption(tree, "model");
+  assert.equal(extractText(modelRow).includes(MENU_COMMANDS[0].usage), false);
+});
+
+test("ChatInput command-menu footer usage hint follows the active row after ArrowDown", () => {
+  const { render } = renderChatInputStateful({
+    getDraftByKey: { thread: "/mo" },
+  });
+
+  let tree = render({ draftKey: "thread", commands: MENU_COMMANDS });
+  const usageAt = (currentTree) =>
+    extractText(
+      findNode(
+        currentTree,
+        (node) => node.props?.["data-testid"] === "chat-command-menu-usage",
+      ),
+    );
+  assert.equal(usageAt(tree), MENU_COMMANDS[0].usage);
+
+  templateProps(findTextarea(tree)).onKeyDown({
+    key: "ArrowDown",
+    preventDefault: () => {},
+  });
+  tree = render({ draftKey: "thread", commands: MENU_COMMANDS });
+
+  assert.equal(usageAt(tree), MENU_COMMANDS[1].usage);
+});
+
+test("ChatInput command-menu header shows a label and the match count out of the full inventory", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  // "mo" matches "model" and "modelinfo" (not "status") out of 3 total.
+  const count = findNode(
+    tree,
+    (node) => node.props?.["data-testid"] === "chat-command-menu-count",
+  );
+  assert.ok(count, "expected a match-count badge in the command-menu header");
+  assert.equal(extractText(count), "2/3");
+
+  // `useT` is stubbed to the identity function in this harness, so the
+  // translated header label renders as its own key.
+  const label = findNode(tree, (node) => extractText(node) === "chat.commandMenu");
+  assert.ok(label, "expected the header label to render the commandMenu copy");
+});
+
+test("ChatInput command-menu footer renders the navigate/run/complete/dismiss key legend", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  // The keycap glyphs are literal (not translated), matching how
+  // command-palette.tsx's own "esc" keycap is untranslated.
+  for (const glyph of ["↑↓", "↵", "Tab", "Esc"]) {
+    const kbd = findNode(tree, (node) => node.type === "kbd" && extractText(node) === glyph);
+    assert.ok(kbd, `expected a <kbd> hint for "${glyph}"`);
+  }
+});
+
+test("ChatInput command-menu shows an intentional empty state for a bare prefix with no matches", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/zz",
+    commands: MENU_COMMANDS,
+  });
+
+  const empty = findNode(
+    tree,
+    (node) => node.props?.["data-testid"] === "chat-command-menu-empty",
+  );
+  assert.ok(empty, "expected an intentional empty state, not a silently empty popover");
+  // Reuses the same copy key the ⌘K command-palette's own empty state uses.
+  assert.equal(extractText(empty), "command.noMatches");
+  assert.equal(findCommandOption(tree, "model"), null);
+
+  // The header count reflects zero matches out of the full inventory.
+  const count = findNode(
+    tree,
+    (node) => node.props?.["data-testid"] === "chat-command-menu-count",
+  );
+  assert.equal(extractText(count), "0/3");
+});
+
+test("ChatInput command-menu renders nothing for plain text that isn't a bare command prefix", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "plain text, no menu here",
+    commands: MENU_COMMANDS,
+  });
+
+  assert.equal(
+    findNode(tree, (node) => node.props?.["data-testid"] === "chat-command-menu-empty"),
+    null,
+  );
+  assert.equal(findCommandOption(tree, "model"), null);
+});
+
+test("ChatInput Escape dismisses the empty no-match command-menu state", () => {
+  const setCalls = [];
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/zz",
+    commands: MENU_COMMANDS,
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Escape",
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+
+  assert.equal(prevented, true);
+  const menuSelectionCalls = setCalls.filter(
+    (call) => call.index === MENU_SELECTION_STATE_INDEX,
+  );
+  assert.deepEqual(menuSelectionCalls, [
+    { index: MENU_SELECTION_STATE_INDEX, value: { index: 0, dismissed: true } },
+  ]);
 });
 
 test("ChatInput command-menu highlights the typed prefix in the row's name", () => {
