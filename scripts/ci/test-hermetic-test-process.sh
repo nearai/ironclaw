@@ -292,8 +292,19 @@ if [[ "${corepack_path_count}" != "3" ]]; then
   exit 1
 fi
 
+postgres_pull_count="$(
+  grep -Fc \
+    'run: docker pull postgres:16-alpine' \
+    "${repo_root}/.github/workflows/reborn-tests.yml"
+)"
+if [[ "${postgres_pull_count}" != "2" ]]; then
+  echo "expected two guarded Rust lanes to pre-pull Postgres, found ${postgres_pull_count}" >&2
+  exit 1
+fi
+
 for stage_call in \
   "prepare_command_dependencies" \
+  "prepare_postgres_test_image" \
   "run_crate_tests" \
   "run_root_partitions" \
   "run_integration_tier" \

@@ -9,6 +9,7 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 frontend_corepack_home=""
+postgres_image_prepared=0
 
 cleanup() {
   if [[ -n "${frontend_corepack_home}" && -d "${frontend_corepack_home}" ]]; then
@@ -31,6 +32,18 @@ prepare_rust_dependencies() {
 
 prepare_command_dependencies() {
   cargo fetch --locked
+}
+
+prepare_postgres_test_image() {
+  if [[ "${postgres_image_prepared}" == "1" ]]; then
+    return
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker is required to prepare postgres:16-alpine for hermetic tests" >&2
+    return 2
+  fi
+  docker pull postgres:16-alpine
+  postgres_image_prepared=1
 }
 
 run_root_partitions() {
@@ -88,6 +101,7 @@ discover_reborn_packages() {
 
 run_crate_tests() {
   local package feature_flags
+  prepare_postgres_test_image
   while IFS= read -r package; do
     feature_flags="$("${repo_root}/scripts/ci/package-feature-flags.sh" "${package}")"
     # shellcheck disable=SC2086 # feature_flags is the checked-in CI argument list.
@@ -97,6 +111,7 @@ run_crate_tests() {
 
 run_integration_tier() {
   local test_name
+  prepare_postgres_test_image
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
     run cargo test -p ironclaw_reborn_integration_tests \
