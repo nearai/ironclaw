@@ -160,6 +160,11 @@ pub struct ExtensionLifecycleManager {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
+    /// Serializes registry package publication with the lifecycle operations
+    /// it coordinates. The ordinary lifecycle lock remains the state writer;
+    /// this outer lock only prevents two catalog clients from replacing the
+    /// same package between catalog publication and install.
+    registry_install_lock: Arc<Mutex<()>>,
     /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
@@ -232,6 +237,7 @@ impl ExtensionLifecycleManager {
             channel_config: std::sync::OnceLock::new(),
             discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
+            registry_install_lock: Arc::new(Mutex::new(())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
@@ -291,6 +297,10 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
+    }
+
+    pub async fn reserved_bundled_extension_ids(&self) -> Vec<String> {
+        self.catalog.read().await.reserved_bundled_ids().to_vec()
     }
 
     /// Attach the generic extension host so lifecycle mutations publish the
@@ -947,6 +957,163 @@ impl ExtensionLifecycleManager {
                 count: 1,
             },
         ))
+    }
+
+    /// Publish and install a package whose registry client has already
+    /// verified signature, provenance, size, and artifact digests.
+    ///
+    /// The package still enters through the extension-host validation
+    /// boundary before this method. A forced replacement uses the ordinary
+    /// removal/install convergence points and restores the previous inline
+    /// catalog package if the replacement install fails.
+    pub async fn install_registry_package(
+        &self,
+        package: AvailableExtensionPackage,
+        force: bool,
+        caller: &UserId,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        if package.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: "registry install requires a registry-validated package".to_string(),
+            });
+        }
+        let _registry_guard = self.registry_install_lock.lock().await;
+        let package_ref = package.package_ref.clone();
+        let extension_id = package.package.id.clone();
+        let previous = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref).ok()
+        };
+        if let Some(previous) = &previous {
+            let matches = previous.manifest_toml == package.manifest_toml
+                && previous.assets == package.assets;
+            if matches {
+                return self
+                    .install_and_activate_registry_package(package_ref, caller)
+                    .await;
+            }
+            if !force {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} already exists in the catalog; retry with force to replace it",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            if previous.source == ironclaw_extensions::ManifestSource::HostBundled {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is host-bundled and cannot be replaced by a registry package",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+        }
+
+        let previous_installation = self.search_installation(&extension_id).await?;
+        let had_installation = previous_installation.is_some()
+            || self
+                .installation_store
+                .get_manifest(&extension_id)
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some();
+        if had_installation && previous.is_none() {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has installed state but no restorable catalog package",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let was_active = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_some();
+        if had_installation {
+            if !force {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is already installed; retry with force to replace it",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            self.remove(package_ref.clone(), scope, Some(caller))
+                .await?;
+        }
+
+        {
+            let mut catalog = self.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        }
+        match self
+            .install_and_activate_registry_package(package_ref.clone(), caller)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(original_error) => {
+                if let Err(cleanup_error) =
+                    self.remove(package_ref.clone(), scope, Some(caller)).await
+                {
+                    return Err(compensation_failure(
+                        "registry install failed and replacement cleanup also failed",
+                        original_error,
+                        cleanup_error,
+                    ));
+                }
+                {
+                    let mut catalog = self.catalog.write().await;
+                    catalog.remove(&package_ref);
+                    if let Some(previous) = previous {
+                        catalog.restore(previous);
+                    }
+                }
+                if had_installation {
+                    let restore = self.install(package_ref.clone(), caller).await;
+                    if let Err(restore_error) = restore {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous install could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if let Some(installation) = &previous_installation
+                        && let Err(restore_error) = self.restore_installation(installation).await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous installation scope could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if was_active
+                        && let Err(restore_error) = self
+                            .activate(package_ref, ExtensionActivationMode::Static, caller)
+                            .await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous activation could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                }
+                Err(original_error)
+            }
+        }
+    }
+
+    async fn install_and_activate_registry_package(
+        &self,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        self.install(package_ref.clone(), caller).await?;
+        self.activate(package_ref, ExtensionActivationMode::Static, caller)
+            .await
     }
 
     pub async fn install(

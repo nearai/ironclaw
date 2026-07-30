@@ -640,8 +640,8 @@ fn skill_summary(
         description: skill.description,
         source: match skill.source {
             ironclaw_skills::ManagedSkillSource::System => LifecycleSkillSource::System,
-            ironclaw_skills::ManagedSkillSource::User
-            | ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::User => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::Installed,
         },
         keywords: skill.keywords,
         tags: skill.tags,
