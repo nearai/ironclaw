@@ -1113,7 +1113,7 @@ registerPack("ko", {
   "admin.users.token": "토큰",
   "admin.users.jobsCount": "{count}개 작업",
   "admin.users.suspendTitle": "사용자 정지",
-  "admin.users.suspendDesc": "사용자가 인증할 수 없게 됩니다. 계속할까요?",
+  "admin.users.suspendDesc": "\"{name}\" 사용자가 인증할 수 없게 됩니다. 계속할까요?",
   "admin.users.tokenNamePrompt": "{name}의 토큰 이름:",
   "admin.users.tokenCreated": "토큰 생성됨",
   "admin.users.tokenCreatedDesc": "지금 복사하세요 — 다시 표시되지 않습니다.",

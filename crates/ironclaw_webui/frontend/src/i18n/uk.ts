@@ -1113,7 +1113,7 @@ registerPack("uk", {
   "admin.users.token": "Токен",
   "admin.users.jobsCount": "{count} задач",
   "admin.users.suspendTitle": "Призупинити користувача",
-  "admin.users.suspendDesc": "Це заборонить користувачу автентифікуватися. Продовжити?",
+  "admin.users.suspendDesc": "Це заборонить користувачу «{name}» автентифікуватися. Продовжити?",
   "admin.users.tokenNamePrompt": "Назва токена для {name}:",
   "admin.users.tokenCreated": "Токен створено",
   "admin.users.tokenCreatedDesc": "Скопіюйте зараз — він більше не буде показаний.",

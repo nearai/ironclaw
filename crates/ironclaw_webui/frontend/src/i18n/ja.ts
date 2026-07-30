@@ -1113,7 +1113,7 @@ registerPack("ja", {
   "admin.users.token": "トークン",
   "admin.users.jobsCount": "{count} ジョブ",
   "admin.users.suspendTitle": "ユーザーを停止",
-  "admin.users.suspendDesc": "ユーザーの認証をブロックします。続行しますか？",
+  "admin.users.suspendDesc": "「{name}」の認証をブロックします。続行しますか？",
   "admin.users.tokenNamePrompt": "{name} のトークン名:",
   "admin.users.tokenCreated": "トークンを作成しました",
   "admin.users.tokenCreatedDesc": "今すぐコピーしてください — 再表示されません。",

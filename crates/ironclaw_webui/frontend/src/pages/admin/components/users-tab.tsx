@@ -183,7 +183,7 @@ export function UserRow({
         <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={(event) => onSuspend(user.id, event.currentTarget)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
+            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={(event) => onSuspend(user, event.currentTarget)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
             : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
           <button
             data-testid="admin-user-role"
@@ -236,13 +236,13 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const isActionPending = isUpdating || isSuspending || isActivating;
   const actionError = activateError || updateError;
 
-  const handleSuspend = (id, returnFocusTo) => {
+  const handleSuspend = (user, returnFocusTo) => {
     resetSuspend?.();
     setConfirm({
-      userId: id,
+      userId: user.id,
       returnFocusTo,
       title: t("admin.users.suspendTitle"),
-      message: t("admin.users.suspendDesc"),
+      message: t("admin.users.suspendDesc", { name: user.display_name || user.id }),
       confirmLabel: t("admin.users.suspend"),
     });
   };

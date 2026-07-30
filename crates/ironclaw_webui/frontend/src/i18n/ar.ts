@@ -1113,7 +1113,7 @@ registerPack("ar", {
   "admin.users.token": "رمز",
   "admin.users.jobsCount": "{count} مهام",
   "admin.users.suspendTitle": "إيقاف مستخدم",
-  "admin.users.suspendDesc": "سيمنع هذا المستخدم من المصادقة. متابعة؟",
+  "admin.users.suspendDesc": "سيمنع هذا المستخدم \"{name}\" من المصادقة. متابعة؟",
   "admin.users.tokenNamePrompt": "اسم الرمز لـ {name}:",
   "admin.users.tokenCreated": "تم إنشاء الرمز",
   "admin.users.tokenCreatedDesc": "انسخه الآن — لن يُعرض مرة أخرى.",

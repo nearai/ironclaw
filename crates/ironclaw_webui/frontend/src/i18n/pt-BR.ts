@@ -1113,7 +1113,7 @@ registerPack("pt-BR", {
   "admin.users.token": "Token",
   "admin.users.jobsCount": "Trabalhos {count}",
   "admin.users.suspendTitle": "Suspender usuário",
-  "admin.users.suspendDesc": "Isso impedirá o usuário de autenticar. Continuar?",
+  "admin.users.suspendDesc": "Isso impedirá \"{name}\" de se autenticar. Continuar?",
   "admin.users.tokenNamePrompt": "Nome do token para {name}:",
   "admin.users.tokenCreated": "Token criado",
   "admin.users.tokenCreatedDesc": "Copie agora — não será mostrado novamente.",

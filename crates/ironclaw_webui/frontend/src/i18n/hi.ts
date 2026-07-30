@@ -1113,7 +1113,7 @@ registerPack("hi", {
   "admin.users.token": "टोकन",
   "admin.users.jobsCount": "{count} नौकरियां",
   "admin.users.suspendTitle": "उपयोगकर्ता को निलंबित करें",
-  "admin.users.suspendDesc": "यह उपयोगकर्ता को प्रमाणीकरण करने से रोकेगा। जारी रखना?",
+  "admin.users.suspendDesc": "यह \"{name}\" को प्रमाणीकरण करने से रोकेगा। जारी रखना?",
   "admin.users.tokenNamePrompt": "{name} के लिए टोकन नाम:",
   "admin.users.tokenCreated": "टोकन बनाया गया",
   "admin.users.tokenCreatedDesc": "इसे अभी कॉपी करें - यह दोबारा नहीं दिखाया जाएगा।",

@@ -82,7 +82,8 @@ function createReactHarness() {
 }
 
 function translate(key, params = {}) {
-  return params.message ? `${key}:${params.message}` : key;
+  if (params.message) return `${key}:${params.message}`;
+  return params.name ? `${key}:${params.name}` : key;
 }
 
 function baseAdminState(overrides = {}) {
@@ -265,6 +266,7 @@ test("suspend failure stays in the confirmation dialog with retry context", asyn
   let dialog = findByType(rendered, ConfirmDialog);
   assert.equal(dialog.props.open, true);
   assert.equal(dialog.props.returnFocusTo, trigger);
+  assert.ok(collectScalars(dialog.props.description).includes("admin.users.suspendDesc:Owner"));
   assert.ok(collectScalars(dialog.props.description).includes("admin.users.lastAdminRequired"));
 
   await dialog.props.onConfirm();

@@ -247,6 +247,7 @@ async def test_admin_confirm_dialogs_restore_focus_after_escape_and_backdrop_can
         "dialog", name="Suspend user", exact=True
     )
     await expect(suspend_dialog).to_be_visible()
+    await expect(suspend_dialog).to_contain_text(test_user["display_name"])
     await expect(
         suspend_dialog.locator(SEL_V2["confirm_dialog_cancel"])
     ).to_be_focused()

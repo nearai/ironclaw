@@ -1215,7 +1215,7 @@ registerPack("en", {
   "admin.users.jobsCount": "{count} jobs",
   "admin.users.suspendTitle": "Suspend user",
   "admin.users.suspendDesc":
-    "This will prevent the user from authenticating. Continue?",
+    'This will prevent "{name}" from authenticating. Continue?',
   "admin.users.tokenNamePrompt": "Token name for {name}:",
   "admin.users.tokenCreated": "Token created",
   "admin.users.tokenCreatedDesc": "Copy this now — it will not be shown again.",
