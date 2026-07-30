@@ -190,40 +190,46 @@ test = "web_search_empty_result_dispatches_through_scripted_exa_mcp"
 
 # Journey evidence: the capability is asserted with provider-side readback
 # inside a harvested full-path journey rather than a typed operation case.
-# The named source, test, and assertion helper must all still exist.
+# The named test and provider-owned assertion helper must all still exist.
 
 [[journey_evidence]]
 capability = "gmail.send_message"
 source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
 test = "test_qa_journey_provider_leg_replays_through_emulate"
-assertion = "_assert_google_provider_outcome"
+assertion_source = "tests/e2e/provider_journey_google.py"
+assertion = "assert_google_provider_outcome"
 
 [[journey_evidence]]
 capability = "google-docs.create_document"
 source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
 test = "test_qa_journey_provider_leg_replays_through_emulate"
-assertion = "_assert_google_provider_outcome"
+assertion_source = "tests/e2e/provider_journey_google.py"
+assertion = "assert_google_provider_outcome"
 
 [[journey_evidence]]
 capability = "google-docs.insert_text"
 source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
 test = "test_qa_journey_provider_leg_replays_through_emulate"
-assertion = "_assert_google_provider_outcome"
+assertion_source = "tests/e2e/provider_journey_google.py"
+assertion = "assert_google_provider_outcome"
 
 [[journey_evidence]]
 capability = "google-sheets.append_values"
 source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
 test = "test_qa_journey_provider_leg_replays_through_emulate"
-assertion = "_assert_google_provider_outcome"
+assertion_source = "tests/e2e/provider_journey_google.py"
+assertion = "assert_google_provider_outcome"
 
 [[journey_evidence]]
 capability = "google-sheets.create_spreadsheet"
 source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
 test = "test_qa_journey_provider_leg_replays_through_emulate"
-assertion = "_assert_google_provider_outcome"
+assertion_source = "tests/e2e/provider_journey_google.py"
+assertion = "assert_google_provider_outcome"
 
 [[journey_evidence]]
 capability = "slack.send_message"
 source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
 test = "test_qa_journey_provider_leg_replays_through_emulate"
-assertion = "_assert_slack_provider_outcome"
+assertion_source = "tests/e2e/provider_journey_slack.py"
+assertion = "assert_slack_provider_outcome"

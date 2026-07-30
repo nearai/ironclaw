@@ -69,6 +69,14 @@ def _is_exempt(
     return len(parts) > 1 and parts[1] in exempt_crates
 
 
+def _is_product_source(path: str) -> bool:
+    return (
+        PRODUCT_SOURCE_RE.fullmatch(path) is not None
+        and "/tests/" not in path
+        and not path.endswith("/tests.rs")
+    )
+
+
 def evaluate(
     diff_text: str,
     lcov_text: str,
@@ -88,7 +96,7 @@ def evaluate(
     changed = {
         path: lines
         for path, lines in _changed_lines(diff_text).items()
-        if PRODUCT_SOURCE_RE.fullmatch(path)
+        if _is_product_source(path)
         and not _is_exempt(path, module_exemptions, crate_exemptions)
     }
     coverage = _lcov_lines(lcov_text)
