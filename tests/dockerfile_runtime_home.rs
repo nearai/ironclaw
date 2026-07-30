@@ -155,6 +155,10 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
     let dockerfile = read_repo_file("Dockerfile");
 
     assert!(
+        dockerfile.contains("COPY .cargo/config.toml .cargo/config.toml"),
+        "Docker build stages must inherit the repo-wide Cargo network resilience configuration"
+    );
+    assert!(
         dockerfile.contains(
             "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --recipe-path recipe.json"
         ),
