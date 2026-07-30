@@ -11,9 +11,9 @@ from pathlib import Path
 import httpx
 import pytest
 from mock_llm_trace import (
-    _capture_trace_tool_call_id_aliases,
-    _resolve_trace_result_bindings,
-    _trace_tool_results_with_recorded_ids,
+    capture_trace_tool_call_id_aliases,
+    resolve_trace_result_bindings,
+    trace_tool_results_with_recorded_ids,
 )
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
@@ -65,7 +65,7 @@ def test_exact_trace_result_binding_uses_only_the_requested_call():
         },
     ]
 
-    assert _resolve_trace_result_bindings(arguments, observed) == {
+    assert resolve_trace_result_bindings(arguments, observed) == {
         "document_id": "fresh-document"
     }
 
@@ -85,7 +85,7 @@ def test_exact_trace_result_binding_does_not_guess_missing_calls():
     ]
 
     with pytest.raises(ValueError, match="no tool call with id"):
-        _resolve_trace_result_bindings(marker, observed)
+        resolve_trace_result_bindings(marker, observed)
 
 
 def test_exact_trace_result_binding_rejects_duplicate_observed_ids():
@@ -107,7 +107,7 @@ def test_exact_trace_result_binding_rejects_duplicate_observed_ids():
     ]
 
     with pytest.raises(ValueError, match="multiple tool results with id"):
-        _resolve_trace_result_bindings(marker, observed)
+        resolve_trace_result_bindings(marker, observed)
 
 
 def test_exact_trace_result_binding_uses_results_from_prior_user_turns():
@@ -141,9 +141,9 @@ def test_exact_trace_result_binding_uses_results_from_prior_user_turns():
         "tool_call_id_aliases": {"call_create": "runtime_create"},
     }
 
-    observed = _trace_tool_results_with_recorded_ids(state, messages)
+    observed = trace_tool_results_with_recorded_ids(state, messages)
 
-    assert _resolve_trace_result_bindings(marker, observed) == "fresh-document"
+    assert resolve_trace_result_bindings(marker, observed) == "fresh-document"
 
 
 def test_exact_trace_result_binding_rejects_paged_evidence_preview():
@@ -173,7 +173,7 @@ def test_exact_trace_result_binding_rejects_paged_evidence_preview():
     ]
 
     with pytest.raises(ValueError, match="has no JSON Pointer"):
-        _resolve_trace_result_bindings(marker, observed)
+        resolve_trace_result_bindings(marker, observed)
 
 
 def test_exact_trace_result_binding_unwraps_complete_preview_and_pointer_escapes():
@@ -200,7 +200,7 @@ def test_exact_trace_result_binding_unwraps_complete_preview_and_pointer_escapes
         }
     ]
 
-    assert _resolve_trace_result_bindings(marker, observed) == "escaped-hit"
+    assert resolve_trace_result_bindings(marker, observed) == "escaped-hit"
 
 
 def test_trace_aliasing_rejects_indistinguishable_parallel_calls():
@@ -242,7 +242,7 @@ def test_trace_aliasing_rejects_indistinguishable_parallel_calls():
     ]
 
     with pytest.raises(ValueError, match="ambiguous trace tool-call aliases"):
-        _capture_trace_tool_call_id_aliases(state, messages)
+        capture_trace_tool_call_id_aliases(state, messages)
 
 
 def test_trace_aliasing_matches_reordered_calls_by_arguments():
@@ -283,7 +283,7 @@ def test_trace_aliasing_matches_reordered_calls_by_arguments():
         }
     ]
 
-    _capture_trace_tool_call_id_aliases(state, messages)
+    capture_trace_tool_call_id_aliases(state, messages)
 
     assert state["tool_call_id_aliases"] == {
         "call_wanted": "runtime_wanted",
@@ -304,7 +304,7 @@ def test_trace_aliasing_discards_mismatched_pending_batch():
     }
 
     with pytest.raises(ValueError, match="alias count mismatch"):
-        _capture_trace_tool_call_id_aliases(state, [])
+        capture_trace_tool_call_id_aliases(state, [])
 
     assert state["pending_tool_calls"] == []
 

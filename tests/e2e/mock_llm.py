@@ -15,7 +15,7 @@ import uuid
 
 from aiohttp import web
 from mock_llm_trace import (
-    _next_llm_trace_response,
+    next_llm_trace_response,
     register_llm_trace_routes,
 )
 
@@ -2565,7 +2565,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     available_tool_names = _available_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
-    trace_response = _next_llm_trace_response(
+    trace_response = next_llm_trace_response(
         request.app["llm_trace_state"], messages, available_tool_names
     )
     if trace_response is not None:

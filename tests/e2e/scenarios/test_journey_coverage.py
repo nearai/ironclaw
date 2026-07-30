@@ -13,10 +13,12 @@ import tomllib
 from journey_cases import (
     _HISTORICAL_MUTATING_PROVIDER_TOOLS,
     _MUTATING_PROVIDER_TOOLS,
+    _PROVIDER_REPLAY_FACTS,
     _TOOL_WORLD_PREFIXES,
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
+    _provider_journey_cases,
     journey_order_is_reversed,
     provider_journey_runs,
     required_delivery_targets,
@@ -29,6 +31,7 @@ from journey_types import (
     CargoEvidence,
     JourneyCase,
     ProviderJourneyCase,
+    ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
 )
@@ -49,6 +52,12 @@ _JOURNEY_RUNNER_SOURCES = (
     ROOT / "tests/e2e/scenarios/test_reborn_qa_trace_replay.py",
     *sorted((ROOT / "tests/e2e").glob("provider_journey_*.py")),
 )
+_SEEDED_SLACK_STATE = {
+    "channel_id": "C_SEEDED",
+    "reviewer_id": "U_REVIEWER",
+    "thread_ts": "1234.5",
+    "channel_name": "reborn-alerts",
+}
 _EXPECTED_COMPILED_PROVIDER_CALLS = {
     "qa_2d_calendar_prep_live_chat": (
         "google-calendar__list_events",
@@ -148,48 +157,46 @@ def _manifest_provider_journeys() -> set[str]:
 def _case_name_branches(source_path: Path) -> list[int]:
     """Find runner control flow or dispatch keyed by journey identity."""
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    offenders = []
+    offenders = set()
+
+    def _is_case_identity_node(node: ast.AST) -> bool:
+        return (
+            (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"case_id", "stem", "trace"}
+                and isinstance(node.value, ast.Name)
+                and (node.value.id == "case" or node.value.id.endswith("_case"))
+            )
+            or (isinstance(node, ast.Name) and node.id in {"case_id", "case_name"})
+            or (
+                isinstance(node, ast.Compare)
+                and isinstance(node.left, ast.Name)
+                and node.left.id == "journey_case"
+            )
+        )
 
     def _reads_case_identity(node: ast.AST) -> bool:
-        return any(
-            isinstance(child, ast.Attribute)
-            and child.attr in {"case_id", "stem", "trace"}
-            and isinstance(child.value, ast.Name)
-            and (child.value.id == "case" or child.value.id.endswith("_case"))
-            for child in ast.walk(node)
-        )
+        return any(_is_case_identity_node(child) for child in ast.walk(node))
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.If, ast.IfExp)):
-            selector = node.test
+            selectors = (node.test,)
         elif isinstance(node, ast.Match):
-            selector = node.subject
+            selectors = (
+                node.subject,
+                *(case.guard for case in node.cases if case.guard is not None),
+            )
         else:
             continue
-        children = tuple(ast.walk(selector))
-        embeds_case_name = any(
-            isinstance(child, ast.Constant)
-            and isinstance(child.value, str)
-            and child.value.startswith("qa_")
-            for child in children
-        )
-        reads_case_identity = any(
-            (
-                isinstance(child, ast.Attribute)
-                and child.attr in {"case_id", "stem", "trace"}
-                and isinstance(child.value, ast.Name)
-                and (child.value.id == "case" or child.value.id.endswith("_case"))
+        for selector in selectors:
+            embeds_case_name = any(
+                isinstance(child, ast.Constant)
+                and isinstance(child.value, str)
+                and child.value.startswith("qa_")
+                for child in ast.walk(selector)
             )
-            or (isinstance(child, ast.Name) and child.id in {"case_id", "case_name"})
-            or (
-                isinstance(child, ast.Compare)
-                and isinstance(child.left, ast.Name)
-                and child.left.id == "journey_case"
-            )
-            for child in children
-        )
-        if embeds_case_name or reads_case_identity:
-            offenders.append(node.lineno)
+            if embeds_case_name or _reads_case_identity(selector):
+                offenders.add(selector.lineno)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             arguments = node.args
@@ -198,8 +205,8 @@ def _case_name_branches(source_path: Path) -> list[int]:
         else:
             continue
         if any(_reads_case_identity(argument) for argument in arguments):
-            offenders.append(node.lineno)
-    return offenders
+            offenders.add(node.lineno)
+    return sorted(offenders)
 
 
 def test_journey_runners_do_not_branch_on_case_names():
@@ -210,6 +217,20 @@ def test_journey_runners_do_not_branch_on_case_names():
         if (lines := _case_name_branches(source))
     }
     assert not offenders, f"journey-name branches found in runners: {offenders}"
+
+
+def test_provider_replay_facts_must_name_collected_case(monkeypatch):
+    monkeypatch.setitem(
+        _PROVIDER_REPLAY_FACTS,
+        "qa_unknown_provider_journey",
+        ProviderJourneyReplayFacts(),
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="replay facts declared for unknown provider journey cases",
+    ):
+        _provider_journey_cases()
 
 
 @pytest.mark.parametrize(
@@ -237,6 +258,19 @@ def test_journey_runners_do_not_branch_on_case_names():
             "    if journey_case == SPECIAL:\n"
             "        return 'special'\n"
         ),
+        (
+            "SPECIAL = object()\n"
+            "def run(journey_case):\n"
+            "    match object():\n"
+            "        case _ if journey_case == SPECIAL:\n"
+            "            return 'special'\n"
+        ),
+        ("def run(case_id):\n    return timeout_for(case_id)\n"),
+        (
+            "SPECIAL = object()\n"
+            "def run(journey_case):\n"
+            "    return TIMEOUTS[journey_case == SPECIAL]\n"
+        ),
     ],
 )
 def test_case_name_branch_detector_fails_loudly(tmp_path, bad_runner):
@@ -260,12 +294,7 @@ def test_provider_trace_compilation_keeps_recording_immutable(case):
         source=trace_path.name,
         facts=case.replay,
         provider_tools=EMULATE_SUPPORTED_TOOLS,
-        slack_state={
-            "channel_id": "C_SEEDED",
-            "reviewer_id": "U_REVIEWER",
-            "thread_ts": "1234.5",
-            "channel_name": "reborn-alerts",
-        },
+        slack_state=_SEEDED_SLACK_STATE,
     )
 
     assert json.dumps(recorded, sort_keys=True) == before
@@ -285,12 +314,7 @@ def test_provider_trace_compilation_declares_expected_failure():
         source=trace_path.name,
         facts=case.replay,
         provider_tools=EMULATE_SUPPORTED_TOOLS,
-        slack_state={
-            "channel_id": "C_SEEDED",
-            "reviewer_id": "U_REVIEWER",
-            "thread_ts": "1234.5",
-            "channel_name": "reborn-alerts",
-        },
+        slack_state=_SEEDED_SLACK_STATE,
     )
 
     assert MISSING_SLACK_CHANNEL_ID in json.dumps(compiled.trace)
@@ -303,12 +327,6 @@ def test_provider_trace_compilation_declares_expected_failure():
 
 def test_provider_trace_compilation_preserves_provider_call_inventory():
     actual = {}
-    slack_state = {
-        "channel_id": "C_SEEDED",
-        "reviewer_id": "U_REVIEWER",
-        "thread_ts": "1234.5",
-        "channel_name": "reborn-alerts",
-    }
     for case in PROVIDER_JOURNEY_CASES:
         trace_path = ROOT / case.trace
         compiled = compile_provider_journey_trace(
@@ -316,7 +334,7 @@ def test_provider_trace_compilation_preserves_provider_call_inventory():
             source=trace_path.name,
             facts=case.replay,
             provider_tools=EMULATE_SUPPORTED_TOOLS,
-            slack_state=slack_state,
+            slack_state=_SEEDED_SLACK_STATE,
         )
         actual[case.case_id] = tuple(
             call["name"]
@@ -338,12 +356,7 @@ def test_provider_trace_compilation_uses_declared_google_seed():
         source=trace_path.name,
         facts=case.replay,
         provider_tools=EMULATE_SUPPORTED_TOOLS,
-        slack_state={
-            "channel_id": "C_SEEDED",
-            "reviewer_id": "U_REVIEWER",
-            "thread_ts": "1234.5",
-            "channel_name": "reborn-alerts",
-        },
+        slack_state=_SEEDED_SLACK_STATE,
     )
     sheet_calls = [
         call

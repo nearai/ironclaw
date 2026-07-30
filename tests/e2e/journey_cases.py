@@ -174,6 +174,7 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
     excluded = set(manifest["no_model_cases"])
     excluded.update(manifest.get("quarantined_model_cases", []))
     cases = []
+    consumed_replay_facts = set()
     for case_id in manifest["selected_cases"]:
         if case_id in excluded:
             continue
@@ -182,6 +183,8 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
         calls = _tool_calls(trace)
         if not any(call["name"] in EMULATE_SUPPORTED_TOOLS for call in calls):
             continue
+        if case_id in _PROVIDER_REPLAY_FACTS:
+            consumed_replay_facts.add(case_id)
         cases.append(
             ProviderJourneyCase(
                 case_id=case_id,
@@ -203,6 +206,10 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                 repeat_after_reset=case_id in _REPEAT_AFTER_RESET,
             )
         )
+    assert consumed_replay_facts == set(_PROVIDER_REPLAY_FACTS), (
+        "replay facts declared for unknown provider journey cases: "
+        f"{sorted(set(_PROVIDER_REPLAY_FACTS) - consumed_replay_facts)}"
+    )
     return tuple(cases)
 
 

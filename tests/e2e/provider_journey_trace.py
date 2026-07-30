@@ -101,8 +101,25 @@ def _result_binding(tool_call_id: str, pointer: str) -> dict:
 
 
 def _normalize_google_arguments(trace: dict[str, Any], seeded_spreadsheet: str) -> None:
-    created_document_call_id = None
-    created_spreadsheet_call_id = None
+    _pin_google_provider_arguments(trace)
+    _rewrite_google_docs_calls(trace)
+    _bind_google_sheets_arguments(trace, seeded_spreadsheet)
+    _prune_empty_tool_call_steps(trace)
+
+
+def _pin_google_provider_arguments(trace: dict[str, Any]) -> None:
+    for step in trace["steps"]:
+        for call in step["response"].get("tool_calls", []):
+            name = call["name"]
+            arguments = call["arguments"]
+            _replace_value(arguments, "EMAIL_REDACTED", "e2e.google@example.com")
+            if name == "gmail__get_message":
+                arguments["message_id"] = "msg_emulate_near_inbound"
+            elif name == "google-drive__download_file":
+                arguments["file_id"] = "drv_pepsico_account_brief"
+
+
+def _rewrite_google_docs_calls(trace: dict[str, Any]) -> None:
     document_upload_contents = []
     for step in trace["steps"]:
         for call in step["response"].get("tool_calls", []):
@@ -116,7 +133,7 @@ def _normalize_google_arguments(trace: dict[str, Any], seeded_spreadsheet: str) 
                         )
                         break
     document_upload_index = 0
-    seeded_sheet_id = 0
+    created_document_call_id = None
 
     for step in trace["steps"]:
         if "tool_calls" not in step["response"]:
@@ -125,7 +142,6 @@ def _normalize_google_arguments(trace: dict[str, Any], seeded_spreadsheet: str) 
         for call in step["response"].get("tool_calls", []):
             name = call["name"]
             arguments = call["arguments"]
-            _replace_value(arguments, "EMAIL_REDACTED", "e2e.google@example.com")
 
             if name == "google-docs__create_document":
                 created_document_call_id = call.get("id")
@@ -152,7 +168,19 @@ def _normalize_google_arguments(trace: dict[str, Any], seeded_spreadsheet: str) 
                         else "drv_near_ai_strategy"
                     )
                 }
+            normalized_calls.append(call)
+        step["response"]["tool_calls"] = normalized_calls
 
+
+def _bind_google_sheets_arguments(
+    trace: dict[str, Any], seeded_spreadsheet: str
+) -> None:
+    created_spreadsheet_call_id = None
+    seeded_sheet_id = 0
+    for step in trace["steps"]:
+        for call in step["response"].get("tool_calls", []):
+            name = call["name"]
+            arguments = call["arguments"]
             if name == "google-sheets__create_spreadsheet":
                 created_spreadsheet_call_id = call.get("id")
             elif name.startswith("google-sheets__"):
@@ -172,12 +200,8 @@ def _normalize_google_arguments(trace: dict[str, Any], seeded_spreadsheet: str) 
                         else seeded_sheet_id
                     )
 
-            if name == "gmail__get_message":
-                arguments["message_id"] = "msg_emulate_near_inbound"
-            elif name == "google-drive__download_file":
-                arguments["file_id"] = "drv_pepsico_account_brief"
-            normalized_calls.append(call)
-        step["response"]["tool_calls"] = normalized_calls
+
+def _prune_empty_tool_call_steps(trace: dict[str, Any]) -> None:
     trace["steps"] = [
         step
         for step in trace["steps"]

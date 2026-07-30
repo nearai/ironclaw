@@ -224,7 +224,7 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
     }
 
 
-def _next_llm_trace_response(
+def next_llm_trace_response(
     state: dict,
     messages: list[dict],
     available_tool_names: set[str],
@@ -241,7 +241,7 @@ def _next_llm_trace_response(
         raise web.HTTPConflict(text=state["error"])
 
     try:
-        _capture_trace_tool_call_id_aliases(state, messages)
+        capture_trace_tool_call_id_aliases(state, messages)
     except ValueError as error:
         state["error"] = str(error)
         raise web.HTTPConflict(text=state["error"]) from error
@@ -323,9 +323,9 @@ def _next_llm_trace_response(
             )
             raise web.HTTPConflict(text=state["error"])
         try:
-            response["tool_calls"] = _resolve_trace_result_bindings(
+            response["tool_calls"] = resolve_trace_result_bindings(
                 response["tool_calls"],
-                _trace_tool_results_with_recorded_ids(state, messages),
+                trace_tool_results_with_recorded_ids(state, messages),
             )
         except ValueError as error:
             state["error"] = str(error)
@@ -336,18 +336,18 @@ def _next_llm_trace_response(
     return response
 
 
-def _resolve_trace_result_bindings(
+def resolve_trace_result_bindings(
     value: object,
     tool_results: list[dict],
 ) -> object:
     """Resolve exact tool-call-ID/JSON-Pointer markers recursively."""
     if isinstance(value, list):
-        return [_resolve_trace_result_bindings(item, tool_results) for item in value]
+        return [resolve_trace_result_bindings(item, tool_results) for item in value]
     if not isinstance(value, dict):
         return value
     if "$trace_result" not in value:
         return {
-            key: _resolve_trace_result_bindings(item, tool_results)
+            key: resolve_trace_result_bindings(item, tool_results)
             for key, item in value.items()
         }
     if set(value) != {"$trace_result"}:
@@ -463,7 +463,7 @@ def _is_trace_result_evidence(content: object) -> bool:
     } <= set(content)
 
 
-def _capture_trace_tool_call_id_aliases(state: dict, messages: list[dict]) -> None:
+def capture_trace_tool_call_id_aliases(state: dict, messages: list[dict]) -> None:
     """Map stable fixture call IDs to IDs normalized by the provider stack."""
     pending = state.get("pending_tool_calls") or []
     if not pending:
@@ -540,7 +540,7 @@ def _trace_tool_call_identity(call: dict) -> tuple[str, str] | None:
     )
 
 
-def _trace_tool_results_with_recorded_ids(
+def trace_tool_results_with_recorded_ids(
     state: dict,
     messages: list[dict],
 ) -> list[dict]:
