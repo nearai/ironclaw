@@ -27,6 +27,11 @@ reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/built
 issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]
+module = "crates/ironclaw_llm/src/rig_adapter/tests/finish_reason_tests.rs"
+reason = "Test-only module stored under src/ for private adapter access; cargo-llvm-cov omits test harness source from production LCOV while the exercised rig_adapter.rs production lines remain coverage-gated."
+issue  = "https://github.com/nearai/ironclaw/issues/6284"
+
+[[exemption]]
 crate  = "ironclaw_gateway"
 reason = "v1-only: consumed only by root `ironclaw` (src/channels/web/platform/static_files.rs, src/channels/web/handlers/frontend.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"
