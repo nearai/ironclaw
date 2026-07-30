@@ -19,7 +19,7 @@
  */
 import type { ReactNode } from "react";
 import { cn } from "../primitives/cn";
-import { Icon, type IconName } from "../primitives/icon";
+import { Icon, type IconName } from "../icons/icon";
 
 export type VerticalTabItem = {
   id: string;

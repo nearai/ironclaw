@@ -1,7 +1,7 @@
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { IconButton } from "../src/components/icon-button";
-import { Icon } from "../src/primitives/icon";
+import { Icon } from "../src/icons/icon";
 
 const meta: Meta<typeof IconButton> = {
   title: "Components/IconButton",

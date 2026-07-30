@@ -2,19 +2,22 @@
  * @ironclaw/ui — public surface.
  *
  * Layered bottom-up:
- *   tokens      src/tokens/tokens.css (import via "@ironclaw/ui/tokens.css")
+ *   theme       tokens.css (import via "@ironclaw/ui/tokens.css"), runtime
+ *               theming + i18n bridging hooks/providers
+ *   icons       the icon glyph registry and <Icon> renderer
  *   primitives  leaf building blocks with no intra-package dependencies
  *   components  themed interactive controls built on primitives
  *   composites  higher-order assemblies built on components
- *   theme       runtime theming + i18n bridging hooks/providers
  *
  * The extras kit ("@ironclaw/ui/extras") sits beside components; when a
  * product surface adopts an extra, promote the file into components/.
  */
 
+/* ── Icons ─────────────────────────────────────────────────────────── */
+export { Icon, ICON_NAMES, type IconName, type IconProps } from "./icons/icon";
+
 /* ── Primitives ────────────────────────────────────────────────────── */
 export { cn, type ClassValue } from "./primitives/cn";
-export { Icon, ICON_NAMES, type IconName, type IconProps } from "./primitives/icon";
 export { Skeleton } from "./primitives/skeleton";
 export { Spinner } from "./primitives/spinner";
 export { StatusDot, type StatusDotTone } from "./primitives/status-dot";

@@ -13,7 +13,7 @@
  */
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "../primitives/cn";
-import { Icon } from "../primitives/icon";
+import { Icon } from "../icons/icon";
 
 export function Pagination({
   className,

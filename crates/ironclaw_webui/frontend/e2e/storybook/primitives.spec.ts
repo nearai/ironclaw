@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { gotoStory } from "./helpers";
 
-test.describe("Primitives", () => {
+test.describe("Icons", () => {
   test("icon gallery renders labelled glyph cells (dark)", async ({ page }) => {
-    await gotoStory(page, "primitives-overview--icons");
+    await gotoStory(page, "icons-overview--icons");
     for (const name of ["plus", "bell", "close", "check"]) {
       await expect(page.getByText(name, { exact: true })).toBeVisible();
     }
@@ -15,11 +15,13 @@ test.describe("Primitives", () => {
   });
 
   test("icon gallery renders in light theme", async ({ page }) => {
-    await gotoStory(page, "primitives-overview--icons", { theme: "light" });
+    await gotoStory(page, "icons-overview--icons", { theme: "light" });
     await expect(page.getByText("plus", { exact: true })).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
+});
 
+test.describe("Primitives", () => {
   test("spinner story renders three accessible loading indicators", async ({ page }) => {
     await gotoStory(page, "primitives-overview--spinner-story");
     const spinners = page.getByRole("status", { name: "Loading" });

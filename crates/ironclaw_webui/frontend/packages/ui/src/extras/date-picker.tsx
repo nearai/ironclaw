@@ -16,7 +16,7 @@
  */
 import React from "react";
 import { cn } from "../primitives/cn";
-import { Icon } from "../primitives/icon";
+import { Icon } from "../icons/icon";
 import { OVERLAY_SURFACE_CLASSES } from "../primitives/overlay";
 
 /* ── Date math (all local-time, day precision) ─────────────────────── */

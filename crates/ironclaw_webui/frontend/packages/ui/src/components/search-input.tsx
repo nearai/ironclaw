@@ -16,7 +16,7 @@
  */
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { cn } from "../primitives/cn";
-import { Icon } from "../primitives/icon";
+import { Icon } from "../icons/icon";
 import { Input, type InputSize } from "./input";
 
 type SearchInputProps = {

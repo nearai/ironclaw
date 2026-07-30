@@ -11,7 +11,7 @@ import {
   CommandShortcut,
 } from "../../src/extras/command";
 import { Button } from "../../src/components/button";
-import { Icon } from "../../src/primitives/icon";
+import { Icon } from "../../src/icons/icon";
 
 const meta: Meta = { title: "Extras/Command" };
 export default meta;

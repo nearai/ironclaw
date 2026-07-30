@@ -8,7 +8,7 @@ import {
 } from "../../src/extras/tooltip";
 import { IconButton } from "../../src/components/icon-button";
 import { Button } from "../../src/components/button";
-import { Icon } from "../../src/primitives/icon";
+import { Icon } from "../../src/icons/icon";
 
 const meta: Meta = { title: "Extras/Tooltip" };
 export default meta;

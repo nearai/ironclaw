@@ -20,7 +20,7 @@
 import React, { type ReactNode } from "react";
 import { useUiText } from "../theme/ui-text";
 import { cn } from "../primitives/cn";
-import { Icon } from "../primitives/icon";
+import { Icon } from "../icons/icon";
 import { IconButton } from "./icon-button";
 
 /* ─── Size ────────────────────────────────────────────────────────── */

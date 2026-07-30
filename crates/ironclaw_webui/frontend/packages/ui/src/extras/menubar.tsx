@@ -18,7 +18,7 @@
 import * as MenubarPrimitive from "@radix-ui/react-menubar";
 import type { ComponentProps } from "react";
 import { cn } from "../primitives/cn";
-import { Icon } from "../primitives/icon";
+import { Icon } from "../icons/icon";
 import {
   MENU_ITEM_CLASSES,
   MENU_LABEL_CLASSES,

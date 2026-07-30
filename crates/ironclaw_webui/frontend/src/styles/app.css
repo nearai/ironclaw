@@ -9,7 +9,7 @@
 /* ════════════════════════════════════════════════════════════════════
    app.css — global resets, compat aliases, and app-only styling.
    Design tokens (theme variables, type scale, motion primitives) live in
-   @ironclaw/ui (packages/ui/src/tokens/tokens.css), imported above.
+   @ironclaw/ui (packages/ui/src/theme/tokens.css), imported above.
    Component-level visual styling lives in @ironclaw/ui components.
    ════════════════════════════════════════════════════════════════════ */
 

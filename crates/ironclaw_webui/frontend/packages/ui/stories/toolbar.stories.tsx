@@ -4,7 +4,7 @@ import { Toolbar, ToolbarGroup } from "../src/composites/toolbar";
 import { SearchInput } from "../src/components/search-input";
 import { Select } from "../src/components/input";
 import { Button } from "../src/components/button";
-import { Icon } from "../src/primitives/icon";
+import { Icon } from "../src/icons/icon";
 
 const meta: Meta = { title: "Composites/Toolbar" };
 export default meta;

@@ -19,7 +19,7 @@ function classNameOf(element: unknown): string {
 }
 
 test("the semantic control type scale stays stable across viewports (#6702)", () => {
-  const tokensCss = readFileSync(new URL("../tokens/tokens.css", import.meta.url), "utf8");
+  const tokensCss = readFileSync(new URL("../theme/tokens.css", import.meta.url), "utf8");
 
   assert.match(tokensCss, /--text-ui-sm:\s*0\.75rem;/);
   assert.match(tokensCss, /--text-ui:\s*0\.8125rem;/);

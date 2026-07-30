@@ -1,7 +1,7 @@
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Toggle } from "../../src/extras/toggle";
-import { Icon } from "../../src/primitives/icon";
+import { Icon } from "../../src/icons/icon";
 
 const meta: Meta = { title: "Extras/Toggle" };
 export default meta;

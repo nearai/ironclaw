@@ -8,15 +8,17 @@ hot-reloads instantly in a running `pnpm dev` session — no build or publish st
 
 ```
 src/
-  tokens/       tokens.css — CSS custom properties for light/dark themes,
-                the semantic type scale, and sanctioned motion keyframes.
-  primitives/   Leaf building blocks: cn, Icon, Spinner, Skeleton.
+  theme/        Everything theme-level: tokens.css (CSS custom properties for
+                light/dark themes, the semantic type scale, and sanctioned
+                motion keyframes), useInterfaceTheme (light/dark persistence),
+                and the UiText provider that bridges the app's i18n into
+                built-in strings.
+  icons/        The icon glyph registry and the <Icon> renderer.
+  primitives/   Leaf building blocks: cn, Spinner, Skeleton, StatusDot.
   components/   Themed controls: Button, IconButton, Badge, Card, Callout,
                 Input/Textarea/Select/Label/FormField, SelectMenu, Modal.
   composites/   Higher-order assemblies: ConfirmDialog, Breadcrumb,
                 EmptyPanel, StatCard, FlowList, SectionHeader/SubLabel.
-  theme/        useInterfaceTheme (light/dark persistence) and the UiText
-                provider that bridges the app's i18n into built-in strings.
 ```
 
 Rules of the road:
