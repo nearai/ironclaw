@@ -331,6 +331,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         std::fs::read_to_string(root.join(".github/workflows/ironclaw-release.yml"))
             .expect("release workflow")
             .replace("\r\n", "\n");
+    let code_style_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/code_style.yml"))
+            .expect("code style workflow")
+            .replace("\r\n", "\n");
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("workspace manifest")
         .replace("\r\n", "\n");
@@ -386,7 +390,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("corepack enable pnpm")
             && compile_workflow.contains("binary: ironclaw.exe")
             && !compile_workflow.contains("binary: ironclaw-reborn")
-            && compile_workflow.contains("core.longpaths true"),
+            && compile_workflow.contains("core.longpaths true")
+            && compile_workflow.contains("name: Install Python for release smoke")
+            && compile_workflow.contains("python-version: \"3.12\"")
+            && release_workflow.contains("name: Install Python for release smoke"),
         "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
     );
     for matrix_entry in [
@@ -429,11 +436,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("readelf --dynamic --wide")
             && compile_workflow.contains("INTERP")
             && compile_workflow.contains("(NEEDED)")
-            && compile_workflow.contains("name: Smoke compiled binary")
-            && compile_workflow.contains("\"$binary_path\" --version")
-            && compile_workflow.contains("\"$binary_path\" --help > /dev/null")
-            && compile_workflow.contains("\"$binary_path\" profile list --json > /dev/null"),
-        "release CI must reject non-portable musl binaries and smoke the exact native artifacts"
+            && compile_workflow.contains("name: Smoke exact release binary")
+            && compile_workflow
+                .contains("python scripts/ci/smoke-release-binary.py --binary \"$binary_path\""),
+        "release CI must reject non-portable musl binaries and run the shared product smoke against the exact native artifacts"
     );
 
     let build_position = compile_workflow
@@ -443,7 +449,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         .find("name: Verify musl portability")
         .expect("musl linkage step");
     let smoke_position = compile_workflow
-        .find("name: Smoke compiled binary")
+        .find("name: Smoke exact release binary")
         .expect("binary smoke step");
     let upload_position = compile_workflow
         .find("name: Upload compile evidence")
@@ -453,6 +459,32 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && linkage_position < smoke_position
             && smoke_position < upload_position,
         "linkage and runtime validation must gate artifact upload"
+    );
+    let release_build_position = release_workflow
+        .find("name: Build artifacts")
+        .expect("cargo-dist build step");
+    let release_smoke_position = release_workflow
+        .find("name: Smoke exact binaries before packaging upload")
+        .expect("cargo-dist binary smoke step");
+    let release_post_build_position = release_workflow
+        .find("name: Post-build")
+        .expect("cargo-dist post-build upload-list step");
+    assert!(
+        release_build_position < release_smoke_position
+            && release_smoke_position < release_post_build_position
+            && release_workflow.contains("TARGETS: ${{ join(matrix.targets, ' ') }}")
+            && release_workflow.contains("archives=(target/distrib/*\"$target\"*.tar.gz)")
+            && release_workflow.contains("--archive \"${archives[0]}\"")
+            && release_workflow.contains("--binary-name \"$binary\"")
+            && release_workflow.contains("if [[ \"$target\" == *-windows-* ]]"),
+        "the cargo-dist publisher must extract and smoke every exact native archive before it can enter the artifact upload set"
+    );
+    assert!(
+        code_style_workflow.contains("scripts/ci/smoke-release-binary\\.py$")
+            && code_style_workflow.contains("tests/test_smoke_release_binary\\.py$")
+            && code_style_workflow
+                .contains("python3 -m unittest tests/test_smoke_release_binary.py"),
+        "release-smoke script changes must select and run their sabotage self-tests on pull requests"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")

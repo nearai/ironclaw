@@ -227,6 +227,38 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
+      - name: Validate product-surface evidence contracts
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_product_surface_coverage.py
+          tests/e2e/scenarios/test_provider_capability_inventory.py
+          tests/e2e/scenarios/test_journey_coverage.py
+          -q
+
+      - id: product_surface_coverage
+        name: Generate product-surface coverage matrix
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          echo "source_commit=${source_commit}" >> "$GITHUB_OUTPUT"
+          set +e
+          python tests/e2e/product_surface_coverage.py \
+            --json artifacts/product-surface-coverage/matrix.json \
+            --markdown artifacts/product-surface-coverage/matrix.md
+          coverage_status=$?
+          if [[ -f artifacts/product-surface-coverage/matrix.md ]]; then
+            cat artifacts/product-surface-coverage/matrix.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$coverage_status"
+
+      - name: Upload product-surface coverage matrix
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: product-surface-coverage-${{ steps.product_surface_coverage.outputs.source_commit }}
+          path: artifacts/product-surface-coverage/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Run Reborn WebUI v2 smoke
         run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
 
