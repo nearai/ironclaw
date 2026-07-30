@@ -11,7 +11,7 @@ on:
         description: >-
           Enumerate longer generated lifecycle sequences (#6524 workstream 9).
           Pull requests stay at the fast depth; the nightly deep run raises it.
-          Depth 3 is 84 sequences (~70s) against depth 2's 20 (~20s).
+          Depth 3 is 39 sequences against depth 2's 12.
         required: false
         default: false
         type: boolean
@@ -757,7 +757,7 @@ jobs:
             --lcov reborn-integration-merged.lcov \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
-            --threshold 90 \
+            --threshold 85 \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
 

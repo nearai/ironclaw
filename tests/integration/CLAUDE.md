@@ -377,6 +377,8 @@ On a harness built from a `live_approvals` group:
 - `deny_gate(run_id, &gate_ref)` — resolves to `Denied` and resumes with `GateResumeDisposition::Denied`; the executor surfaces a non-retryable authorization failure to the model.
 - `wait_for_status(run_id, expected)` — polls the turn-state store until the run reaches `expected`; fails fast on a different terminal status.
 - `enable_auto_approve()` — flips the per-`(tenant, user)` CAS-persisted auto-approve toggle ON; the flip persists across threads in the group because the store is shared.
+- `assert_process_ownership(run_ids)` — validates the row-native process tree while a run may still be executing.
+- `assert_no_orphan_runs_or_reservations(run_ids)` — combines process ownership with zero capability-governor holds at a blocked or terminal quiescent boundary. Do not use the combined form while a capability is legitimately in flight.
 
 ### Test-support crate accessors
 
@@ -387,6 +389,7 @@ On a harness built from a `live_approvals` group:
 `ironclaw_reborn_composition::test_support` exposes:
 
 - `build_secret_store_for_test(root, scoped)` — constructs the `StandaloneSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
 `RebornRuntime` (returned by `build_runtime`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 
@@ -406,6 +409,14 @@ runtime. Cross-thread persistence is real — thread A
 writes, thread B sees it. Single-shot `test_default()` is a degenerate
 one-thread group (its own storage, baseline = 0); all existing tests are
 byte-identical after this refactor.
+
+For restart recovery tests, `restart_planned_runtime(self)` consumes a LibSQL
+group and reconstructs the scheduler, coordinator, executor, scope gateway,
+checkpoint adapters, and process journal over a fresh database connection.
+Every thread harness must be dropped first so no old coordinator remains live.
+The external capability backend is retained to model durable approval/host
+state. InMemory and Postgres modes fail loudly because they do not provide this
+hermetic fresh-connection restart recipe.
 
 ### When to use a group (vs a flat test)
 

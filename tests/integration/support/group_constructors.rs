@@ -18,6 +18,11 @@ use super::{
     RebornIntegrationGroupBuilder,
 };
 
+enum CapabilityDispatchScope {
+    CanonicalOwner,
+    RunOwner,
+}
+
 /// Shared "align user to the group's canonical binding subject, then build"
 /// step for the preset constructors below whose capability executes under
 /// the group's resolved binding user rather than a fixed constructor test
@@ -74,6 +79,13 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Extension-lifecycle group whose credential resolution follows each
+    /// run owner. Used to prove one actor cannot dispatch with another
+    /// actor's provider account.
+    pub async fn extension_lifecycle_multiuser() -> HarnessResult<Self> {
+        Self::builder().extension_lifecycle_multiuser().await
+    }
+
     /// Extension-lifecycle group extended with the invented-vendor fixture
     /// (native factory + on-disk assets): drives the full generic runtime
     /// path — install → dispatch-from-snapshot → remove — with
@@ -108,6 +120,15 @@ impl RebornIntegrationGroup {
     /// sibling off the model surface.
     pub async fn extension_visibility_probe() -> HarnessResult<Self> {
         Self::builder().extension_visibility_probe().await
+    }
+
+    /// Group with registry-installed and local prompt-description fixtures
+    /// published together, so the real surface derives and enforces each
+    /// package's description trust independently.
+    pub async fn extension_prompt_description_trust_probe() -> HarnessResult<Self> {
+        Self::builder()
+            .extension_prompt_description_trust_probe()
+            .await
     }
 
     /// Group whose GitHub extension's credential account resolves to
@@ -316,6 +337,17 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
+            CapabilityDispatchScope::CanonicalOwner,
+        )
+        .await
+    }
+
+    /// Multi-actor extension lifecycle with provider credentials resolved
+    /// from the run owner rather than the group-canonical actor.
+    pub async fn extension_lifecycle_multiuser(self) -> HarnessResult<RebornIntegrationGroup> {
+        self.extension_lifecycle_with_profile(
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
+            CapabilityDispatchScope::RunOwner,
         )
         .await
     }
@@ -333,6 +365,7 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user,
+            CapabilityDispatchScope::CanonicalOwner,
         )
         .await
     }
@@ -344,6 +377,7 @@ impl RebornIntegrationGroupBuilder {
     async fn extension_lifecycle_with_profile(
         mut self,
         profile_for_user: fn(&str) -> HarnessResult<ToolsProfile>,
+        dispatch_scope: CapabilityDispatchScope,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Build the profile with the
@@ -354,7 +388,10 @@ impl RebornIntegrationGroupBuilder {
         // otherwise credential-ready installs on auth.
         let subject_user = base.canonical_subject_user()?;
         let profile = profile_for_user(subject_user.as_str())?;
-        let host_runtime = build_group_capability_with_base(profile, &base).await?;
+        let mut host_runtime = build_group_capability_with_base(profile, &base).await?;
+        if matches!(dispatch_scope, CapabilityDispatchScope::RunOwner) {
+            host_runtime = host_runtime.with_run_owner_scoped_capability_dispatch();
+        }
         // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
         // channel-connection service over this harness's own `RebornServices`,
         // mirroring the production `build_reborn_runtime` slot fill — so
@@ -449,6 +486,18 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a prompt-description trust probe group. See
+    /// [`RebornIntegrationGroup::extension_prompt_description_trust_probe`].
+    pub async fn extension_prompt_description_trust_probe(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::extension::
+            extension_prompt_description_trust_probe_tools()
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

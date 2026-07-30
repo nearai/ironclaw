@@ -151,6 +151,7 @@ fn github_issue_tools_with_credential_result(
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
+        resource_governor: None,
         approval_parts: None,
         gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
