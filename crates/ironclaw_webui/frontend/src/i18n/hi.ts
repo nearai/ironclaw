@@ -1203,6 +1203,8 @@ registerPack("hi", {
   "logs.pausedBadge": "● रुका हुआ",
   "logs.empty": "लॉग प्रविष्टियों की प्रतीक्षा है…",
   "logs.loadOlder": "पुराने लॉग लोड करें",
+  "logs.retentionLimitReached":
+    "सबसे हाल की {count} लॉग प्रविष्टियां दिखाई जा रही हैं। स्थिर सीमा देखने के लिए लाइव अपडेट रोकें या फ़िल्टर सीमित करें।",
   "common.recent": "हाल ही का",
   "common.searchChats": "चैट खोजें...",
   "common.gatewaySession": "गेटवे सत्र",

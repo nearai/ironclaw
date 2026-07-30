@@ -407,6 +407,7 @@ export function queryLogs({
   source,
   tail,
   follow,
+  signal,
 } = {}) {
   const url = new URL(`${V2_BASE}/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -421,7 +422,7 @@ export function queryLogs({
   if (source) url.searchParams.set("source", source);
   if (tail) url.searchParams.set("tail", "true");
   if (follow) url.searchParams.set("follow", "true");
-  return apiFetch(url.pathname + url.search);
+  return apiFetch(url.pathname + url.search, { signal });
 }
 
 export function queryOperatorLogs({
@@ -437,6 +438,7 @@ export function queryOperatorLogs({
   source,
   tail,
   follow,
+  signal,
 } = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -451,7 +453,7 @@ export function queryOperatorLogs({
   if (source) url.searchParams.set("source", source);
   if (tail) url.searchParams.set("tail", "true");
   if (follow) url.searchParams.set("follow", "true");
-  return apiFetch(url.pathname + url.search);
+  return apiFetch(url.pathname + url.search, { signal });
 }
 
 // --- Messages ---

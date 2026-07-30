@@ -1203,6 +1203,8 @@ registerPack("de", {
   "logs.pausedBadge": "● pausiert",
   "logs.empty": "Warte auf Protokolleintraege…",
   "logs.loadOlder": "Ältere Protokolle laden",
+  "logs.retentionLimitReached":
+    "Die neuesten {count} Protokolleintraege werden angezeigt. Pausiere Live-Aktualisierungen oder grenze die Filter ein, um einen stabilen Bereich zu untersuchen.",
   "common.recent": "Kürzlich",
   "common.searchChats": "Chats durchsuchen...",
   "common.gatewaySession": "Gateway-Sitzung",

@@ -6,6 +6,7 @@ import { normalizeOperatorLogsResponse } from "../lib/logs-data";
 
 const POLL_INTERVAL_MS = 2000;
 const LOG_LIMIT = 500;
+const MAX_RETAINED_LOG_ENTRIES = 2000;
 const HIDDEN_ENTRY_ID_CAP = 2000;
 const TERMINAL_UNSUPPORTED_STATUSES = new Set([403, 404]);
 const SCOPE_QUERY_PARAMS = [
@@ -25,6 +26,7 @@ function mergeLogEntries(...pages) {
       if (seen.has(entry.id)) continue;
       seen.add(entry.id);
       merged.push(entry);
+      if (merged.length === MAX_RETAINED_LOG_ENTRIES) return merged;
     }
   }
   return merged;
@@ -76,18 +78,24 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
   const generationRef = React.useRef(0);
   const refreshRequestIdRef = React.useRef(0);
   const nextCursorRef = React.useRef(null);
-  const olderEntriesRef = React.useRef([]);
   const hasLoadedOlderRef = React.useRef(false);
   const loadMoreInFlightRef = React.useRef(null);
+  const loadMoreAbortRef = React.useRef(null);
   const needsThreadScope = !isAdmin && !threadId;
 
+  // Pagination invariants:
+  // - generation changes invalidate every response issued for an old scope/filter.
+  // - refresh request IDs keep only the newest poll within one generation.
+  // - once pagination advances, polling must not rewind nextCursor.
+  // - entries are newest-first and bounded so polling work and DOM size stay finite.
   React.useEffect(() => {
+    loadMoreAbortRef.current?.abort();
     generationRef.current += 1;
     refreshRequestIdRef.current += 1;
     nextCursorRef.current = null;
-    olderEntriesRef.current = [];
     hasLoadedOlderRef.current = false;
     loadMoreInFlightRef.current = null;
+    loadMoreAbortRef.current = null;
     setEntries([]);
     setError(null);
     setNextCursor(null);
@@ -116,8 +124,8 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
     }
   }, [isAdmin]);
 
-  const requestForCursor = React.useCallback((cursor = null) => ({
-    limit: LOG_LIMIT,
+  const requestForCursor = React.useCallback((cursor = null, limit = LOG_LIMIT) => ({
+    limit,
     cursor,
     level: levelFilter === "all" ? null : levelFilter,
     target: targetFilter.trim() || null,
@@ -155,7 +163,7 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
       const hidden = hiddenEntryIdsRef.current;
       const logs = normalizeOperatorLogsResponse(response);
       const nextEntries = logs.entries.filter((entry) => !hidden.has(entry.id));
-      setEntries(mergeLogEntries(nextEntries, olderEntriesRef.current));
+      setEntries((current) => mergeLogEntries(nextEntries, current));
       if (!hasLoadedOlderRef.current) {
         nextCursorRef.current = logs.nextCursor;
         setNextCursor(logs.nextCursor);
@@ -185,20 +193,23 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
     const cursor = nextCursorRef.current;
     if (!cursor) return Promise.resolve();
     if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
+    const remainingCapacity = MAX_RETAINED_LOG_ENTRIES - entries.length;
+    if (remainingCapacity <= 0) return Promise.resolve();
 
     const generation = generationRef.current;
+    const controller = new AbortController();
+    loadMoreAbortRef.current = controller;
     setIsLoadingMore(true);
     setLoadMoreError(null);
-    const request = queryLogPage(requestForCursor(cursor))
+    const request = queryLogPage({
+      ...requestForCursor(cursor, Math.min(LOG_LIMIT, remainingCapacity)),
+      signal: controller.signal,
+    })
       .then((response) => {
-        if (generation !== generationRef.current) return;
+        if (generation !== generationRef.current || controller.signal.aborted) return;
         const hidden = hiddenEntryIdsRef.current;
         const logs = normalizeOperatorLogsResponse(response);
         const pageEntries = logs.entries.filter((entry) => !hidden.has(entry.id));
-        olderEntriesRef.current = mergeLogEntries(
-          olderEntriesRef.current,
-          pageEntries,
-        );
         hasLoadedOlderRef.current = true;
         nextCursorRef.current = logs.nextCursor;
         setEntries((current) => mergeLogEntries(current, pageEntries));
@@ -206,13 +217,14 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
         setLoadMoreError(null);
       })
       .catch((err) => {
-        if (generation === generationRef.current) {
+        if (generation === generationRef.current && !controller.signal.aborted) {
           setLoadMoreError(err);
         }
       })
       .finally(() => {
         if (loadMoreInFlightRef.current === request) {
           loadMoreInFlightRef.current = null;
+          loadMoreAbortRef.current = null;
           if (generation === generationRef.current) {
             setIsLoadingMore(false);
           }
@@ -220,7 +232,14 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
       });
     loadMoreInFlightRef.current = request;
     return request;
-  }, [queryLogPage, requestForCursor]);
+  }, [entries.length, queryLogPage, requestForCursor]);
+
+  React.useEffect(() => () => {
+    generationRef.current += 1;
+    loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
+    loadMoreInFlightRef.current = null;
+  }, []);
 
   React.useEffect(() => {
     loadLogs();
@@ -242,12 +261,13 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
       ...entries.map((entry) => entry.id),
     ].slice(-HIDDEN_ENTRY_ID_CAP);
     hiddenEntryIdsRef.current = new Set(hidden);
+    loadMoreAbortRef.current?.abort();
     generationRef.current += 1;
     refreshRequestIdRef.current += 1;
     nextCursorRef.current = null;
-    olderEntriesRef.current = [];
     hasLoadedOlderRef.current = false;
     loadMoreInFlightRef.current = null;
+    loadMoreAbortRef.current = null;
     setEntries([]);
     setIsLoading(false);
     setNextCursor(null);
@@ -275,6 +295,9 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
     isLoading,
     error,
     nextCursor,
+    retentionLimitReached:
+      Boolean(nextCursor) && entries.length >= MAX_RETAINED_LOG_ENTRIES,
+    maxRetainedEntries: MAX_RETAINED_LOG_ENTRIES,
     isLoadingMore,
     loadMoreError,
     loadOlder,

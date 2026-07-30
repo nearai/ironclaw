@@ -1203,6 +1203,8 @@ registerPack("ko", {
   "logs.pausedBadge": "● 일시 중지됨",
   "logs.empty": "로그 항목 대기 중…",
   "logs.loadOlder": "이전 로그 불러오기",
+  "logs.retentionLimitReached":
+    "최근 로그 {count}개를 표시하고 있습니다. 안정적인 범위를 확인하려면 실시간 업데이트를 일시 중지하거나 필터를 좁히세요.",
   "common.recent": "최근",
   "common.searchChats": "채팅 검색...",
   "common.gatewaySession": "게이트웨이 세션",

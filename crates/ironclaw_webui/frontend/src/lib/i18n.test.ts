@@ -281,16 +281,10 @@ test("locale packs include lazy-route loading and recovery copy", () => {
 test("locale packs include logs pagination copy", () => {
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);
-    assert.equal(
-      typeof pack["logs.loadOlder"],
-      "string",
-      `${locale} missing logs.loadOlder`,
-    );
-    assert.notEqual(
-      pack["logs.loadOlder"].trim(),
-      "",
-      `${locale} logs.loadOlder should not be empty`,
-    );
+    for (const key of ["logs.loadOlder", "logs.retentionLimitReached"]) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
   }
 });
 

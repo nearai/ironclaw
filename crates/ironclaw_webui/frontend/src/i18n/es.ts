@@ -1204,6 +1204,8 @@ registerPack("es", {
   "logs.pausedBadge": "● pausado",
   "logs.empty": "Esperando entradas de registro…",
   "logs.loadOlder": "Cargar registros anteriores",
+  "logs.retentionLimitReached":
+    "Se muestran las {count} entradas de registro más recientes. Pausa las actualizaciones en vivo o limita los filtros para inspeccionar un intervalo estable.",
   "common.recent": "Reciente",
   "common.searchChats": "Buscar chats...",
   "common.gatewaySession": "Sesión de puerta de enlace",

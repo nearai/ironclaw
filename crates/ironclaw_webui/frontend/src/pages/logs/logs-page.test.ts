@@ -37,6 +37,8 @@ function createLogsPageHarness(overrides = {}) {
     error: null,
     needsThreadScope: false,
     nextCursor: null,
+    retentionLimitReached: false,
+    maxRetainedEntries: 2000,
     isLoadingMore: false,
     loadMoreError: null,
     loadOlder: () => {},
@@ -72,8 +74,15 @@ function createLogsPageHarness(overrides = {}) {
         ];
       },
     },
-    useT: () => (key, params) =>
-      params?.message ? `${key}: ${params.message}` : key,
+    useT: () => (key, params) => {
+      if (key === "error.loadFailed") {
+        return `Failed to load ${params.what}: ${params.message}`;
+      }
+      if (key === "logs.retentionLimitReached") {
+        return `Showing ${params.count} entries`;
+      }
+      return key;
+    },
     useOutletContext: () => ({ isAdmin: true, threadsState: null }),
     useLogs: () => logs,
   };
@@ -362,11 +371,26 @@ test("LogsPage shows a retry action when loading older logs fails", () => {
     },
   });
 
-  assert.match(flattenMarkup(rendered), /older logs unavailable/);
+  const markup = flattenMarkup(rendered);
+  assert.match(markup, /Failed to load nav\.logs: older logs unavailable/);
+  assert.doesNotMatch(markup, /Failed to load logs\.loadOlder/);
   const retry = nativeNodeByText(rendered, "button", "ext.catalog.retry");
   assert.ok(retry, "expected a retry button after pagination fails");
   retry.props.onClick();
   assert.equal(retryCount, 1);
+});
+
+test("LogsPage explains the retention cap instead of offering another page", () => {
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 2000,
+    nextCursor: "cursor-beyond-cap",
+    retentionLimitReached: true,
+    maxRetainedEntries: 2000,
+  });
+
+  assert.match(flattenMarkup(rendered), /Showing 2000 entries/);
+  assert.equal(nativeNodeByText(rendered, "button", "logs.loadOlder"), undefined);
 });
 
 test("LogsPage clears entries only after confirming the shared dialog", () => {

@@ -85,6 +85,7 @@ function createHookHarness({
   };
 
   const context = {
+    AbortController,
     React,
     clearInterval: () => {},
     globalThis: { location: { search: globalSearch } },
@@ -281,11 +282,11 @@ test("useLogs preserves paginated entries while polling refreshes the latest pag
       latestPage += 1;
       return latestPage === 1
         ? {
-            entries: [{ id: "latest-1" }, { id: "overlap" }],
+            entries: [{ id: "latest-2" }, { id: "latest-1" }],
             next_cursor: "cursor-1",
           }
         : {
-            entries: [{ id: "latest-2" }, { id: "latest-1" }],
+            entries: [{ id: "latest-3" }, { id: "latest-2" }],
             next_cursor: "cursor-after-refresh",
           };
     },
@@ -301,13 +302,116 @@ test("useLogs preserves paginated entries while polling refreshes the latest pag
 
   assert.deepEqual(
     Array.from(result.entries, (entry) => entry.id),
-    ["latest-2", "latest-1", "overlap", "older"],
+    ["latest-3", "latest-2", "latest-1", "overlap", "older"],
   );
   assert.equal(
     result.nextCursor,
     "cursor-2",
     "polling must not rewind the pagination cursor",
   );
+});
+
+test("useLogs bounds retained entries and stops pagination without skipping a partial page", async () => {
+  const makeEntries = (prefix, count) =>
+    Array.from({ length: count }, (_, index) => ({ id: `${prefix}-${index}` }));
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      const page = request.cursor ? Number(request.cursor.split("-")[1]) : 0;
+      return {
+        entries: makeEntries(`page-${page}`, page === 3 ? 400 : request.limit),
+        next_cursor: `page-${page + 1}`,
+      };
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  for (let page = 0; page < 4; page += 1) {
+    await result.loadOlder();
+    result = harness.render();
+  }
+
+  assert.equal(result.entries.length, 2000);
+  assert.equal(result.retentionLimitReached, true);
+  assert.equal(result.maxRetainedEntries, 2000);
+  assert.equal(harness.calls.length, 5);
+  assert.deepEqual(
+    harness.calls.map((call) => call.limit),
+    [500, 500, 500, 500, 100],
+  );
+
+  await result.loadOlder();
+  assert.equal(harness.calls.length, 5, "the retention cap must stop another request");
+
+  await harness.intervals[0].fn();
+  result = harness.render();
+  assert.equal(result.entries.length, 2000, "polling must keep the displayed window bounded");
+});
+
+test("useLogs resets paginated entries and cursor when filters change", async () => {
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      if (request.cursor) {
+        return { entries: [{ id: "older" }], next_cursor: "cursor-2" };
+      }
+      return {
+        entries: [{ id: request.level === "warn" ? "warn-latest" : "latest" }],
+        next_cursor: request.level === "warn" ? "warn-cursor" : "cursor-1",
+      };
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  await result.loadOlder();
+  result = harness.render();
+  assert.deepEqual(Array.from(result.entries, (entry) => entry.id), ["latest", "older"]);
+
+  result.setLevelFilter("warn");
+  harness.render();
+  await harness.runEffects();
+  result = harness.render();
+
+  assert.deepEqual(Array.from(result.entries, (entry) => entry.id), ["warn-latest"]);
+  assert.equal(result.nextCursor, "warn-cursor");
+  assert.equal(harness.calls.at(-1).level, "warn");
+  assert.equal(harness.calls.at(-1).cursor, null);
+});
+
+test("useLogs aborts in-flight pagination when filters change", async () => {
+  let paginationSignal;
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => {
+      if (!request.cursor) {
+        return { entries: [{ id: "latest" }], next_cursor: "cursor-1" };
+      }
+      paginationSignal = request.signal;
+      return new Promise(() => {});
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  let result = harness.render();
+  result.loadOlder();
+  assert.equal(paginationSignal.aborted, false);
+
+  result.setTargetFilter("scheduler");
+  harness.render();
+  await harness.runEffects();
+  result = harness.render();
+
+  assert.equal(paginationSignal.aborted, true);
+  assert.equal(result.isLoadingMore, false);
+  assert.equal(result.loadMoreError, null);
 });
 
 test("useLogs coalesces concurrent pagination requests", async () => {

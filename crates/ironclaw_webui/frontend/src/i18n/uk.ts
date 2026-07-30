@@ -1203,6 +1203,8 @@ registerPack("uk", {
   "logs.pausedBadge": "● пауза",
   "logs.empty": "Очікування записів журналу…",
   "logs.loadOlder": "Завантажити старіші журнали",
+  "logs.retentionLimitReached":
+    "Показано {count} найновіших записів журналу. Призупиніть оновлення наживо або звузьте фільтри, щоб переглянути стабільний діапазон.",
   "common.recent": "Нещодавно",
   "common.searchChats": "Пошук чатів...",
   "common.gatewaySession": "Сеанс шлюзу",

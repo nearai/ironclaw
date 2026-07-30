@@ -1203,6 +1203,8 @@ registerPack("ar", {
   "logs.pausedBadge": "● متوقف مؤقتًا",
   "logs.empty": "بانتظار إدخالات السجل…",
   "logs.loadOlder": "تحميل سجلات أقدم",
+  "logs.retentionLimitReached":
+    "يتم عرض أحدث {count} من إدخالات السجل. أوقف التحديثات المباشرة أو ضيّق عوامل التصفية لفحص نطاق ثابت.",
   "common.recent": "أخيرة",
   "common.searchChats": "البحث في المحادثات...",
   "common.gatewaySession": "جلسة البوابة",

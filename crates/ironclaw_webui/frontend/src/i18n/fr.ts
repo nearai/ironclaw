@@ -1203,6 +1203,8 @@ registerPack("fr", {
   "logs.pausedBadge": "● en pause",
   "logs.empty": "En attente d'entrees de journal…",
   "logs.loadOlder": "Charger les journaux plus anciens",
+  "logs.retentionLimitReached":
+    "Les {count} entrées de journal les plus récentes sont affichées. Mettez les mises à jour en direct en pause ou affinez les filtres pour examiner une plage stable.",
   "common.recent": "Récent",
   "common.searchChats": "Rechercher des discussions...",
   "common.gatewaySession": "Session de passerelle",
