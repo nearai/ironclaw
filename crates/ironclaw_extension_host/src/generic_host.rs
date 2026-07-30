@@ -253,9 +253,21 @@ pub fn effective_resolved_for_package(
         tools: package.manifest.capabilities.clone(),
         ..base.clone()
     };
-    if package.root_binding == ironclaw_extensions::PackageRootBinding::Virtual
-        && let Some(mcp) = resolved.mcp.as_mut()
-    {
+    // Discovered per-tool schemas must be persisted for both the virtual
+    // (user-registered, remote-only) package shape and the materialized
+    // host-bundled shape whose descriptors are inline-dynamic (hosted MCP
+    // providers built by `package_with_discovered_hosted_mcp_tools`). The
+    // schema mode itself is not persisted on `ResolvedExtensionManifest` —
+    // `rebuild_package_from_resolved` re-derives which constructor to use
+    // from whether this map ends up non-empty.
+    let captures_dynamic_schemas = package.root_binding
+        == ironclaw_extensions::PackageRootBinding::Virtual
+        || (matches!(
+            package.root_binding,
+            ironclaw_extensions::PackageRootBinding::Materialized(_)
+        ) && package.descriptor_schema_mode
+            == ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic);
+    if captures_dynamic_schemas && let Some(mcp) = resolved.mcp.as_mut() {
         mcp.dynamic_input_schemas = package
             .capabilities
             .iter()
@@ -372,7 +384,31 @@ pub(crate) fn rebuild_package_from_resolved(
     use ironclaw_extensions::PackageRootBinding;
     match &resolved.root_binding {
         PackageRootBinding::Materialized(root) => {
-            ExtensionPackage::from_manifest(manifest, root.clone())
+            // A materialized host-bundled package that persisted discovered
+            // dynamic schemas (hosted MCP providers such as `nearai`) must be
+            // rebuilt through the inline-dynamic constructor: `from_manifest`
+            // hardcodes `ManifestRefs`, which routes descriptor schemas
+            // through filesystem `$ref` reads that were never written for
+            // discovered tools. Whether the persisted map is non-empty is the
+            // only signal available — `descriptor_schema_mode` itself is not
+            // persisted on `ResolvedExtensionManifest`.
+            let dynamic_schemas = resolved
+                .mcp
+                .as_ref()
+                .map(|mcp| &mcp.dynamic_input_schemas)
+                .filter(|schemas| !schemas.is_empty());
+            match dynamic_schemas {
+                Some(schemas) => {
+                    let capabilities = descriptors_from_dynamic_schemas(&manifest, schemas)?;
+                    ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+                        manifest,
+                        root.clone(),
+                        None,
+                        capabilities,
+                    )
+                }
+                None => ExtensionPackage::from_manifest(manifest, root.clone()),
+            }
         }
         PackageRootBinding::FabricateOnLoad => {
             let root = VirtualPath::new(format!("/system/extensions/{extension_id}"))
@@ -385,32 +421,107 @@ pub(crate) fn rebuild_package_from_resolved(
                 .as_ref()
                 .map(|mcp| &mcp.dynamic_input_schemas)
                 .ok_or_else(|| "virtual package lacks MCP catalog metadata".to_string())?;
-            let capabilities = manifest
-                .capabilities
-                .iter()
-                .map(|capability| ironclaw_host_api::CapabilityDescriptor {
-                    id: capability.id.clone(),
-                    provider: manifest.id.clone(),
-                    runtime: manifest.runtime.kind(),
-                    trust_ceiling: manifest.descriptor_trust_default,
-                    description: capability.description.clone(),
-                    parameters_schema: schemas
-                        .get(capability.id.as_str())
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null),
-                    effects: capability.effects.clone(),
-                    default_permission: capability.default_permission,
-                    runtime_credentials: capability.runtime_credentials.clone(),
-                    network_targets: capability.network_targets.clone(),
-                    max_egress_bytes: capability.max_egress_bytes,
-                    resource_profile: capability.resource_profile.clone(),
-                    origin_gate_matrix: capability.origin_gate_matrix.clone(),
-                })
-                .collect();
+            // A virtual (user-registered hosted MCP) package whose discovery
+            // has not run yet — including the pending/auth-checkpoint states
+            // `HostedMcpPreparationService::sync_lifecycle_package` rebuilds
+            // through while OAuth/bearer setup is still outstanding —
+            // persists an EMPTY dynamic-schema map while its manifest still
+            // carries the discovery-placeholder capability. That is a
+            // legitimate pre-discovery state, not a persistence defect: the
+            // rebuilt in-memory package is never published for callable
+            // dispatch until `PreparationRequirement::Ready` (`install`'s
+            // `visible_capability_ids` gating stays empty until then), so a
+            // placeholder null-schema descriptor is safe here — mirrors the
+            // Materialized branch's `!schemas.is_empty()` gate above and
+            // `hosted_mcp_manifest::available_package`'s tolerant
+            // construction for the same not-yet-discovered state. Fail
+            // closed only once discovery has recorded at least one schema
+            // and a declared capability is STILL missing one — that
+            // remains the real persistence defect the fail-closed check
+            // exists to catch.
+            let capabilities = if schemas.is_empty() {
+                placeholder_descriptors_from_manifest(&manifest)
+            } else {
+                descriptors_from_dynamic_schemas(&manifest, schemas)?
+            };
             ExtensionPackage::from_virtual_manifest(manifest, None, capabilities)
         }
     }
     .map_err(|error| format!("package rebuild failed: {error}"))
+}
+
+/// Build capability descriptors for a manifest whose per-tool `input_schema`
+/// values come from a discovered-dynamic-schema map rather than the
+/// manifest's own `$ref` projections. Fails closed: a capability declared in
+/// the manifest with no admitted schema is a persistence defect, not a
+/// reason to publish a `null`-schema descriptor.
+fn descriptors_from_dynamic_schemas(
+    manifest: &ExtensionManifest,
+    schemas: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<Vec<ironclaw_host_api::capability::CapabilityDescriptor>, String> {
+    manifest
+        .capabilities
+        .iter()
+        .map(|capability| {
+            let parameters_schema =
+                schemas
+                    .get(capability.id.as_str())
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "no discovered input schema recorded for capability {}",
+                            capability.id
+                        )
+                    })?;
+            Ok(ironclaw_host_api::capability::CapabilityDescriptor {
+                id: capability.id.clone(),
+                provider: manifest.id.clone(),
+                runtime: manifest.runtime.kind(),
+                trust_ceiling: manifest.descriptor_trust_default,
+                description: capability.description.clone(),
+                parameters_schema,
+                effects: capability.effects.clone(),
+                default_permission: capability.default_permission,
+                runtime_credentials: capability.runtime_credentials.clone(),
+                network_targets: capability.network_targets.clone(),
+                max_egress_bytes: capability.max_egress_bytes,
+                resource_profile: capability.resource_profile.clone(),
+                origin_gate_matrix: capability.origin_gate_matrix.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Build capability descriptors for a virtual hosted-MCP manifest whose
+/// dynamic-schema map is still empty (no discovery has run yet). Same shape
+/// as `descriptors_from_dynamic_schemas` but never fails closed — every
+/// capability gets a `null` parameters schema, matching
+/// `hosted_mcp_manifest::available_package`'s tolerant construction for this
+/// exact pre-discovery state.
+fn placeholder_descriptors_from_manifest(
+    manifest: &ExtensionManifest,
+) -> Vec<ironclaw_host_api::capability::CapabilityDescriptor> {
+    manifest
+        .capabilities
+        .iter()
+        .map(
+            |capability| ironclaw_host_api::capability::CapabilityDescriptor {
+                id: capability.id.clone(),
+                provider: manifest.id.clone(),
+                runtime: manifest.runtime.kind(),
+                trust_ceiling: manifest.descriptor_trust_default,
+                description: capability.description.clone(),
+                parameters_schema: serde_json::Value::Null,
+                effects: capability.effects.clone(),
+                default_permission: capability.default_permission,
+                runtime_credentials: capability.runtime_credentials.clone(),
+                network_targets: capability.network_targets.clone(),
+                max_egress_bytes: capability.max_egress_bytes,
+                resource_profile: capability.resource_profile.clone(),
+                origin_gate_matrix: capability.origin_gate_matrix.clone(),
+            },
+        )
+        .collect()
 }
 
 #[cfg(test)]
@@ -939,5 +1050,262 @@ input_schema_ref = "schemas/echo.input.json"
             });
         }
         records
+    }
+
+    /// Stub MCP transport that answers the standard `initialize` /
+    /// `notifications/initialized` / `tools/list` handshake with one
+    /// discovered tool carrying a non-trivial input schema. Mirrors
+    /// `mcp_discovery::tests::TwoToolEgress`, scoped to this test module so it
+    /// can name its own tool/schema.
+    struct OneToolEgress {
+        tool_name: &'static str,
+        input_schema: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl ironclaw_host_api::http::RuntimeHttpEgress for OneToolEgress {
+        async fn execute(
+            &self,
+            request: ironclaw_host_api::http::RuntimeHttpEgressRequest,
+        ) -> Result<
+            ironclaw_host_api::http::RuntimeHttpEgressResponse,
+            ironclaw_host_api::http::RuntimeHttpEgressError,
+        > {
+            use ironclaw_host_api::http::RuntimeHttpEgressError;
+            let body: serde_json::Value = serde_json::from_slice(&request.body).map_err(|_| {
+                RuntimeHttpEgressError::Request {
+                    reason: "invalid_json_rpc_body".to_string(),
+                    request_bytes: request.body.len() as u64,
+                    response_bytes: 0,
+                }
+            })?;
+            let method =
+                body["method"]
+                    .as_str()
+                    .ok_or_else(|| RuntimeHttpEgressError::Request {
+                        reason: "missing_json_rpc_method".to_string(),
+                        request_bytes: request.body.len() as u64,
+                        response_bytes: 0,
+                    })?;
+            let result = match method {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "test", "version": "1"}
+                }),
+                "notifications/initialized" => serde_json::json!({}),
+                "tools/list" => serde_json::json!({"tools": [
+                    {
+                        "name": self.tool_name,
+                        "description": "discovered tool fixture",
+                        "inputSchema": self.input_schema.clone(),
+                    }
+                ]}),
+                _ => {
+                    return Err(RuntimeHttpEgressError::Request {
+                        reason: "unexpected_json_rpc_method".to_string(),
+                        request_bytes: request.body.len() as u64,
+                        response_bytes: 0,
+                    });
+                }
+            };
+            Ok(ironclaw_host_api::http::RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("Mcp-Session-Id".to_string(), "session-1".to_string()),
+                ],
+                body: serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": result,
+                }))
+                .map_err(|_| RuntimeHttpEgressError::Request {
+                    reason: "serialize_json_rpc_response".to_string(),
+                    request_bytes: request.body.len() as u64,
+                    response_bytes: 0,
+                })?,
+                saved_body: None,
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            })
+        }
+    }
+
+    /// Nearai-shaped `HostBundled` fixture manifest: `[mcp]` connection plus a
+    /// static `[[tools]]` template capability, matching
+    /// `crates/ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml`'s
+    /// shape (source, root binding, and discovered-schema path convention),
+    /// without depending on the real nearai asset files.
+    fn hosted_mcp_first_party_manifest_toml(id: &str) -> String {
+        format!(
+            r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "{id}"
+name = "Hosted MCP fixture"
+version = "0.1.0"
+description = "hosted MCP discovery fixture mirroring the nearai bundled provider"
+trust = "first_party_requested"
+
+[mcp]
+server = "https://mcp.example.test/mcp"
+namespace = "{id}"
+max_tools = 8
+default_permission = "ask"
+effects = ["network"]
+
+[[tools]]
+id = "{id}.web_search"
+description = "Static template tool"
+default_permission = "ask"
+input_schema_ref = "schemas/{id}/web_search.input.v1.json"
+"#,
+            id = id,
+        )
+    }
+
+    /// Regression test for the production incident: "The run failed while
+    /// preparing the runtime host" /
+    /// `missing input_schema_ref at /system/extensions/nearai/schemas/nearai/dynamic/web_search.input.v1.json`.
+    ///
+    /// Drives the real production caller chain for a `HostBundled` hosted-MCP
+    /// provider shaped exactly like `nearai` (source `HostBundled`,
+    /// `root_binding: Materialized`, `descriptor_schema_mode: InlineDynamic`
+    /// after discovery):
+    ///
+    /// 1. `discover_hosted_mcp_package` (the real discovery path activation
+    ///    uses) against a stubbed MCP server returning one tool with a
+    ///    non-trivial input schema.
+    /// 2. `effective_resolved_for_package` (the real activation-publish
+    ///    helper) — pins defect 1: the persisted `ResolvedExtensionManifest`
+    ///    must carry the discovered schema in `mcp.dynamic_input_schemas`.
+    /// 3. `rebuild_package_from_resolved` from ONLY that durable record (no
+    ///    live discovery) — pins defect 2: rebuild must choose the
+    ///    inline-dynamic constructor, not the `ManifestRefs` one.
+    /// 4. `publish_hot_capability_catalog` (the real capability-catalog path)
+    ///    against a filesystem that does NOT contain the schema file —
+    ///    reproduces the exact production absence and must still succeed,
+    ///    with `parameters_schema` equal to the originally discovered schema.
+    #[tokio::test]
+    async fn hosted_mcp_discovered_schema_survives_persist_and_rebuild_without_filesystem_schema() {
+        let id = "hosted-mcp-fixture";
+        let toml = hosted_mcp_first_party_manifest_toml(id);
+        let root = VirtualPath::new(format!("/system/extensions/{id}")).expect("test root");
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
+            toml,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            None,
+            &crate::product_extension_host_api_contract_registry().expect("test contracts"),
+            ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),
+        )
+        .expect("hosted MCP fixture manifest resolves");
+        let base_resolved = record.resolved().clone();
+        assert!(
+            base_resolved
+                .mcp
+                .as_ref()
+                .is_some_and(|mcp| mcp.dynamic_input_schemas.is_empty()),
+            "the pre-discovery durable record must not yet carry a discovered schema"
+        );
+
+        // Build the pre-discovery package exactly as the production loader
+        // would (`to_internal` + `try_from`, no TOML reparse), in
+        // `ManifestRefs` mode (the ordinary Materialized shape before
+        // discovery ever runs).
+        let manifest_v2 = base_resolved
+            .to_internal(ManifestSource::HostBundled)
+            .expect("resolved contract rebuilds to v2");
+        let manifest = ironclaw_extensions::ExtensionManifest::try_from(manifest_v2)
+            .expect("v2 manifest rebuilds to v1");
+        let initial_package = ExtensionPackage::from_manifest(manifest, root.clone())
+            .expect("pre-discovery package constructs");
+
+        let discovered_schema = serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        });
+        let scope = ironclaw_host_api::resource::ResourceScope::local_default(
+            ironclaw_host_api::ids::UserId::new("hosted-mcp-fixture-user").expect("test user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("test scope");
+        let discovered = crate::discover_hosted_mcp_package(
+            &initial_package,
+            8,
+            scope,
+            Arc::new(OneToolEgress {
+                tool_name: "web_search",
+                input_schema: discovered_schema.clone(),
+            }),
+        )
+        .await
+        .expect("stubbed discovery succeeds");
+        assert_eq!(
+            discovered.descriptor_schema_mode,
+            ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic,
+            "a HostBundled hosted-MCP package built from discovery is InlineDynamic, \
+             exactly like nearai's `package_with_discovered_hosted_mcp_tools`"
+        );
+
+        // Defect 1: the persisted record must capture the discovered schema
+        // for THIS package shape, not only for `Virtual` packages.
+        let effective = effective_resolved_for_package(&base_resolved, &discovered);
+        let capability_id = format!("{id}.web_search");
+        assert_eq!(
+            effective
+                .mcp
+                .as_ref()
+                .expect("hosted MCP declaration persists")
+                .dynamic_input_schemas
+                .get(capability_id.as_str()),
+            Some(&discovered_schema),
+            "effective_resolved_for_package must persist the discovered schema for a \
+             Materialized + InlineDynamic package, not only for Virtual packages"
+        );
+
+        // Defect 2: rebuilding from ONLY the durable record (no live
+        // discovery) must reconstruct an InlineDynamic package whose
+        // descriptor already carries the discovered schema.
+        let rebuild_manifest_v2 = effective
+            .to_internal(ManifestSource::HostBundled)
+            .expect("persisted resolved contract rebuilds to v2");
+        let rebuild_manifest =
+            ironclaw_extensions::ExtensionManifest::try_from(rebuild_manifest_v2)
+                .expect("v2 manifest rebuilds to v1");
+        let rebuilt = rebuild_package_from_resolved(rebuild_manifest, &effective, id)
+            .expect("rebuild from the durable record alone succeeds");
+        assert_eq!(
+            rebuilt.descriptor_schema_mode,
+            ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic,
+            "rebuilding a Materialized package with a persisted discovered-schema map must \
+             choose the inline-dynamic constructor, not `from_manifest`'s ManifestRefs"
+        );
+
+        // Reproduce the exact production absence: publish through the real
+        // capability-catalog path against a filesystem with no schema file at
+        // all (not even the directory), and confirm success with the
+        // originally discovered schema.
+        let fs = ironclaw_filesystem::InMemoryBackend::new();
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(rebuilt)
+            .expect("rebuilt package inserts into the registry");
+        let catalog = ironclaw_host_runtime::publish_hot_capability_catalog(&fs, &registry)
+            .await
+            .expect(
+                "publishing the rebuilt package must succeed even though \
+                 /system/extensions/hosted-mcp-fixture/schemas/hosted-mcp-fixture/dynamic/\
+                 web_search.input.v1.json was never written to the filesystem",
+            );
+        let record = catalog
+            .get(&CapabilityId::new(capability_id.as_str()).expect("capability id"))
+            .expect("discovered capability publishes");
+        assert_eq!(
+            record.descriptor.parameters_schema, discovered_schema,
+            "the published descriptor must carry the originally discovered schema"
+        );
     }
 }
