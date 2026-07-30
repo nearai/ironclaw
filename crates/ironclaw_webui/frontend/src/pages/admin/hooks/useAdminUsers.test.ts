@@ -84,10 +84,16 @@ test("admin user hook exposes pending and error state for every management actio
 test("admin user hook consumes cursors, deduplicates pages, and keeps polling off after load-more failure", async () => {
   let infiniteQueryOptions;
   const fetchCalls = [];
-  let rejectPage;
+  let resolvePage;
   let fetchNextPageCalls = 0;
-  const pendingPage = new Promise((_resolve, reject) => {
-    rejectPage = reject;
+  const pageError = new Error("next page failed");
+  const failedPageResult = {
+    data: { pages: [] },
+    error: pageError,
+    isFetchNextPageError: true,
+  };
+  const pendingPage = new Promise((resolve) => {
+    resolvePage = resolve;
   });
   const mutationState = {
     data: null,
@@ -128,7 +134,7 @@ test("admin user hook consumes cursors, deduplicates pages, and keeps polling of
               },
             ],
           },
-          error: new Error("page failed"),
+          error: pageError,
           fetchNextPage: () => {
             fetchNextPageCalls += 1;
             return fetchNextPageCalls === 1
@@ -174,7 +180,7 @@ test("admin user hook consumes cursors, deduplicates pages, and keeps polling of
     ],
   );
   assert.equal(state.hasMore, true);
-  assert.equal(state.loadMoreError.message, "page failed");
+  assert.equal(state.loadMoreError, pageError);
   assert.equal(infiniteQueryOptions.initialPageParam, null);
   assert.equal(
     infiniteQueryOptions.getNextPageParam({ nextCursor: "cursor-next" }),
@@ -213,8 +219,10 @@ test("admin user hook consumes cursors, deduplicates pages, and keeps polling of
   const duplicateRequest = state.loadMore();
   assert.equal(firstRequest, duplicateRequest);
   assert.equal(fetchNextPageCalls, 1);
-  rejectPage(new Error("next page failed"));
-  await assert.rejects(firstRequest, /next page failed/);
+  resolvePage(failedPageResult);
+  const firstResult = await firstRequest;
+  assert.equal(firstResult.error, pageError);
+  assert.equal(firstResult.isFetchNextPageError, true);
   assert.equal(
     infiniteQueryOptions.refetchInterval({
       state: { data: { pages: [{ users: [] }] }, fetchStatus: "idle" },
