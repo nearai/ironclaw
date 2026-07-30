@@ -1,6 +1,5 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
@@ -10,6 +9,12 @@ import {
   commandMenuSelectionReducer,
   commandMenuToken,
 } from "./chat-commands";
+import {
+  HTML_ATTRIBUTE_PATTERN,
+  componentProps,
+  componentSourceForTest,
+  findComponent,
+} from "../../../lib/vm-component-harness";
 
 // Wire shape from `GET /api/webchat/v2/commands`. Two commands share the
 // "mo" prefix so ArrowDown/wraparound has somewhere to move.
@@ -35,51 +40,10 @@ const MENU_COMMANDS = [
 ];
 
 function chatInputSourceForTest() {
-  const source = readFileSync(
+  return componentSourceForTest(
     new URL("../components/chat-input.tsx", import.meta.url),
-    "utf8",
+    "ChatInput",
   );
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace("export function ChatInput", "function ChatInput"));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ChatInput };`;
-}
-
-function findComponent(node, component) {
-  if (!node || typeof node !== "object") return null;
-  if (!Array.isArray(node.values)) return null;
-  const componentIndex = node.values.indexOf(component);
-  if (componentIndex >= 0) {
-    return node;
-  }
-  for (const value of node.values) {
-    const found = findComponent(value, component);
-    if (found) return found;
-  }
-  return null;
-}
-
-// HTML attribute names may contain hyphens (for example, data-testid).
-const HTML_ATTRIBUTE_PATTERN = /([A-Za-z][A-Za-z0-9-]*)=\s*$/;
-
-function componentProps(node, component) {
-  const props = {};
-  const start = node.values.indexOf(component);
-  for (let index = start + 1; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(HTML_ATTRIBUTE_PATTERN)?.[1];
-    if (name) props[name] = node.values[index];
-  }
-  return props;
 }
 
 function templateProps(node) {
@@ -629,6 +593,134 @@ function findCommandOption(tree, name) {
   return findNode(tree, (node) => node.props?.id === `chat-command-option-${name}`);
 }
 
+// A second, stateful hook harness used only by the thread-switch (item 4)
+// test below. `renderChatInput`'s stub above is a fresh one-shot render
+// (fine for every other test here, which each render exactly once); this
+// one persists useState/useRef/useEffect slots by hook-call index — and,
+// critically, actually MEMOIZES useCallback by its deps array — across
+// repeated `render(props)` calls on the same instance, the same shape
+// `useChat-send.test.ts`'s `createReactStub` uses. Real memoization matters
+// here: `flushDraft` (deps `[]`) sits inside the draft-restore effect's own
+// deps array, so an unmemoized (always-a-new-function) `useCallback` would
+// make that effect look "changed" and re-fire on every render regardless of
+// whether `draftKey` actually changed, defeating the test.
+function createChatInputHookHost() {
+  let stateIndex = 0;
+  let refIndex = 0;
+  let effectIndex = 0;
+  let callbackIndex = 0;
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const callbackSlots = [];
+  const setCalls = [];
+  const refs = [];
+  const depsChanged = (previous, next) => {
+    if (!previous || !next || previous.length !== next.length) return true;
+    return next.some((value, index) => !Object.is(value, previous[index]));
+  };
+  const React = {
+    useCallback: (fn, deps) => {
+      const index = callbackIndex++;
+      const slot = callbackSlots[index];
+      if (slot && !depsChanged(slot.deps, deps)) return slot.fn;
+      callbackSlots[index] = { fn, deps: deps ? [...deps] : null };
+      return fn;
+    },
+    useRef: (initial = null) => {
+      const index = refIndex++;
+      const ref = refSlots[index] || { current: initial };
+      refSlots[index] = ref;
+      if (!refs.includes(ref)) refs.push(ref);
+      return ref;
+    },
+    useState: (initial) => {
+      const index = stateIndex++;
+      if (!(index in stateSlots)) {
+        stateSlots[index] = typeof initial === "function" ? initial() : initial;
+      }
+      return [
+        stateSlots[index],
+        (next) => {
+          stateSlots[index] =
+            typeof next === "function" ? next(stateSlots[index]) : next;
+          setCalls.push({ index, value: stateSlots[index] });
+        },
+      ];
+    },
+    useEffect: (effect, deps) => {
+      const index = effectIndex++;
+      const slot = effectSlots[index] || { deps: null, cleanup: null };
+      if (!depsChanged(slot.deps, deps)) {
+        effectSlots[index] = slot;
+        return;
+      }
+      if (typeof slot.cleanup === "function") slot.cleanup();
+      slot.deps = deps ? [...deps] : null;
+      slot.cleanup = effect() || null;
+      effectSlots[index] = slot;
+    },
+  };
+  return { React, setCalls, refs, beginRender: () => {
+    stateIndex = 0;
+    refIndex = 0;
+    effectIndex = 0;
+    callbackIndex = 0;
+  } };
+}
+
+function renderChatInputStateful({ getDraftByKey = {} } = {}) {
+  const host = createChatInputHookHost();
+  const components = { Button() {}, Icon() {} };
+  const context = {
+    ...components,
+    React: host.React,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    useT: () => (key) => key,
+    authScope: () => "test-scope",
+    stageFiles: async () => ({ staged: [], errors: [] }),
+    commandMenuMatches,
+    commandMenuToken,
+    commandMenuSelectionReducer,
+    INITIAL_COMMAND_MENU_SELECTION,
+    useAttachmentConfig: () => ({
+      accept: [],
+      maxCount: 10,
+      maxFileBytes: 1024,
+      maxTotalBytes: 2048,
+    }),
+    NEW_DRAFT_KEY: "__new__",
+    clearDraft: () => {},
+    clearStagedAttachments: () => {},
+    getDraft: (key) => getDraftByKey[key] || "",
+    getStagedAttachments: () => [],
+    setDraft: () => {},
+    setStagedAttachments: () => {},
+    window: {
+      clearTimeout: () => {},
+      requestAnimationFrame: (fn) => fn(),
+      setTimeout: () => 1,
+    },
+  };
+  vm.runInNewContext(chatInputSourceForTest(), context);
+  const ChatInputFn = context.globalThis.__testExports.ChatInput;
+  return {
+    components,
+    render: (props) => {
+      host.beginRender();
+      return ChatInputFn({
+        onSend: async () => {},
+        disabled: false,
+        sendDisabled: false,
+        canCancel: false,
+        commands: [],
+        ...props,
+      });
+    },
+  };
+}
+
 test("ChatInput ArrowDown moves the active command-menu row", () => {
   const setCalls = [];
   const { tree } = renderChatInput({
@@ -744,6 +836,86 @@ test("ChatInput Tab completes the active command-menu row", async () => {
   );
 });
 
+test("ChatInput Enter submits an exact single command-menu match instead of completing it again", async () => {
+  // Regression (item 3): a draft that's already an exact, sole match for one
+  // command ("/status" against a menu whose only row is "status") kept the
+  // menu open, so Enter rewrote the draft to "/status " (a no-op completion)
+  // and the user had to press Enter twice. Enter must submit here instead —
+  // Tab still completes (covered separately below).
+  const setCalls = [];
+  const sentContents = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/status",
+    commands: MENU_COMMANDS,
+    onSend: async (content) => {
+      sendCalls += 1;
+      sentContents.push(content);
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await flushAsyncHandlers();
+
+  // Still prevented — by the bottom Enter-to-send handler, not the menu's
+  // completion branch.
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 1, "Enter on an exact single match must submit");
+  assert.deepEqual(sentContents, ["/status"]);
+  // The draft was submitted (and cleared by handleSend's own send-start
+  // reset), not rewritten to the completed "/status " form.
+  const textCalls = setCalls.filter((call) => call.index === 0);
+  assert.deepEqual(textCalls, [{ index: 0, value: "" }]);
+});
+
+test("ChatInput Enter still completes a single command-menu match that is only a partial prefix", async () => {
+  // The critical boundary the fix above must not overshoot: a menu with
+  // exactly one row is not by itself an exact match — "/stat" also narrows
+  // MENU_COMMANDS to the single "status" row, but the draft is still a
+  // partial prefix, so Enter must complete it (not submit "/stat").
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/stat",
+    commands: MENU_COMMANDS,
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0, "a partial single match must still complete, not submit");
+  const textCalls = setCalls.filter((call) => call.index === 0);
+  assert.deepEqual(textCalls, [{ index: 0, value: "/status " }]);
+});
+
 test("ChatInput Escape dismisses the command menu so a later Enter sends normally", async () => {
   const setCalls = [];
   let sendCalls = 0;
@@ -795,6 +967,49 @@ test("ChatInput Escape dismisses the command menu so a later Enter sends normall
   assert.deepEqual(textCalls, [{ index: 0, value: "" }]);
 });
 
+test("ChatInput resets a dismissed command menu when the draft key changes", () => {
+  // Regression (item 4): `menuSelection`/`commandTokenRef` were reset only
+  // from `handleChange`. The draft-restore effect sets `text` programmatically
+  // on a thread switch without going through that reset, so an Esc-dismissal
+  // on thread A hid the menu on thread B until the first keystroke there.
+  const { render } = renderChatInputStateful({
+    getDraftByKey: { "thread-a": "/mo", "thread-b": "/mo" },
+  });
+
+  // Render #1: mount on thread-a with a menu-matching draft.
+  let tree = render({ draftKey: "thread-a", commands: MENU_COMMANDS });
+  assert.ok(
+    findCommandOption(tree, "model"),
+    "menu open on thread-a before dismissal",
+  );
+
+  // Dismiss it (Esc) — same handler exercised by the Escape test above.
+  const textareaProps = templateProps(findTextarea(tree));
+  textareaProps.onKeyDown({ key: "Escape", preventDefault: () => {} });
+
+  // Re-render the SAME draftKey (mirrors React committing the Esc setState)
+  // to observe the dismissal actually took effect.
+  tree = render({ draftKey: "thread-a", commands: MENU_COMMANDS });
+  assert.equal(
+    findCommandOption(tree, "model"),
+    null,
+    "menu dismissed on thread-a",
+  );
+
+  // Switch to thread-b: draftKey changes, so the draft-restore effect fires.
+  render({ draftKey: "thread-b", commands: MENU_COMMANDS });
+  // The effect's own setState call lands after this render function
+  // returns (mirrors real React's post-commit effect timing, not a
+  // same-render synchronous update) — render once more with the same props
+  // to observe the settled post-effect state.
+  tree = render({ draftKey: "thread-b", commands: MENU_COMMANDS });
+
+  assert.ok(
+    findCommandOption(tree, "model"),
+    "the menu must be available again on thread-b, not suppressed by thread-a's dismissal",
+  );
+});
+
 test("ChatInput command-menu rows render the title and description", () => {
   const { tree } = renderChatInput({
     disabled: false,
@@ -844,6 +1059,33 @@ test("ChatInput command-menu highlights the typed prefix in the row's name", () 
   // from the highlighted prefix rather than baked into one string.
   assert.equal(extractText(modelRow).includes("mo"), true);
   assert.equal(extractText(modelRow).includes("del"), true);
+});
+
+test("ChatInput command-menu rows are non-focusable listbox options, not tab stops", () => {
+  // Regression (item 7, a11y): a focusable <button role="option"> inside
+  // role="listbox" is a second, competing tab stop alongside the textarea's
+  // own aria-activedescendant-driven selection, breaking the listbox
+  // pattern. Rows must render as a non-focusable element (mouse handlers
+  // preserved) so the textarea remains the only stop.
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+
+  const modelRow = findCommandOption(tree, "model");
+  assert.ok(modelRow, "expected a command-menu row for 'model'");
+  assert.equal(
+    modelRow.type,
+    "div",
+    "command-menu rows must not render as a focusable <button>",
+  );
+  assert.equal(modelRow.props.role, "option");
+  assert.equal(typeof modelRow.props.onClick, "function", "click-to-complete must still be wired");
+  assert.equal(typeof modelRow.props.onMouseEnter, "function", "hover-to-select must still be wired");
+  assert.equal(typeof modelRow.props.onMouseDown, "function", "focus-steal prevention must still be wired");
 });
 
 test("ChatInput Shift+Enter and Shift+Tab fall through the open command menu", async () => {

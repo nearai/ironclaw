@@ -213,19 +213,30 @@ export function Chat({
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
+      // A newly created thread (from either path below) is not yet the
+      // selected/active one — route the browser to it, exactly as the send
+      // path already did, so the result (a system notice for a command, the
+      // first reply for a message) renders somewhere visible.
+      const selectResponseThread = (response) => {
+        const responseThreadId = response?.thread_id || activeThreadId;
+        if (!activeThreadId && responseThreadId && onSelectThread) {
+          onSelectThread(responseThreadId, { replace: true });
+        }
+      };
       // Slash text naming an inventory command executes as a product command
       // (no turn); anything else — including unknown slash text — submits as
-      // an ordinary message, matching channel behavior. Commands need an
-      // existing conversation (the execute route is thread-scoped), so on
-      // the landing view slash text simply opens the thread as a message —
-      // the same first-contact semantics channels have.
+      // an ordinary message, matching channel behavior. Commands no longer
+      // require a pre-existing conversation: `runCommand` creates one itself
+      // (mirroring `send`) when called from the landing composer, so the
+      // primary entry point can run a command on first contact too.
       if (
-        activeThreadId &&
         images.length === 0 &&
         attachments.length === 0 &&
         matchCommand(content, chatCommands)
       ) {
-        return await runCommand(content);
+        const response = await runCommand(content);
+        selectResponseThread(response);
+        return response;
       }
       const response = await send(content, {
         images,
@@ -233,10 +244,7 @@ export function Chat({
         displayContent,
         threadId: activeThreadId,
       });
-      const responseThreadId = response?.thread_id || activeThreadId;
-      if (!activeThreadId && responseThreadId && onSelectThread) {
-        onSelectThread(responseThreadId, { replace: true });
-      }
+      selectResponseThread(response);
       return response;
     },
     [
@@ -358,7 +366,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
-            commands={activeThreadId ? chatCommands : []}
+            commands={chatCommands}
             disabled={false}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}
@@ -476,7 +484,7 @@ export function Chat({
 
           <ChatInput
             onSend={handleSend}
-            commands={activeThreadId ? chatCommands : []}
+            commands={chatCommands}
             disabled={false}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}

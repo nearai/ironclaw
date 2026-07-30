@@ -170,6 +170,7 @@ use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Notify, oneshot};
+use tracing_test::traced_test;
 
 fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
@@ -14356,6 +14357,12 @@ fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> 
 #[derive(Default)]
 struct FakeAdminUsers {
     users: Mutex<HashMap<String, AdminUserRecord>>,
+    // Regression counter for item 6 of the PR-2 palette review fix wave:
+    // `execute_product_command` must read the admin directory exactly once
+    // per request (resolved once at the top and reused), never twice (the
+    // audience gate + the Lifecycle/Unknown help-text arm previously each
+    // called `caller_is_command_admin`, which calls `get_user`, separately).
+    get_user_calls: Mutex<usize>,
 }
 
 impl FakeAdminUsers {
@@ -14366,7 +14373,12 @@ impl FakeAdminUsers {
             .collect();
         Self {
             users: Mutex::new(map),
+            get_user_calls: Mutex::new(0),
         }
+    }
+
+    fn get_user_calls(&self) -> usize {
+        *self.get_user_calls.lock().unwrap()
     }
 }
 
@@ -14403,6 +14415,7 @@ impl AdminUserService for FakeAdminUsers {
         _tenant: &TenantId,
         user_id: &UserId,
     ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        *self.get_user_calls.lock().unwrap() += 1;
         Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
     }
 
@@ -15480,6 +15493,91 @@ async fn member_execute_non_slash_text_is_invalid_request_with_empty_command() {
     assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
 }
 
+// PR-2 review fix wave, item 5: the parse-stage `Err(_)` and
+// `ProductCommand::from_payload` `Err(_rejection)` arms correctly keep the
+// underlying cause off the wire (the leak rule above), but previously logged
+// nothing at all — a caller's own malformed command left no server-side
+// trail to debug. Both arms must now bind the cause and log it at `debug!`
+// (never `info!`/`warn!`, matching the repo's REPL-safe logging-level rule).
+#[tokio::test]
+#[traced_test]
+async fn execute_malformed_slash_text_logs_the_parse_cause_at_debug_level() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    // A bare "/" is empty after the slash — fails at
+    // `parse_product_slash_command` itself (`ProductSlashCommandParseError`),
+    // a different branch than the non-slash-text case above.
+    let response =
+        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/")
+            .await
+            .expect("a malformed slash line is a rejection, not a transport error");
+
+    assert_eq!(response.command, "");
+    let rejection = response
+        .rejection
+        .expect("an empty slash command must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    // The wire response never carries the raw parser error (leak rule
+    // above) — but the server-side cause must still be logged, not
+    // silently dropped.
+    assert!(
+        logs_contain("product command parse rejected"),
+        "the parse-stage rejection cause must be logged at debug level before mapping to help text"
+    );
+    assert!(
+        logs_contain("slash command is empty"),
+        "the bound parser error's own Display message must appear in the log line"
+    );
+}
+
+#[tokio::test]
+#[traced_test]
+async fn execute_command_argument_rejection_logs_the_cause_at_debug_level() {
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+    );
+
+    // Parses fine (a recognized command word), but `from_payload` rejects it
+    // for a missing argument — a different branch than the parse-stage
+    // failure above.
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model set-provider",
+    )
+    .await
+    .expect("a missing-argument command is a rejection, not a transport error");
+
+    let rejection = response
+        .rejection
+        .expect("model set-provider with no provider id must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    assert!(
+        logs_contain("product command argument rejection"),
+        "the argument-rejection cause must be logged at debug level before mapping to help text"
+    );
+    // The rejection's `reason` is a `RedactedString` (never logged even in
+    // Debug form, by design) — `kind` is the safe categorical signal that
+    // must appear instead.
+    assert!(
+        logs_contain("InvalidRequest"),
+        "the rejection kind must appear in the log line"
+    );
+}
+
 // Mirrors the cross-user-access idiom used throughout this file (e.g.
 // `get_run_state_rejects_cross_user_access`: "404 rather than 403 so the
 // existence of Alice's thread is not leaked"). `execute_product_status_command`
@@ -15578,6 +15676,46 @@ async fn admin_execute_lifecycle_command_stays_listing_only() {
         .rejection
         .expect("lifecycle commands must be rejected as non-executable here");
     assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+// PR-2 review fix wave, item 6: an admin caller executing a Lifecycle
+// command is exactly the path that used to read the admin directory twice —
+// once at the audience gate (Lifecycle requires Admin audience, so the
+// `required_audience(&command) == Admin && !is_admin` short-circuit actually
+// evaluates `caller_is_command_admin`) and again while building the
+// listing-only help response in the Lifecycle/Unknown arm. `is_admin` must
+// now be resolved once at the top of `execute_product_command` and reused,
+// so the SAME request reads the directory exactly once — not zero (it must
+// still run at least once; this is not a cache), not two.
+#[tokio::test]
+async fn admin_execute_lifecycle_command_reads_admin_directory_exactly_once() {
+    let admin_users = Arc::new(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(admin_users.clone())
+    .with_llm_config_service(Arc::new(SetupRecordingLlmConfigService::default()));
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/extension_list",
+    )
+    .await
+    .expect("lifecycle listing-only is a rejection, not a transport error");
+
+    assert!(response.result.is_none());
+    assert_eq!(
+        admin_users.get_user_calls(),
+        1,
+        "the admin directory must be read exactly once per execute_product_command call"
+    );
 }
 
 // FINDING 2 (Task 3 re-review): only an ACTIVE admin record counts on both

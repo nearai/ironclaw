@@ -86,22 +86,39 @@ where
     /// Every parse-stage failure (ordinary text, an empty/malformed slash
     /// line, or a `ProductCommand::from_payload` argument rejection) becomes a
     /// role-filtered `InvalidRequest` help response — the underlying
-    /// rejection's internal reason is never surfaced (leak rule, matching the
-    /// channel observer's `InvalidRequest` -> help-text behavior). An
-    /// Admin-audience command is rejected with a fixed `AccessDenied` message
-    /// before its handler ever runs when the caller is not a command admin.
-    /// The Lifecycle family stays listing-only (non-executable) here even for
-    /// admins, per the PR-2 spec.
+    /// rejection's internal reason is never surfaced on the wire (leak rule,
+    /// matching the channel observer's `InvalidRequest` -> help-text
+    /// behavior), though the sanitized cause is logged server-side at debug
+    /// level before it's mapped away. An Admin-audience command is rejected
+    /// with a fixed `AccessDenied` message before its handler ever runs when
+    /// the caller is not a command admin. The Lifecycle family stays
+    /// listing-only (non-executable) here even for admins, per the PR-2 spec.
+    ///
+    /// `is_admin` is resolved once, here, and reused by every branch below
+    /// that needs the caller's admin standing — never re-queried per branch.
+    /// Still exactly one admin-directory lookup per request (never cached
+    /// across requests).
     pub(super) async fn execute_product_command(
         &self,
         caller: ProductSurfaceCaller,
         request: RebornExecuteProductCommandRequest,
     ) -> Result<RebornExecuteProductCommandResponse, ProductSurfaceError> {
+        let is_admin = self.caller_is_command_admin(&caller).await?;
+
         let payload =
             match parse_product_slash_command(&request.text, ProductTriggerReason::DirectChat) {
                 Ok(Some(payload)) => payload,
-                Ok(None) | Err(_) => {
-                    let is_admin = self.caller_is_command_admin(&caller).await?;
+                Ok(None) => {
+                    return Ok(Self::invalid_request_response(
+                        String::new(),
+                        Self::caller_command_help_text(is_admin),
+                    ));
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "product command parse rejected; returning role-filtered help text"
+                    );
                     return Ok(Self::invalid_request_response(
                         String::new(),
                         Self::caller_command_help_text(is_admin),
@@ -111,8 +128,17 @@ where
         let command_name = payload.command.clone();
         let command = match ProductCommand::from_payload(&payload) {
             Ok(command) => command,
-            Err(_rejection) => {
-                let is_admin = self.caller_is_command_admin(&caller).await?;
+            Err(rejection) => {
+                // `rejection.reason` is a `RedactedString` — its Display/Debug
+                // both always print the fixed placeholder, by design (never
+                // even a debug-log leak). `kind`/`disposition` are safe
+                // categorical enums that still say *which* validation failed.
+                tracing::debug!(
+                    command = %command_name,
+                    kind = ?rejection.kind,
+                    disposition = ?rejection.disposition(),
+                    "product command argument rejection; returning role-filtered help text"
+                );
                 return Ok(Self::invalid_request_response(
                     command_name,
                     Self::caller_command_help_text(is_admin),
@@ -120,9 +146,7 @@ where
             }
         };
 
-        if required_audience(&command) == CommandAudience::Admin
-            && !self.caller_is_command_admin(&caller).await?
-        {
+        if required_audience(&command) == CommandAudience::Admin && !is_admin {
             return Ok(RebornExecuteProductCommandResponse {
                 command: command_name,
                 result: None,
@@ -161,7 +185,6 @@ where
             // PR — listing-only, even for an admin caller that just cleared
             // the audience gate above.
             ProductCommand::Lifecycle { .. } | ProductCommand::Unknown { .. } => {
-                let is_admin = self.caller_is_command_admin(&caller).await?;
                 Ok(Self::invalid_request_response(
                     command_name,
                     Self::caller_command_help_text(is_admin),

@@ -94,3 +94,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+# Captures per-test tracing output so the command-palette parse/rejection
+# debug! logging (item 5 of the PR-2 review fix wave) can be asserted on
+# through the caller, not just trusted by inspection.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

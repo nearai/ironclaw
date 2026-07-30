@@ -112,21 +112,6 @@ export function ChatInput({
     autoResize();
   }, [text, autoResize]);
 
-  // Restore the persisted draft when the active conversation changes
-  // (draftKey switches). The initialText effect below runs after this
-  // and overrides when a location.state draft was passed in, so an
-  // explicit hand-off draft still wins over the stored one.
-  React.useEffect(() => {
-    const restored = getDraft(draftKey);
-    textRef.current = restored;
-    setText(restored);
-    // Flush any queued write (for the previous key) before this key changes
-    // or the composer unmounts, so a debounced draft is never lost. The
-    // authenticated scope is part of the dependency list because the same
-    // composer can stay mounted across a token/session switch.
-    return () => flushDraft();
-  }, [draftKey, storageScope, flushDraft]);
-
   // Keep the in-memory staged-attachment store in sync so files survive
   // navigating away from (and back to) this composer, the same way the text
   // draft does. On a conversation switch, *re-read* the new key's files and
@@ -162,6 +147,34 @@ export function ChatInput({
   );
   const activeMenuCommand = menuOpen ? menuCommands[activeMenuIndex] : null;
 
+  // Shared by every place `text` is set PROGRAMMATICALLY rather than via
+  // `handleChange` (draft restore on a thread switch, an explicit
+  // `initialText` hand-off) so the command menu's selection/dismissed state
+  // never survives across a swap it wasn't dismissed for. Without this, an
+  // Esc-dismissal on one draft key hides the menu on the next one until the
+  // first keystroke there re-triggers `handleChange`'s own reset.
+  const resetCommandMenuSelection = React.useCallback((forText) => {
+    commandTokenRef.current = commandMenuToken(forText);
+    menuSelectionRef.current = INITIAL_COMMAND_MENU_SELECTION;
+    setMenuSelection(INITIAL_COMMAND_MENU_SELECTION);
+  }, []);
+
+  // Restore the persisted draft when the active conversation changes
+  // (draftKey switches). The initialText effect below runs after this
+  // and overrides when a location.state draft was passed in, so an
+  // explicit hand-off draft still wins over the stored one.
+  React.useEffect(() => {
+    const restored = getDraft(draftKey);
+    textRef.current = restored;
+    setText(restored);
+    resetCommandMenuSelection(restored);
+    // Flush any queued write (for the previous key) before this key changes
+    // or the composer unmounts, so a debounced draft is never lost. The
+    // authenticated scope is part of the dependency list because the same
+    // composer can stay mounted across a token/session switch.
+    return () => flushDraft();
+  }, [draftKey, storageScope, flushDraft, resetCommandMenuSelection]);
+
   React.useEffect(() => {
     if (
       stagedDraftKeyRef.current !== draftKey ||
@@ -182,6 +195,7 @@ export function ChatInput({
     if (!initialText) return;
     textRef.current = initialText;
     setText(initialText);
+    resetCommandMenuSelection(initialText);
     window.requestAnimationFrame(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
@@ -191,7 +205,7 @@ export function ChatInput({
         );
       }
     });
-  }, [initialText, resetKey]);
+  }, [initialText, resetKey, resetCommandMenuSelection]);
 
   // Stage dropped/picked/pasted files: validate against the server contract,
   // append the accepted ones, and surface any rejection reasons as a single
@@ -436,7 +450,7 @@ export function ChatInput({
           setMenuSelection(next);
           return;
         }
-        if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+        if (e.key === "Tab" && !e.shiftKey) {
           e.preventDefault();
           const boundedIndex = Math.max(
             0,
@@ -444,6 +458,28 @@ export function ChatInput({
           );
           completeMenuCommand(openMenuCommands[boundedIndex]);
           return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          const boundedIndex = Math.max(
+            0,
+            Math.min(menuSelectionRef.current.index, openMenuCommands.length - 1)
+          );
+          const activeCommand = openMenuCommands[boundedIndex];
+          // Read the live text (not the render-scope `commandToken`, which
+          // this stable-identity callback would otherwise close over stale)
+          // to decide whether the draft is already an exact match for the
+          // menu's only row.
+          const liveToken = commandMenuToken(textRef.current);
+          const isExactSingleMatch =
+            openMenuCommands.length === 1 && activeCommand?.name === liveToken;
+          if (!isExactSingleMatch) {
+            e.preventDefault();
+            completeMenuCommand(activeCommand);
+            return;
+          }
+          // Exact match on the menu's only row: fall through to the normal
+          // Enter-to-send handling below instead of completing (rewriting
+          // the draft to itself) a second time.
         }
         // Shift+Enter/Shift+Tab fall through unhandled here — identical to
         // the menu-closed case (native newline / focus-shift), not a
@@ -564,10 +600,15 @@ export function ChatInput({
                 const matchedPrefix = command.name.slice(0, prefixLength);
                 const restOfName = command.name.slice(prefixLength);
                 return (
-                  <button
+                  // A non-focusable row: the textarea drives selection via
+                  // `aria-activedescendant`, so a row must not be its own
+                  // tab stop (a focusable <button> here would be a second,
+                  // competing stop inside role="listbox"). Mouse handlers
+                  // (click-to-complete, hover-to-select, focus-steal
+                  // prevention) still work on a plain element.
+                  <div
                     key={command.name}
                     id={`chat-command-option-${command.name}`}
-                    type="button"
                     role="option"
                     aria-selected={isActive}
                     onMouseDown={(e) => e.preventDefault()}
@@ -587,7 +628,7 @@ export function ChatInput({
                     </span>
                     {isActive &&
                     (<span className="text-iron-400">{command.usage}</span>)}
-                  </button>
+                  </div>
                 );
               }
             )}
