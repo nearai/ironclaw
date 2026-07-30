@@ -407,6 +407,25 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the exact number of text-only system-inference provider calls.
+    pub async fn assert_text_model_provider_call_count(
+        &self,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.text_calls();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected {expected} text-only model provider call(s), observed {actual}")
+                .into(),
+        )
+    }
+
     /// Assert no request seen by the recoverable-failure provider contains
     /// `needle`, including requests rejected before `TraceLlm` delegation.
     pub async fn assert_model_message_content_not_contains(
@@ -1123,6 +1142,36 @@ impl RebornIntegrationHarness {
         Err(format!(
             "expected seeded user daily cap {expected:?} (compiled default), saw {:?}",
             limits.max_usd
+        )
+        .into())
+    }
+
+    /// Assert provider-reported token usage was durably reconciled by the
+    /// production budget accountant.
+    pub async fn assert_budget_spent_tokens(
+        &self,
+        expected_input: u64,
+        expected_output: u64,
+    ) -> HarnessResult<()> {
+        let governor = self._shared.budget_governor.as_ref().ok_or(
+            "harness was not built with budget accounting wired (call with_budget_accounting)",
+        )?;
+        let account = self
+            ._shared
+            .budget_account
+            .as_ref()
+            .ok_or("budget-accounting harness is missing its run-owner account")?;
+        let snapshot = governor
+            .account_snapshot(account)
+            .map_err(|e| format!("budget account snapshot failed: {e}"))?
+            .ok_or("budget accountant never recorded model usage")?;
+        let spent = snapshot.ledger.spent;
+        if spent.input_tokens == expected_input && spent.output_tokens == expected_output {
+            return Ok(());
+        }
+        Err(format!(
+            "expected spent tokens ({expected_input}, {expected_output}), saw ({}, {})",
+            spent.input_tokens, spent.output_tokens
         )
         .into())
     }

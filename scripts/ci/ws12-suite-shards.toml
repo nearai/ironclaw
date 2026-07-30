@@ -29,7 +29,7 @@ evidence = "tests/e2e/reborn_responses_e2e_tests.txt"
 
 [[suite]]
 path = "tests/e2e/scenarios/test_reborn_webui_harness_artifacts.py"
-affinity = "webui-smoke-files"
+affinity = "served-api-routes"
 historical_seconds = 22
 retry = "never"
 

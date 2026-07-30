@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::LoopGateRef;
 
+use super::model::LoopModelUsage;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorKind {
@@ -26,7 +28,15 @@ pub enum AgentLoopHostErrorKind {
     /// filter rejected the request or response.
     ContentFiltered,
     PolicyDenied,
+    /// Generic non-model resource/capacity exhaustion. Model-call budget and
+    /// token-window outcomes use the three precise variants below.
     BudgetExceeded,
+    /// The configured host-side spend budget cannot admit another model call.
+    SpendBudgetExceeded,
+    /// The model input exceeded the provider's context window.
+    ContextOverflow,
+    /// The provider stopped because generated output hit its token ceiling.
+    OutputTruncated,
     /// The model call would push utilization past the configured pause
     /// threshold. Callers surface an approval gate (foreground or
     /// background) and retry after the user resolves it.
@@ -59,6 +69,9 @@ impl AgentLoopHostErrorKind {
             Self::ContentFiltered => "content_filtered",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
+            Self::SpendBudgetExceeded => "spend_budget_exceeded",
+            Self::ContextOverflow => "context_overflow",
+            Self::OutputTruncated => "output_truncated",
             Self::BudgetApprovalRequired => "budget_approval_required",
             Self::BudgetAccountingFailed => "budget_accounting_failed",
             Self::RateLimited => "rate_limited",
@@ -86,9 +99,10 @@ impl AgentLoopHostErrorKind {
             Self::InvalidOutput => FailureKind::OutputDecode,
             Self::ContentFiltered => FailureKind::OperationFailed,
             Self::PolicyDenied => FailureKind::PolicyDenied,
-            // A budget limit the model could work around (smaller call, fewer
-            // tools) — the honest resource-quota kind.
-            Self::BudgetExceeded => FailureKind::Resource,
+            Self::BudgetExceeded | Self::SpendBudgetExceeded | Self::ContextOverflow => {
+                FailureKind::Resource
+            }
+            Self::OutputTruncated => FailureKind::OutputTooLarge,
             // "Callers surface an approval gate and retry after the user
             // resolves it" (variant doc) — a PARK semantic, so the projection
             // must carry the Park-fated kind, not a model-visible tool error.
@@ -141,6 +155,9 @@ pub struct AgentLoopHostError {
     /// route available for recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
     /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
     /// carries the original error text (paths, codes, schema refs) so the model
     /// can retry or explain. Secret VALUES are redacted by the producer via
@@ -159,6 +176,7 @@ impl AgentLoopHostError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -184,6 +202,11 @@ impl AgentLoopHostError {
 
     pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
         self.next_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 }
@@ -252,10 +275,18 @@ mod tests {
                 .failure_kind()
                 .is_retryable()
         );
-        // The genuine budget outcome keeps the resource-quota kind.
+        // Generic capacity, configured spend, and context-window exhaustion
+        // remain resource-shaped, while truncated output is output-shaped.
+        for kind in [
+            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::SpendBudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
+        ] {
+            assert_eq!(kind.failure_kind(), FailureKind::Resource);
+        }
         assert_eq!(
-            AgentLoopHostErrorKind::BudgetExceeded.failure_kind(),
-            FailureKind::Resource
+            AgentLoopHostErrorKind::OutputTruncated.failure_kind(),
+            FailureKind::OutputTooLarge
         );
     }
 }
