@@ -17,6 +17,13 @@ HUNK_RE = re.compile(r"^@@ .* \+(?P<start>\d+)(?:,(?P<count>\d+))? @@")
 PRODUCT_SOURCE_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
 
 
+def _is_rust_unit_test_source(path: str) -> bool:
+    """Return whether a crate source path is a conventional Rust test module."""
+    source_path = path.partition("/src/")[2]
+    parts = source_path.split("/")
+    return parts[-1] == "tests.rs" or "tests" in parts[:-1]
+
+
 def _normalize_source_path(path: str) -> str:
     normalized = path.replace("\\", "/")
     marker = "crates/"
@@ -89,6 +96,7 @@ def evaluate(
         path: lines
         for path, lines in _changed_lines(diff_text).items()
         if PRODUCT_SOURCE_RE.fullmatch(path)
+        and not _is_rust_unit_test_source(path)
         and not _is_exempt(path, module_exemptions, crate_exemptions)
     }
     coverage = _lcov_lines(lcov_text)
