@@ -32,6 +32,7 @@ VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
 SSO_GOOGLE_CLIENT_ID = "reborn-v2-e2e-google-client"
 DEFAULT_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
+MAX_SERVER_LOG_BYTES = 16 * 1024 * 1024
 _ARTIFACT_PENDING_SENTINEL = ".pytest-outcome-pending"
 _ARTIFACT_FAILED_SENTINEL = ".pytest-outcome-failed"
 _ARTIFACT_BUNDLES_BY_NODE: dict[
@@ -39,6 +40,10 @@ _ARTIFACT_BUNDLES_BY_NODE: dict[
     list[tuple[Path, Path, int]],
 ] = {}
 _ARTIFACT_FAILED_NODES: set[str] = set()
+_process_log_drains: dict[
+    object,
+    tuple[tuple[asyncio.Task[None], ...], Path, int],
+] = {}
 
 # Shared tenant secret for the test-tools/market-data fixture (test-tools/README.md).
 # `IRONCLAW_REBORN_DEV_SECRET__<handle>` is read once at `serve` boot, so it must
@@ -79,18 +84,22 @@ def _artifact_bundle_is_protected(artifact_dir: Path) -> bool:
 
 
 def _enforce_artifact_budget(
-    browser_artifact_root: Path,
+    artifact_root: Path,
     max_bytes: int,
-    current_artifact_dir: Path,
+    current_artifact_dir: Path | None,
 ) -> None:
-    """Prune successful artifacts while preserving pending and failed bundles."""
-    bundles = [
-        path
-        for path in browser_artifact_root.iterdir()
-        if path.is_dir()
-    ]
+    """Keep the complete upload tree bounded, pruning protected bundles last."""
+    if not artifact_root.exists():
+        return
+
+    browser_artifact_root = artifact_root / "browser"
+    bundles = (
+        [path for path in browser_artifact_root.iterdir() if path.is_dir()]
+        if browser_artifact_root.exists()
+        else []
+    )
     bundle_sizes = {path: _directory_size(path) for path in bundles}
-    total_bytes = sum(bundle_sizes.values())
+    total_bytes = _directory_size(artifact_root)
     if total_bytes <= max_bytes:
         return
 
@@ -109,21 +118,26 @@ def _enforce_artifact_budget(
         total_bytes -= bundle_sizes[path]
         shutil.rmtree(path)
 
-    if (
-        total_bytes <= max_bytes
-        or not current_artifact_dir.exists()
-        or _artifact_bundle_is_protected(current_artifact_dir)
-    ):
+    if total_bytes <= max_bytes:
         return
 
+    protected_bundles = {
+        path
+        for path in bundles
+        if path.exists() and _artifact_bundle_is_protected(path)
+    }
     largest_first = sorted(
         (
             path
-            for path in current_artifact_dir.rglob("*")
+            for path in artifact_root.rglob("*")
             if path.is_file()
+            and path.name
+            not in {_ARTIFACT_PENDING_SENTINEL, _ARTIFACT_FAILED_SENTINEL}
         ),
-        key=lambda path: path.stat().st_size,
-        reverse=True,
+        key=lambda path: (
+            any(bundle in path.parents for bundle in protected_bundles),
+            -path.stat().st_size,
+        ),
     )
     for path in largest_first:
         if total_bytes <= max_bytes:
@@ -133,14 +147,55 @@ def _enforce_artifact_budget(
         total_bytes -= file_size
 
 
+def _server_log_max_bytes(artifact_max_bytes: int) -> int:
+    """Reserve a bounded fraction of the shard budget for each server stream."""
+    return max(1, min(MAX_SERVER_LOG_BYTES, artifact_max_bytes // 16))
+
+
+async def _drain_stream_to_bounded_file(
+    stream: asyncio.StreamReader,
+    path: Path,
+    max_bytes: int,
+) -> None:
+    """Continuously drain a process stream while retaining a bounded tail."""
+    retained_bytes = max(1, max_bytes // 2)
+    with path.open("w+b") as output:
+        while chunk := await stream.read(64 * 1024):
+            output.seek(0, os.SEEK_END)
+            output.write(chunk)
+            if output.tell() <= max_bytes:
+                continue
+
+            output.flush()
+            output.seek(-retained_bytes, os.SEEK_END)
+            tail = output.read(retained_bytes)
+            output.seek(0)
+            output.write(tail)
+            output.truncate()
+
+
+async def _finalize_process_logs(proc) -> None:
+    drain_state = _process_log_drains.pop(proc, None)
+    if drain_state is None:
+        return
+
+    tasks, artifact_root, artifact_max_bytes = drain_state
+    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        _enforce_artifact_budget(artifact_root, artifact_max_bytes, None)
+    except OSError:
+        # Diagnostics cleanup must never replace the scenario's real result.
+        pass
+
+
 def _register_artifact_bundle(
     node_id: str,
-    browser_artifact_root: Path,
+    artifact_root: Path,
     artifact_dir: Path,
     max_bytes: int,
 ) -> None:
     _ARTIFACT_BUNDLES_BY_NODE.setdefault(node_id, []).append(
-        (browser_artifact_root, artifact_dir, max_bytes)
+        (artifact_root, artifact_dir, max_bytes)
     )
     outcome = "failed" if node_id in _ARTIFACT_FAILED_NODES else "pending"
     _mark_artifact_bundle_outcome(artifact_dir, outcome)
@@ -150,7 +205,11 @@ def _mark_registered_artifact_bundles_failed(node_id: str) -> None:
     _ARTIFACT_FAILED_NODES.add(node_id)
     for _, artifact_dir, _ in _ARTIFACT_BUNDLES_BY_NODE.get(node_id, []):
         if artifact_dir.exists():
-            _mark_artifact_bundle_outcome(artifact_dir, "failed")
+            try:
+                _mark_artifact_bundle_outcome(artifact_dir, "failed")
+            except OSError:
+                # Diagnostics bookkeeping must not replace the scenario failure.
+                pass
 
 
 def _finalize_registered_artifact_bundles(node_id: str) -> None:
@@ -159,20 +218,28 @@ def _finalize_registered_artifact_bundles(node_id: str) -> None:
     _ARTIFACT_FAILED_NODES.discard(node_id)
     for _, artifact_dir, _ in bundles:
         if artifact_dir.exists():
-            _mark_artifact_bundle_outcome(
-                artifact_dir,
-                "failed" if failed else "passed",
-            )
+            try:
+                _mark_artifact_bundle_outcome(
+                    artifact_dir,
+                    "failed" if failed else "passed",
+                )
+            except OSError:
+                # Diagnostics bookkeeping must not replace the scenario result.
+                pass
 
     roots: dict[tuple[Path, int], Path] = {}
-    for browser_artifact_root, artifact_dir, max_bytes in bundles:
-        roots[(browser_artifact_root, max_bytes)] = artifact_dir
-    for (browser_artifact_root, max_bytes), current_artifact_dir in roots.items():
-        _enforce_artifact_budget(
-            browser_artifact_root,
-            max_bytes,
-            current_artifact_dir,
-        )
+    for artifact_root, artifact_dir, max_bytes in bundles:
+        roots[(artifact_root, max_bytes)] = artifact_dir
+    for (artifact_root, max_bytes), current_artifact_dir in roots.items():
+        try:
+            _enforce_artifact_budget(
+                artifact_root,
+                max_bytes,
+                current_artifact_dir,
+            )
+        except OSError:
+            # Pytest calls this from teardown; preserve the scenario result.
+            pass
 
 
 def _artifact_max_bytes() -> int:
@@ -199,12 +266,12 @@ class _ArtifactContext:
         self,
         context,
         artifact_dir: Path,
-        browser_artifact_root: Path,
+        artifact_root: Path,
         artifact_max_bytes: int,
     ):
         self._context = context
         self._artifact_dir = artifact_dir
-        self._browser_artifact_root = browser_artifact_root
+        self._artifact_root = artifact_root
         self._artifact_max_bytes = artifact_max_bytes
         self._closed = False
 
@@ -234,11 +301,15 @@ class _ArtifactContext:
         except PlaywrightError:
             pass
         await self._context.close()
-        _enforce_artifact_budget(
-            self._browser_artifact_root,
-            self._artifact_max_bytes,
-            self._artifact_dir,
-        )
+        try:
+            _enforce_artifact_budget(
+                self._artifact_root,
+                self._artifact_max_bytes,
+                self._artifact_dir,
+            )
+        except OSError:
+            # Diagnostics cleanup must never replace the scenario's real result.
+            pass
 
 
 class _ArtifactBrowser:
@@ -251,6 +322,7 @@ class _ArtifactBrowser:
         artifact_max_bytes: int,
     ):
         self._browser = browser
+        self._artifact_root = artifact_root
         self._browser_artifact_root = artifact_root / "browser"
         self._artifact_max_bytes = artifact_max_bytes
 
@@ -267,7 +339,7 @@ class _ArtifactBrowser:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         _register_artifact_bundle(
             node_id,
-            self._browser_artifact_root,
+            self._artifact_root,
             artifact_dir,
             self._artifact_max_bytes,
         )
@@ -282,7 +354,7 @@ class _ArtifactBrowser:
         return _ArtifactContext(
             context,
             artifact_dir,
-            self._browser_artifact_root,
+            self._artifact_root,
             self._artifact_max_bytes,
         )
 
@@ -313,17 +385,20 @@ def forward_coverage_env(env: dict[str, str]) -> None:
 async def stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:
     """Signal a subprocess and wait for exit without re-reading stdio pipes."""
     if proc.returncode is not None:
+        await _finalize_process_logs(proc)
         return
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
         await proc.wait()
+        await _finalize_process_logs(proc)
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await asyncio.wait_for(proc.wait(), timeout=5)
+    await _finalize_process_logs(proc)
 
 
 def write_config_toml(
@@ -370,6 +445,17 @@ async def start_reborn_webui_v2_server(
     use_listener_as_webui_base_url: bool = False,
 ) -> tuple[object, str]:
     """Start ``ironclaw serve`` and return ``(process, base_url)``."""
+    configured_artifact_root = os.environ.get(
+        "IRONCLAW_E2E_ARTIFACT_DIR", ""
+    ).strip()
+    artifact_root = (
+        Path(configured_artifact_root).resolve()
+        if configured_artifact_root
+        else None
+    )
+    artifact_max_bytes = (
+        _artifact_max_bytes() if artifact_root else DEFAULT_ARTIFACT_MAX_BYTES
+    )
     binary_path = str(Path(ironclaw_reborn_binary).resolve())
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)
@@ -390,9 +476,8 @@ async def start_reborn_webui_v2_server(
         port = find_free_port()
         last_port = port
         base_url = f"http://127.0.0.1:{port}"
-        artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
         if artifact_root:
-            log_dir = Path(artifact_root).resolve() / "server-logs" / home_dir.name
+            log_dir = artifact_root / "server-logs" / home_dir.name
             log_dir.mkdir(parents=True, exist_ok=True)
         else:
             log_dir = home_dir
@@ -429,15 +514,48 @@ async def start_reborn_webui_v2_server(
         if profile == YOLO_PROFILE:
             args.insert(2, "--confirm-host-access")
 
-        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+        if artifact_root:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=out,
-                stderr=err,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=workspace_dir,
             )
+            if proc.stdout is None or proc.stderr is None:
+                raise RuntimeError("server log pipes were not created")
+            log_max_bytes = _server_log_max_bytes(artifact_max_bytes)
+            _process_log_drains[proc] = (
+                (
+                    asyncio.create_task(
+                        _drain_stream_to_bounded_file(
+                            proc.stdout,
+                            stdout_path,
+                            log_max_bytes,
+                        )
+                    ),
+                    asyncio.create_task(
+                        _drain_stream_to_bounded_file(
+                            proc.stderr,
+                            stderr_path,
+                            log_max_bytes,
+                        )
+                    ),
+                ),
+                artifact_root,
+                artifact_max_bytes,
+            )
+        else:
+            with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+                proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err,
+                    env=env,
+                    cwd=workspace_dir,
+                )
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
             return proc, base_url
@@ -459,6 +577,8 @@ async def close_reborn_server(proc) -> None:
         await stop_process(proc, sig=signal.SIGINT, timeout=10)
         if proc.returncode is None:
             await stop_process(proc, sig=signal.SIGTERM, timeout=5)
+    elif proc is not None:
+        await _finalize_process_logs(proc)
 
 
 async def kill_reborn_server(proc) -> None:
@@ -469,6 +589,8 @@ async def kill_reborn_server(proc) -> None:
     """
     if proc is not None and proc.returncode is None:
         await stop_process(proc, sig=signal.SIGKILL, timeout=5)
+    elif proc is not None:
+        await _finalize_process_logs(proc)
 
 
 async def enable_reborn_global_auto_approve(

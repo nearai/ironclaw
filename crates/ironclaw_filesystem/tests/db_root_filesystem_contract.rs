@@ -2369,6 +2369,33 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_transaction_reserves_i64_sequence_ranges_atomically() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let sequence_path = vpath(&prefix, "sequence-range");
+        let mut transaction = fs.begin(&prefix_path).await.unwrap();
+
+        let first = transaction
+            .reserve_sequence_range(&sequence_path, 3)
+            .await
+            .unwrap();
+        let second = transaction
+            .reserve_sequence_range(&sequence_path, 2)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(first, SeqNo::from_backend(3));
+        assert_eq!(second, SeqNo::from_backend(5));
+        assert_eq!(
+            fs.reserve_sequence(&sequence_path).await.unwrap(),
+            SeqNo::from_backend(6)
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_get_returns_none_for_missing_path() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
