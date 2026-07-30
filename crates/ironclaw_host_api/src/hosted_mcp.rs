@@ -167,12 +167,13 @@ impl<'de> Deserialize<'de> for HostedMcpEndpoint {
 
 /// Caller-selected hosted MCP authentication shape. Credentials never cross
 /// this request boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostedMcpAuthSelection {
     /// Probe without credentials and derive no-auth, bearer, or OAuth setup
     /// from the server's protocol response.
     Auto,
+    #[default]
     NoAuth,
     Bearer,
     #[serde(rename = "oauth")]
@@ -180,12 +181,6 @@ pub enum HostedMcpAuthSelection {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_profile_id: Option<String>,
     },
-}
-
-impl Default for HostedMcpAuthSelection {
-    fn default() -> Self {
-        Self::NoAuth
-    }
 }
 
 /// Untrusted request to create or join a caller-owned hosted MCP package.

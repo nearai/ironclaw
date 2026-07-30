@@ -92,14 +92,24 @@ fn contains_mode_term(ident: &str, term: &str) -> bool {
 const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     // --- Hosted*: JUSTIFIED (Bucket-3 false positive) — "hosted MCP" is a real
     //     domain concept (platform-hosted MCP server), not a deployment-mode tier.
+    // Hosted-MCP endpoint, admission, auth, preparation, and registration types
+    // are domain contracts, not deployment-mode tiers.
+    "CanonicalHostedMcpEndpoint",
+    "HostedMcpAdmissionError",
+    "HostedMcpAuthSelection",
     "HostedMcpDiscoveredTool",
-    // Branch-side hosted-MCP discovery test double (network script fake for the
-    // discovery egress) — same Bucket-3 domain-name class as its siblings.
-    "HostedMcpDiscoveryNetworkScript",
     "HostedMcpDiscoveredToolAnnotations",
     "HostedMcpDiscoveryEgress",
     "HostedMcpDiscoveryError",
+    // Branch-side hosted-MCP discovery test double (network script fake for the
+    // discovery egress) — same Bucket-3 domain-name class as its siblings.
+    "HostedMcpDiscoveryNetworkScript",
     "HostedMcpEndpoint",
+    "HostedMcpPreparationDependencies",
+    "HostedMcpPreparationService",
+    "RegisterHostedMcpBody",
+    "RegisterHostedMcpRequest",
+    "RegisterHostedMcpResponse",
     // --- Local* (non-Standalone): the `local_trigger_access` module has been
     //     folded to a config value — fire-time trigger access is now the
     //     `TriggerFireAccessPolicy` on `RebornRuntimeInput`, backed by config
