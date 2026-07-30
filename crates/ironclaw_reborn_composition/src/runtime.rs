@@ -559,6 +559,8 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     #[cfg(any(test, feature = "test-support"))]
+    pub(crate) reply_attachment_intents: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
@@ -4048,6 +4050,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
         outbound_state: services.outbound_state.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        reply_attachment_intents: services.reply_attachment_intents.clone(),
         #[cfg(any(test, feature = "test-support"))]
         triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]
