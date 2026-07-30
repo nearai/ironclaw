@@ -11,8 +11,14 @@ MSG_FILE="$1"
 REPO_ROOT=$(git rev-parse --show-toplevel)
 FIRST_LINE=$(head -1 "$MSG_FILE")
 COMMIT_BODY=$(<"$MSG_FILE")
+CHECKER="$REPO_ROOT/scripts/ci/regression-test-check.py"
 
-python3 "$REPO_ROOT/scripts/ci/regression-test-check.py" \
+if [[ ! -f "$CHECKER" ]] || ! command -v python3 >/dev/null 2>&1; then
+  echo "commit-msg-regression: checker unavailable; CI will enforce." >&2
+  exit 0
+fi
+
+python3 "$CHECKER" \
   --repo "$REPO_ROOT" \
   --base HEAD \
   --head INDEX \

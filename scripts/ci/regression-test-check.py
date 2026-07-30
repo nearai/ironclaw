@@ -207,7 +207,20 @@ def has_meaningful_typescript_assertion(text: str) -> bool:
         }:
             continue
         return True
-    return bool(re.search(r"\b(assert|strictEqual|deepStrictEqual)\s*\(", text))
+    for match in re.finditer(r"\bassert\s*\((.*?)\)", text, re.DOTALL):
+        if normalized(match.group(1)) in {"true", "false", "1", "0", ""}:
+            continue
+        return True
+    for match in re.finditer(
+        r"\b(?:strictEqual|deepStrictEqual)\s*\((.*?)\)",
+        text,
+        re.DOTALL,
+    ):
+        operands = match.group(1).split(",", 2)
+        if len(operands) >= 2 and normalized(operands[0]) == normalized(operands[1]):
+            continue
+        return True
+    return False
 
 
 def has_meaningful_shell_assertion(text: str) -> bool:

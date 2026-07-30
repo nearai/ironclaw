@@ -56,6 +56,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_title_from_message;
 use crate::tool_result_records::{
@@ -71,13 +72,12 @@ use crate::{
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_read::{MessageReadBudget, MessageReadResult};
@@ -122,29 +122,6 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
-}
-
-/// On-disk transcript message record.
-///
-/// `ThreadMessageRecord` deliberately skips provider replay metadata when it is
-/// serialized for product-facing transcript surfaces. The filesystem service is
-/// the private backend for model context, so it stores that metadata explicitly
-/// while history reads continue to scrub it before returning records.
-#[derive(Serialize)]
-struct StoredThreadMessageRecord<'a> {
-    #[serde(flatten)]
-    record: &'a ThreadMessageRecord,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_result_provider_call: &'a Option<ProviderToolCallReferenceEnvelope>,
-}
-
-impl<'a> From<&'a ThreadMessageRecord> for StoredThreadMessageRecord<'a> {
-    fn from(record: &'a ThreadMessageRecord) -> Self {
-        Self {
-            record,
-            tool_result_provider_call: &record.tool_result_provider_call,
-        }
-    }
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so a
@@ -1261,12 +1238,6 @@ where
         })
         .await
     }
-}
-
-pub(crate) fn serialize_stored_thread_message(
-    record: &ThreadMessageRecord,
-) -> Result<Vec<u8>, SessionThreadError> {
-    serialize_pretty(&StoredThreadMessageRecord::from(record))
 }
 
 #[async_trait]

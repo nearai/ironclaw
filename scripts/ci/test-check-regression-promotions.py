@@ -67,6 +67,15 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
             self.validate(broken),
         )
 
+    def test_boolean_max_replay_age_is_not_accepted_as_an_integer(self) -> None:
+        broken = copy.deepcopy(self.manifest)
+        broken["promotion_metadata"]["max_replay_age_days"] = True
+
+        self.assertIn(
+            "max_replay_age_days must be a positive integer",
+            self.validate(broken),
+        )
+
     def test_retirement_requires_deterministic_evidence(self) -> None:
         broken = copy.deepcopy(self.manifest)
         del broken["promotion_metadata"]["live_retirement"]["retirement_evidence"]

@@ -241,6 +241,19 @@ test("keeps the caller-visible result", () => {
 EOF
 expect_pass "meaningful TypeScript assertion" run_check "$typescript"
 
+typescript_tautology="$TMP_ROOT/typescript-tautology"
+init_repo "$typescript_tautology"
+mkdir -p "$typescript_tautology/crates/ironclaw_webui/frontend/src"
+cat > "$typescript_tautology/crates/ironclaw_webui/frontend/src/regression.test.ts" <<'EOF'
+test("does not prove the regression", () => {
+  const result = runRegression();
+  assert(true);
+  strictEqual(result, result);
+});
+EOF
+expect_fail "tautological TypeScript assertion" \
+  "no meaningful changed regression assertion" run_check "$typescript_tautology"
+
 shell_test="$TMP_ROOT/shell"
 init_repo "$shell_test"
 mkdir -p "$shell_test/scripts/ci"
@@ -339,5 +352,12 @@ printf '%s\n' \
 expect_pass "commit hook permits a reasoned marker pending PR review" \
   env GIT_DIR="$hook_repo/.git" GIT_WORK_TREE="$hook_repo" \
   bash "$HOOK" "$hook_repo/COMMIT_MSG"
+
+missing_checker_repo="$TMP_ROOT/missing-checker-hook"
+init_repo "$missing_checker_repo"
+printf 'fix: checker unavailable\n' > "$missing_checker_repo/COMMIT_MSG"
+expect_pass "commit hook defers to CI when the checker is unavailable" \
+  env GIT_DIR="$missing_checker_repo/.git" GIT_WORK_TREE="$missing_checker_repo" \
+  bash "$HOOK" "$missing_checker_repo/COMMIT_MSG"
 
 echo "regression-test-check self-tests passed"

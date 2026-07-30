@@ -9,8 +9,8 @@ use ironclaw_host_api::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::filesystem_service::serialize_stored_thread_message;
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{

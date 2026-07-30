@@ -60,7 +60,10 @@ jobs:
         if: env.GATE_AVAILABLE == 'true'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: git fetch origin -- "$BASE_REF"
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
 
       - name: Collect current approving reviews
         if: env.GATE_AVAILABLE == 'true'

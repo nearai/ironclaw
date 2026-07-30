@@ -1,11 +1,14 @@
 //! Bounded transcript materialization for filesystem-backed exports.
 
-use ironclaw_filesystem::{Filter, Page, RootFilesystem};
+use ironclaw_filesystem::{OrderedPage, OrderedQueryCursor, Page, RootFilesystem, SortDirection};
 use ironclaw_host_api::ThreadId;
 
 use crate::{SessionThreadError, ThreadMessageRecord, ThreadScope};
 
-use super::{FilesystemSessionThreadService, deserialize, messages_root};
+use super::{
+    FilesystemSessionThreadService, deserialize, fs_index_key, message_sequence_index_spec,
+    messages_root, thread_partition_filter,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MessageReadBudget {
@@ -52,22 +55,36 @@ where
         thread_id: &ThreadId,
         mut budget: Option<MessageReadBudget>,
     ) -> Result<MessageReadResult, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         let root = messages_root(scope, thread_id)?;
+        let index = message_sequence_index_spec()?;
+        let sequence_key = fs_index_key("sequence")?;
+        let message_id_key = fs_index_key("message_id")?;
         let mut messages = Vec::new();
-        let mut offset = 0_u64;
+        let mut cursor = None;
 
         loop {
             let page_limit = budget
                 .map(MessageReadBudget::page_limit)
                 .unwrap_or(Page::MAX_LIMIT)
                 .max(1);
+            let mut page = OrderedPage::new(
+                index.name.clone(),
+                sequence_key.clone(),
+                message_id_key.clone(),
+                SortDirection::Ascending,
+                page_limit,
+            );
+            if let Some(after) = cursor.take() {
+                page = page.after(after);
+            }
             let entries = match self
                 .filesystem
-                .query(
+                .query_ordered(
                     &scope.to_resource_scope(),
                     &root,
-                    &Filter::All,
-                    Page::new(offset, page_limit),
+                    &thread_partition_filter(thread_id)?,
+                    &page,
                 )
                 .await
             {
@@ -75,7 +92,7 @@ where
                 Err(error) => return Err(error.into()),
             };
             let entry_count = entries.len();
-            for versioned in entries {
+            for versioned in &entries {
                 if !versioned.path.as_str().ends_with(".json") {
                     continue;
                 }
@@ -89,10 +106,36 @@ where
                     messages.push(record);
                 }
             }
+            cursor = entries
+                .last()
+                .map(|entry| {
+                    let value =
+                        entry
+                            .entry
+                            .indexed
+                            .get(&sequence_key)
+                            .cloned()
+                            .ok_or_else(|| {
+                                SessionThreadError::Backend(
+                                    "ordered message row is missing sequence index".to_string(),
+                                )
+                            })?;
+                    let tie_breaker = entry
+                        .entry
+                        .indexed
+                        .get(&message_id_key)
+                        .cloned()
+                        .ok_or_else(|| {
+                            SessionThreadError::Backend(
+                                "ordered message row is missing message_id index".to_string(),
+                            )
+                        })?;
+                    Ok::<_, SessionThreadError>(OrderedQueryCursor { value, tie_breaker })
+                })
+                .transpose()?;
             if entry_count < page_limit as usize {
                 break;
             }
-            offset = offset.saturating_add(entry_count as u64);
         }
 
         messages.sort_by_key(|message| message.sequence);

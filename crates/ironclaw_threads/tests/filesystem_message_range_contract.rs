@@ -65,7 +65,11 @@ async fn filesystem_store_bounded_read_uses_capped_query_page() {
         .unwrap();
 
     assert_eq!(result, BoundedThreadMessages::LimitExceeded);
-    assert_eq!(backend.query_pages(), vec![Page::first(3)]);
+    assert_eq!(
+        backend.ordered_query_limits(),
+        vec![3],
+        "bounded reads must request only max_messages + 1 ordered rows",
+    );
 }
 
 #[tokio::test]
@@ -287,7 +291,16 @@ async fn filesystem_store_bounded_read_fails_closed_without_paginated_query() {
         })
         .await
         .unwrap();
-    backend.reject_queries();
+    service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            max_messages: 10,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .expect("the ordered-query baseline must be available");
+    backend.reject_ordered_queries();
 
     let error = service
         .list_thread_messages_bounded(BoundedThreadMessagesRequest {
@@ -484,8 +497,8 @@ async fn filesystem_store_summary_creation_requires_complete_sequence_projection
 
 struct QueryTrackingBackend {
     inner: InMemoryBackend,
-    query_pages: Mutex<Vec<Page>>,
-    reject_queries: AtomicBool,
+    ordered_query_limits: Mutex<Vec<u32>>,
+    reject_ordered_queries: AtomicBool,
     list_dir_calls: AtomicUsize,
 }
 
@@ -493,22 +506,22 @@ impl QueryTrackingBackend {
     fn new() -> Self {
         Self {
             inner: InMemoryBackend::new(),
-            query_pages: Mutex::new(Vec::new()),
-            reject_queries: AtomicBool::new(false),
+            ordered_query_limits: Mutex::new(Vec::new()),
+            reject_ordered_queries: AtomicBool::new(false),
             list_dir_calls: AtomicUsize::new(0),
         }
     }
 
     fn reset_query_observations(&self) {
-        self.query_pages.lock().unwrap().clear();
+        self.ordered_query_limits.lock().unwrap().clear();
     }
 
-    fn query_pages(&self) -> Vec<Page> {
-        self.query_pages.lock().unwrap().clone()
+    fn ordered_query_limits(&self) -> Vec<u32> {
+        self.ordered_query_limits.lock().unwrap().clone()
     }
 
-    fn reject_queries(&self) {
-        self.reject_queries.store(true, Ordering::SeqCst);
+    fn reject_ordered_queries(&self) {
+        self.reject_ordered_queries.store(true, Ordering::SeqCst);
         self.list_dir_calls.store(0, Ordering::SeqCst);
     }
 
@@ -547,13 +560,6 @@ impl RootFilesystem for QueryTrackingBackend {
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.query_pages.lock().unwrap().push(page);
-        if self.reject_queries.load(Ordering::SeqCst) {
-            return Err(FilesystemError::Unsupported {
-                path: path.clone(),
-                operation: ironclaw_filesystem::FilesystemOperation::Query,
-            });
-        }
         self.inner.query(path, filter, page).await
     }
 
@@ -563,6 +569,13 @@ impl RootFilesystem for QueryTrackingBackend {
         filter: &Filter,
         page: &OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.ordered_query_limits.lock().unwrap().push(page.limit);
+        if self.reject_ordered_queries.load(Ordering::SeqCst) {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::Query,
+            });
+        }
         self.inner.query_ordered(path, filter, page).await
     }
 

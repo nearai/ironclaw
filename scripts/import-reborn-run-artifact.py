@@ -68,10 +68,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_artifact(path: pathlib.Path) -> dict[str, Any]:
+def load_artifact_with_sha256(path: pathlib.Path) -> tuple[dict[str, Any], str]:
     try:
-        artifact = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        artifact_bytes = path.read_bytes()
+        artifact = json.loads(artifact_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"could not read artifact: {error}") from error
     if artifact.get("schema") not in {SCHEMA, THREAD_SCHEMA}:
         raise ValueError("unsupported artifact schema")
@@ -81,6 +82,11 @@ def load_artifact(path: pathlib.Path) -> dict[str, Any]:
     if not isinstance(messages, list) or not messages:
         raise ValueError("artifact has no replayable messages")
     verify_scrubbed(artifact, "artifact")
+    return artifact, hashlib.sha256(artifact_bytes).hexdigest()
+
+
+def load_artifact(path: pathlib.Path) -> dict[str, Any]:
+    artifact, _sha256 = load_artifact_with_sha256(path)
     return artifact
 
 
@@ -221,6 +227,7 @@ def trace_candidate(
     model_override: str | None,
     source_url: str = "review-required://missing-provenance",
     owning_journey: str = "review-required",
+    artifact_sha256: str | None = None,
 ) -> dict[str, Any]:
     turns: list[dict[str, Any]] = []
     captured_models: list[str] = []
@@ -287,17 +294,17 @@ def trace_candidate(
         review["skipped_unscoped_messages"] = skipped_unscoped
     if skipped_incomplete_runs:
         review["skipped_incomplete_runs"] = skipped_incomplete_runs
+    provenance = {
+        "source_url": source_url,
+        "artifact_schema": artifact.get("schema"),
+    }
+    if artifact_sha256 is not None:
+        provenance["artifact_sha256"] = artifact_sha256
     candidate = {
         "_review": review,
         "_promotion": {
             "schema_version": PROMOTION_SCHEMA_VERSION,
-            "provenance": {
-                "source_url": source_url,
-                "artifact_schema": artifact.get("schema"),
-                "artifact_sha256": hashlib.sha256(
-                    json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest(),
-            },
+            "provenance": provenance,
             "scrub": {
                 "status": "verified",
                 "pipeline": artifact.get("redaction", {}).get("pipeline"),
@@ -317,11 +324,13 @@ def trace_candidate(
 def main() -> int:
     args = parse_args()
     try:
+        artifact, artifact_sha256 = load_artifact_with_sha256(args.artifact)
         candidate = trace_candidate(
-            load_artifact(args.artifact),
+            artifact,
             args.model_name,
             args.source_url,
             args.owning_journey,
+            artifact_sha256,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(candidate, indent=2) + "\n", encoding="utf-8")

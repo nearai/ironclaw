@@ -17,6 +17,7 @@ mod filesystem_service;
 mod identifiers;
 mod in_memory;
 mod service;
+mod stored_message;
 mod summary_artifacts;
 mod title;
 mod tool_result_records;

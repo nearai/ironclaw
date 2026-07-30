@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -140,6 +141,31 @@ class RunArtifactImporterTest(unittest.TestCase):
                 MODULE.load_artifact(path)
 
         self.assertNotIn(unsafe, str(ctx.exception))
+
+    def test_provenance_digest_hashes_exact_downloaded_artifact_bytes(self) -> None:
+        artifact = self.artifact(
+            [
+                {"sequence": 1, "kind": "user", "content": "safe input"},
+                {"sequence": 2, "kind": "assistant", "content": "safe output"},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "artifact.json"
+            path.write_text(json.dumps(artifact, indent=4) + "\n", encoding="utf-8")
+            expected = hashlib.sha256(path.read_bytes()).hexdigest()
+            loaded, digest = MODULE.load_artifact_with_sha256(path)
+
+        candidate = MODULE.trace_candidate(
+            loaded,
+            None,
+            artifact_sha256=digest,
+        )
+
+        self.assertEqual(digest, expected)
+        self.assertEqual(
+            candidate["_promotion"]["provenance"]["artifact_sha256"],
+            expected,
+        )
 
     def test_candidate_rejects_unsafe_metadata_without_logging_raw_match(self) -> None:
         unsafe = "sk-proj-METADATA_SECRET_MUST_NOT_APPEAR_1234567890"

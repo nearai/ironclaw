@@ -60,7 +60,7 @@ def validate(
     replay = metadata.get("last_successful_replay")
     replay_command = ""
     max_age = metadata.get("max_replay_age_days")
-    if not isinstance(max_age, int) or max_age <= 0:
+    if type(max_age) is not int or max_age <= 0:
         errors.append("max_replay_age_days must be a positive integer")
     if not isinstance(replay, dict):
         errors.append("missing last_successful_replay")
