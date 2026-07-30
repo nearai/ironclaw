@@ -263,6 +263,7 @@ for workflow_contract in \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh command" \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh prepare-command" \
   ".github/workflows/reborn-tests.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1" \
+  ".github/workflows/reborn-tests.yml:Install WebUI frontend dependencies for coverage" \
   ".github/workflows/reborn-e2e.yml:scripts/ci/run-hermetic-deterministic-suite.sh" \
   ".github/workflows/reborn-e2e.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE" \
   ".github/workflows/code_style.yml:scripts/ci/test-hermetic-test-process.sh"

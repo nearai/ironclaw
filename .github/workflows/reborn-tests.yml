@@ -620,6 +620,24 @@ jobs:
         with:
           components: llvm-tools-preview
 
+      - name: Enable pnpm for setup-node cache
+        run: corepack enable pnpm
+
+      - name: Install Node.js for instrumented WebUI bundle builds
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies for coverage
+        run: |
+          cd crates/ironclaw_webui/frontend
+          pnpm install --frozen-lockfile
+
       - name: Install mold and clang
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold
