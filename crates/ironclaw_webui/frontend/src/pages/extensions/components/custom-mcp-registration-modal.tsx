@@ -109,6 +109,10 @@ export function CustomMcpRegistrationModal({
       setError("");
       setShowConnectionErrors(false);
       setRegistered(false);
+      setDesiredName("");
+      setDesiredId("");
+      setIsIdAdvanced(false);
+      setEndpoint("");
     }
   }, [open]);
 

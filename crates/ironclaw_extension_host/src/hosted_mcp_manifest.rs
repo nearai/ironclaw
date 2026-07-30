@@ -8,14 +8,18 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionError, ExtensionManifestRecord, ExtensionPackage, ManifestSource,
-    PackageDefinitionRetention, PackageRootBinding, PreparationRequirement,
+    ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
+    PackageRootBinding, PreparationRequirement,
 };
 use ironclaw_host_api::{
-    CapabilityDescriptor, ExtensionId, HostedMcpAuthSelection, HostedMcpEndpoint, NetworkPolicy,
-    NetworkScheme, NetworkTargetPattern, RuntimeCredentialAccountSetup,
-    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    SecretHandle, VendorId,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
+    hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint},
+    http::RuntimeCredentialTarget,
+    ids::{ExtensionId, SecretHandle, VendorId},
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
@@ -25,13 +29,14 @@ use ironclaw_product::{
 use crate::{
     AvailableExtensionPackage, HostedMcpDiscoveryError, hosted_mcp_admission,
     product_extension_host_api_contract_registry,
-    product_lifecycle::map_extension_installation_error, surface_kinds_from_manifest_record,
+    product_lifecycle::{map_extension_error, map_extension_installation_error},
+    surface_kinds_from_manifest_record,
 };
 
 pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> LifecycleProductResponse {
     LifecycleProductResponse {
         package_ref: Some(package_ref),
-        phase: ironclaw_host_api::InstallationState::Installed,
+        phase: ironclaw_host_api::state::InstallationState::Installed,
         blockers: Vec::new(),
         message: Some("Hosted MCP registration accepted.".to_string()),
         payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -68,8 +73,9 @@ pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceF
 }
 
 pub(crate) fn oauth_admission_error(
-    _error: ironclaw_auth::AuthProductError,
+    error: ironclaw_auth::AuthProductError,
 ) -> ProductSurfaceFailure {
+    tracing::debug!(?error, "hosted MCP OAuth metadata admission rejected");
     ProductSurfaceFailure::InvalidBindingRequest {
         reason: "hosted MCP OAuth metadata was not admissible".to_string(),
     }
@@ -252,7 +258,7 @@ effects = ["network", "use_secret"]
 {auth}"#
     );
     let manifest_hash = ironclaw_extensions::ManifestHash::new(
-        ironclaw_host_api::sha256_digest_token(raw.as_bytes()),
+        ironclaw_host_api::approval::sha256_digest_token(raw.as_bytes()),
     )
     .map_err(map_extension_installation_error)?;
     let parsed = ExtensionManifestRecord::from_toml_with_root_binding(
@@ -330,7 +336,7 @@ pub(crate) fn available_package(
         .collect();
     let package = ExtensionPackage::from_virtual_manifest(
         manifest,
-        Some(ironclaw_host_api::sha256_digest_token(
+        Some(ironclaw_host_api::approval::sha256_digest_token(
             record.raw_toml().as_bytes(),
         )),
         capabilities,
@@ -351,17 +357,4 @@ pub(crate) fn available_package(
         oauth_setup_override: None,
         search_aliases: Vec::new(),
     })
-}
-
-fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
-    match error {
-        ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductSurfaceFailure::Transient {
-                reason: error.to_string(),
-            }
-        }
-        _ => ProductSurfaceFailure::InvalidBindingRequest {
-            reason: error.to_string(),
-        },
-    }
 }

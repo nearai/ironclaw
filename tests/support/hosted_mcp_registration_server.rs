@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
@@ -432,7 +432,7 @@ fn record_metadata_request(state: &StateData, path: &str) {
             method: "GET".to_string(),
             path: path.to_string(),
             authorization_present: false,
-            authorization_matches: true,
+            authorization_matches: false,
             rpc_method: None,
         });
 }

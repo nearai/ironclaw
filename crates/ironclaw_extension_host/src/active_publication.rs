@@ -185,7 +185,11 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
-    use ironclaw_host_api::{ExtensionId, HostedMcpAuthSelection, HostedMcpEndpoint, TrustClass};
+    use ironclaw_host_api::{
+        hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint},
+        ids::ExtensionId,
+        runtime::TrustClass,
+    };
     use ironclaw_trust::{
         AdminConfig, HostTrustPolicy, InvalidationBus, TrustPolicy, TrustProvenance,
     };

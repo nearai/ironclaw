@@ -9,7 +9,7 @@
 //! authority site.
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
-use ironclaw_host_api::{ids::CapabilityId, trust::PackageSource};
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
 use tracing::debug;
 
@@ -112,6 +112,7 @@ mod tests {
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_host_api::{
         approval::sha256_digest_token, host_port::HostPortCatalog, path::VirtualPath,
+        trust::PackageSource,
     };
 
     // Relocated from `ironclaw_host_runtime::production` alongside the trust

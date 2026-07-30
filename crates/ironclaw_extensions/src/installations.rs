@@ -816,6 +816,18 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         Ok(None)
     }
 
+    /// Enumerate every definition admitted through
+    /// [`Self::admit_package_definition`], regardless of whether it currently
+    /// has a live installation. Used at restart to repopulate the in-memory
+    /// catalog for registered-but-never-installed (or install-then-removed)
+    /// definitions. A store with no registrations returns an empty vec rather
+    /// than an error.
+    async fn list_registered_package_definitions(
+        &self,
+    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+        Ok(Vec::new())
+    }
+
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError>;
@@ -942,6 +954,12 @@ where
         (**self)
             .get_registered_package_definition(extension_id)
             .await
+    }
+
+    async fn list_registered_package_definitions(
+        &self,
+    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+        (**self).list_registered_package_definitions().await
     }
 
     async fn list_manifests(
@@ -3221,6 +3239,37 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         Ok(Some(record))
     }
 
+    async fn list_registered_package_definitions(
+        &self,
+    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+        let rows = query_all(
+            &self.filesystem,
+            &self.registered_definitions_root()?,
+            &Filter::All,
+        )
+        .await?;
+        let mut records = rows
+            .into_iter()
+            .map(|row| {
+                ensure_entry_kind(&row.entry, REGISTERED_DEFINITION_RECORD_KIND, &row.path)?;
+                let record = row
+                    .entry
+                    .parse_json::<WireManifestRecord>()
+                    .map_err(|error| {
+                        corrupt_row(
+                            "deserialize registered package definition",
+                            &row.path,
+                            error,
+                        )
+                    })?
+                    .into_manifest_record()?;
+                Ok(record)
+            })
+            .collect::<Result<Vec<_>, ExtensionInstallationError>>()?;
+        records.sort_by(|a, b| a.extension_id().cmp(b.extension_id()));
+        Ok(records)
+    }
+
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -3430,14 +3479,31 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             expected_pending_manifest_ref,
         )
         .await?;
-        let core = self
+        let core = match self
             .finish_v2_preparation(
                 installation_id,
                 incarnation_id,
                 expected_pending_manifest_ref,
                 &finalized_manifest,
             )
-            .await?;
+            .await
+        {
+            Ok(core) => core,
+            Err(rejection) => {
+                // The lease was committed by take_v2_preparation_lease above;
+                // finish_v2_preparation's real validation rejected the
+                // finalize, so the aggregate would otherwise be stranded
+                // under a held lease (is_visible() requires lease.is_none())
+                // until the next store-construction repair pass. Release it
+                // here so the aggregate stays visible immediately.
+                // silent-ok: best-effort release racing a concurrent repair
+                // (repair_interrupted_v2_leases) or another mutator; either
+                // outcome still clears the lease, and the original rejection
+                // below is the error the caller must see.
+                let _ = self.clear_v2_lease(installation_id).await;
+                return Err(rejection);
+            }
+        };
         let installation = self.reconstruct_v2_installation(&core).await?;
         // The v2 aggregate has committed. Compatibility rows are repaired at
         // next open, so a projection failure must not make callers undo the
@@ -4863,6 +4929,57 @@ mod tests {
             Some("hash-final")
         );
         assert_eq!(winner.incarnation_id(), Some(&incarnation_id));
+
+        // Regression: take_v2_preparation_lease's (narrower) checks can pass
+        // and commit the lease while finish_v2_preparation's real validation
+        // (lease match, extension-id match, finalized_is_ready) still
+        // rejects the finalize. That must not strand the aggregate under a
+        // permanently held lease — is_visible() requires lease.is_none(), so
+        // a stranded lease would make get_installation return None until a
+        // store-construction repair pass (repair_interrupted_v2_leases)
+        // runs, which only happens on restart.
+        let stranded_manifest = pending_manifest_record("stranded", Some("hash-pending"));
+        let stranded = pending_installation("stranded", Some("hash-pending"));
+        let stranded_id = stranded.installation_id().clone();
+        let stranded_incarnation = stranded
+            .incarnation_id()
+            .cloned()
+            .expect("fresh incarnation");
+        let stranded_ref = stranded.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(stranded_manifest, stranded)
+            .await
+            .expect("persist stranded pending aggregate");
+
+        // A finalized manifest for a different extension id passes
+        // take_v2_preparation_lease's checks (which don't compare extension
+        // ids) but fails finish_v2_preparation's extension-id match, so the
+        // lease is committed before the rejection is returned.
+        let mismatched_finalized = manifest_record("other", Some("hash-final"));
+        let rejection = store
+            .finalize_preparation(
+                &stranded_id,
+                &stranded_incarnation,
+                &stranded_ref,
+                mismatched_finalized,
+            )
+            .await
+            .expect_err("mismatched finalize is rejected");
+        assert!(matches!(
+            rejection,
+            ExtensionInstallationError::PreparationFinalizationRejected { .. }
+        ));
+
+        // The aggregate must remain immediately visible with no store
+        // reconstruction/restart repair pass in between.
+        assert!(
+            store
+                .get_installation(&stranded_id)
+                .await
+                .expect("load after rejected finalize")
+                .is_some(),
+            "rejected finalize must not strand the aggregate under a held lease"
+        );
     }
 
     #[tokio::test]

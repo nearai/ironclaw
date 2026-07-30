@@ -15,7 +15,7 @@ pub enum HostedMcpDiscoveryError {
     Permanent(String),
     /// The remote rejected the currently staged account. This is a setup
     /// outcome, not a retryable transport failure.
-    CredentialsRejected(ironclaw_host_api::McpAuthChallenge),
+    CredentialsRejected(ironclaw_host_api::hosted_mcp::McpAuthChallenge),
 }
 
 pub async fn discover_hosted_mcp_package(
@@ -91,18 +91,7 @@ pub async fn discover_hosted_mcp_package_with_policy(
             max_tools,
         )
         .await
-        .map_err(|error| match error {
-            ironclaw_mcp::McpClientError::AuthChallenge { challenge } => {
-                HostedMcpDiscoveryError::CredentialsRejected(challenge)
-            }
-            ironclaw_mcp::McpClientError::AuthRequired => {
-                HostedMcpDiscoveryError::Transient("auth_required_without_challenge".to_string())
-            }
-            ironclaw_mcp::McpClientError::InvalidToolCatalog { reason } => {
-                HostedMcpDiscoveryError::Permanent(reason)
-            }
-            error => HostedMcpDiscoveryError::Transient(error.stable_reason().to_string()),
-        })?;
+        .map_err(classify_mcp_client_error)?;
     if output.tools.is_empty() {
         return Err(HostedMcpDiscoveryError::Transient(format!(
             "hosted MCP provider {} returned no discoverable tools",
@@ -121,6 +110,35 @@ pub async fn discover_hosted_mcp_package_with_policy(
         .map_err(|error| HostedMcpDiscoveryError::Permanent(error.to_string()))
 }
 
+/// Classifies a client-side MCP discovery failure as retryable (`Transient`)
+/// or terminal (`Permanent`). `mcp_missing_url` / `mcp_unsupported_transport`
+/// / `mcp_session_state_poisoned` describe a structurally broken
+/// registration (bad manifest shape, wrong transport) that repeating the
+/// same request can never fix; classifying them `Transient` let a
+/// `Required`-preparation package retry forever instead of failing terminally.
+fn classify_mcp_client_error(error: ironclaw_mcp::McpClientError) -> HostedMcpDiscoveryError {
+    match error {
+        ironclaw_mcp::McpClientError::AuthChallenge { challenge } => {
+            HostedMcpDiscoveryError::CredentialsRejected(challenge)
+        }
+        ironclaw_mcp::McpClientError::AuthRequired => {
+            HostedMcpDiscoveryError::Transient("auth_required_without_challenge".to_string())
+        }
+        ironclaw_mcp::McpClientError::InvalidToolCatalog { reason } => {
+            HostedMcpDiscoveryError::Permanent(reason)
+        }
+        ironclaw_mcp::McpClientError::Client { ref reason }
+            if matches!(
+                reason.as_str(),
+                "mcp_missing_url" | "mcp_unsupported_transport" | "mcp_session_state_poisoned"
+            ) =>
+        {
+            HostedMcpDiscoveryError::Permanent(error.stable_reason().to_string())
+        }
+        error => HostedMcpDiscoveryError::Transient(error.stable_reason().to_string()),
+    }
+}
+
 pub use ironclaw_extensions::is_hosted_http_mcp_package;
 
 #[cfg(test)]
@@ -130,8 +148,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, PackageRootBinding};
     use ironclaw_host_api::{
-        InvocationId, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-        UserId,
+        http::{RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{InvocationId, UserId},
     };
 
     struct TwoToolEgress;
@@ -344,5 +362,32 @@ effects = ["network"]
             HostedMcpDiscoveryError::Permanent(reason)
                 if reason.contains("hosted MCP catalog rejected by safety policy")
         ));
+    }
+
+    #[test]
+    fn structurally_broken_client_reasons_classify_permanent_not_transient() {
+        for reason in [
+            "mcp_missing_url",
+            "mcp_unsupported_transport",
+            "mcp_session_state_poisoned",
+        ] {
+            let classified =
+                classify_mcp_client_error(ironclaw_mcp::McpClientError::client(reason.to_string()));
+            assert!(
+                matches!(&classified, HostedMcpDiscoveryError::Permanent(got) if got == reason),
+                "expected {reason} to classify as Permanent, got {classified:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_client_reasons_still_classify_transient() {
+        let classified = classify_mcp_client_error(ironclaw_mcp::McpClientError::client(
+            "mcp_denied_credential_source".to_string(),
+        ));
+        assert!(
+            matches!(&classified, HostedMcpDiscoveryError::Transient(got) if got == "mcp_denied_credential_source"),
+            "non-structural client reasons must stay retryable, got {classified:?}"
+        );
     }
 }

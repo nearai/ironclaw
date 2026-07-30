@@ -96,7 +96,10 @@ mod tests {
 
     #[test]
     fn fail_closed_policy_keeps_direct_remote_untrusted() {
-        use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
+        use ironclaw_host_api::{
+            ids::PackageId,
+            trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+        };
         let identity = PackageIdentity::new(
             PackageId::new("mcp-linear").unwrap(),
             PackageSource::DirectRemote {

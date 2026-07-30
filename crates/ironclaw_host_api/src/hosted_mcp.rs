@@ -6,14 +6,16 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::{ExtensionId, HostApiError, LifecyclePackageId};
+use crate::error::HostApiError;
+use crate::ids::ExtensionId;
+use crate::package_lifecycle::LifecyclePackageId;
 
 /// A bounded, redacted location advertised by a hosted MCP server while
 /// challenging an unauthenticated request.
 ///
 /// This deliberately carries a location only: response text, credentials, and
 /// arbitrary authentication parameters must not cross the runtime boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct McpAuthMetadataLocation(String);
 
@@ -53,10 +55,32 @@ impl McpAuthMetadataLocation {
     }
 }
 
+impl<'de> Deserialize<'de> for McpAuthMetadataLocation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+/// Maximum number of metadata locations extracted from a single untrusted
+/// `WWW-Authenticate`/`Protected-Resource-Metadata` header value. A hosted MCP
+/// server response is attacker-controlled input, and both consumers
+/// (`ironclaw_host_runtime::egress::sanitize` and `ironclaw_mcp`) `extend()`
+/// unconditionally from this helper's output, so the ceiling must live here
+/// rather than at either call site. A real challenge header carries at most a
+/// couple of `resource`/`resource_metadata` params plus the whole-header
+/// fallback; 8 leaves generous headroom while bounding fan-out from a header
+/// crafted with many repeated params.
+const MAX_MCP_AUTH_METADATA_LOCATIONS: usize = 8;
+
 /// Extract the only OAuth challenge values permitted to cross the runtime
 /// response-sanitization boundary. Raw challenge parameters and response text
 /// remain discarded; query and fragment data are removed by
-/// [`McpAuthMetadataLocation::new`].
+/// [`McpAuthMetadataLocation::new`]. Bounded to
+/// [`MAX_MCP_AUTH_METADATA_LOCATIONS`] entries regardless of how many
+/// candidate parts an attacker-controlled header contains.
 pub fn extract_mcp_auth_metadata_locations(value: &str) -> Vec<McpAuthMetadataLocation> {
     value
         .split([' ', ','])
@@ -70,6 +94,7 @@ pub fn extract_mcp_auth_metadata_locations(value: &str) -> Vec<McpAuthMetadataLo
                 .filter(|value| value.starts_with("https://") || value.starts_with("http://")),
         )
         .filter_map(|value| McpAuthMetadataLocation::new(value).ok())
+        .take(MAX_MCP_AUTH_METADATA_LOCATIONS)
         .collect()
 }
 
@@ -231,7 +256,7 @@ mod tests {
 
     #[test]
     fn direct_remote_source_serializes_with_exact_endpoint() {
-        let source = crate::PackageSource::DirectRemote {
+        let source = crate::trust::PackageSource::DirectRemote {
             endpoint: "https://mcp.example.test/rpc?tenant=one".to_string(),
         };
         let json = serde_json::to_value(&source).expect("serialize source");
@@ -243,7 +268,8 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::from_value::<crate::PackageSource>(json).expect("deserialize source"),
+            serde_json::from_value::<crate::trust::PackageSource>(json)
+                .expect("deserialize source"),
             source
         );
     }
@@ -286,6 +312,33 @@ mod tests {
             "https://issuer.example.test/.well-known/oauth-protected-resource"
         );
         assert!(McpAuthMetadataLocation::new("not a location").is_err());
+    }
+
+    #[test]
+    fn auth_metadata_location_deserialize_routes_through_validation() {
+        let rejected: Result<McpAuthMetadataLocation, _> =
+            serde_json::from_value(serde_json::json!("not a location"));
+        assert!(rejected.is_err(), "non-HTTP(S) value must be rejected");
+
+        let oversized = "https://issuer.example.test/".to_string() + &"a".repeat(3_000);
+        let rejected: Result<McpAuthMetadataLocation, _> =
+            serde_json::from_value(serde_json::json!(oversized));
+        assert!(rejected.is_err(), "oversized value must be rejected");
+
+        let accepted: McpAuthMetadataLocation =
+            serde_json::from_value(serde_json::json!("https://issuer.example.test/metadata"))
+                .expect("valid HTTPS location deserializes");
+        assert_eq!(accepted.as_str(), "https://issuer.example.test/metadata");
+    }
+
+    #[test]
+    fn auth_metadata_locations_are_capped_regardless_of_header_fan_out() {
+        let many_resources = (0..64)
+            .map(|index| format!("resource=\"https://issuer.example.test/r{index}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let locations = extract_mcp_auth_metadata_locations(&many_resources);
+        assert_eq!(locations.len(), MAX_MCP_AUTH_METADATA_LOCATIONS);
     }
 
     #[test]

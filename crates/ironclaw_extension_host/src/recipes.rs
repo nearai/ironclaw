@@ -151,6 +151,7 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
         let requester_extension = requester_extension?;
+        // silent-ok: get_manifest read for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
         let record = self.store.get_manifest(requester_extension).await.ok()??;
         recipe_for_manifest(record.resolved(), vendor)
     }

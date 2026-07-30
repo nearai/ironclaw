@@ -30,10 +30,15 @@ use ironclaw_extension_host::lifecycle_test_support::{
 };
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExtensionId,
-    GrantConstraints, HostedMcpAuthSelection, HostedMcpEndpoint, LifecyclePackageId, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, RegisterHostedMcpRequest, RuntimeKind, SecretHandle, TrustClass,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle},
+    mount::MountView,
+    package_lifecycle::LifecyclePackageId,
+    product_surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+    runtime::{RuntimeKind, TrustClass},
+    scope::Principal,
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
@@ -51,11 +56,11 @@ fn live_network_egress() -> Arc<dyn ironclaw_network::NetworkHttpEgress> {
 }
 
 fn runtime_context(
-    scope: ironclaw_host_api::ResourceScope,
+    scope: ironclaw_host_api::resource::ResourceScope,
     capability: &str,
-) -> ironclaw_host_api::ExecutionContext {
+) -> ironclaw_host_api::scope::ExecutionContext {
     let grantee = ExtensionId::new("hosted-mcp-registration-test").expect("test extension id");
-    let mut context = ironclaw_host_api::ExecutionContext::local_default(
+    let mut context = ironclaw_host_api::scope::ExecutionContext::local_default(
         scope.user_id.clone(),
         grantee.clone(),
         RuntimeKind::Mcp,
@@ -102,7 +107,7 @@ fn runtime_context(
     scope.invocation_id = context.invocation_id;
     context.resource_scope = scope;
     context.authenticated_actor_user_id = Some(context.user_id.clone());
-    context.run_id = Some(ironclaw_host_api::RunId::new());
+    context.run_id = Some(ironclaw_host_api::ids::RunId::new());
     context
         .validate()
         .expect("test invocation context preserves scope invariants");
@@ -130,8 +135,8 @@ fn fixture_package_ref() -> LifecyclePackageRef {
 
 async fn install_fixture(
     services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
-    scope: ironclaw_host_api::ResourceScope,
-) -> ironclaw_host_api::LifecycleProductResponse {
+    scope: ironclaw_host_api::resource::ResourceScope,
+) -> ironclaw_host_api::package_lifecycle::LifecycleProductResponse {
     services
         .lifecycle_service
         .execute(
@@ -145,13 +150,13 @@ async fn install_fixture(
 }
 
 fn credential_provider_from_response(
-    response: &ironclaw_host_api::LifecycleProductResponse,
+    response: &ironclaw_host_api::package_lifecycle::LifecycleProductResponse,
 ) -> AuthProviderId {
     response
         .blockers
         .iter()
         .find_map(|blocker| match blocker {
-            ironclaw_host_api::LifecycleReadinessBlocker::Credential {
+            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential {
                 ref_id: Some(provider),
             } => AuthProviderId::new(provider.as_str()).ok(),
             _ => None,
@@ -161,7 +166,7 @@ fn credential_provider_from_response(
 
 async fn submit_fixture_bearer(
     services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
-    scope: ironclaw_host_api::ResourceScope,
+    scope: ironclaw_host_api::resource::ResourceScope,
     provider: AuthProviderId,
     token: &str,
 ) -> Result<ironclaw_auth::RebornManualTokenSubmitResponse, ironclaw_auth::RebornManualTokenError> {
@@ -249,7 +254,7 @@ fn fixture_digest(value: &str) -> String {
 
 async fn complete_fixture_oauth_callback(
     services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
-    scope: &ironclaw_host_api::ResourceScope,
+    scope: &ironclaw_host_api::resource::ResourceScope,
     provider: ironclaw_auth::AuthProviderId,
 ) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {
     let auth_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
@@ -379,7 +384,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     );
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Installed,
+        ironclaw_host_api::state::InstallationState::Installed,
         "registration persists a catalog definition without implicit installation: {registration:#?}",
     );
     assert!(
@@ -408,7 +413,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert_eq!(exact_retry.package_ref, registration.package_ref);
     assert_eq!(
         exact_retry.phase,
-        ironclaw_host_api::InstallationState::Installed
+        ironclaw_host_api::state::InstallationState::Installed
     );
     let mut conflicting = automatic_request();
     conflicting.desired_name = "Different fixture MCP".to_string();
@@ -428,7 +433,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     let installed = install_fixture(&services, scope.clone()).await;
     assert_eq!(
         installed.phase,
-        ironclaw_host_api::InstallationState::Active
+        ironclaw_host_api::state::InstallationState::Active
     );
     let active_capabilities = services
         .extension_management
@@ -476,6 +481,88 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert!(methods.contains(&"initialize"));
     assert!(methods.contains(&"tools/list"));
     assert!(methods.contains(&"tools/call"));
+}
+
+#[tokio::test]
+async fn registered_but_never_installed_definition_survives_restart_and_installs_without_reregistration()
+ {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-registered-only",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-registered-only");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("registration persists the tenant definition without installing it");
+
+    // Deliberately never install. Rebuild services over the same durable
+    // backing (simulated restart) and confirm the registered definition is
+    // still discoverable, even though restore only ever walked installation
+    // rows — the durable `registered-definitions/{id}.json` row has no
+    // installation row backing it here.
+    let restored = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        "hosted-mcp-registered-only",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
+    )
+    .await;
+
+    let search = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionSearch {
+                query: "Fixture MCP".to_string(),
+            },
+        )
+        .await
+        .expect("registered definition remains searchable after restart");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload else {
+        panic!("search returns extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .any(|extension| extension.summary.package_ref == fixture_package_ref()),
+        "a registered-but-never-installed hosted MCP definition must survive restart: {extensions:#?}",
+    );
+
+    assert!(
+        restored
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capability projection")
+            .is_empty(),
+        "a registered-but-uninstalled definition must not be active or publish tools after restart",
+    );
+
+    let installed = install_fixture(&restored, scope).await;
+    assert_eq!(
+        installed.phase,
+        ironclaw_host_api::state::InstallationState::Active,
+        "the restored definition installs without re-registration: {installed:#?}",
+    );
 }
 
 #[tokio::test]
@@ -634,13 +721,13 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
         .expect("member joins through the ordinary install lifecycle");
     assert_eq!(
         member_install.phase,
-        ironclaw_host_api::InstallationState::Active
+        ironclaw_host_api::state::InstallationState::Active
     );
 
     let admin_install = install_fixture(&services, admin_scope.clone()).await;
     assert_eq!(
         admin_install.phase,
-        ironclaw_host_api::InstallationState::Active
+        ironclaw_host_api::state::InstallationState::Active
     );
 
     services
@@ -653,8 +740,9 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
         )
         .await
         .expect("admin removes only their installation membership");
-    let admin_user_id = ironclaw_host_api::UserId::new("tenant-admin").expect("admin user id");
-    let member_user_id = ironclaw_host_api::UserId::new("tenant-member").expect("member user id");
+    let admin_user_id = ironclaw_host_api::ids::UserId::new("tenant-admin").expect("admin user id");
+    let member_user_id =
+        ironclaw_host_api::ids::UserId::new("tenant-member").expect("member user id");
     let capabilities_after_admin_removal = services
         .extension_management
         .active_model_visible_capabilities()
@@ -751,7 +839,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         .expect("bearer MCP definition is admitted before credentials exist");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Installed
+        ironclaw_host_api::state::InstallationState::Installed
     );
     assert!(
         registration.blockers.is_empty(),
@@ -765,7 +853,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
     assert!(
         unfinished_retry.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "ordinary installation exposes credential readiness"
     );
@@ -781,7 +869,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
 
     assert_eq!(
         unfinished_retry.phase,
-        ironclaw_host_api::InstallationState::Installed
+        ironclaw_host_api::state::InstallationState::Installed
     );
 
     let provider = credential_provider_from_response(&unfinished_retry);
@@ -829,10 +917,9 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         server.requests(),
     );
     assert!(
-        server
-            .requests()
-            .iter()
-            .any(|request| request.authorization_matches),
+        server.requests().iter().any(|request| {
+            request.rpc_method.as_deref() == Some("tools/list") && request.authorization_matches
+        }),
         "activation reaches the MCP with the host-injected bearer"
     );
     let capability = capabilities
@@ -896,7 +983,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     let pending_provider = credential_provider_from_response(&pending);
     assert!(pending.blockers.iter().any(|blocker| matches!(
         blocker,
-        ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+        ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
 
     let restored_secret_store = Arc::new(OnceLock::new());
@@ -933,7 +1020,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     assert!(
         activation_only.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "activation without a prior re-install must still surface the credential setup \
          blocker rather than \"is not installed\": {activation_only:#?}"
@@ -956,7 +1043,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     );
     assert!(resumed.blockers.iter().any(|blocker| matches!(
         blocker,
-        ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+        ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
     assert!(
         restored
@@ -1012,7 +1099,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
 
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Installed
+        ironclaw_host_api::state::InstallationState::Installed
     );
     assert!(
         registration.blockers.is_empty(),
@@ -1027,7 +1114,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(
         install.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "ordinary install discovers OAuth and returns the credential setup blocker: {install:#?}"
     );
@@ -1076,12 +1163,12 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         }
     );
     let requester = ExtensionId::new("mcp-fixture").expect("extension id");
-    let provider_vendor = ironclaw_host_api::VendorId::new(provider.as_str())
+    let provider_vendor = ironclaw_host_api::ids::VendorId::new(provider.as_str())
         .expect("metadata-derived provider remains a vendor id");
     let account_request = ironclaw_auth::runtime_credential_account_selection_request(
         &scope,
         &provider_vendor,
-        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
         &[],
         &requester,
     )
@@ -1140,7 +1227,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(
         extensions.iter().any(|extension| {
             extension.summary.package_ref == fixture_package_ref()
-                && extension.phase == ironclaw_host_api::InstallationState::Active
+                && extension.phase == ironclaw_host_api::state::InstallationState::Active
         }),
         "a callback that publishes tools must project as active: {extensions:#?}"
     );
@@ -1190,9 +1277,20 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
 /// published.
 #[tokio::test]
 async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
+    /// Discriminates the two distinct outcomes `fetch_oauth_metadata`
+    /// failures must produce, per sub-case (see the comment above the
+    /// `match install_result` below for which sub-case gets which).
+    enum ExpectedInstallOutcome {
+        /// Swallowed into a still-installed, non-progressing response.
+        SwallowedIntoInstalled,
+        /// Propagates as a real `ProductSurfaceErrorKind::Validation` error.
+        PropagatedValidationError,
+    }
+
     async fn assert_metadata_failure_blocks_preparation(
         user_id: &str,
         egress: Arc<dyn ironclaw_network::NetworkHttpEgress>,
+        expected: ExpectedInstallOutcome,
     ) {
         let fixture_secret_store = Arc::new(OnceLock::new());
         let services = build_lifecycle_test_services_with_auth_provider(
@@ -1232,18 +1330,34 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
         // the non-200 and malformed-JSON branches propagate as a real
         // error. Either way, no blockers get fabricated and no OAuth setup
         // requirement is discovered.
-        match install_result {
-            Ok(response) => assert!(
-                response.blockers.is_empty(),
-                "a metadata-fetch failure surfaces as a still-installed response, not a \
-                 fabricated credential blocker: {response:#?}"
-            ),
-            Err(ref error) => assert_eq!(
-                error.kind,
-                ProductSurfaceErrorKind::Validation,
-                "a non-transient metadata-fetch failure surfaces as an invalid binding \
-                 request: {error:#?}"
-            ),
+        match expected {
+            ExpectedInstallOutcome::SwallowedIntoInstalled => {
+                let response = install_result.unwrap_or_else(|error| {
+                    panic!(
+                        "a transport-error metadata fetch must swallow into a \
+                         still-installed response, not propagate an error: {error:#?}"
+                    )
+                });
+                assert!(
+                    response.blockers.is_empty(),
+                    "a metadata-fetch failure surfaces as a still-installed response, not a \
+                     fabricated credential blocker: {response:#?}"
+                );
+            }
+            ExpectedInstallOutcome::PropagatedValidationError => {
+                let error = install_result.err().unwrap_or_else(|| {
+                    panic!(
+                        "a non-200/oversized/malformed metadata fetch must propagate as a \
+                         real error, not a still-installed response"
+                    )
+                });
+                assert_eq!(
+                    error.kind,
+                    ProductSurfaceErrorKind::Validation,
+                    "a non-transient metadata-fetch failure surfaces as an invalid binding \
+                     request: {error:#?}"
+                );
+            }
         }
         assert!(
             services
@@ -1283,6 +1397,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-transport",
         transport_egress,
+        ExpectedInstallOutcome::SwallowedIntoInstalled,
     )
     .await;
 
@@ -1295,8 +1410,12 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     let non200_egress = Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
         &non200_server,
     ));
-    assert_metadata_failure_blocks_preparation("hosted-mcp-oauth-metadata-non200", non200_egress)
-        .await;
+    assert_metadata_failure_blocks_preparation(
+        "hosted-mcp-oauth-metadata-non200",
+        non200_egress,
+        ExpectedInstallOutcome::PropagatedValidationError,
+    )
+    .await;
 
     // Sub-case 3: an oversized (>64 KiB) protected-resource body.
     let oversized_server = HostedMcpRegistrationServer::start(oauth_policy(), search_tool()).await;
@@ -1310,6 +1429,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-oversized",
         oversized_egress,
+        ExpectedInstallOutcome::PropagatedValidationError,
     )
     .await;
 
@@ -1325,6 +1445,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-malformed",
         malformed_egress,
+        ExpectedInstallOutcome::PropagatedValidationError,
     )
     .await;
 }
@@ -1416,7 +1537,7 @@ async fn oauth_callback_with_a_rejected_token_stays_setup_needed_and_publishes_n
     };
     assert!(extensions.iter().any(|extension| {
         extension.summary.package_ref == fixture_package_ref()
-            && extension.phase == ironclaw_host_api::InstallationState::Installed
+            && extension.phase == ironclaw_host_api::state::InstallationState::Installed
     }));
 }
 
@@ -1470,12 +1591,12 @@ async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed(
     assert_eq!(callback.status, ironclaw_auth::AuthFlowStatus::Completed);
 
     let requester = ExtensionId::new("mcp-fixture").expect("extension id");
-    let provider_vendor = ironclaw_host_api::VendorId::new(provider.as_str())
+    let provider_vendor = ironclaw_host_api::ids::VendorId::new(provider.as_str())
         .expect("metadata-derived provider remains a vendor id");
     let account_request = ironclaw_auth::runtime_credential_account_selection_request(
         &scope,
         &provider_vendor,
-        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
         &[],
         &requester,
     )
@@ -1544,7 +1665,7 @@ async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed(
     assert!(
         extensions.iter().any(|extension| {
             extension.summary.package_ref == fixture_package_ref()
-                && extension.phase == ironclaw_host_api::InstallationState::Installed
+                && extension.phase == ironclaw_host_api::state::InstallationState::Installed
         }),
         "empty catalog remains installed for a later lifecycle retry: {extensions:#?}"
     );
@@ -1585,7 +1706,7 @@ async fn live_notion_oauth_registration_reaches_generic_setup() {
         .expect("Notion OAuth registration persists its definition");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Installed
+        ironclaw_host_api::state::InstallationState::Installed
     );
     assert!(registration.blockers.is_empty());
     let install = services
@@ -1602,7 +1723,7 @@ async fn live_notion_oauth_registration_reaches_generic_setup() {
     assert!(
         install.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "Notion install must hand off to generic setup: {install:#?}"
     );
@@ -1644,7 +1765,7 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
         .expect("public no-auth server registers through the standard lifecycle");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Installed
+        ironclaw_host_api::state::InstallationState::Installed
     );
     let install = services
         .lifecycle_service
@@ -1660,7 +1781,10 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
         )
         .await
         .expect("public no-auth server installs through the standard lifecycle");
-    assert_eq!(install.phase, ironclaw_host_api::InstallationState::Active);
+    assert_eq!(
+        install.phase,
+        ironclaw_host_api::state::InstallationState::Active
+    );
 
     let capabilities = services
         .extension_management

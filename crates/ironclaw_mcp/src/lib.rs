@@ -42,6 +42,20 @@ use thiserror::Error;
 const STREAMABLE_HTTP_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
 
+/// Maximum number of tools accepted from a hosted MCP `tools/list` discovery
+/// pass, across all pages. Shared by the discovery loop's running-total check
+/// and [`parse_tools_list_result`]'s per-page cap so the two enforcement
+/// points cannot drift apart.
+const MAX_DISCOVERED_MCP_TOOLS: usize = 1024;
+
+/// Maximum number of `tools/list` pagination pages followed during a single
+/// discovery pass.
+const MAX_MCP_TOOLS_LIST_PAGES: usize = 50;
+
+/// Maximum aggregate serialized bytes accepted across all `tools/list` pages
+/// during a single discovery pass.
+const MAX_MCP_TOOLS_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+
 /// Host-owned MCP adapter limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpRuntimeConfig {
@@ -792,7 +806,7 @@ where
         let mut discovered = Vec::new();
         let mut accepted_catalog_bytes = 0usize;
         let mut cursor = None;
-        for page in 1..=50usize {
+        for page in 1..=MAX_MCP_TOOLS_LIST_PAGES {
             let tools_list_id = self.next_request_id();
             let tools_list_plan = self.plan_json_rpc(
                 &request,
@@ -829,21 +843,21 @@ where
             let (page_tools, next_cursor) =
                 parse_tools_list_page(&result).map_err(McpClientError::invalid_tool_catalog)?;
             accepted_catalog_bytes = accepted_catalog_bytes.saturating_add(page_bytes);
-            if discovered.len().saturating_add(page_tools.len()) > 1024
+            if discovered.len().saturating_add(page_tools.len()) > MAX_DISCOVERED_MCP_TOOLS
                 || discovered.len().saturating_add(page_tools.len()) > max_tools as usize
             {
                 return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
                     McpInvalidToolListCause::TooManyTools,
                 )));
             }
-            if accepted_catalog_bytes > 16 * 1024 * 1024 {
+            if accepted_catalog_bytes > MAX_MCP_TOOLS_CATALOG_BYTES {
                 return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
                     McpInvalidToolListCause::CatalogTooLarge,
                 )));
             }
             discovered.extend(page_tools);
             match next_cursor {
-                Some(_next_cursor) if page == 50 => {
+                Some(_next_cursor) if page == MAX_MCP_TOOLS_LIST_PAGES => {
                     return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
                         McpInvalidToolListCause::TooManyPages,
                     )));
@@ -962,13 +976,11 @@ fn mcp_auth_challenge_from_response(response: &McpHostHttpResponse) -> McpAuthCh
     let mut protected_resource_metadata = Vec::new();
     for (name, value) in &response.headers {
         if name.eq_ignore_ascii_case("www-authenticate") {
-            www_authenticate_metadata.extend(
-                ironclaw_host_api::extract_mcp_auth_metadata_locations(value),
-            );
+            www_authenticate_metadata
+                .extend(ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations(value));
         } else if name.eq_ignore_ascii_case("protected-resource-metadata") {
-            protected_resource_metadata.extend(
-                ironclaw_host_api::extract_mcp_auth_metadata_locations(value),
-            );
+            protected_resource_metadata
+                .extend(ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations(value));
         }
     }
     McpAuthChallenge {
@@ -1150,7 +1162,6 @@ fn parse_tools_list_result(
     value: &Value,
     manifest_max_tools: u32,
 ) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
-    const HOST_MAX_DISCOVERED_TOOLS: usize = 1024;
     const MAX_TOOL_NAME_BYTES: usize = 128;
     // Real hosted catalogs may use several kilobytes to document one tool.
     // Keep descriptions exact while bounding each value consistently with
@@ -1166,8 +1177,8 @@ fn parse_tools_list_result(
         .and_then(Value::as_array)
         .ok_or_else(|| invalid_tool_list(McpInvalidToolListCause::MissingToolsArray))?;
     let manifest_max_tools = usize::try_from(manifest_max_tools)
-        .unwrap_or(HOST_MAX_DISCOVERED_TOOLS)
-        .min(HOST_MAX_DISCOVERED_TOOLS);
+        .unwrap_or(MAX_DISCOVERED_MCP_TOOLS)
+        .min(MAX_DISCOVERED_MCP_TOOLS);
     if manifest_max_tools == 0 || tools.len() > manifest_max_tools {
         return Err(invalid_tool_list(McpInvalidToolListCause::TooManyTools));
     }
@@ -1199,7 +1210,7 @@ fn parse_tools_list_result(
 fn parse_tools_list_page(
     value: &Value,
 ) -> Result<(Vec<HostedMcpDiscoveredTool>, Option<String>), String> {
-    let tools = parse_tools_list_result(value, 1024)?;
+    let tools = parse_tools_list_result(value, MAX_DISCOVERED_MCP_TOOLS as u32)?;
     let next_cursor = match value.get("nextCursor") {
         None | Some(Value::Null) => None,
         Some(Value::String(cursor))

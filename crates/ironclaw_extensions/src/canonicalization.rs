@@ -111,7 +111,7 @@ pub fn canonicalize_installation_rows(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     use super::*;
     use crate::installations::{ExtensionManifestRef, InstallationOwner};

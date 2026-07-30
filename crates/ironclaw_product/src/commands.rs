@@ -365,7 +365,11 @@ fn parse_lifecycle_command_payload(
 
 fn parse_register_hosted_mcp_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
     let request = serde_json::from_str::<RegisterHostedMcpRequest>(payload.arguments.trim())
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::debug!(
+                error = %error,
+                "hosted MCP registration payload failed to parse"
+            );
             ProductRejection::permanent(
                 ProductRejectionKind::InvalidRequest,
                 "extension_register_hosted_mcp expects a registration JSON payload",
@@ -589,7 +593,10 @@ fn lifecycle_package_ref(
 mod tests {
     use super::*;
     use crate::ProductTriggerReason;
-    use ironclaw_host_api::{HostedMcpAuthSelection, HostedMcpEndpoint, LifecyclePackageId};
+    use ironclaw_host_api::{
+        hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint},
+        package_lifecycle::LifecyclePackageId,
+    };
 
     #[test]
     fn register_hosted_mcp_command_parses_the_registration_wire_shape() {

@@ -153,7 +153,7 @@ pub struct ResolvedMcpDeclaration {
     /// user-registered MCP definition. Bundled/static providers use NoAuth
     /// here because their concrete auth recipe remains the authority.
     #[serde(default)]
-    pub registration_auth: ironclaw_host_api::HostedMcpAuthSelection,
+    pub registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection,
 }
 
 /// One vendor the extension authenticates against: the account setup this
@@ -170,7 +170,7 @@ pub struct ResolvedAuthSurface {
     /// OAuth MCP. This stays with the recipe so later DCR uses the advertised
     /// location rather than guessing a well-known resource path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protected_resource_metadata_url: Option<ironclaw_host_api::HttpsEndpoint>,
+    pub protected_resource_metadata_url: Option<ironclaw_host_api::recipe::HttpsEndpoint>,
 }
 
 /// Serializable mirror of a v2 `[[host_api]]` reference.

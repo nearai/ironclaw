@@ -170,9 +170,11 @@ impl ExtensionPackage {
                     command: None,
                     args,
                     url: Some(endpoint),
-                } if transport == "http" && args.is_empty() => Ok(PackageSource::DirectRemote {
-                    endpoint: endpoint.clone(),
-                }),
+                } if transport.eq_ignore_ascii_case("http") && args.is_empty() => {
+                    Ok(PackageSource::DirectRemote {
+                        endpoint: endpoint.clone(),
+                    })
+                }
                 _ => Err(ExtensionError::InvalidManifest {
                     reason: "virtual package is not a direct HTTP MCP endpoint".to_string(),
                 }),
@@ -396,7 +398,7 @@ fn descriptor_schema_ref(capability: &CapabilityManifest) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::HostPortCatalog;
+    use ironclaw_host_api::host_port::HostPortCatalog;
 
     use super::*;
     use crate::{CapabilityProviderHostApiContract, HostApiContractRegistry};

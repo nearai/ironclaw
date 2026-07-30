@@ -14,8 +14,11 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
-    action::NetworkPolicy, decision::RuntimeCredentialAuthRequirement, http::RuntimeHttpEgress,
-    ids::{ExtensionId, UserId}, resource::ResourceScope,
+    action::NetworkPolicy,
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId},
+    resource::ResourceScope,
 };
 use tokio::sync::Mutex;
 

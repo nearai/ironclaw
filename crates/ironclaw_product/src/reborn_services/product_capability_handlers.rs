@@ -391,7 +391,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
             Self::ExtensionRegisterHostedMcp => {
-                let request: ironclaw_host_api::RegisterHostedMcpRequest =
+                let request: ironclaw_host_api::hosted_mcp::RegisterHostedMcpRequest =
                     product_command_input(input)?;
                 services
                     .lifecycle_service

@@ -1730,7 +1730,7 @@ use ironclaw_auth::{
     KeepaliveSweepFuture, KeepaliveSweepSettings, LeaderOutcome, NewCredentialAccount,
     ProviderBackedCredentialAccountService,
 };
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 use tokio_util::sync::CancellationToken;
 
 fn keepalive_recipe_toml(vendor: &str, keepalive_idle_seconds: Option<u32>) -> String {

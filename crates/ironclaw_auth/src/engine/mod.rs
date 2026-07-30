@@ -66,7 +66,7 @@ pub struct ResolvedVendorAuthRecipe {
     /// The exact protected-resource metadata document admitted from the MCP
     /// authorization challenge. Dynamic registration must use this location,
     /// rather than reconstructing a well-known path from the resource URL.
-    pub protected_resource_metadata_url: Option<ironclaw_host_api::HttpsEndpoint>,
+    pub protected_resource_metadata_url: Option<ironclaw_host_api::recipe::HttpsEndpoint>,
 }
 
 /// Resolver port: recipe DATA for a vendor id (never adapters, never code).
@@ -307,7 +307,7 @@ impl AuthEngine {
         (
             Box<OAuth2CodeRecipe>,
             Option<String>,
-            Option<ironclaw_host_api::HttpsEndpoint>,
+            Option<ironclaw_host_api::recipe::HttpsEndpoint>,
         ),
         AuthProductError,
     > {
@@ -334,7 +334,7 @@ impl AuthEngine {
         vendor: &str,
         recipe: &OAuth2CodeRecipe,
         resource: Option<&str>,
-        protected_resource_metadata_url: Option<&ironclaw_host_api::HttpsEndpoint>,
+        protected_resource_metadata_url: Option<&ironclaw_host_api::recipe::HttpsEndpoint>,
         register_if_missing: bool,
     ) -> Result<exchange::EffectiveOAuthClient, AuthProductError> {
         if let Some(credentials) = &recipe.client_credentials {

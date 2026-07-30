@@ -26,6 +26,7 @@ pub async fn restore_extension_lifecycle_state(
     active_extensions: &ActiveExtensionPublisher,
     legacy_tenant_owner: &UserId,
 ) -> Result<(), ProductSurfaceFailure> {
+    let mut catalog_registered_user_extension_ids: BTreeSet<String> = BTreeSet::new();
     for installation in
         canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
     {
@@ -38,6 +39,8 @@ pub async fn restore_extension_lifecycle_state(
         {
             let available = crate::hosted_mcp_manifest::available_package(manifest)?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
+            catalog_registered_user_extension_ids
+                .insert(installation.extension_id().as_str().to_string());
         }
         if remove_retired_internal_installation(installation_store, &installation).await? {
             continue;
@@ -92,6 +95,44 @@ pub async fn restore_extension_lifecycle_state(
                 .map_err(map_extension_error)?;
         }
         active_extensions.publish(&available.package)?;
+    }
+    restore_registered_only_definitions(
+        catalog,
+        installation_store,
+        &catalog_registered_user_extension_ids,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Repopulate the catalog with hosted MCP definitions that were registered
+/// but never installed, or whose last installation was later removed. The
+/// durable `registered-definitions/{id}.json` row survives that removal (see
+/// `installations.rs`'s `registered_definition_survives_its_final_installation_removal`),
+/// but no installation row exists to drive it through the loop above — so
+/// without this sweep the definition silently disappears from the registry
+/// after a restart. This only extends the in-memory catalog: it must not
+/// install into the lifecycle service, enable, or publish, since a
+/// registered-but-uninstalled definition confers no invocation and no active
+/// surface.
+async fn restore_registered_only_definitions(
+    catalog: &mut AvailableExtensionCatalog,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
+    already_contributed: &BTreeSet<String>,
+) -> Result<(), ProductSurfaceFailure> {
+    let registered_definitions = installation_store
+        .list_registered_package_definitions()
+        .await
+        .map_err(map_extension_installation_error)?;
+    for manifest in &registered_definitions {
+        if manifest.manifest().source != ManifestSource::UserRegistered {
+            continue;
+        }
+        if already_contributed.contains(manifest.extension_id().as_str()) {
+            continue;
+        }
+        let available = crate::hosted_mcp_manifest::available_package(manifest)?;
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
     }
     Ok(())
 }
@@ -242,7 +283,7 @@ pub fn prepare_install(
 
 fn manifest_record_for_available(
     available: &AvailableExtensionPackage,
-    host_ports: &ironclaw_host_api::HostPortCatalog,
+    host_ports: &ironclaw_host_api::host_port::HostPortCatalog,
     contracts: &ironclaw_extensions::HostApiContractRegistry,
     manifest_hash: Option<ironclaw_extensions::ManifestHash>,
 ) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {

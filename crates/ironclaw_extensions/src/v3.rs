@@ -628,7 +628,7 @@ pub(crate) fn parse_v3(
                 })
                 .unwrap_or_default(),
             dynamic_input_schemas: std::collections::BTreeMap::new(),
-            registration_auth: ironclaw_host_api::HostedMcpAuthSelection::NoAuth,
+            registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::NoAuth,
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,
@@ -801,7 +801,7 @@ fn credential_from_v3(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{HostPortCatalog, HostPortCatalogEntry, HostPortId};
+    use ironclaw_host_api::host_port::{HostPortCatalog, HostPortCatalogEntry, HostPortId};
 
     use super::*;
 

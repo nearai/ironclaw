@@ -4,7 +4,7 @@
 //! opaque endpoint and auth selection, while the durable manifest remains the
 //! sole stored contract.
 
-use ironclaw_host_api::{HostedMcpEndpoint, VendorId};
+use ironclaw_host_api::{hosted_mcp::HostedMcpEndpoint, ids::VendorId};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +33,13 @@ impl CanonicalHostedMcpEndpoint {
         {
             return Err(HostedMcpAdmissionError::InvalidEndpoint);
         }
+        // Denylist, not allowlist: query parameters are load-bearing identity
+        // for legitimate endpoints (see the ordering-preservation comment
+        // below and `canonical_endpoint_keeps_query_identity_and_normalizes_path`),
+        // so a blanket query rejection is not viable. This list is
+        // necessarily incomplete-by-construction; it blocks the well-known
+        // credential-bearing names plus common vendor-specific signature
+        // forms observed in hosted MCP / cloud-API query auth.
         const CREDENTIAL_QUERY_KEYS: &[&str] = &[
             "access_token",
             "token",
@@ -40,9 +47,20 @@ impl CanonicalHostedMcpEndpoint {
             "apikey",
             "key",
             "secret",
+            "client_secret",
             "authorization",
             "auth",
             "bearer",
+            "password",
+            "signature",
+            "sig",
+            "x-amz-signature",
+            "x-amz-security-token",
+            "x-amz-credential",
+            "session_token",
+            "id_token",
+            "refresh_token",
+            "sas",
         ];
         if url.query_pairs().any(|(key, _)| {
             CREDENTIAL_QUERY_KEYS
@@ -93,6 +111,10 @@ mod tests {
             "https://mcp.example.test/rpc?Access_Token=must-not-persist",
             "https://[::1]/mcp",
             "https://[2001:db8::1]/mcp",
+            "https://mcp.example.test/rpc?client_secret=must-not-persist",
+            "https://mcp.example.test/rpc?Password=must-not-persist",
+            "https://mcp.example.test/rpc?signature=must-not-persist",
+            "https://mcp.example.test/rpc?X-Amz-Signature=must-not-persist",
         ] {
             let input = HostedMcpEndpoint::new(endpoint).expect("wire endpoint");
             assert_eq!(

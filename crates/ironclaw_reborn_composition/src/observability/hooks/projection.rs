@@ -62,7 +62,12 @@ impl HookProjection {
         if package.manifest.hooks.is_empty() {
             return None;
         }
-        let root = package.materialized_root().ok()?.clone();
+        // silent-ok: only virtual-root (hosted MCP) packages fail materialized_root();
+        // they cannot declare filesystem hooks, so skipping projection is correct.
+        let Ok(root) = package.materialized_root() else {
+            return None;
+        };
+        let root = root.clone();
         Some(Self {
             extension_id: package.manifest.id.clone(),
             version: package.manifest.version.clone(),

@@ -3911,7 +3911,8 @@ pub struct RegisterHostedMcpResponse {
 
 fn bounded_hosted_mcp_name(name: String) -> Result<String, ProductSurfaceError> {
     let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed.len() > 256 || trimmed.chars().any(char::is_control) {
+    if trimmed.is_empty() || trimmed.chars().count() > 256 || trimmed.chars().any(char::is_control)
+    {
         return Err(ProductSurfaceError::validation(
             "desired_name",
             ProductSurfaceValidationCode::InvalidValue,

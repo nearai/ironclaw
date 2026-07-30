@@ -116,6 +116,7 @@ impl OAuthGateFlowDriver {
                 request.flow_source,
                 query.clone(),
                 &provider,
+                &requirement.requester_extension,
             )
             .await?
         {
@@ -175,6 +176,7 @@ impl OAuthGateFlowDriver {
                     request.flow_source,
                     query,
                     &provider,
+                    &requirement.requester_extension,
                 )
                 .await?
                 .ok_or(AuthProductError::BackendConflict)?
@@ -196,6 +198,7 @@ impl OAuthGateFlowDriver {
         flow_source: &Arc<dyn AuthFlowRecordSource>,
         query: TurnGateAuthFlowQuery,
         requested_provider: &AuthProviderId,
+        requested_requester_extension: &ironclaw_host_api::ids::ExtensionId,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
         let Some(existing) = flow_source.flow_for_turn_gate(query).await? else {
             return Ok(None);
@@ -209,6 +212,19 @@ impl OAuthGateFlowDriver {
                 .map(|_| None);
         }
         if existing.expires_at > Utc::now() {
+            // A live, unexpired flow whose requester differs from the
+            // requirement asking to reuse it belongs to a different
+            // extension's in-flight consent: decline reuse rather than
+            // canceling it. Canceling would destroy another extension's
+            // legitimate in-progress OAuth work for a mere
+            // same-gate/same-vendor coincidence; the caller falls through to
+            // creating its own flow under the same `setup_lock`/`gate_ref`,
+            // so declining here is fail-closed, not racy. An expired flow
+            // (below) carries no live consent to protect, so it is always
+            // cleaned up regardless of requester.
+            if existing.requester_extension.as_ref() != Some(requested_requester_extension) {
+                return Ok(None);
+            }
             return Ok(Some(existing));
         }
         // The flow being replaced is expired and about to be canceled; drop its
@@ -695,6 +711,74 @@ mod tests {
             "same gate must cancel a stale live flow for another provider before replacement"
         );
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gate_does_not_reuse_live_flow_for_a_different_requester_extension() {
+        let fixture = GateFixture::new();
+        let auth_scope = fixture.auth_scope();
+        let other_extension_flow_id = AuthFlowId::new();
+        let other_extension = fixture
+            .flow_manager
+            .create_flow(NewAuthFlow {
+                id: Some(other_extension_flow_id),
+                scope: auth_scope,
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("acmevendor").unwrap(),
+                requester_extension: Some(ExtensionId::new("other-extension-fixture").unwrap()),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://auth.acme.example/authorize?state=other-extension".to_string(),
+                    )
+                    .unwrap(),
+                    expires_at: Utc::now() + ChronoDuration::seconds(60),
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: TurnRunRef::new(fixture.run_id.to_string()).unwrap(),
+                    gate_ref: fixture.gate_ref.clone(),
+                },
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: Utc::now() + ChronoDuration::seconds(60),
+            })
+            .await
+            .unwrap();
+
+        // fixture.requirement's requester_extension is "acme-messenger-fixture",
+        // distinct from the flow's "other-extension-fixture" requester, but
+        // same owner/turn_run_ref/gate_ref/provider.
+        let flow = fixture.challenge().await;
+
+        assert_ne!(
+            flow.id, other_extension.id,
+            "a requirement from one extension must never receive another \
+             extension's live, unexpired flow for the same vendor/gate"
+        );
+        let AuthChallenge::OAuthUrl {
+            authorization_url, ..
+        } = flow.challenge.expect("authorization challenge")
+        else {
+            panic!("expected OAuth URL challenge");
+        };
+        assert!(
+            !authorization_url.as_str().contains("state=other-extension"),
+            "same gate/vendor must not reuse another requester's authorization URL"
+        );
+
+        // Declining reuse is fail-closed, not destructive: the other
+        // extension's still-valid flow must survive untouched.
+        let other_extension = fixture
+            .shared
+            .get_flow(&other_extension.scope, other_extension.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other_extension.status,
+            AuthFlowStatus::AwaitingUser,
+            "declining reuse must not cancel another extension's in-flight flow"
+        );
     }
 
     /// A resolvable-but-unconfigured vendor (operator has not saved OAuth

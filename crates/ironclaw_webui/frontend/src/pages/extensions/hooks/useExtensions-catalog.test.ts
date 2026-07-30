@@ -296,6 +296,19 @@ test("extension mutations preserve stable client action ids through hook payload
   ]);
 });
 
+// `useMutation` is called once per mutation declared in useExtensions.ts, in
+// declaration order. Binding a harness field to a fixed array index silently
+// repoints to the wrong mutation if that declaration order ever changes.
+// Instead, match each `mutationFn`'s source text against the distinctive
+// action call it makes — a stable discriminator independent of ordering.
+function configFor(mutationConfigs, calleeName) {
+  const config = mutationConfigs.find((candidate) =>
+    candidate.mutationFn.toString().includes(`${calleeName}(`),
+  );
+  assert.ok(config, `no mutation config found calling ${calleeName}(...)`);
+  return config;
+}
+
 function installMutationHarness(authoritativeExtension) {
   const mutationConfigs = [];
   const openCalls = [];
@@ -317,6 +330,7 @@ function installMutationHarness(authoritativeExtension) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    registerCustomMcp: () => {},
     hasChannelSurface,
     removeExtension: () => {},
     startExtensionOauth: () => {},
@@ -353,8 +367,8 @@ function installMutationHarness(authoritativeExtension) {
   vm.runInNewContext(useExtensionsSourceForTest(), context);
   context.globalThis.__testExports.useExtensions();
   return {
-    installConfig: mutationConfigs[0],
-    registerConfig: mutationConfigs[1],
+    installConfig: configFor(mutationConfigs, "installExtension"),
+    registerConfig: configFor(mutationConfigs, "registerCustomMcp"),
     openCalls,
     refetches,
     setupRequests,

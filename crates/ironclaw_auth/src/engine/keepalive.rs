@@ -48,7 +48,7 @@ use crate::credential::{
 };
 use crate::engine::AuthRecipeResolver;
 use crate::error::AuthProductError;
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 
 /// How long shutdown waits for an in-flight sweep before aborting the task.
 pub const KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);

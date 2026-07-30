@@ -9,8 +9,11 @@ use std::fmt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    BoundedJsonPointer, HttpsEndpoint, McpAuthChallenge, OAuth2CodeRecipe, RecipeClientCredentials,
-    TokenResponseMap, VendorAuthRecipe,
+    hosted_mcp::McpAuthChallenge,
+    recipe::{
+        BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials,
+        TokenResponseMap, VendorAuthRecipe,
+    },
 };
 
 use crate::{AuthProductError, ResolvedVendorAuthRecipe};
@@ -74,8 +77,8 @@ impl AuthorizationServerMetadataFetch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionClientProfile {
     pub id: String,
-    pub resource: String,
-    pub issuer: String,
+    pub resource: HttpsEndpoint,
+    pub issuer: HttpsEndpoint,
     pub credentials: RecipeClientCredentials,
 }
 
@@ -230,7 +233,9 @@ where
                     .resolve(&profile_id)
                     .await
                     .ok_or(AuthProductError::MalformedConfig)?;
-                if profile.resource != canonical_resource || profile.issuer != issuer {
+                if profile.resource.as_str() != canonical_resource
+                    || profile.issuer.as_str() != issuer
+                {
                     return Err(AuthProductError::MalformedConfig);
                 }
                 Some(profile.credentials)
@@ -248,12 +253,14 @@ where
         };
         let recipe = OAuth2CodeRecipe {
             display_name: request.vendor.clone(),
-            authorization_endpoint: ironclaw_host_api::HttpsEndpoint::new(
+            authorization_endpoint: ironclaw_host_api::recipe::HttpsEndpoint::new(
                 authorization_endpoint.to_string(),
             )
             .map_err(|_| AuthProductError::MalformedConfig)?,
-            token_endpoint: ironclaw_host_api::HttpsEndpoint::new(token_endpoint.to_string())
-                .map_err(|_| AuthProductError::MalformedConfig)?,
+            token_endpoint: ironclaw_host_api::recipe::HttpsEndpoint::new(
+                token_endpoint.to_string(),
+            )
+            .map_err(|_| AuthProductError::MalformedConfig)?,
             scope_param: None,
             scope_join: Default::default(),
             pkce: Default::default(),
@@ -289,7 +296,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::McpAuthMetadataLocation;
+    use ironclaw_host_api::hosted_mcp::McpAuthMetadataLocation;
 
     #[derive(Debug)]
     struct Profiles(Option<AdmissionClientProfile>);
@@ -709,10 +716,10 @@ mod tests {
         r.client_profile_id = Some("known".into());
         let profile = AdmissionClientProfile {
             id: "known".into(),
-            resource: "https://other.example/mcp".into(),
-            issuer: "https://auth.example.test".into(),
+            resource: https("https://other.example/mcp"),
+            issuer: https("https://auth.example.test"),
             credentials: RecipeClientCredentials {
-                client_id_handle: ironclaw_host_api::SecretHandle::new("client-id").unwrap(),
+                client_id_handle: ironclaw_host_api::ids::SecretHandle::new("client-id").unwrap(),
                 client_secret_handle: None,
             },
         };
@@ -729,12 +736,12 @@ mod tests {
         r.client_profile_id = Some("known".into());
         let profile = AdmissionClientProfile {
             id: "known".into(),
-            resource: "https://mcp.example.test/mcp".into(),
-            issuer: "https://auth.example.test".into(),
+            resource: https("https://mcp.example.test/mcp"),
+            issuer: https("https://auth.example.test"),
             credentials: RecipeClientCredentials {
-                client_id_handle: ironclaw_host_api::SecretHandle::new("client-id").unwrap(),
+                client_id_handle: ironclaw_host_api::ids::SecretHandle::new("client-id").unwrap(),
                 client_secret_handle: Some(
-                    ironclaw_host_api::SecretHandle::new("client-secret").unwrap(),
+                    ironclaw_host_api::ids::SecretHandle::new("client-secret").unwrap(),
                 ),
             },
         };
