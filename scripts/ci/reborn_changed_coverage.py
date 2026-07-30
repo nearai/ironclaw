@@ -70,10 +70,12 @@ def _is_exempt(
 
 
 def _is_product_source(path: str) -> bool:
+    filename = path.rsplit("/", 1)[-1]
     return (
         PRODUCT_SOURCE_RE.fullmatch(path) is not None
         and "/tests/" not in path
         and not path.endswith("/tests.rs")
+        and not filename.endswith("_tests.rs")
     )
 
 

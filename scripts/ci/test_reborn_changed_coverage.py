@@ -73,6 +73,7 @@ class ChangedCoverageTests(unittest.TestCase):
         paths = [
             "crates/ironclaw_example/src/tests.rs",
             "crates/ironclaw_example/src/projection/tests/contract.rs",
+            "crates/ironclaw_example/src/channel_host/e2e_tests.rs",
         ]
 
         for path in paths:
