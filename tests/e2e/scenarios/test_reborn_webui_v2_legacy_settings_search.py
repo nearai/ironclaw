@@ -1,5 +1,6 @@
-"""Legacy settings search coverage ported to Reborn WebChat v2."""
+"""Legacy settings coverage ported to Reborn WebChat v2."""
 
+import asyncio
 import json
 from urllib.parse import urlparse
 
@@ -78,6 +79,8 @@ async def _open_mocked_settings_page(
     llm_state: dict | None = None,
     llm_requests: list[dict] | None = None,
     skill_requests: list[str] | None = None,
+    settings_tools_gate: asyncio.Event | None = None,
+    tool_settings_requests: list[bool] | None = None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -88,6 +91,7 @@ async def _open_mocked_settings_page(
     )
     page.on("pageerror", lambda error: browser_messages.append(f"pageerror: {error}"))
     skills_state = [dict(skill) for skill in MOCK_SKILLS]
+    tool_entries = [dict(entry) for entry in MOCK_TOOL_ENTRIES]
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -120,7 +124,17 @@ async def _open_mocked_settings_page(
         path = urlparse(request.url).path
 
         if path == "/api/webchat/v2/settings/tools" and request.method == "GET":
-            await fulfill_json(route, {"entries": MOCK_TOOL_ENTRIES})
+            if settings_tools_gate is not None:
+                await settings_tools_gate.wait()
+            await fulfill_json(route, {"entries": tool_entries})
+            return
+
+        if path == "/api/webchat/v2/settings/tools" and request.method == "POST":
+            enabled = bool(json.loads(request.post_data or "{}").get("enabled"))
+            if tool_settings_requests is not None:
+                tool_settings_requests.append(enabled)
+            tool_entries[0] = {**tool_entries[0], "value": enabled}
+            await fulfill_json(route, {"entry": tool_entries[0]})
             return
 
         await route.continue_()
@@ -384,6 +398,71 @@ async def test_reborn_legacy_settings_tools_search_and_clear(
         await expect(page.get_by_text("No tools match the filter.")).to_be_visible()
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_settings_switches_share_accessible_keyboard_behavior(
+    reborn_v2_server, reborn_v2_browser
+):
+    appearance = await _open_mocked_settings_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        tab="appearance",
+    )
+    try:
+        appearance_switch = appearance["page"].get_by_role(
+            "switch", name="Show chat terminal shortcut"
+        )
+        await expect(appearance_switch).to_be_visible()
+        await expect(appearance_switch).to_be_enabled()
+        await expect(appearance_switch).to_have_attribute("aria-checked", "true")
+        appearance_box = await appearance_switch.bounding_box()
+        assert appearance_box is not None
+
+        await appearance_switch.focus()
+        await appearance_switch.press("Space")
+        await expect(appearance_switch).to_have_attribute("aria-checked", "false")
+        await appearance_switch.press("Enter")
+        await expect(appearance_switch).to_have_attribute("aria-checked", "true")
+    finally:
+        await appearance["context"].close()
+
+    settings_tools_gate = asyncio.Event()
+    tool_settings_requests: list[bool] = []
+    tools = await _open_mocked_settings_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        tab="tools",
+        settings_tools_gate=settings_tools_gate,
+        tool_settings_requests=tool_settings_requests,
+    )
+    try:
+        tools_switch = tools["page"].get_by_role(
+            "switch", name="Always allow eligible tools"
+        )
+        await expect(tools_switch).to_be_visible()
+        await expect(tools_switch).to_be_disabled()
+        await expect(tools_switch).to_have_attribute("aria-checked", "true")
+
+        await tools_switch.press("Space")
+        await expect(tools_switch).to_have_attribute("aria-checked", "true")
+        assert tool_settings_requests == []
+
+        settings_tools_gate.set()
+        await expect(tools_switch).to_be_enabled()
+        await expect(tools_switch).to_have_attribute("aria-checked", "false")
+        tools_box = await tools_switch.bounding_box()
+        assert tools_box is not None
+        assert tools_box["width"] == appearance_box["width"]
+        assert tools_box["height"] == appearance_box["height"]
+
+        await tools_switch.press("Space")
+        await expect(tools_switch).to_have_attribute("aria-checked", "true")
+        await tools_switch.click()
+        await expect(tools_switch).to_have_attribute("aria-checked", "false")
+        assert tool_settings_requests == [True, False]
+    finally:
+        settings_tools_gate.set()
+        await tools["context"].close()
 
 
 async def test_reborn_legacy_settings_skills_search_empty_state(
