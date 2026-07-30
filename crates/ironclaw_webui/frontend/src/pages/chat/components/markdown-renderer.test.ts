@@ -198,8 +198,8 @@ test("streaming markdown delegates accumulated text without a fixed render inter
   );
   assert.match(
     rendererSource,
-    /<StreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode=\{streaming \? "streaming" : "static"\}/,
-    "the renderer should animate active streams and hold their final snapshot statically",
+    /<StreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode="static"/,
+    "the renderer should animate active streams without Streamdown's transition-backed update queue",
   );
   assert.doesNotMatch(
     rendererSource,

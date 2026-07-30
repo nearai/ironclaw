@@ -29,7 +29,7 @@ vi.mock("streamdown", async () => {
   };
 });
 
-test("streaming Markdown updates immediately and finalizes through the sanitizer", async () => {
+test("streaming Markdown uses the synchronous package path and finalizes through the sanitizer", async () => {
   renderMarkdownMock.mockReset();
   renderMarkdownMock.mockImplementation((content) => `<p>${content}</p>`);
   const { MarkdownRenderer } = await import("./markdown-renderer");
@@ -52,7 +52,8 @@ test("streaming Markdown updates immediately and finalizes through the sanitizer
       container.querySelector('[data-testid="streamdown"]')?.getAttribute(
         "data-mode",
       ),
-      "streaming",
+      "static",
+      "package streaming mode uses supersedable React transitions that can starve under sustained SSE updates",
     );
     assert.equal(
       container.querySelector('[data-testid="streamdown"]')?.getAttribute(

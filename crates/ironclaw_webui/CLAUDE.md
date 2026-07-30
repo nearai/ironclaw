@@ -166,12 +166,14 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   intermediate text, and upgrades only the latest phase when the durable final
   reply arrives. These phase items remain live-projection/session state rather
   than durable transcript records.
-- Active assistant phases render their accumulated Markdown through Streamdown,
-  which incrementally reconciles incomplete model output and animates newly
-  arrived words. Do not add a fixed render timer or transport-side text
-  coalescer: those turn provider-rate updates into visible bursts. Completed
-  phases continue through the existing marked + DOMPurify renderer and
-  code-block enhancement path.
+- Active assistant phases render every accumulated Markdown snapshot through
+  Streamdown's synchronous `static` mode while keeping its new-word animation.
+  Do not use Streamdown's transition-backed `streaming` mode here: sustained
+  provider-rate updates can supersede the pending React transition and freeze
+  visible text until the stream ends. Do not add a fixed render timer or
+  transport-side text coalescer either; those turn provider-rate updates into
+  visible bursts. Completed phases continue through the existing marked +
+  DOMPurify renderer and code-block enhancement path.
 - `after_cursor` is retained only within one mounted Chat route (including
   native EventSource retries and visibility recovery). A route/thread remount
   starts at the projection origin so the server returns durable state plus the
