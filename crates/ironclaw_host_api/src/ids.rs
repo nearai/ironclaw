@@ -250,7 +250,7 @@ impl GateRef {
     /// [`GateRecord`](crate::GateRecord) is persisted and later resolved.
     ///
     /// Derived from the approval request's uuid so the host persist side
-    /// (`ironclaw_capabilities` authorize, the local-dev synthetic approval
+    /// (`ironclaw_capabilities` authorize, the standalone synthetic approval
     /// producer, and any future host-side gate rendering per §5.2.9) and the
     /// product read model derive the SAME record key from the one shared
     /// [`ApprovalRequestId`]. The two must never diverge or a persisted gate is

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, reference backend remains one RootFilesystem implementation while ordered-index helpers are extracted, plan #5274
 //! In-memory [`RootFilesystem`] implementing the full unified surface.
 //!
 //! Serves as:
@@ -18,7 +19,8 @@
 //! - [`append`](RootFilesystem::append)/[`tail`](RootFilesystem::tail) keep
 //!   one append log per path with monotonic [`SeqNo`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -34,6 +36,9 @@ use crate::{
     root::validate_atomic_subtree_entries,
 };
 
+mod transaction;
+use transaction::InMemoryStorageTxn;
+
 #[derive(Clone)]
 struct StoredEntry {
     entry: Entry,
@@ -41,6 +46,7 @@ struct StoredEntry {
     modified: SystemTime,
 }
 
+#[derive(Clone)]
 struct State {
     // Audit finding F2: keying on `VirtualPath` directly removes the
     // hot-path `VirtualPath::new(...).unwrap_or_else(unreachable!)` that
@@ -50,24 +56,32 @@ struct State {
     // both wasted work and a sloppy invariant to assert via panic.
     entries: HashMap<VirtualPath, StoredEntry>,
     indexes: HashMap<String, Vec<IndexSpec>>,
+    ordered_indexes: HashMap<String, HashMap<IndexName, MaterializedOrderedIndex>>,
     event_logs: HashMap<String, Vec<EventRecord>>,
     sequences: HashMap<String, SeqNo>,
 }
 
+#[derive(Clone)]
+struct MaterializedOrderedIndex {
+    spec: IndexSpec,
+    rows: BTreeMap<(Vec<IndexValue>, String), VirtualPath>,
+}
+
 /// In-memory backend serving the full unified [`RootFilesystem`] surface.
 pub struct InMemoryBackend {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 
 impl InMemoryBackend {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(State {
+            state: Arc::new(Mutex::new(State {
                 entries: HashMap::new(),
                 indexes: HashMap::new(),
+                ordered_indexes: HashMap::new(),
                 event_logs: HashMap::new(),
                 sequences: HashMap::new(),
-            }),
+            })),
         }
     }
 }
@@ -91,45 +105,12 @@ impl RootFilesystem for InMemoryBackend {
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         let mut state = self.state.lock().await;
-        // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
-        // already exists. Mirror the SQL contract so cross-backend tests
-        // can't pass against impossible production state.
-        let prefix = with_trailing_slash(path.as_str());
-        if state
-            .entries
-            .keys()
-            .any(|k| k.as_str().starts_with(&prefix))
-        {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "cannot overwrite a directory".to_string(),
-            });
-        }
-        let current_version = state.entries.get(path).map(|stored| stored.version);
-        check_cas(path, cas, current_version)?;
-
-        let next_version = current_version
-            .map(|v| v.next())
-            .unwrap_or_else(|| RecordVersion::from_backend(1));
-        state.entries.insert(
-            path.clone(),
-            StoredEntry {
-                entry,
-                version: next_version,
-                modified: SystemTime::now(),
-            },
-        );
-        Ok(next_version)
+        state_put(&mut state, path, entry, cas)
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
-        Ok(state.entries.get(path).map(|stored| VersionedEntry {
-            path: path.clone(),
-            entry: stored.entry.clone(),
-            version: stored.version,
-        }))
+        Ok(state_get(&state, path))
     }
 
     async fn create_subtree_atomic(
@@ -171,38 +152,7 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut state = self.state.lock().await;
-        // PR #3659 reviewer fix: delete now matches the SQL backends'
-        // subtree semantics. If an exact entry exists, remove it.
-        // Otherwise, if the path has children (i.e. `stat` would call
-        // this a directory), remove every entry under it. Returns
-        // NotFound only when neither an exact entry nor any descendants
-        // exist.
-        if state.entries.remove(path).is_some() {
-            // Also sweep any descendants under the deleted path — a
-            // record-shaped entry at /a/b plus byte entries at /a/b/c
-            // should both be cleared on `delete("/a/b")`.
-            let prefix = with_trailing_slash(path.as_str());
-            state
-                .entries
-                .retain(|key, _| !key.as_str().starts_with(&prefix));
-            clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
-            clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
-            return Ok(());
-        }
-        let prefix = with_trailing_slash(path.as_str());
-        let before = state.entries.len();
-        state
-            .entries
-            .retain(|key, _| !key.as_str().starts_with(&prefix));
-        clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
-        clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
-        if state.entries.len() == before {
-            return Err(FilesystemError::NotFound {
-                path: path.clone(),
-                operation: FilesystemOperation::Delete,
-            });
-        }
-        Ok(())
+        state_delete(&mut state, path)
     }
 
     async fn delete_if_version(
@@ -228,7 +178,9 @@ impl RootFilesystem for InMemoryBackend {
                 found: Some(current),
             });
         }
-        state.entries.remove(path);
+        if let Some(removed) = state.entries.remove(path) {
+            update_materialized_indexes(&mut state, path, Some(&removed.entry), None);
+        }
         Ok(())
     }
 
@@ -386,6 +338,93 @@ impl RootFilesystem for InMemoryBackend {
             .collect())
     }
 
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let state = self.state.lock().await;
+        let Some(materialized) = state
+            .ordered_indexes
+            .get(path.as_str())
+            .and_then(|indexes| indexes.get(&page.index))
+        else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let Some(prefix_values) =
+            crate::index::ordered_query_prefix_values(&materialized.spec, filter, page)
+        else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let sort_position = prefix_values.len();
+        let mut results = Vec::with_capacity(page.limit as usize);
+        match page.direction {
+            crate::SortDirection::Ascending => {
+                let start_values = page.after.as_ref().map_or_else(
+                    || prefix_values.clone(),
+                    |cursor| {
+                        let mut values = prefix_values.clone();
+                        values.push(cursor.value.clone());
+                        values.push(cursor.tie_breaker.clone());
+                        values
+                    },
+                );
+                for ((values, _), matched_path) in
+                    materialized.rows.range((start_values, String::new())..)
+                {
+                    if !values.starts_with(&prefix_values) {
+                        break;
+                    }
+                    if let Some(cursor) = &page.after
+                        && (values.get(sort_position), values.get(sort_position + 1))
+                            <= (Some(&cursor.value), Some(&cursor.tie_breaker))
+                    {
+                        continue;
+                    }
+                    push_ordered_result(&state, matched_path, &mut results);
+                    if results.len() >= page.limit as usize {
+                        break;
+                    }
+                }
+            }
+            crate::SortDirection::Descending => {
+                let mut upper_values = prefix_values.clone();
+                upper_values.resize(
+                    materialized.spec.keys.len(),
+                    IndexValue::Bytes(vec![u8::MAX; 1024]),
+                );
+                let upper_path = char::MAX.to_string();
+                for ((values, _), matched_path) in materialized
+                    .rows
+                    .range((prefix_values.clone(), String::new())..=(upper_values, upper_path))
+                    .rev()
+                {
+                    if !values.starts_with(&prefix_values) {
+                        continue;
+                    }
+                    if let Some(cursor) = &page.after
+                        && (values.get(sort_position), values.get(sort_position + 1))
+                            >= (Some(&cursor.value), Some(&cursor.tie_breaker))
+                    {
+                        continue;
+                    }
+                    push_ordered_result(&state, matched_path, &mut results);
+                    if results.len() >= page.limit as usize {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
     async fn ensure_index(
         &self,
         path: &VirtualPath,
@@ -419,30 +458,34 @@ impl RootFilesystem for InMemoryBackend {
             return Ok(());
         }
         bucket.push(spec.clone());
+        if matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix) {
+            state
+                .ordered_indexes
+                .entry(path.as_str().to_string())
+                .or_default()
+                .insert(
+                    spec.name.clone(),
+                    MaterializedOrderedIndex {
+                        spec: spec.clone(),
+                        rows: BTreeMap::new(),
+                    },
+                );
+        }
         Ok(())
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
-        // In-memory backend supports CAS only; multi-key transactions would
-        // require a separate state snapshot. Consumers must use CAS.
-        Err(FilesystemError::Unsupported {
-            path: path.clone(),
-            operation: FilesystemOperation::BeginTxn,
-        })
+        let state = Arc::clone(&self.state).lock_owned().await;
+        Ok(Box::new(InMemoryStorageTxn {
+            state: Some(state),
+            undo: Vec::new(),
+            prefix: path.clone(),
+        }))
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         let mut state = self.state.lock().await;
-        let log = state
-            .event_logs
-            .entry(path.as_str().to_string())
-            .or_default();
-        let next = log
-            .last()
-            .map(|rec| rec.seq.next())
-            .unwrap_or_else(|| SeqNo::ZERO.next());
-        log.push(EventRecord { seq: next, payload });
-        Ok(next)
+        Ok(state_append(&mut state, path, payload))
     }
 
     async fn append_batch(
@@ -505,13 +548,7 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
         let mut state = self.state.lock().await;
-        let next = state
-            .sequences
-            .entry(path.as_str().to_string())
-            .or_insert_with(|| SeqNo::ZERO.next());
-        let reserved = *next;
-        *next = next.next();
-        Ok(reserved)
+        Ok(state_reserve_sequence(&mut state, path))
     }
 
     // Legacy bytes ops — default impls in the trait route them through put/get
@@ -549,6 +586,152 @@ impl RootFilesystem for InMemoryBackend {
     }
 }
 
+fn state_put(
+    state: &mut State,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<RecordVersion, FilesystemError> {
+    let prefix = with_trailing_slash(path.as_str());
+    if state
+        .entries
+        .keys()
+        .any(|key| key.as_str().starts_with(&prefix))
+    {
+        return Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "cannot overwrite a directory".to_string(),
+        });
+    }
+    let current = state.entries.get(path).cloned();
+    let current_version = current.as_ref().map(|stored| stored.version);
+    check_cas(path, cas, current_version)?;
+    let next_version = current_version
+        .map(RecordVersion::next)
+        .unwrap_or_else(|| RecordVersion::from_backend(1));
+    update_materialized_indexes(
+        state,
+        path,
+        current.as_ref().map(|stored| &stored.entry),
+        Some(&entry),
+    );
+    state.entries.insert(
+        path.clone(),
+        StoredEntry {
+            entry,
+            version: next_version,
+            modified: SystemTime::now(),
+        },
+    );
+    Ok(next_version)
+}
+
+fn state_get(state: &State, path: &VirtualPath) -> Option<VersionedEntry> {
+    state.entries.get(path).map(|stored| VersionedEntry {
+        path: path.clone(),
+        entry: stored.entry.clone(),
+        version: stored.version,
+    })
+}
+
+fn state_delete(state: &mut State, path: &VirtualPath) -> Result<(), FilesystemError> {
+    let prefix = with_trailing_slash(path.as_str());
+    let removed = state
+        .entries
+        .iter()
+        .filter(|(key, _)| *key == path || key.as_str().starts_with(&prefix))
+        .map(|(key, stored)| (key.clone(), stored.clone()))
+        .collect::<Vec<_>>();
+    if removed.is_empty() {
+        return Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: FilesystemOperation::Delete,
+        });
+    }
+    for (removed_path, stored) in removed {
+        state.entries.remove(&removed_path);
+        update_materialized_indexes(state, &removed_path, Some(&stored.entry), None);
+    }
+    clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
+    clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
+    Ok(())
+}
+
+fn materialized_row_key(
+    spec: &IndexSpec,
+    path: &VirtualPath,
+    entry: &Entry,
+) -> Option<(Vec<IndexValue>, String)> {
+    let values = spec
+        .keys
+        .iter()
+        .map(|key| entry.indexed.get(key).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    Some((values, path.as_str().to_string()))
+}
+
+fn update_materialized_indexes(
+    state: &mut State,
+    path: &VirtualPath,
+    old_entry: Option<&Entry>,
+    new_entry: Option<&Entry>,
+) {
+    for prefix in ancestor_paths(path.as_str()) {
+        let Some(indexes) = state.ordered_indexes.get_mut(prefix) else {
+            continue;
+        };
+        for index in indexes.values_mut() {
+            if let Some(old_key) =
+                old_entry.and_then(|entry| materialized_row_key(&index.spec, path, entry))
+            {
+                index.rows.remove(&old_key);
+            }
+            if let Some(new_key) =
+                new_entry.and_then(|entry| materialized_row_key(&index.spec, path, entry))
+            {
+                index.rows.insert(new_key, path.clone());
+            }
+        }
+    }
+}
+
+fn ancestor_paths(path: &str) -> Vec<&str> {
+    let mut prefixes = vec!["/"];
+    prefixes.extend(
+        path.char_indices()
+            .filter(|(index, character)| *index > 0 && *character == '/')
+            .filter_map(|(index, _)| path.get(..index)),
+    );
+    if path != "/" {
+        prefixes.push(path);
+    }
+    prefixes
+}
+
+fn state_append(state: &mut State, path: &VirtualPath, payload: Vec<u8>) -> SeqNo {
+    let log = state
+        .event_logs
+        .entry(path.as_str().to_string())
+        .or_default();
+    let next = log
+        .last()
+        .map(|record| record.seq.next())
+        .unwrap_or_else(|| SeqNo::ZERO.next());
+    log.push(EventRecord { seq: next, payload });
+    next
+}
+
+fn state_reserve_sequence(state: &mut State, path: &VirtualPath) -> SeqNo {
+    let next = state
+        .sequences
+        .entry(path.as_str().to_string())
+        .or_insert_with(|| SeqNo::ZERO.next());
+    let reserved = *next;
+    *next = next.next();
+    reserved
+}
+
 fn check_cas(
     path: &VirtualPath,
     cas: CasExpectation,
@@ -569,6 +752,21 @@ fn check_cas(
             found,
         }),
     }
+}
+
+fn push_ordered_result(
+    state: &State,
+    matched_path: &VirtualPath,
+    results: &mut Vec<VersionedEntry>,
+) {
+    let Some(stored) = state.entries.get(matched_path) else {
+        return;
+    };
+    results.push(VersionedEntry {
+        path: matched_path.clone(),
+        entry: stored.entry.clone(),
+        version: stored.version,
+    });
 }
 
 fn filter_matches(
@@ -719,6 +917,61 @@ mod tests {
 
     fn vpath(s: &str) -> VirtualPath {
         VirtualPath::new(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn multi_key_transaction_commits_rows_together() {
+        let fs = InMemoryBackend::new();
+        let mut txn = fs.begin(&vpath("/processes")).await.unwrap();
+        txn.put(
+            &vpath("/processes/state/one"),
+            Entry::bytes(b"one".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        txn.put(
+            &vpath("/processes/state/two"),
+            Entry::bytes(b"two".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        assert!(
+            fs.get(&vpath("/processes/state/one"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            fs.get(&vpath("/processes/state/two"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_multi_key_transaction_rolls_back_rows() {
+        let fs = InMemoryBackend::new();
+        let mut txn = fs.begin(&vpath("/processes")).await.unwrap();
+        txn.put(
+            &vpath("/processes/state/one"),
+            Entry::bytes(b"one".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        drop(txn);
+
+        assert!(
+            fs.get(&vpath("/processes/state/one"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn key(s: &str) -> IndexKey {
@@ -982,6 +1235,167 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ordered_query_uses_index_value_and_keyset_cursor() {
+        let fs = InMemoryBackend::new();
+        fs.ensure_index(
+            &vpath("/threads/index"),
+            &IndexSpec::new(
+                IndexName::new("thread_activity").unwrap(),
+                vec![key("activity"), key("thread_id")],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+        let kind = RecordKind::new("thread_index").unwrap();
+        for (thread_id, activity) in [("b", "001"), ("a", "001"), ("c", "002")] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(key("activity"), IndexValue::Text(activity.into()))
+                .with_indexed(key("thread_id"), IndexValue::Text(thread_id.into()));
+            fs.put(
+                &vpath(&format!("/threads/index/{thread_id}")),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        }
+        let first = fs
+            .query_ordered(
+                &vpath("/threads/index"),
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    key("activity"),
+                    key("thread_id"),
+                    crate::SortDirection::Ascending,
+                    2,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.entry.indexed[&key("thread_id")].clone())
+                .collect::<Vec<_>>(),
+            vec![IndexValue::Text("a".into()), IndexValue::Text("b".into())]
+        );
+        let second = fs
+            .query_ordered(
+                &vpath("/threads/index"),
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    key("activity"),
+                    key("thread_id"),
+                    crate::SortDirection::Ascending,
+                    2,
+                )
+                .after(crate::OrderedQueryCursor {
+                    value: IndexValue::Text("001".into()),
+                    tie_breaker: IndexValue::Text("b".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].entry.indexed[&key("thread_id")],
+            IndexValue::Text("c".into())
+        );
+
+        let descending = fs
+            .query_ordered(
+                &vpath("/threads/index"),
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    key("activity"),
+                    key("thread_id"),
+                    crate::SortDirection::Descending,
+                    2,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            descending
+                .iter()
+                .map(|row| row.entry.indexed[&key("thread_id")].clone())
+                .collect::<Vec<_>>(),
+            vec![IndexValue::Text("c".into()), IndexValue::Text("b".into())]
+        );
+        let descending_next = fs
+            .query_ordered(
+                &vpath("/threads/index"),
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    key("activity"),
+                    key("thread_id"),
+                    crate::SortDirection::Descending,
+                    2,
+                )
+                .after(crate::OrderedQueryCursor {
+                    value: IndexValue::Text("001".into()),
+                    tie_breaker: IndexValue::Text("b".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(descending_next.len(), 1);
+        assert_eq!(
+            descending_next[0].entry.indexed[&key("thread_id")],
+            IndexValue::Text("a".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn ordered_index_declaration_never_backfills_existing_rows() {
+        let fs = InMemoryBackend::new();
+        let prefix = vpath("/processes/materialized/process");
+        let kind = RecordKind::new("process").unwrap();
+        let entry = Entry::record(kind, &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(key("status"), IndexValue::Text("queued".into()))
+            .with_indexed(key("process_id"), IndexValue::Text("old".into()));
+        fs.put(
+            &vpath("/processes/materialized/process/old"),
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        fs.ensure_index(
+            &prefix,
+            &IndexSpec::new(
+                IndexName::new("process_queue_no_backfill").unwrap(),
+                vec![key("status"), key("process_id")],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+        let rows = fs
+            .query_ordered(
+                &prefix,
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("process_queue_no_backfill").unwrap(),
+                    key("status"),
+                    key("process_id"),
+                    crate::SortDirection::Ascending,
+                    10,
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
     }
 
     #[tokio::test]

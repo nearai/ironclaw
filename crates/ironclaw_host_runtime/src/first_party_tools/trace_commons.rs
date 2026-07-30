@@ -173,7 +173,7 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
         // model-controlled (a prompt-injected model could supply it), so the
         // runtime approval gate — user-controlled consent — is the primary
         // control, with `confirmed=true` as defense-in-depth. profile_set is
-        // also deliberately NOT on the local-dev approval-gate exemption list.
+        // also deliberately NOT on the standalone approval-gate exemption list.
         PermissionMode::Ask,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate::default()
@@ -628,7 +628,7 @@ it's safe to retry.",
         ),
         OnboardError::DeviceKey(_) => (
             "DeviceKeyError",
-            "Couldn't establish the local device key for onboarding; the device-key state \
+            "Couldn't establish the standaloneice key for onboarding; the device-key state \
 may be missing or malformed. Re-run onboarding with a fresh invite.",
         ),
         OnboardError::Persist { .. } => (

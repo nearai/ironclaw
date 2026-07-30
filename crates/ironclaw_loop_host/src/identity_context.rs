@@ -182,7 +182,7 @@ impl HostIdentityContextBuildError {
             Self::UnknownIdentityFile | Self::InvalidIdentityFile | Self::PolicyDenied => {
                 AgentLoopHostErrorKind::PolicyDenied
             }
-            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::ContextOverflow,
             Self::BudgetMisconfigured | Self::Internal => AgentLoopHostErrorKind::Internal,
         };
         AgentLoopHostError::new(kind, self.to_string())

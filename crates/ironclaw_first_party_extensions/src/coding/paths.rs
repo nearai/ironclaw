@@ -240,7 +240,7 @@ pub(super) async fn deny_sensitive_existing_path(
 
 /// Walk up the directory tree, denying if any existing parent is sensitive.
 ///
-/// Best-effort check for the local-dev threat model: assumes a trusted filesystem
+/// Best-effort check for the standalone threat model: assumes a trusted filesystem
 /// where parent directories do not become sensitive between this walk and the
 /// subsequent `create_dir_all` (TOCTOU).
 async fn deny_nearest_sensitive_existing_parent(

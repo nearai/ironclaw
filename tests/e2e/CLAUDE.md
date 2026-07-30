@@ -83,17 +83,14 @@ final page screenshots, a screenshot-only Playwright trace (DOM snapshots and
 source capture are disabled), and 960×540 video. The nightly workflow uploads
 these diagnostics only when its shard fails.
 
-Browser artifacts have a 256 MiB per-shard default soft budget. Override it
-with a positive byte count in `IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Context
-bundles remain protected while their test outcome is pending. Once pytest
-reports the final outcome, the harness removes the oldest successful bundles
-first; if the newest successful bundle alone exceeds the remaining budget, its
-largest files are removed until it fits. Failed-test bundles remain protected
-until the workflow uploads them, so a shard with failures can temporarily
-exceed the soft budget rather than delete the traces needed to diagnose those
-failures. Server logs remain outside this browser budget so startup and process
-failures retain textual evidence even when successful browser bundles are
-pruned; nightly servers run at warn-level logging to limit that volume.
+The complete uploaded artifact tree has a 256 MiB per-shard hard budget.
+Override it with a positive byte count in
+`IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Server stdout and stderr streams retain
+bounded tails while the process is running. Browser context bundles remain
+protected while their test outcome is pending, and failed bundles are pruned
+after successful bundles. If protected bundles alone exceed the hard limit,
+their largest files are removed last so the complete upload tree still fits.
+Nightly servers also run at warn-level logging to limit volume.
 
 ## Test Scenarios
 
@@ -118,6 +115,7 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
 | `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
@@ -146,6 +144,7 @@ full-path Emulate tests still start the legacy gateway binary.
 | `test_provider_fault_proxy.py` | Harness self-tests for reusable provider status, response, timeout, connection-reset, and lost-acknowledgement profiles plus safe request evidence and reset |
 | `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
 | `test_journey_coverage.py` | Fast whole-path completeness gate. Harvested provider traces are typed `JourneyCase` entries, while representative WebUI, Slack, Telegram, and scheduled-trigger journeys name exact executable Pytest or Cargo evidence. Production channel manifests cannot add an inbound or outbound surface without journey evidence. |
+| `test_product_surface_coverage.py` | Generated-report contract and sabotage tests. The report joins the production capability inventory, typed operation/journey/fault registries, and owned backlog into JSON and Markdown without copying their denominators. |
 | `test_reborn_qa_trace_full_path.py` | Harvested and typed provider operations through standalone Reborn and Emulate, including representative read/idempotent-write/non-idempotent-write fault cases with provider readback |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
@@ -334,10 +333,33 @@ inventory now says so mechanically.** Coverage is counted per
 Everything not yet meeting those rules is listed in `coverage_backlog` with an
 owner, reason, issue, and review condition. The backlog is a ratchet: entries
 must be removed as coverage lands, and the gate fails if an entry names a write
-that now has a case, or a read that now covers every required outcome class. As
-of this writing it holds no write capabilities and 48 read capabilities missing
-an empty-result case. That gap was previously invisible because a harvested
+that now has a case, or a read that now covers every required outcome class.
+Use the generated product-surface report for the current count instead of
+copying it into prose. That gap was previously invisible because a harvested
 tool-call name satisfied the old gate.
+
+### Product-surface coverage artifact
+
+`product_surface_coverage.py` emits a stable JSON artifact and a human-readable
+Markdown matrix with `contract`, `journey`, `faults`, `browser`, and `live`
+columns. It derives capability IDs and operation kinds from shipped extension
+manifests and imports the typed evidence registries. The only policy metadata
+it consumes is the existing classification, waiver, and owned-backlog manifest.
+
+The generator exits non-zero for an unclassified production capability or a
+capability classified as tested with no executable evidence. Owned backlog
+items, waivers, and live-only classifications remain visible in dedicated
+sections without being laundered into missing coverage. The `live` column must
+only use a stable live-result binding; the fact that a hermetic fixture was
+originally harvested from live QA is provenance, not current live evidence.
+
+Run it locally with:
+
+```bash
+python tests/e2e/product_surface_coverage.py \
+  --json artifacts/product-surface-coverage/matrix.json \
+  --markdown artifacts/product-surface-coverage/matrix.md
+```
 
 ### Environment passed to ironclaw in tests
 

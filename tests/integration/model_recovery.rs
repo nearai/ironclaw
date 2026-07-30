@@ -184,3 +184,59 @@ async fn invalid_output_recovers_with_model_visible_observation() {
         .await
         .expect("gateway summaries do not enter the recovery prompt");
 }
+
+/// Regression for #6700: a provider's output-token ceiling is not an input
+/// context overflow. The real gateway caller must preserve that distinction,
+/// skip context compaction, and give the model an actionable finalization turn.
+#[tokio::test]
+async fn output_truncation_recovers_without_shrinking_input_context() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .with_budget_accounting()
+        .output_truncated_model_times(1)
+        .script([RebornScriptedReply::text(
+            "concise complete answer after truncation",
+        )])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("give a complete answer")
+        .await
+        .expect("run survives a truncated provider response");
+    harness
+        .assert_reply_contains("concise complete answer after truncation")
+        .await
+        .expect("the recovery turn is durably finalized");
+    harness
+        .assert_model_message_content_contains(
+            "model error observation: output was truncated; continue without repeating if prior partial text is available, otherwise provide a concise complete answer",
+        )
+        .await
+        .expect("the real gateway caller injects continue-or-condense guidance");
+    harness
+        .assert_interactive_model_provider_call_count(2)
+        .await
+        .expect("truncation receives exactly one recovery call");
+    harness
+        .assert_text_model_provider_call_count(0)
+        .await
+        .expect("output truncation must not consume a context-compaction attempt");
+    harness
+        .assert_conversation_history_lacks("partial response that must not be reported as complete")
+        .await
+        .expect("partial provider output is never durably reported as a successful reply");
+    harness
+        .assert_tool_not_invoked("builtin.http")
+        .await
+        .expect("a truncated textual tool call must never reach capability dispatch");
+    harness
+        .assert_egress_count(0)
+        .await
+        .expect("a truncated textual tool call must never reach HTTP egress");
+    harness
+        .assert_budget_spent_tokens(11, 7)
+        .await
+        .expect("truncated provider usage must still be durably charged");
+}

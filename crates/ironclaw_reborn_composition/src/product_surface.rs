@@ -15,10 +15,10 @@ use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
     ChannelConnectionService, OperatorStatusService, ProjectScopedAttachmentLander,
-    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
 };
 
@@ -27,8 +27,8 @@ use ironclaw_triggers::TriggerRepository;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
-    RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticStatus, RebornRuntime,
+    RebornBuildError, RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus,
+    RebornRuntime,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
@@ -42,20 +42,22 @@ use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCr
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
-/// SAME runtime. Local-dev and production graphs both carry these two
+/// SAME runtime. Standalone and production graphs both carry these two
 /// separately; mixing runtimes would let active-hold projections read run
 /// state the poller of the *other* runtime writes, silently desyncing the
 /// automations panel (#5886).
 pub(crate) struct AutomationBacking {
     pub(crate) repository: Arc<dyn TriggerRepository>,
-    pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+    pub(crate) lifecycle_source: Arc<
+        dyn ironclaw_processes::ProcessLifecycleLookupSource<Error = ironclaw_turns::TurnError>,
+    >,
 }
 
 /// Resolves the [`AutomationBacking`] pair from the runtime-owned stores.
 pub(crate) fn automation_backing(runtime: &RebornRuntime) -> AutomationBacking {
     AutomationBacking {
         repository: Arc::clone(&runtime.trigger_repository),
-        snapshot_source: Arc::clone(&runtime.turn_run_snapshot_source),
+        lifecycle_source: Arc::clone(&runtime.process_lifecycle_lookup_source),
     }
 }
 
@@ -224,7 +226,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     )));
     let backing = automation_backing(runtime);
     let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
-        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(backing.snapshot_source),
+        crate::automation::trigger_poller::ProcessActiveRunLookup::new(backing.lifecycle_source),
     );
     api = api.with_automation_product_service(Arc::new(
         RebornAutomationProductService::new(backing.repository, active_run_lookup)
@@ -329,7 +331,7 @@ struct LocalSkillsProductService {
     // flag-reading selector is wired (the production assembly) — the toggle then
     // reports unavailable instead of writing to a flag nothing reads.
     //
-    // Process-global by design: this is a single-operator local-dev switch, so it
+    // Process-global by design: this is a single-operator standalone switch, so it
     // is intentionally not scoped per caller. A future multi-user surface would
     // need a per-tenant flag.
     auto_activate_learned: Option<Arc<AtomicBool>>,

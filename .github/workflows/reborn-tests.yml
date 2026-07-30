@@ -11,7 +11,7 @@ on:
         description: >-
           Enumerate longer generated lifecycle sequences (#6524 workstream 9).
           Pull requests stay at the fast depth; the nightly deep run raises it.
-          Depth 3 is 84 sequences (~70s) against depth 2's 20 (~20s).
+          Depth 3 is 39 sequences against depth 2's 12.
         required: false
         default: false
         type: boolean
@@ -53,6 +53,10 @@ env:
   # parses this strictly and fails on a bad value rather than falling back,
   # so a typo here cannot silently downgrade the nightly lane.
   IRONCLAW_GENERATED_SEQUENCE_DEPTH: ${{ inputs.deep_generations && '3' || '2' }}
+  # The same full-scope nightly reuse increases every existing proptest
+  # boundary generator instead of maintaining a duplicate randomized list.
+  # Proptest reports its random seed on failure for exact local replay.
+  PROPTEST_CASES: ${{ inputs.deep_generations && '2048' || '256' }}
   # Pin wall-clock rendering inputs so a test cannot pass or fail on the
   # runner's locale. Reborn renders model-visible time slices, and date/number
   # formatting differs by locale, so an unpinned runner turns a formatting
@@ -683,7 +687,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
       - name: Download lane lcov artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -733,6 +743,23 @@ jobs:
             tests/integration/coverage-floor.toml \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Test changed-code coverage gate
+        run: python3 scripts/ci/test_reborn_changed_coverage.py
+
+      - name: Enforce changed production-line coverage
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/reborn_changed_coverage.py \
+            --lcov reborn-integration-merged.lcov \
+            --base "$BASE_SHA" \
+            --head "$(git rev-parse HEAD)" \
+            --threshold 85 \
+            --json reborn-changed-coverage.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       # Surface the same %/hole-list as a sticky PR comment so it lives in the
       # conversation, not just the job summary. PR-only, and non-fatal by
       # design: fork PRs get a read-only GITHUB_TOKEN and the comment API
@@ -741,7 +768,7 @@ jobs:
       # reborn-coverage.yml workflow's comment step) — enforcement happens in
       # the "Render Reborn coverage ratchet" step above, not here.
       - name: Post sticky coverage comment
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -759,7 +786,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: reborn-integration-coverage-merged
-          path: reborn-integration-merged.lcov
+          path: |
+            reborn-integration-merged.lcov
+            reborn-changed-coverage.json
           if-no-files-found: warn
 
   webui-v2-js-tests:

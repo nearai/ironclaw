@@ -4,14 +4,13 @@
 //! approves, and the run resumes and completes. Existing durability coverage
 //! (`group_approvals::scenario_approval_request_persists_after_reopen`) proves
 //! the approval-REQUEST record survives an independent reopen, but that
-//! scenario runs over the default `StorageMode::InMemory` group — the turn/gate
-//! STATE (`TurnStateRowStore`, holding `TurnStatus::BlockedApproval` +
-//! `GateRef`) is never independently reopened there. This test drives a
+//! scenario runs over the default `StorageMode::InMemory` group, so process
+//! suspension state is never independently reopened there. This test drives a
 //! `StorageMode::LibSql` group so BOTH stores are genuinely on-disk, reopens
 //! BOTH independently of the live group, then resumes to completion — the
 //! missing half of the "harness-rebuild-over-storage-root" seam.
 //!
-//! Scope note: this reopens the on-disk STORES (turn-state + approval-request)
+//! Scope note: this reopens the on-disk stores (process journal + approval request)
 //! independently of the live process, mirroring `assert_reply_persists_after_reopen`'s
 //! established idiom — it does not additionally tear down and rebuild the
 //! `TurnCoordinator`/`TurnRunScheduler` themselves (that would require
@@ -30,7 +29,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-use ironclaw_run_state::ApprovalStatus;
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::StorageMode;
 use reborn_support::group::RebornIntegrationGroup;
@@ -79,7 +78,7 @@ async fn gate_survives_storage_reopen_and_resumes_to_completion() {
         .approval_request_scope_for_test(&gate_ref)
         .expect("gate ref resolves to a request scope");
     let reopened_approvals =
-        ironclaw_reborn_composition::test_support::open_local_dev_approval_request_store_for_test(
+        ironclaw_reborn_composition::test_support::open_standalone_approval_request_store_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await

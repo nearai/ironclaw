@@ -18,10 +18,12 @@ fn deployment_profile(profile: RebornCompositionProfile) -> MemoryDeploymentProf
     match profile {
         // `Disabled` never reaches memory composition; treat it as the safest
         // non-production profile so a stray call cannot relax production rules.
-        RebornCompositionProfile::Disabled | RebornCompositionProfile::LocalDev => {
-            MemoryDeploymentProfile::LocalDev
+        RebornCompositionProfile::Disabled | RebornCompositionProfile::Standalone => {
+            MemoryDeploymentProfile::Standalone
         }
-        RebornCompositionProfile::LocalDevYolo => MemoryDeploymentProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted => {
+            MemoryDeploymentProfile::StandaloneUnrestricted
+        }
         // Volume-backed hosted single-tenant shares the same single-tenant trust
         // model as plain hosted-single-tenant, so it gets the same memory
         // deployment classification (and the same binding-certification rules).
@@ -138,8 +140,9 @@ mod tests {
     #[test]
     fn invalid_provider_id_fails_startup() {
         let memory = section(Some("not a valid id"), Vec::new());
-        let err = resolve_memory_binding_policy(Some(&memory), RebornCompositionProfile::LocalDev)
-            .expect_err("invalid provider id rejected");
+        let err =
+            resolve_memory_binding_policy(Some(&memory), RebornCompositionProfile::Standalone)
+                .expect_err("invalid provider id rejected");
         assert!(matches!(err, RebornBuildError::InvalidConfig { .. }));
     }
 }

@@ -4,8 +4,8 @@ use ironclaw_host_api::VirtualPath;
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat,
-    FilesystemError, FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, SeqNo,
-    VersionedEntry,
+    FilesystemError, FilesystemOperation, Filter, IndexSpec, OrderedPage, Page, RecordVersion,
+    SeqNo, VersionedEntry,
 };
 
 /// Unified filesystem interface over canonical virtual paths.
@@ -114,6 +114,16 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Query)
     }
 
+    /// Ordered keyset query over one declared indexed projection.
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        _filter: &Filter,
+        _page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        unsupported(path, FilesystemOperation::Query)
+    }
+
     /// Declare an index on a mount prefix. Idempotent: re-declaring the same
     /// spec is a no-op; declaring a conflicting spec returns
     /// [`FilesystemError::IndexConflict`].
@@ -199,8 +209,9 @@ pub trait RootFilesystem: Send + Sync {
     // ─── Atomicity ────────────────────────────────────────────────────────
 
     /// Begin a multi-key transaction scoped to `prefix`. Backends with only
-    /// CAS support return [`FilesystemError::Unsupported`]; consumers must
-    /// always have a CAS-only path.
+    /// CAS support return [`FilesystemError::Unsupported`]. Consumers normally
+    /// provide a CAS-only path; stores with cross-record invariants may require
+    /// `TxnCapability::MultiKey` and fail closed on weaker backends.
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         unsupported(path, FilesystemOperation::BeginTxn)
     }

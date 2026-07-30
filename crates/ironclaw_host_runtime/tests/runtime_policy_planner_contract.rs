@@ -1,7 +1,7 @@
 //! Vertical slice + enforcement tests for #3045 PR 5/6/7.
 //!
 //! PR 6 (local profile vertical slice): drive a `LocalSingleUser +
-//! LocalDev` policy through the planner and assert the resolver +
+//! Standalone` policy through the planner and assert the resolver +
 //! planner agree on `HostWorkspace` filesystem and `LocalHost`
 //! process backend for filesystem/shell capabilities. Coding-alias
 //! capabilities (cargo test, npm test, ripgrep) are modelled as
@@ -69,13 +69,13 @@ fn builtin_shell_descriptor() -> CapabilityDescriptor {
 // -- PR 6: Local profile vertical slice -------------------------------------
 
 #[test]
-fn local_dev_filesystem_read_plans_against_host_workspace() {
-    // Acceptance criterion: `LocalSingleUser + LocalDev` reaches a
+fn standalone_filesystem_read_plans_against_host_workspace() {
+    // Acceptance criterion: `LocalSingleUser + Standalone` reaches a
     // `HostWorkspace` filesystem backend through the planner. This is
     // the canonical "agent edits files in the user's repo" path.
     let policy = resolve(ResolveRequest::new(
         DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
     ))
     .unwrap();
 
@@ -89,14 +89,14 @@ fn local_dev_filesystem_read_plans_against_host_workspace() {
 }
 
 #[test]
-fn local_dev_coding_alias_capabilities_plan_against_local_host_shell() {
+fn standalone_coding_alias_capabilities_plan_against_local_host_shell() {
     // The coding-aliases (cargo test, npm test, ripgrep, etc.) all
-    // declare `SpawnProcess + ReadFilesystem`. Under LocalDev the
+    // declare `SpawnProcess + ReadFilesystem`. Under Standalone the
     // planner must route them to the LocalHost process backend so the
     // user can run native development tooling.
     let policy = resolve(ResolveRequest::new(
         DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
     ))
     .unwrap();
 
@@ -114,24 +114,24 @@ fn local_dev_coding_alias_capabilities_plan_against_local_host_shell() {
         assert_eq!(
             plan.process_backend,
             ProcessBackendKind::LocalHost,
-            "{alias} must plan against LocalHost under LocalDev"
+            "{alias} must plan against LocalHost under Standalone"
         );
         assert_eq!(
             plan.filesystem_backend,
             FilesystemBackendKind::HostWorkspace,
-            "{alias} must plan against HostWorkspace under LocalDev"
+            "{alias} must plan against HostWorkspace under Standalone"
         );
     }
 }
 
 #[test]
-fn local_dev_builtin_shell_manifest_plans_against_local_host_direct_network() {
+fn standalone_builtin_shell_manifest_plans_against_local_host_direct_network() {
     // `builtin.shell` is the real copied shell tool descriptor. Under the
-    // LocalDev profile its declared process/network effects must resolve to
+    // Standalone profile its declared process/network effects must resolve to
     // the local host/direct logged backend family.
     let policy = resolve(ResolveRequest::new(
         DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
     ))
     .unwrap();
 
@@ -270,18 +270,18 @@ fn hosted_dev_filesystem_write_plans_against_tenant_workspace_only() {
 }
 
 #[test]
-fn hosted_multi_tenant_rejects_local_dev_at_resolver_before_planner_runs() {
+fn hosted_multi_tenant_rejects_standalone_at_resolver_before_planner_runs() {
     // The planner is only reachable when the resolver succeeded.
-    // Acceptance criterion: `HostedMultiTenant + LocalDev` fails closed
+    // Acceptance criterion: `HostedMultiTenant + Standalone` fails closed
     // at the resolver, not silently downgrades to a different profile
     // at plan time.
     let result = resolve(ResolveRequest::new(
         DeploymentMode::HostedMultiTenant,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
     ));
     assert!(
         result.is_err(),
-        "HostedMultiTenant + LocalDev must fail closed at the resolver"
+        "HostedMultiTenant + Standalone must fail closed at the resolver"
     );
 }
 

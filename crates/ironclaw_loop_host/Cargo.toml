@@ -14,8 +14,7 @@ publish = false
 layer = "loops"
 
 [features]
-# Test-only constructors (in-memory-backed store seams). Disabled by default;
-# enable only from a downstream crate's [dev-dependencies].
+# Compatibility feature for downstream test configurations.
 test-support = []
 
 [dependencies]
@@ -23,13 +22,13 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
-hex = "0.4.3"
 jsonschema = { version = "0.46", default-features = false }
 parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 ironclaw_capabilities = { path = "../ironclaw_capabilities", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
@@ -41,7 +40,7 @@ ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-feat
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
-ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
+ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

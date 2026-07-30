@@ -169,7 +169,7 @@ mod tests {
         nearai_login_callback_mount(
             session,
             reload,
-            RebornBootConfig::new(home, RebornProfile::LocalDev),
+            RebornBootConfig::new(home, RebornProfile::Standalone),
             states,
         )
         .expect("valid NEAR AI callback route")

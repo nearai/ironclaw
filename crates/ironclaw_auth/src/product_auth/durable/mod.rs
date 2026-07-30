@@ -86,7 +86,7 @@ where
     ///
     /// `ScopedFilesystem` does not expose its inner `RootFilesystem`, so
     /// this field is wired explicitly by the factory (`new_with_root`).
-    /// `None` in test/local-dev paths that do not need cross-tenant listing —
+    /// `None` in test/standalone paths that do not need cross-tenant listing —
     /// `list_refresh_candidates` returns an empty vec in that case (safe: no
     /// accounts are refreshed, which is benign for local/test deployments).
     root: Option<Arc<F>>,
@@ -648,7 +648,7 @@ where
     /// `list_refresh_candidates`; idle-threshold filtering (by `updated_at`
     /// against the vendor's recipe-declared lifetime) is the engine keepalive
     /// sweep's job. Returns an empty vec when the root filesystem was not
-    /// wired (local-dev / test path). The returned `CredentialAccount` records
+    /// wired (standalone / test path). The returned `CredentialAccount` records
     /// carry the `access_secret`/`refresh_secret` *handles* (opaque
     /// references, never the raw token material) because the refresh path
     /// needs them. Callers MUST NOT log or serialize these records; only the
@@ -673,7 +673,7 @@ where
     /// so one bad subtree never aborts the sweep.
     pub(crate) async fn sweep_all_accounts(&self) -> Vec<CredentialAccount> {
         let Some(root) = &self.root else {
-            // Local-dev / test path: no root wired, nothing to enumerate.
+            // Standalone/test path: no root wired, nothing to enumerate.
             return Vec::new();
         };
 

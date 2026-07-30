@@ -28,6 +28,10 @@ use ironclaw_turns::{
 };
 
 use crate::model_failure_mapping::model_stage_failure_category;
+use crate::{
+    failure_categories::CHECKPOINT_REJECTED_CATEGORY,
+    failure_summary::checkpoint_rejection_host_explanation,
+};
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
@@ -344,12 +348,9 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 };
             }
             if let Some(category) = permanent_prompt_stage_failure_category(stage, kind) {
-                let detail = detail
-                    .or_else(|| Some(safe_summary.as_str().to_string()))
-                    .map(ironclaw_loop_host::scrub_model_visible_detail);
                 return AgentLoopDriverError::Failed {
                     reason_kind: category.to_string(),
-                    detail,
+                    detail: Some(safe_summary.as_str().to_string()),
                 };
             }
             AgentLoopDriverError::Unavailable {
@@ -366,8 +367,22 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
         AgentLoopExecutorError::CheckpointFailed { stage } => {
             tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
             AgentLoopDriverError::Failed {
-                reason_kind: "checkpoint_rejected".to_string(),
+                reason_kind: CHECKPOINT_REJECTED_CATEGORY.to_string(),
                 detail: None,
+            }
+        }
+        AgentLoopExecutorError::CheckpointRejected {
+            stage,
+            safe_summary,
+        } => {
+            tracing::warn!(
+                stage = ?stage,
+                safe_summary = %safe_summary,
+                "planned driver checkpoint was rejected"
+            );
+            AgentLoopDriverError::Failed {
+                reason_kind: CHECKPOINT_REJECTED_CATEGORY.to_string(),
+                detail: Some(checkpoint_rejection_host_explanation(stage, &safe_summary)),
             }
         }
         AgentLoopExecutorError::RecoverySequenceExhausted => {
@@ -440,13 +455,12 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
     match kind {
         LoopCheckpointKind::BeforeModel => Ok(CheckpointKind::BeforeModel),
         LoopCheckpointKind::BeforeBlock => Ok(CheckpointKind::BeforeBlock),
-        LoopCheckpointKind::BeforeSideEffect | LoopCheckpointKind::Final => {
-            tracing::warn!(
-                ?kind,
-                "planned driver cannot resume checkpoint kind without exact continuation semantics"
-            );
-            Err(())
-        }
+        // These boundaries are resumed only after the process layer has
+        // created a distinct replacement run. `BeforeSideEffect` therefore
+        // represents the user's explicit retry of the failed invocation, not
+        // an automatic in-run replay.
+        LoopCheckpointKind::BeforeSideEffect => Ok(CheckpointKind::BeforeSideEffect),
+        LoopCheckpointKind::Final => Ok(CheckpointKind::Final),
     }
 }
 
@@ -561,6 +575,31 @@ mod tests {
                 reason_kind: "interrupted_unexpectedly".to_string(),
                 detail: None,
             }
+        );
+    }
+
+    #[test]
+    fn executor_checkpoint_rejection_maps_to_host_authored_terminal_explanation() {
+        let mapped = map_executor_error(AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::BeforeModel,
+            safe_summary: LoopSafeSummary::new(
+                "checkpoint state write conflicted with current turn state",
+            )
+            .expect("safe checkpoint cause"),
+        });
+
+        let AgentLoopDriverError::Failed {
+            reason_kind,
+            detail: Some(detail),
+        } = mapped
+        else {
+            panic!("checkpoint rejection should be a detailed terminal failure");
+        };
+        assert_eq!(reason_kind, CHECKPOINT_REJECTED_CATEGORY);
+        assert!(
+            detail.contains("pre-model checkpoint")
+                && detail.contains("No model or capability ran after the rejection")
+                && detail.contains("Start a new run")
         );
     }
 
@@ -763,7 +802,9 @@ mod tests {
             kind: AgentLoopHostErrorKind::PolicyDenied,
             safe_summary: LoopSafeSummary::new("explicit skill is ambiguous").expect("safe"),
             reason_kind: None,
-            detail: None,
+            detail: Some(
+                "provider rejected /private/path with api_key=raw-secret-value".to_string(),
+            ),
         });
 
         assert_eq!(
@@ -1017,17 +1058,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_unsupported_checkpoint_kind_returns_checkpoint_unavailable_exit() {
+    async fn resume_before_side_effect_continues_without_replaying_the_capability() {
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
         let context = run_context_for_driver(&driver);
         let checkpoint_id = TurnCheckpointId::new();
+        let mut restored_state = LoopExecutionState::initial_for_run(&context);
+        restored_state.last_checkpoint = Some(ironclaw_agent_loop::state::CheckpointMarker {
+            kind: CheckpointKind::BeforeSideEffect,
+            iteration_at_checkpoint: 0,
+        });
         let loaded = LoadedCheckpointPayload {
             kind: LoopCheckpointKind::BeforeSideEffect,
             schema_id: context.checkpoint_schema_id.clone(),
             schema_version: context.checkpoint_schema_version,
-            payload: RedactedCheckpointPayload::new(b"{}".to_vec())
-                .expect("valid checkpoint payload"),
+            payload: RedactedCheckpointPayload::new(
+                serde_json::to_vec(&restored_state).expect("serialize checkpoint state"),
+            )
+            .expect("valid checkpoint payload"),
         };
         let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
             .run_context(context.clone())
@@ -1047,11 +1095,11 @@ mod tests {
             )
             .await;
 
-        assert_checkpoint_unavailable_exit(result);
+        result.expect("resume should continue after the durable side-effect boundary");
         assert_eq!(host.load_call_count(), 1);
         assert!(
-            host.call_log().is_empty(),
-            "unsupported checkpoint kinds must fail before executor host ports"
+            host.call_log().contains(&MockHostCall::StreamModel),
+            "resume must continue to the model without re-dispatching a capability"
         );
     }
 

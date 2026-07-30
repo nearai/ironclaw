@@ -43,8 +43,8 @@ static DEFAULT_TRUST_POLICY: LazyLock<StaticTrustPolicy> = LazyLock::new(|| Stat
 static DEFAULT_RUNTIME_POLICY: LazyLock<EffectiveRuntimePolicy> =
     LazyLock::new(|| EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

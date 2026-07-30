@@ -2576,7 +2576,6 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_run_state",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2649,6 +2648,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_events",
  "ironclaw_extensions",
@@ -2656,7 +2656,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_processes",
  "ironclaw_resources",
- "ironclaw_run_state",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_trust",
@@ -2778,7 +2777,6 @@ dependencies = [
  "ironclaw_product",
  "ironclaw_reborn_config",
  "ironclaw_resources",
- "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
@@ -2980,7 +2978,6 @@ dependencies = [
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
- "ironclaw_run_state",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_scripts",
@@ -3018,14 +3015,15 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "deadpool-postgres",
+ "ironclaw_approvals",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
+ "ironclaw_processes",
  "ironclaw_libsql_runtime",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
- "ironclaw_run_state",
  "ironclaw_secrets",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -3095,7 +3093,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "futures",
- "hex",
+ "ironclaw_approvals",
  "ironclaw_capabilities",
  "ironclaw_filesystem",
  "ironclaw_host_api",
@@ -3103,8 +3101,8 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_observability",
  "ironclaw_process_sandbox",
+ "ironclaw_processes",
  "ironclaw_resources",
- "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_threads",
@@ -3142,6 +3140,7 @@ dependencies = [
  "chrono-tz",
  "hex",
  "ironclaw_host_api",
+ "ironclaw_prompt_envelope",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3255,6 +3254,8 @@ name = "ironclaw_processes"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
+ "chrono",
  "futures",
  "ironclaw_events",
  "ironclaw_filesystem",
@@ -3264,6 +3265,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3290,7 +3292,6 @@ dependencies = [
  "ironclaw_loop_host",
  "ironclaw_outbound",
  "ironclaw_reborn_traces",
- "ironclaw_run_state",
  "ironclaw_runner",
  "ironclaw_safety",
  "ironclaw_threads",
@@ -3379,7 +3380,6 @@ dependencies = [
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
- "ironclaw_run_state",
  "ironclaw_runner",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
@@ -3541,20 +3541,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_run_state"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "ironclaw_runner"
 version = "0.1.0"
 dependencies = [
@@ -3564,6 +3550,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "ironclaw_agent_loop",
+ "ironclaw_approvals",
  "ironclaw_common",
  "ironclaw_events",
  "ironclaw_filesystem",
@@ -3574,7 +3561,7 @@ dependencies = [
  "ironclaw_loop_host",
  "ironclaw_memory",
  "ironclaw_observability",
- "ironclaw_run_state",
+ "ironclaw_processes",
  "ironclaw_safety",
  "ironclaw_threads",
  "ironclaw_turns",
@@ -3739,6 +3726,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_observability",
+ "ironclaw_processes",
  "serde",
  "serde_jcs",
  "serde_json",

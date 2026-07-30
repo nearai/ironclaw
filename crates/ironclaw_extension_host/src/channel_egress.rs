@@ -433,12 +433,8 @@ mod tests {
         }
     }
 
-    fn test_host_runtime_services() -> HostRuntimeServices<
-        DiskFilesystem,
-        InMemoryResourceGovernor,
-        ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
-        ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
-    > {
+    fn test_host_runtime_services() -> HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor>
+    {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
             Arc::new(DiskFilesystem::new()),

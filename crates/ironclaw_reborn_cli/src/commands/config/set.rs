@@ -48,7 +48,7 @@ impl ConfigSetCommand {
             key,
             self.value,
             &mut StdinSecretValueSource,
-            &LocalDevSecretStoreOpener,
+            &StandaloneSecretStoreOpener,
         )
     }
 }
@@ -380,9 +380,9 @@ trait SecretStoreOpener {
     ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore>;
 }
 
-struct LocalDevSecretStoreOpener;
+struct StandaloneSecretStoreOpener;
 
-impl SecretStoreOpener for LocalDevSecretStoreOpener {
+impl SecretStoreOpener for StandaloneSecretStoreOpener {
     fn open_llm_key_store(
         &self,
         home_path: &Path,
@@ -390,14 +390,14 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
         // `config set` is a write command: create the reborn home directory
         // (if missing) before opening the store, mirroring
         // `onboard::llm_credentials::open_llm_key_store` — a never-onboarded
-        // home has no directory yet, and `open_local_dev_secret_store` opens
+        // home has no directory yet, and `open_standalone_secret_store` opens
         // a libSQL file directly under it without creating parents itself.
         std::fs::create_dir_all(home_path).map_err(|error| {
             anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
         })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
@@ -415,7 +415,7 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
         })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_reborn_composition::GoogleOauthSecretStore::new(
@@ -760,9 +760,9 @@ mod tests {
 
     /// `config set` on a secret-destination key may be the FIRST command a
     /// never-onboarded home runs, before `onboard` creates the reborn home
-    /// directory. Drives the real `LocalDevSecretStoreOpener` (not
+    /// directory. Drives the real `StandaloneSecretStoreOpener` (not
     /// `FakeSecretStoreOpener`) so it actually reaches
-    /// `open_local_dev_secret_store`'s libSQL file-open and needs
+    /// `open_standalone_secret_store`'s libSQL file-open and needs
     /// `create_dir_all` to succeed.
     #[test]
     fn google_client_secret_write_creates_the_reborn_home_directory_on_a_never_onboarded_host() {
@@ -789,7 +789,7 @@ mod tests {
             ConfigKey::GoogleClientSecret,
             None,
             &mut FixedPromptSource::new(vec!["GOCSPX-never-onboarded"]),
-            &LocalDevSecretStoreOpener,
+            &StandaloneSecretStoreOpener,
         );
 
         result.expect(

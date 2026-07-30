@@ -67,7 +67,7 @@ jobs:
             echo "No code changes — style checks will be skipped"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -201,6 +201,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       # Guards the #5603 Docker-outage class: every include_str! target must
       # exist and be present in each Dockerfile build context. Whole-repo scan,
       # no compile — safe on a shallow checkout.
@@ -227,6 +231,8 @@ jobs:
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-package-feature-flags.sh
           scripts/ci/test-reborn-crate-test-buckets.sh
+          python3 scripts/ci/test_ws12_suite_shards.py
+          python3 scripts/ci/test_ws12_workflow_contracts.py
           bash .github/scripts/test-pr-labeler.sh
 
   clippy:
@@ -340,6 +346,9 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: reborn-cli-smoke
@@ -360,13 +369,14 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
+      - name: Self-test exact release-binary smoke gate
+        run: python3 -m unittest tests/test_smoke_release_binary.py
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw
       - name: Test Reborn libSQL restart integration
         run: |
-          cargo test -p ironclaw_runner \
-            --test loop_driver_host \
-            turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
+          cargo test -p ironclaw_host_runtime \
+            --test reborn_durable_restart_integration \
             -- --nocapture
       - name: Test Reborn architecture boundaries
         run: cargo test -p ironclaw_architecture reborn

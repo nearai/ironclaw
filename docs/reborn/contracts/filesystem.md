@@ -130,8 +130,8 @@ Recommended meaning:
 | `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
 | `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
 | `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
-| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
-| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+| `/run-state` | read-only compatibility input for invocation lifecycle migration into `/processes` |
+| `/approvals` | approval-request lifecycle records owned by `ironclaw_approvals` |
 | `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
 | `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
 | `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |

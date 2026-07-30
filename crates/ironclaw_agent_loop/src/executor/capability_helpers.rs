@@ -862,6 +862,7 @@ mod tests {
             runtime: RuntimeKind::FirstParty,
             safe_name: "tool_search".to_string(),
             safe_description: "search".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         };

@@ -52,7 +52,7 @@ when introduced:
 - **`pr3180-ready`, `pr7-ready`** — speculative gates for landings that
   never came, with zero `#[cfg]` sites, sitting in the manifest for two
   months.
-- **`libsql`/`postgres` on `ironclaw_resources`, `ironclaw_run_state`,
+- **`libsql`/`postgres` on `ironclaw_resources`, the retired run-state crate,
   `ironclaw_outbound`** — declared, forwarded to by three crates, never
   read; they pulled `libsql`, `deadpool-postgres`, and `tokio-postgres`
   into builds that used none of them.

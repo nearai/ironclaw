@@ -1,0 +1,210 @@
+use std::sync::Arc;
+
+use ironclaw_approvals::*;
+use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::*;
+
+#[tokio::test]
+async fn approval_store_marks_pending_request_approved_or_denied_with_scope() {
+    let store = in_mem_approval_request_store();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    let approved = store.approve(&scope, request_id).await.unwrap();
+
+    assert_eq!(approved.status, ApprovalStatus::Approved);
+    assert_eq!(
+        store.get(&scope, request_id).await.unwrap().unwrap().status,
+        ApprovalStatus::Approved
+    );
+
+    let denied_request = approval_request(invocation_id);
+    let denied_id = denied_request.id;
+    store
+        .save_pending(scope.clone(), denied_request)
+        .await
+        .unwrap();
+    let denied = store.deny(&scope, denied_id).await.unwrap();
+
+    assert_eq!(denied.status, ApprovalStatus::Denied);
+}
+
+#[tokio::test]
+async fn approval_resolution_is_scoped_to_tenant_and_user() {
+    let store = in_mem_approval_request_store();
+    let invocation_id = InvocationId::new();
+    let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
+    let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(tenant_a, approval).await.unwrap();
+
+    let err = store.approve(&tenant_b, request_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalStoreError::UnknownApprovalRequest { request_id: id } if id == request_id
+    ));
+}
+
+#[tokio::test]
+async fn approval_store_rejects_second_resolution_attempt() {
+    let store = in_mem_approval_request_store();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store.deny(&scope, request_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalStoreError::ApprovalNotPending {
+            request_id: id,
+            status: ApprovalStatus::Approved,
+        } if id == request_id
+    ));
+}
+
+#[tokio::test]
+async fn approval_store_rejects_duplicate_pending_save() {
+    let store = in_mem_approval_request_store();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store
+        .save_pending(scope.clone(), approval.clone())
+        .await
+        .unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalStoreError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+    ));
+    assert_eq!(
+        store.get(&scope, request_id).await.unwrap().unwrap().status,
+        ApprovalStatus::Approved
+    );
+}
+
+#[tokio::test]
+async fn filesystem_approval_store_rejects_second_resolution_attempt() {
+    let fs = Arc::new(engine_filesystem());
+    let store = ApprovalRequestStore::new(scoped_approval_fs(fs));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store.deny(&scope, request_id).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalStoreError::ApprovalNotPending {
+            request_id: id,
+            status: ApprovalStatus::Approved,
+        } if id == request_id
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_approval_store_rejects_duplicate_pending_save() {
+    let fs = Arc::new(engine_filesystem());
+    let store = ApprovalRequestStore::new(scoped_approval_fs(fs));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store
+        .save_pending(scope.clone(), approval.clone())
+        .await
+        .unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    let err = store
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ApprovalStoreError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+    ));
+    assert_eq!(
+        store.get(&scope, request_id).await.unwrap().unwrap().status,
+        ApprovalStatus::Approved
+    );
+}
+
+fn engine_filesystem() -> ironclaw_filesystem::InMemoryBackend {
+    ironclaw_filesystem::InMemoryBackend::new()
+}
+
+/// The production approval-request store over a fresh in-memory backend — the
+/// drop-in for the deleted `InMemoryApprovalRequestStore` (arch-simplification §4.3).
+fn in_mem_approval_request_store()
+-> ironclaw_approvals::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend> {
+    ironclaw_approvals::ApprovalRequestStore::new(scoped_approval_fs(std::sync::Arc::new(
+        engine_filesystem(),
+    )))
+}
+
+/// Build a [`ScopedFilesystem`] exposing `/approvals` under one tenant/user.
+fn scoped_approval_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/approvals").expect("alias"),
+        VirtualPath::new("/engine/tenants/test-tenant/users/test-user/approvals").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new(tenant).unwrap(),
+        user_id: UserId::new(user).unwrap(),
+        agent_id: None,
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    }
+}
+
+fn approval_request(invocation_id: InvocationId) -> ApprovalRequest {
+    ApprovalRequest {
+        id: ApprovalRequestId::new(),
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::Extension(ExtensionId::new("caller").unwrap()),
+        action: Box::new(Action::Dispatch {
+            capability: CapabilityId::new("echo.say").unwrap(),
+            estimated_resources: ResourceEstimate::default(),
+        }),
+        invocation_fingerprint: None,
+        reason: format!("approval for {invocation_id}"),
+        reusable_scope: None,
+    }
+}

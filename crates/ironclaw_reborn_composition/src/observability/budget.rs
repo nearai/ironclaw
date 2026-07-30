@@ -1,10 +1,10 @@
 //! Shared budget-accountant composition helpers.
 //!
-//! Both the local-dev runtime (`build_reborn_runtime`) and any
+//! Both the standalone runtime (`build_reborn_runtime`) and any
 //! production loop composer go through [`build_default_budget_accountant`]
 //! so the same `BudgetDefaults`-derived seeding policy + overestimate
 //! factor reach every code path that needs to enforce daily caps. Without
-//! a shared helper, local-dev would seed defaults and production wouldn't
+//! a shared helper, standalone would seed defaults and production wouldn't
 //! — the kind of split-brain configuration the #3899 review pass
 //! flagged (review feedback High #2).
 
@@ -21,11 +21,11 @@ use rust_decimal::Decimal;
 ///
 /// The accountant gets:
 ///
-/// 1. The caller's `ResourceGovernor` (in-memory for non-durable local-dev,
+/// 1. The caller's `ResourceGovernor` (in-memory for non-durable standalone,
 ///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
-/// 3. A `BudgetGateStore` (in-memory for local-dev,
+/// 3. A `BudgetGateStore` (in-memory for standalone,
 ///    `BudgetGateStore` scoped to the tenant for production).
 /// 4. A `BudgetSeedingPolicy` derived from the caller-resolved
 ///    [`BudgetDefaults`] so fresh user/project accounts pick up the

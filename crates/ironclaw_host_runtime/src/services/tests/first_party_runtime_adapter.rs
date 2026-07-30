@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     DispatchError, ExtensionId, InvocationOrigin, ResourceEstimate, RunId,
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId,

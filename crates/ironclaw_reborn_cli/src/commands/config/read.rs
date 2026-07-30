@@ -201,7 +201,7 @@ mod tests {
 api_version = "ironclaw.runtime/v1"
 
 [boot]
-profile = "local-dev"
+profile = "standalone"
 
 [identity]
 default_owner = "test-operator"
@@ -230,7 +230,7 @@ user_daily_usd = 5.0
         ));
         assert!(matches!(
             find("boot.profile").value,
-            Some(ConfigValue::String(ref s)) if s == "local-dev"
+            Some(ConfigValue::String(ref s)) if s == "standalone"
         ));
         assert!(matches!(
             find("identity.default_owner").value,

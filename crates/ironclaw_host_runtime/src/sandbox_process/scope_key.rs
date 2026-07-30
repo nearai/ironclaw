@@ -41,7 +41,8 @@ impl RebornSandboxScopeKey {
     }
 
     pub fn container_name_prefix(&self) -> String {
-        format!("ironclaw-reborn-sandbox-{}", &self.digest[..24])
+        let digest_prefix = self.digest.get(..24).unwrap_or(self.digest.as_str());
+        format!("ironclaw-reborn-sandbox-{digest_prefix}")
     }
 }
 

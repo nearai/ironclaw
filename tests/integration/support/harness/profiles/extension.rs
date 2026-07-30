@@ -17,7 +17,7 @@ use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress, VendorResponseRouter,
-    bundled_extension_provider_trust, capability_ids_from_strs, local_dev_all_effects,
+    bundled_extension_provider_trust, capability_ids_from_strs, standalone_all_effects,
     wildcard_test_policy,
 };
 
@@ -54,12 +54,10 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     );
     Ok(ToolsProfile {
         capability_ids,
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
@@ -100,12 +98,22 @@ fn hosted_mcp_discovery_fixture_response(
                 "annotations": {"readOnlyHint": true}
             }]
         }),
-        "tools/call" if is_nearai => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": "REBORN_NEARAI_WEB_SEARCH_RESULT"
-            }]
-        }),
+        "tools/call" if is_nearai => {
+            let is_empty_query = body
+                .pointer("/params/arguments/query")
+                .and_then(serde_json::Value::as_str)
+                == Some("NEARAI_EMPTY_PROVIDER_RESULT");
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": if is_empty_query {
+                        "[]"
+                    } else {
+                        "REBORN_NEARAI_WEB_SEARCH_RESULT"
+                    }
+                }]
+            })
+        }
         _ => return None,
     };
     let response = serde_json::to_vec(&serde_json::json!({
@@ -231,18 +239,16 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
             VISIBILITY_PROBE_MODEL_CAPABILITY_ID,
             VISIBILITY_PROBE_HOST_INTERNAL_CAPABILITY_ID,
         ])?,
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![(
             ironclaw_host_api::ExtensionId::new("visprobe")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         )]),
         // Surface resolution reads each advertised capability's
         // `input_schema_ref` off the mounted filesystem under the package
@@ -263,6 +269,195 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
 pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRuntimeCapabilityHarness>
 {
     extension_visibility_probe_tools_profile()?.build().await
+}
+
+/// Catalog wording from the Attio incident. Registry-installed descriptions
+/// may retain this authentication vocabulary; local packages may not.
+pub(crate) const PROMPT_DENIAL_DESCRIPTION: &str =
+    "Authenticated with a workspace API key presented as a Bearer header";
+
+const VERIFIED_PROMPT_DESCRIPTION_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "verifiedprompt"
+name = "Verified Prompt Description Probe"
+version = "0.1.0"
+description = "Verified prompt-description probe fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/verifiedprompt.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "verifiedprompt.invoke"
+description = "Authenticated with a workspace API key presented as a Bearer header"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/invoke.input.json"
+output_schema_ref = "schemas/invoke.output.json"
+"#;
+
+const LOCAL_PROMPT_DESCRIPTION_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "localprompt"
+name = "Local Prompt Description Probe"
+version = "0.1.0"
+description = "Local prompt-description probe fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/localprompt.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "localprompt.unsafe"
+description = "Authenticated with a workspace API key presented as a Bearer header"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/probe.input.json"
+output_schema_ref = "schemas/probe.output.json"
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "localprompt.healthy"
+description = "Healthy local capability remains available"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/probe.input.json"
+output_schema_ref = "schemas/probe.output.json"
+"#;
+
+fn prompt_description_files(
+    manifest_toml: &str,
+    package_id: &str,
+    module_name: &str,
+    schema_names: &[&str],
+) -> HarnessResult<Vec<(String, Vec<u8>)>> {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests/fixtures/extension_prompt_trust")
+        .join(package_id);
+    let module = std::fs::read(
+        repo_root
+            .join("crates/ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
+    )?;
+    let mut files = vec![
+        (
+            "manifest.toml".to_string(),
+            manifest_toml.as_bytes().to_vec(),
+        ),
+        (format!("wasm/{module_name}"), module),
+    ];
+    for schema_name in schema_names {
+        files.push((
+            format!("schemas/{schema_name}"),
+            std::fs::read(fixture_root.join("schemas").join(schema_name))?,
+        ));
+    }
+    Ok(files)
+}
+
+fn verified_prompt_description_package() -> HarnessResult<(
+    ironclaw_extensions::ExtensionPackage,
+    ironclaw_extensions::ResolvedExtensionManifest,
+)> {
+    let available = ironclaw_extension_host::registry_extension_package(
+        prompt_description_files(
+            VERIFIED_PROMPT_DESCRIPTION_MANIFEST,
+            "verifiedprompt",
+            "verifiedprompt.wasm",
+            &["invoke.input.json", "invoke.output.json"],
+        )?,
+        &[],
+    )?;
+    let resolved = available.resolved_manifest.as_ref().clone();
+    Ok((available.package, resolved))
+}
+
+fn local_prompt_description_package() -> HarnessResult<(
+    ironclaw_extensions::ExtensionPackage,
+    ironclaw_extensions::ResolvedExtensionManifest,
+)> {
+    let available = ironclaw_extension_host::imported_extension_package(
+        prompt_description_files(
+            LOCAL_PROMPT_DESCRIPTION_MANIFEST,
+            "localprompt",
+            "localprompt.wasm",
+            &["probe.input.json", "probe.output.json"],
+        )?,
+        &[],
+    )?;
+    let resolved = available.resolved_manifest.as_ref().clone();
+    Ok((available.package, resolved))
+}
+
+/// Real-turn prompt-description trust probe. Both fixture manifests go
+/// through the production registry/local import boundaries and the
+/// active-extension publisher. Those boundaries assign the manifest source,
+/// which is the production input that derives `CapabilityDescriptionTrust`.
+pub(crate) fn extension_prompt_description_trust_probe_tools_profile() -> HarnessResult<ToolsProfile>
+{
+    let (verified_package, verified_resolved) = verified_prompt_description_package()?;
+    let (local_package, local_resolved) = local_prompt_description_package()?;
+    Ok(ToolsProfile {
+        capability_ids: capability_ids_from_strs(&[
+            "verifiedprompt.invoke",
+            "localprompt.unsafe",
+            "localprompt.healthy",
+        ])?,
+        effect_kinds: standalone_all_effects(),
+        options: HostRuntimeHarnessOptions::new(
+            MountView::default(),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+        )
+        .with_activated_bundled_extension_resolved(verified_package, verified_resolved)
+        .with_activated_bundled_extension_resolved(local_package, local_resolved),
+        network_policy_override: Some(wildcard_test_policy()),
+        provider_trust_override: Some(vec![
+            (
+                ironclaw_host_api::ExtensionId::new("verifiedprompt")?,
+                standalone_all_effects(),
+            ),
+            (
+                ironclaw_host_api::ExtensionId::new("localprompt")?,
+                standalone_all_effects(),
+            ),
+        ]),
+        post_construct_asset_copy: Some((
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/extension_prompt_trust"),
+            std::path::PathBuf::from("local-dev/system/extensions"),
+        )),
+        auto_approve_default: Some(true),
+        ..ToolsProfile::new(
+            "reborn-e2e-extension-prompt-description-trust",
+            "reborn-e2e-extension-prompt-description-trust-user",
+        )?
+    })
+}
+
+pub(crate) async fn extension_prompt_description_trust_probe_tools()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    extension_prompt_description_trust_probe_tools_profile()?
+        .build()
+        .await
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(
@@ -626,11 +821,11 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ExtensionId::new("acme-messenger")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         ));
         trust.push((
             ironclaw_host_api::ExtensionId::new("slack")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         ));
     }
     profile.options = profile
@@ -768,7 +963,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ExtensionId::new("telegram")?,
-            local_dev_all_effects(),
+            standalone_all_effects(),
         ));
     }
     let network_egress = Arc::new(

@@ -5,7 +5,7 @@
 //! Files" viewer calls to navigate the agent's internal filesystem (persistent
 //! memory + project working files, which include landed attachments). It reads
 //! through a single read-only [`ScopedFilesystem`] whose mount view spans every
-//! browsable alias (see [`scoped_browse_mount_view`](crate::local_dev_mounts)). A
+//! browsable alias (see [`scoped_browse_mount_view`](crate::runtime_mounts)). A
 //! [`FsMount`] selects which alias to confine to; paths in and out are
 //! mount-relative so neither an alias nor a host path crosses the boundary.
 //!
@@ -22,12 +22,10 @@ use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFiles
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
-};
-
-use crate::local_dev_mounts::{BROWSE_MEMORY_ALIAS, WORKSPACE_ALIAS};
-use ironclaw_product::{
     file_name_of, guard_readable_file, map_filesystem_error, map_kind, mime_for_path,
 };
+
+use crate::runtime_mounts::{BROWSE_MEMORY_ALIAS, WORKSPACE_ALIAS};
 
 /// Browses the agent's internal filesystem across mounts on behalf of an
 /// already-authorized caller, over a read-only scoped filesystem.
@@ -360,7 +358,7 @@ mod tests {
         let root = Arc::new(InMemoryBackend::new());
         let reader = MountScopedFilesystemReader::new(Arc::new(ScopedFilesystem::new(
             Arc::clone(&root),
-            crate::local_dev_mounts::scoped_browse_mount_view,
+            crate::runtime_mounts::scoped_browse_mount_view,
         )));
         let alice = user_scope("alice");
         let bob = user_scope("bob");

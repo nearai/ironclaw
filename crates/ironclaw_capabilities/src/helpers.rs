@@ -1,3 +1,4 @@
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_authorization::{
     CapabilityLease, CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStorePort,
 };
@@ -5,7 +6,7 @@ use ironclaw_host_api::{
     Action, ApprovalRequest, CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId,
     Principal, ResourceEstimate, ResourceScope,
 };
-use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStateStorePort};
+use ironclaw_processes::{ProcessInvocationError, ProcessInvocationStatePort};
 use tracing::warn;
 
 use crate::{CapabilityInvocationError, ResumeContextMismatchKind};
@@ -125,31 +126,32 @@ pub(crate) async fn matching_claimed_approval_lease_for_auth_resume(
         })
 }
 
-pub(crate) async fn fail_run_if_configured(
-    run_state: Option<&dyn RunStateStorePort>,
+pub(crate) async fn fail_invocation_if_configured(
+    invocation_state: Option<&dyn ProcessInvocationStatePort>,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     error_kind: &'static str,
 ) {
-    if let Some(run_state) = run_state
-        && let Err(error) = fail_run(run_state, scope, invocation_id, error_kind).await
+    if let Some(invocation_state) = invocation_state
+        && let Err(error) =
+            fail_invocation(invocation_state, scope, invocation_id, error_kind).await
     {
         warn!(
             invocation_id = %invocation_id,
             error_kind,
-            transition_error_kind = run_state_error_kind(&error),
-            "run-state fail transition failed; original business error is being returned to caller",
+            transition_error_kind = invocation_state_error_kind(&error),
+            "process-invocation fail transition failed; original business error is being returned to caller",
         );
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CapabilityRunStateTransition {
+pub(crate) enum CapabilityInvocationStateTransition {
     Fail { error_kind: &'static str },
     BlockAuth { error_kind: &'static str },
 }
 
-impl CapabilityRunStateTransition {
+impl CapabilityInvocationStateTransition {
     pub(crate) fn error_kind(self) -> &'static str {
         match self {
             Self::Fail { error_kind } | Self::BlockAuth { error_kind } => error_kind,
@@ -158,7 +160,7 @@ impl CapabilityRunStateTransition {
 }
 
 impl CapabilityInvocationError {
-    /// Returns the run-state transition to apply for this error, or `None`
+    /// Returns the process-invocation transition to apply for this error, or `None`
     /// when no transition is appropriate at the capability-host layer.
     ///
     /// Dispatch failures intentionally return `None`: per the
@@ -170,16 +172,20 @@ impl CapabilityInvocationError {
     /// layer; doing so would short-circuit the disposition policy and turn
     /// recoverable failures (notably `InputEncode`) into terminal run
     /// failures.
-    pub(crate) fn run_state_transition(&self) -> Option<CapabilityRunStateTransition> {
+    pub(crate) fn invocation_state_transition(
+        &self,
+    ) -> Option<CapabilityInvocationStateTransition> {
         match self {
-            Self::UnsupportedObligations { .. } => Some(CapabilityRunStateTransition::Fail {
-                error_kind: "UnsupportedObligations",
-            }),
-            Self::ObligationFailed { .. } => Some(CapabilityRunStateTransition::Fail {
+            Self::UnsupportedObligations { .. } => {
+                Some(CapabilityInvocationStateTransition::Fail {
+                    error_kind: "UnsupportedObligations",
+                })
+            }
+            Self::ObligationFailed { .. } => Some(CapabilityInvocationStateTransition::Fail {
                 error_kind: "ObligationFailed",
             }),
             Self::AuthorizationRequiresAuth { .. } => {
-                Some(CapabilityRunStateTransition::BlockAuth {
+                Some(CapabilityInvocationStateTransition::BlockAuth {
                     error_kind: "AuthRequired",
                 })
             }
@@ -198,74 +204,76 @@ impl CapabilityInvocationError {
             | Self::ResumeNotBlocked { .. }
             | Self::ResumeContextMismatch { .. }
             | Self::Lease(_)
-            | Self::RunState(_)
-            | Self::Process(_) => Some(CapabilityRunStateTransition::Fail {
+            | Self::ApprovalStore(_)
+            | Self::InvocationState(_)
+            | Self::Process(_) => Some(CapabilityInvocationStateTransition::Fail {
                 error_kind: "Obligation",
             }),
         }
     }
 }
 
-pub(crate) async fn apply_run_state_transition_if_configured(
-    run_state: Option<&dyn RunStateStorePort>,
+pub(crate) async fn apply_invocation_state_transition_if_configured(
+    invocation_state: Option<&dyn ProcessInvocationStatePort>,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     error: &CapabilityInvocationError,
 ) {
-    let Some(run_state) = run_state else {
+    let Some(invocation_state) = invocation_state else {
         return;
     };
-    let Some(transition) = error.run_state_transition() else {
-        // No run-state transition at this layer; PR #4236 disposition policy
+    let Some(transition) = error.invocation_state_transition() else {
+        // No process-invocation transition at this layer; PR #4236 disposition policy
         // handles the failure on the outcome path.
         return;
     };
     match transition {
-        CapabilityRunStateTransition::Fail { error_kind } => {
-            fail_run_if_configured(Some(run_state), scope, invocation_id, error_kind).await;
+        CapabilityInvocationStateTransition::Fail { error_kind } => {
+            fail_invocation_if_configured(Some(invocation_state), scope, invocation_id, error_kind)
+                .await;
         }
-        CapabilityRunStateTransition::BlockAuth { error_kind } => {
-            if let Err(error) = run_state
+        CapabilityInvocationStateTransition::BlockAuth { error_kind } => {
+            if let Err(error) = invocation_state
                 .block_auth(scope, invocation_id, error_kind.to_string())
                 .await
             {
                 warn!(
                     invocation_id = %invocation_id,
                     error_kind,
-                    transition_error_kind = run_state_error_kind(&error),
-                    "run-state auth block transition failed; original business error is being returned to caller",
+                    transition_error_kind = invocation_state_error_kind(&error),
+                    "process-invocation auth block transition failed; original business error is being returned to caller",
                 );
             }
         }
     }
 }
 
-pub(crate) async fn fail_run(
-    run_state: &dyn RunStateStorePort,
+pub(crate) async fn fail_invocation(
+    invocation_state: &dyn ProcessInvocationStatePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     error_kind: &'static str,
-) -> Result<(), RunStateError> {
-    run_state
+) -> Result<(), ProcessInvocationError> {
+    invocation_state
         .fail(scope, invocation_id, error_kind.to_string())
         .await?;
     Ok(())
 }
 
-pub(crate) async fn complete_run_after_side_effect(
-    run_state: &dyn RunStateStorePort,
+pub(crate) async fn complete_invocation_after_side_effect(
+    invocation_state: &dyn ProcessInvocationStatePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     capability_id: &CapabilityId,
     side_effect: &'static str,
 ) {
-    if let Err(error) = run_state.complete(scope, invocation_id).await {
+    if let Err(error) = invocation_state.complete(scope, invocation_id).await {
         warn!(
             invocation_id = %invocation_id,
             capability_id = %capability_id,
             side_effect,
-            transition_error_kind = run_state_error_kind(&error),
-            "run-state completion failed after successful side effect; returning successful capability result",
+            transition_error_kind = invocation_state_error_kind(&error),
+            "process-invocation completion failed after successful side effect; returning successful capability result",
         );
     }
 }
@@ -319,19 +327,13 @@ pub(crate) fn claim_error_may_be_concurrent_resume(error: &CapabilityLeaseError)
     )
 }
 
-pub(crate) fn run_state_error_kind(error: &RunStateError) -> &'static str {
+pub(crate) fn invocation_state_error_kind(error: &ProcessInvocationError) -> &'static str {
     match error {
-        RunStateError::UnknownInvocation { .. } => "UnknownInvocation",
-        RunStateError::InvocationAlreadyExists { .. } => "InvocationAlreadyExists",
-        RunStateError::UnknownApprovalRequest { .. } => "UnknownApprovalRequest",
-        RunStateError::ApprovalRequestAlreadyExists { .. } => "ApprovalRequestAlreadyExists",
-        RunStateError::GateRecordAlreadyExists { .. } => "GateRecordAlreadyExists",
-        RunStateError::ApprovalNotPending { .. } => "ApprovalNotPending",
-        RunStateError::InvalidPath(_) => "InvalidPath",
-        RunStateError::Filesystem(_) => "Filesystem",
-        RunStateError::Serialization(_) => "Serialization",
-        RunStateError::Deserialization(_) => "Deserialization",
-        RunStateError::Backend(_) => "Backend",
+        ProcessInvocationError::UnknownInvocation { .. } => "UnknownInvocation",
+        ProcessInvocationError::InvocationAlreadyExists { .. } => "InvocationAlreadyExists",
+        ProcessInvocationError::Serialization(_) => "Serialization",
+        ProcessInvocationError::Deserialization(_) => "Deserialization",
+        ProcessInvocationError::Backend(_) => "Backend",
     }
 }
 
@@ -349,50 +351,50 @@ mod tests {
     /// state at this layer. The `capability_failure_disposition` policy in
     /// host_runtime maps every `DispatchFailureKind` to either
     /// `ModelVisibleToolError` or `RetrySameCall`; both want the run to keep
-    /// going. Calling `run_state.fail()` here would short-circuit that policy
+    /// going. Calling `invocation_state.fail()` here would short-circuit that policy
     /// and turn recoverable input errors (notably `InputEncode`) into
     /// terminal run failures invisible to the model.
     #[test]
-    fn dispatch_input_encode_returns_no_run_state_transition() {
+    fn dispatch_input_encode_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             safe_summary: None,
             detail: None,
         };
-        assert!(error.run_state_transition().is_none());
+        assert!(error.invocation_state_transition().is_none());
     }
 
     #[test]
-    fn dispatch_backend_returns_no_run_state_transition() {
+    fn dispatch_backend_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
             safe_summary: None,
             detail: None,
         };
-        assert!(error.run_state_transition().is_none());
+        assert!(error.invocation_state_transition().is_none());
     }
 
     #[test]
-    fn dispatch_unknown_capability_returns_no_run_state_transition() {
+    fn dispatch_unknown_capability_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::UnknownCapability,
             safe_summary: None,
             detail: None,
         };
-        assert!(error.run_state_transition().is_none());
+        assert!(error.invocation_state_transition().is_none());
     }
 
     #[test]
-    fn unknown_capability_still_fails_run_state() {
+    fn unknown_capability_still_fails_invocation_state() {
         let error = CapabilityInvocationError::UnknownCapability {
             capability: capability(),
         };
         let transition = error
-            .run_state_transition()
+            .invocation_state_transition()
             .expect("non-dispatch errors keep their fail transition");
         assert!(matches!(
             transition,
-            CapabilityRunStateTransition::Fail { .. }
+            CapabilityInvocationStateTransition::Fail { .. }
         ));
     }
 
@@ -404,11 +406,11 @@ mod tests {
             credential_requirements: Vec::new(),
         };
         let transition = error
-            .run_state_transition()
+            .invocation_state_transition()
             .expect("auth-required errors keep their block-auth transition");
         assert!(matches!(
             transition,
-            CapabilityRunStateTransition::BlockAuth { .. }
+            CapabilityInvocationStateTransition::BlockAuth { .. }
         ));
     }
 

@@ -537,7 +537,7 @@ fn lookup_jwk(keys: &[Jwk], kid: Option<&str>) -> Option<Jwk> {
 }
 
 /// Reject JWKS URLs that aren't HTTPS, with a narrow loopback
-/// exception for local-dev / contract tests.
+/// exception for standalone / contract tests.
 ///
 /// The guard is a real URL parser, not a string-prefix check, because
 /// JWKS-URL trust is a security boundary: if it accepts an
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn require_secure_jwks_url_accepts_loopback_http() {
-        // Local-dev / contract tests run JWKS over loopback HTTP. All
+        // Standalone/contract tests run JWKS over loopback HTTP. All
         // of these must parse cleanly with `url::Url` and pass the
         // `IpAddr::is_loopback()` check (or be the literal
         // `localhost`).

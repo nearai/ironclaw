@@ -47,7 +47,6 @@ ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
@@ -99,7 +98,6 @@ ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"]
 # Enables the in-memory-backed process store constructors for tests only.
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
-ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

@@ -17,7 +17,7 @@ layer = "kernel"
 # Exposes filesystem-backed in-memory test constructors to integration tests and
 # downstream harnesses. Off by default so production builds do not carry test
 # helpers.
-test-support = []
+test-support = ["ironclaw_turns/test-support"]
 
 [dependencies]
 async-trait = "0.1"
@@ -40,7 +40,8 @@ ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
-ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
+ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
+ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }

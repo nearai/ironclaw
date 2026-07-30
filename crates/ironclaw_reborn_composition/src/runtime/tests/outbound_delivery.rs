@@ -262,21 +262,22 @@ impl HostManagedModelGateway for ReplyAttachmentGateway {
 async fn production_reply_attachment_capability_registers_durable_run_intent() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway: Arc<dyn HostManagedModelGateway> = Arc::new(ReplyAttachmentGateway::default());
-    let input = RebornRuntimeInput::from_build_input(crate::deployment::local_dev_build_input(
-        "runtime-reply-attachment-owner",
-        root.path().join("local-dev"),
-    ))
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-reply-attachment-tenant".to_string(),
-        agent_id: "runtime-reply-attachment-agent".to_string(),
-        source_binding_id: "runtime-reply-attachment-source".to_string(),
-        reply_target_binding_id: "runtime-reply-attachment-reply".to_string(),
-    })
-    .with_poll_settings(PollSettings {
-        interval: Duration::from_millis(10),
-        max_total: RUNTIME_SEND_TIMEOUT,
-    })
-    .with_model_gateway_override(gateway);
+    let input =
+        RebornRuntimeInput::from_build_input(crate::deployment::local_filesystem_build_input(
+            "runtime-reply-attachment-owner",
+            root.path().join("standalone"),
+        ))
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-reply-attachment-tenant".to_string(),
+            agent_id: "runtime-reply-attachment-agent".to_string(),
+            source_binding_id: "runtime-reply-attachment-source".to_string(),
+            reply_target_binding_id: "runtime-reply-attachment-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let conversation = runtime.new_conversation().await.expect("conversation");
@@ -324,22 +325,23 @@ async fn production_reply_attachment_capability_registers_durable_run_intent() {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_create() {
+async fn standalone_runtime_selects_outbound_delivery_target_before_trigger_create() {
     let root = tempfile::tempdir().expect("tempdir");
     let host_home = root.path().join("host-home");
     std::fs::create_dir_all(&host_home).expect("host home");
     let gateway = Arc::new(OutboundDeliveryTriggerGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_dev_build_input_with_profile(
-            RebornCompositionProfile::LocalDevYolo,
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::StandaloneUnrestricted,
             "runtime-outbound-trigger-owner",
-            root.path().join("local-dev"),
+            root.path().join("standalone"),
         )
         .with_runtime_policy(
-            crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            crate::standalone_unrestricted_runtime_policy(true)
+                .expect("local-yolo policy resolves"),
         )
-        .with_local_dev_confirmed_host_home_root(host_home),
+        .with_local_runtime_confirmed_host_home_root(host_home),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-outbound-trigger-tenant".to_string(),

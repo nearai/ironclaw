@@ -641,7 +641,7 @@ mod tests {
             ironclaw_host_runtime::memory_binding::MemoryBindingInput {
                 provider: Some("memory.disabled".to_string()),
                 ..ironclaw_host_runtime::memory_binding::MemoryBindingInput::native_default(
-                    ironclaw_host_runtime::memory_binding::MemoryDeploymentProfile::LocalDev,
+                    ironclaw_host_runtime::memory_binding::MemoryDeploymentProfile::Standalone,
                 )
             },
         )
@@ -657,7 +657,7 @@ mod tests {
             ironclaw_host_runtime::memory_binding::MemoryBindingInput {
                 provider: Some("acme.honcho".to_string()),
                 ..ironclaw_host_runtime::memory_binding::MemoryBindingInput::native_default(
-                    ironclaw_host_runtime::memory_binding::MemoryDeploymentProfile::LocalDev,
+                    ironclaw_host_runtime::memory_binding::MemoryDeploymentProfile::Standalone,
                 )
             },
         )

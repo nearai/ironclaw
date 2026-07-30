@@ -403,6 +403,86 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["extension_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/ironhub_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Optional free-text filter matched against entry names and descriptions. OMIT IT to return the entire catalog — that is how you list everything available. A query returns only matching entries: compare total_entries against catalog_total before describing the result as what is available." }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_info.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"] }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_install.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"] },
+                "force": { "type": "boolean", "default": false },
+                "expected_version": { "type": "string" },
+                "expected_artifact_digest": { "type": "string" }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_search.output.v1.json"
+        | "schemas/builtin/ironhub_info.output.v1.json"
+        | "schemas/builtin/ironhub_install.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "phase": { "type": "string", "enum": ["discovered", "installed"] },
+                "total_entries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "How many catalog entries MATCHED the request. With a query this is the size of the match, not the catalog."
+                },
+                "returned_entries": { "type": "integer", "minimum": 0 },
+                "catalog_total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Total entries in the signed catalog, ignoring any query filter. When it exceeds total_entries the result is a filtered subset — say so rather than presenting it as everything available."
+                },
+                "truncated": {
+                    "type": "boolean",
+                    "description": "True when entries is an incomplete prefix of the matching signed catalog. Never infer absence from an incomplete result."
+                },
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "enum": ["tool", "skill"] },
+                            "name": { "type": "string" },
+                            "version": { "type": "string" },
+                            "description": { "type": "string" },
+                            "provenance": {
+                                "type": "string",
+                                "enum": ["official", "trusted", "verified", "new"]
+                            },
+                            "artifact_digest": { "type": "string" }
+                        },
+                        "required": ["kind", "name", "version", "description", "provenance"],
+                        "additionalProperties": false
+                    }
+                },
+                "lifecycle": { "type": "object" },
+                "message": { "type": "string" }
+            },
+            "required": [
+                "phase",
+                "total_entries",
+                "returned_entries",
+                "truncated",
+                "entries"
+            ],
+            "additionalProperties": false
+        }),
         "schemas/builtin/admin_configuration_replace.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -896,6 +976,46 @@ mod tests {
             tool_output["required"],
             serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
         );
+    }
+
+    #[test]
+    fn ironhub_schemas_require_explicit_catalog_completeness_metadata() {
+        let input =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.input.v1.json")
+                .expect("IronHub install input schema is registered");
+        let install_output =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.output.v1.json")
+                .expect("IronHub install output schema is registered");
+        let search_output =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_search.output.v1.json")
+                .expect("IronHub search output schema is registered");
+
+        assert!(input["properties"].get("acknowledge_unverified").is_none());
+        assert_eq!(input["additionalProperties"], false);
+        assert_eq!(
+            install_output["properties"]["phase"]["enum"],
+            serde_json::json!(["discovered", "installed"])
+        );
+        assert_eq!(
+            search_output["required"],
+            serde_json::json!([
+                "phase",
+                "total_entries",
+                "returned_entries",
+                "truncated",
+                "entries"
+            ])
+        );
+        assert_eq!(
+            search_output["properties"]["total_entries"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            search_output["properties"]["returned_entries"]["type"],
+            "integer"
+        );
+        assert_eq!(search_output["properties"]["truncated"]["type"], "boolean");
+        assert_eq!(search_output["additionalProperties"], false);
     }
 
     #[test]

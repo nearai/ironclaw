@@ -10,10 +10,12 @@ from urllib.parse import urlparse
 
 from journey_types import (
     CargoEvidence,
+    DeliveryAddressEvidence,
     JourneyCase,
     JourneyDeliveryTarget,
     JourneyExecution,
     JourneyIngress,
+    LiveEvidence,
     ObservableAssertion,
     ProductJourneyCase,
     ProviderJourneyCase,
@@ -110,6 +112,8 @@ def unreset_mutating_tools() -> frozenset[str]:
             if tool_name not in _MUTATING_PROVIDER_TOOLS:
                 unreset.add(tool_name)
     return frozenset(unreset)
+
+
 _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_10f_slack_mention_encoding",
@@ -182,6 +186,12 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                 ),
                 evidence=_PYTEST_PROVIDER_EVIDENCE,
                 repeat_after_reset=case_id in _REPEAT_AFTER_RESET,
+                live_evidence=LiveEvidence(
+                    workflow=".github/workflows/live-canary.yml",
+                    job="reborn-webui-v2-live-qa",
+                    case_id=case_id,
+                    artifact="results.json",
+                ),
             )
         )
     return tuple(cases)
@@ -281,6 +291,10 @@ PRODUCT_JOURNEY_CASES = (
             source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
             test="test_reborn_v2_text_turn_persists",
         ),
+        browser_evidence=PytestEvidence(
+            source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+            test="test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages",
+        ),
     ),
     ProductJourneyCase(
         case_id="slack_inbound_real_turn_reply",
@@ -292,12 +306,21 @@ PRODUCT_JOURNEY_CASES = (
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="slack_final_reply_flows_through_the_real_delivery_coordinator",
             target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="C777",
+                thread_anchor="1710000200.000050",
+                exact_count=1,
+                assertion="assert_slack_thread_delivery_evidence",
+            ),
         ),
     ),
     ProductJourneyCase(
@@ -310,12 +333,50 @@ PRODUCT_JOURNEY_CASES = (
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="telegram_update_becomes_a_turn_and_a_coordinated_reply",
             target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="-1008675309",
+                thread_anchor="77",
+                exact_count=1,
+                assertion="assert_telegram_topic_delivery_evidence",
+            ),
+        ),
+    ),
+    ProductJourneyCase(
+        case_id="telegram_pairing_chat_unpair_repair",
+        provider_worlds=(ProviderWorld.TELEGRAM,),
+        mutable_provider_worlds=(ProviderWorld.TELEGRAM,),
+        ingress=JourneyIngress.TELEGRAM,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        delivery_target=JourneyDeliveryTarget.TELEGRAM,
+        assertions=(
+            ObservableAssertion.DURABLE_STATE,
+            ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
+        ),
+        evidence=CargoEvidence(
+            source="tests/integration/extension_delivery.rs",
+            test=(
+                "unbound_telegram_actor_pairs_via_web_minted_code_then_"
+                "turns_attribute_to_the_paired_user"
+            ),
+            target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="515151",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_telegram_chat_delivery_evidence",
+            ),
         ),
     ),
     ProductJourneyCase(
@@ -341,21 +402,45 @@ PRODUCT_JOURNEY_CASES = (
             target="trigger_poller_e2e",
             manifest="crates/ironclaw_reborn_composition/Cargo.toml",
         ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="D-TRIGGER-DEFAULT",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_slack_dm_delivery_evidence",
+            ),
+            DeliveryAddressEvidence(
+                conversation_id="C-TRIGGER-OVERRIDE",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_slack_channel_delivery_evidence",
+            ),
+        ),
     ),
 )
 
 ALL_JOURNEY_CASES = (*PROVIDER_JOURNEY_CASES, *PRODUCT_JOURNEY_CASES)
 
 
-def _production_channel_surfaces(direction: str) -> set[str]:
-    surfaces = set()
-    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+def _production_channel_capabilities(
+    direction: str, *, asset_root: Path = ASSET_ROOT
+) -> dict[str, dict]:
+    capabilities: dict[str, dict] = {}
+    for manifest_path in sorted(asset_root.glob("*/manifest.toml")):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         channel = manifest.get("channel")
         if channel is not None and channel.get(direction) is True:
-            surfaces.add(manifest["id"])
-    return surfaces
+            surface = manifest.get("id")
+            assert isinstance(surface, str) and surface, (
+                f"{manifest_path}: channel manifest declares no non-empty id"
+            )
+            capabilities[surface] = channel.get("presentation") or {}
+    return capabilities
+
+
+def _production_channel_surfaces(direction: str) -> set[str]:
+    return set(_production_channel_capabilities(direction))
 
 
 def required_ingresses() -> set[str]:

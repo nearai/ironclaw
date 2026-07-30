@@ -39,21 +39,21 @@ use ironclaw_runner::{
     model_routes::{ModelSelectionMode, ModelSlot},
     planned_driver_factory::default_planned_run_profile_resolver,
     runtime::{
-        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
+        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
+        build_product_live_planned_runtime,
     },
     subagent::{
         await_edge::{
             boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
         },
         flavors::StaticSubagentDefinitionResolver,
-        goal_store::{SubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    CheckpointStateStorePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
-    RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    AgentTurnRuntimePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
+    RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
         InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
@@ -62,8 +62,7 @@ use ironclaw_turns::{
     },
 };
 
-use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 
 async fn build_runtime_for_test(input: RebornHostBindings) -> RebornRuntime {
     build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
@@ -81,10 +80,6 @@ fn adapters_from_runtime(
             .expect("runtime exposes host runtime"),
         config,
     )
-}
-
-fn in_memory_subagent_goal_store() -> Arc<SubagentGoalStore<InMemoryBackend>> {
-    Arc::new(in_memory_backed_subagent_goal_store())
 }
 
 async fn write_capability_result_for_test(
@@ -434,13 +429,14 @@ async fn visible_capability_request_preserves_custom_provider_trust_decision() {
 }
 
 #[tokio::test]
-async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() {
+async fn standalone_adapter_gates_builtin_echo_when_global_auto_approve_is_off() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "builtin-echo-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "builtin-echo-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let run_context = loop_run_context("builtin-echo").await;
     disable_global_auto_approve_for_run(
         &services,
@@ -531,13 +527,14 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
 }
 
 #[tokio::test]
-async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() {
+async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "builtin-shell-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "builtin-shell-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let run_context = loop_run_context("builtin-shell").await;
     disable_global_auto_approve_for_run(
         &services,
@@ -660,13 +657,14 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
 }
 
 #[tokio::test]
-async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_principal() {
+async fn standalone_adapter_invokes_extension_scoped_grants_with_loop_driver_principal() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "extension-grant-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "extension-grant-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let run_context = loop_run_context("extension-grant").await;
     enable_global_auto_approve_for_run(
         &services,
@@ -763,13 +761,14 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
 }
 
 #[tokio::test]
-async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() {
+async fn standalone_adapter_registers_provider_tool_calls_as_run_scoped_inputs() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "provider-tool-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "provider-tool-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let run_context = loop_run_context("provider-tool").await;
     enable_global_auto_approve_for_run(
         &services,
@@ -914,13 +913,14 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
 }
 
 #[tokio::test]
-async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_string_content() {
+async fn standalone_adapter_exposes_skill_install_provider_tool_schema_requires_string_content() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "provider-skill-install-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "provider-skill-install-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let run_context = loop_run_context("provider-skill-install").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(SKILL_INSTALL_CAPABILITY_ID);
@@ -948,7 +948,7 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
                     Principal::User(user_id),
                     [SKILL_INSTALL_CAPABILITY_ID],
                     skill_install_effects.clone(),
-                    local_dev_network_policy(),
+                    local_host_network_policy(),
                 ))
                 .with_provider_trust_for_effects(
                     ExtensionId::new("builtin").unwrap(),
@@ -1017,11 +1017,12 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
 #[tokio::test]
 async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "read-effect-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "read-effect-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let run_context = loop_run_context("read-effect").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(READ_FILE_CAPABILITY_ID);
@@ -1076,15 +1077,14 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
 }
 
 #[tokio::test]
-async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
+async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
     let root = tempfile::tempdir().unwrap();
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     std::fs::create_dir_all(storage_root.join("workspace")).unwrap();
     std::fs::write(storage_root.join("workspace/readme.md"), "alpha\nbeta\n").unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "read-file-owner",
-        storage_root,
-    ))
+    let services = build_runtime_for_test(
+        ironclaw_reborn_composition::local_filesystem_build_input("read-file-owner", storage_root),
+    )
     .await;
     let run_context = loop_run_context("read-file").await;
     enable_global_auto_approve_for_run(
@@ -1184,11 +1184,12 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
 #[tokio::test]
 async fn adapter_bundle_maps_authority_resolution_failure_to_host_error() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "authority-failure-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "authority-failure-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
@@ -1226,11 +1227,12 @@ async fn adapter_bundle_maps_authority_resolution_failure_to_host_error() {
 #[tokio::test]
 async fn adapter_bundle_wires_required_product_live_components() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "adapter-test-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "adapter-test-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
 
     let route = adapters
@@ -1275,11 +1277,12 @@ async fn adapter_bundle_wires_required_product_live_components() {
 #[tokio::test]
 async fn adapter_bundle_builds_visible_requests_from_each_run_context() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "multi-run-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "multi-run-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
     let first_context = loop_run_context("multi-run-first").await;
     let second_context = loop_run_context("multi-run-second").await;
@@ -1305,11 +1308,12 @@ async fn adapter_bundle_builds_visible_requests_from_each_run_context() {
 #[tokio::test]
 async fn adapter_bundle_resolves_authority_for_each_run_context() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "run-authority-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "run-authority-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let calls = Arc::new(Mutex::new(Vec::new()));
     let adapters = adapters_from_runtime(
         &services,
@@ -1358,35 +1362,36 @@ async fn adapter_bundle_resolves_authority_for_each_run_context() {
 #[tokio::test]
 async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "runtime-gate-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "runtime-gate-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let turn_state = Arc::new(in_memory_turn_state_store());
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::clone(&turn_state);
+    let turn_state = Arc::new(in_memory_agent_turn_runtime());
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let thread_scope = thread_scope("runtime-gate");
     let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
 
-    let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_state.clone();
+    let turn_state_for_evidence: Arc<dyn AgentTurnRuntimePort> = turn_state.clone();
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
     let await_edge_mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").unwrap(),
-        VirtualPath::new("/turns").unwrap(),
+        MountAlias::new("/processes").unwrap(),
+        VirtualPath::new("/processes").unwrap(),
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
     let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
+        ironclaw_processes::ProcessJournalStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            await_edge_mounts,
+        ))),
     )));
-    let subagent_goal_store = in_memory_subagent_goal_store();
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&await_edge_store),
-        subagent_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-        turn_state.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        turn_state.clone() as Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
         adapters.capability_result_writer.clone(),
         Arc::clone(&thread_service),
     ));
@@ -1398,17 +1403,15 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         attachment_read_port: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
-        turn_state,
+        process_system: ProcessRuntimeSystem::in_memory_ephemeral().expect("process system"),
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
         model_gateway: Arc::new(StubModelGateway),
-        checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStorePort>,
         loop_checkpoint_store,
         milestone_sink,
         capability_factory: adapters.capability_factory,
         capability_surface_resolver: adapters.capability_surface_resolver,
         capability_result_writer: adapters.capability_result_writer,
-        subagent_goal_store,
         subagent_await_edge_writer: await_edge_driver
             as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
         subagent_await_edge_settler: await_edge_resolver
@@ -1459,11 +1462,12 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
 #[tokio::test]
 async fn model_route_settings_wire_default_and_mission_slots() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "route-settings-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "route-settings-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let settings = ProductLiveModelRouteSettings::new("nearai", "qwen3-coder")
         .unwrap()
         .with_mission_route("openrouter", "anthropic/claude-sonnet-4")
@@ -1490,11 +1494,12 @@ async fn model_route_settings_wire_default_and_mission_slots() {
 #[tokio::test]
 async fn model_route_settings_respect_selection_mode_override() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
-        "route-selection-mode-owner",
-        root.path().join("local-dev"),
-    ))
-    .await;
+    let services =
+        build_runtime_for_test(ironclaw_reborn_composition::local_filesystem_build_input(
+            "route-selection-mode-owner",
+            root.path().join("standalone"),
+        ))
+        .await;
     let settings = ProductLiveModelRouteSettings::new("nearai", "qwen3-coder")
         .unwrap()
         .with_selection_mode(ModelSelectionMode::DeveloperAnyConfigured);
@@ -1519,8 +1524,8 @@ async fn model_route_settings_respect_selection_mode_override() {
     );
 }
 
-fn test_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStorePort> {
-    Arc::new(ironclaw_run_state::GateRecordStore::new(
+fn test_gate_record_store() -> Arc<dyn ironclaw_approvals::GateRecordStorePort> {
+    Arc::new(ironclaw_approvals::GateRecordStore::new(
         ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
     ))
 }
@@ -1647,8 +1652,8 @@ async fn enable_global_auto_approve_for_run(
     user_id: UserId,
 ) {
     let store = runtime
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test");
     let mut scope = run_context.scope.to_resource_scope();
     scope.user_id = user_id;
     store
@@ -1669,8 +1674,8 @@ async fn disable_global_auto_approve_for_run(
     user_id: UserId,
 ) {
     let store = runtime
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test");
     let mut scope = run_context.scope.to_resource_scope();
     scope.user_id = user_id;
     store
@@ -1824,7 +1829,7 @@ fn grant_for_principal_with_effects(
     }
 }
 
-fn local_dev_network_policy() -> NetworkPolicy {
+fn local_host_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: None,

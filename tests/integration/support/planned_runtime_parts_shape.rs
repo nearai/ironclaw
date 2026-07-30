@@ -44,7 +44,7 @@ pub struct DefaultPlannedRuntimePartsShape {
 
 /// Exhaustive, no-`..` destructure of `parts` into its Option-field shape.
 ///
-/// Every one of the 35 fields is named explicitly here (the 18 required
+/// Every one of the 33 fields is named explicitly here (the 19 required
 /// fields bound to `_`), so this function FAILS TO COMPILE the moment a
 /// field is added to or removed from `DefaultPlannedRuntimeParts` — the
 /// tripwire `wiring_parity.rs` relies on. Match ergonomics on `&parts` bind
@@ -56,17 +56,15 @@ where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let DefaultPlannedRuntimeParts {
-        turn_state: _,
+        process_system: _,
         thread_service: _,
         thread_scope: _,
         model_gateway: _,
-        checkpoint_state_store: _,
         loop_checkpoint_store: _,
         milestone_sink: _,
         capability_factory: _,
         capability_surface_resolver: _,
         capability_result_writer: _,
-        subagent_goal_store: _,
         subagent_await_edge_writer: _,
         subagent_await_edge_settler: _,
         subagent_await_edge_evidence: _,
