@@ -251,12 +251,12 @@ export function threadPresentation(thread, t) {
 }
 
 export function summarizeOverview(overview) {
-  const projects = overview?.projects || [];
+  const counts = overview?.lifecycleCounts;
 
   return {
-    totalProjects: projects.length,
-    activeProjects: projects.filter((project) => project.state === "active").length,
-    archivedProjects: projects.filter((project) => project.state === "archived").length,
+    totalProjects: counts?.total ?? 0,
+    activeProjects: counts?.active ?? 0,
+    archivedProjects: counts?.archived ?? 0,
   };
 }
 

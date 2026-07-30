@@ -98,6 +98,12 @@ pub struct RebornListProjectsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListProjectsResponse {
     pub projects: Vec<RebornProjectInfo>,
+    #[serde(default)]
+    pub total_projects: usize,
+    #[serde(default)]
+    pub active_projects: usize,
+    #[serde(default)]
+    pub archived_projects: usize,
 }
 
 /// Single-project response (create / get / update).

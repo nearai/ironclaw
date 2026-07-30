@@ -78,20 +78,20 @@ test("project enum formatters localize API-backed state and role values", () => 
   assert.equal(formatMessageRole("assistant", t), "Localized assistant");
 });
 
-test("project summary counts only API-backed lifecycle states", () => {
+test("project summary uses authoritative API lifecycle counts beyond the loaded page", () => {
   assert.deepEqual(
     summarizeOverview({
-      projects: [
-        { state: "active", cost_today_usd: 99, pending_gates: 4 },
-        { state: "active", failures_24h: 3, threads_today: 2 },
-        { state: "archived" },
-      ],
-      attention: [{ type: "failure" }],
+      projects: [{ state: "active" }],
+      lifecycleCounts: {
+        total: 501,
+        active: 450,
+        archived: 51,
+      },
     }),
     {
-      totalProjects: 3,
-      activeProjects: 2,
-      archivedProjects: 1,
+      totalProjects: 501,
+      activeProjects: 450,
+      archivedProjects: 51,
     },
   );
 });

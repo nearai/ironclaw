@@ -16,8 +16,8 @@ import {
   listThreads as apiListThreads,
 } from "../../../lib/api";
 
-// Match the server's hard list cap so lifecycle summaries cover the complete
-// supported response page until the API exposes authoritative totals.
+// Fetch the largest supported card page. Lifecycle totals are independent
+// authoritative fields in the list response.
 const PROJECTS_OVERVIEW_LIMIT = 500;
 
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
@@ -62,7 +62,14 @@ function toPageThread(thread) {
 export async function fetchProjectsOverview() {
   const response = await apiListProjects({ limit: PROJECTS_OVERVIEW_LIMIT });
   const projects = (response?.projects || []).map(toPageProject);
-  return { projects };
+  return {
+    projects,
+    lifecycleCounts: {
+      total: response?.total_projects ?? 0,
+      active: response?.active_projects ?? 0,
+      archived: response?.archived_projects ?? 0,
+    },
+  };
 }
 
 export async function fetchProjectDetail(projectId) {
