@@ -75,7 +75,28 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     )
     await expect(pdf_preview).to_be_visible(timeout=15000)
     assert len(page.context.pages) == open_pages
-    await page.get_by_role("button", name="Close", exact=True).last.click()
+
+    # Workspace-backed previews expose a direct jump to the selected file.
+    # Reload the dotted deep link to cover the server-side SPA fallback too;
+    # without it `/workspace/.../report.pdf` is mistaken for a missing asset.
+    open_workspace = page.locator(SEL_V2["attachment_open_workspace"])
+    await expect(open_workspace).to_be_visible()
+    await open_workspace.click()
+    await expect(page).to_have_url(
+        re.compile(r"/workspace/workspace/report\.pdf$")
+    )
+    await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible()
+    await expect(page.locator(SEL_V2["workspace_download"])).to_be_visible(
+        timeout=15000
+    )
+    await page.reload()
+    await expect(page).to_have_url(
+        re.compile(r"/workspace/workspace/report\.pdf$")
+    )
+    await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible()
+
+    await page.go_back()
+    await expect(pdf_link).to_be_visible(timeout=15000)
     await expect(modal_download).to_be_hidden()
 
     # The chip's inline download icon performs the bearer-authenticated blob

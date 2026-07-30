@@ -399,6 +399,7 @@ SEL_V2 = {
     ),
     # Download action inside the shared attachment preview modal.
     "attachment_download": "[data-testid='attachment-download']",
+    "attachment_open_workspace": "[data-testid='attachment-open-workspace']",
     "attachment_preview_pdf_frame_for": "iframe[title='{filename}']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
     "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
