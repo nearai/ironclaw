@@ -81,7 +81,7 @@ This family holds the durable audit/event append and replay-cursor responsibilit
 - **Depends on:** `ironclaw_event_projections`; the neutral authority vocabulary crate, including its turn vocabulary; the outbound-delivery domain crate, for exactly one read-only push-candidate lookup method.
 - **Never depends on:** any transport framework; any channel-specific crate; a write path into the outbound-delivery domain — the dependency is read-only by design.
 - **Security & authority role:** enforces the family's strictest boundary. Every value crossing this crate toward a subscriber fails closed on raw prompts, tool input or output, secrets, host paths, provider errors, invocation fingerprints, approval reasons, lease material, or backend diagnostics. Subscription authorization and delivery authorization are kept as two independent decisions on principle.
-- **Why a separate crate:** it is the only member of this family trusted to read outbound delivery state, and isolating that one dependency here means the other three crates in the family can be reasoned about — and depended upon — without ever considering delivery semantics at all.
+- **Why a separate crate:** the three-contract split — durable evidence, derived projections, transport streams — is a standing design invariant, and this crate is its delivery leg: the only member of the family trusted to read outbound delivery state, so the other three crates can be reasoned about — and depended upon — without ever considering delivery semantics at all.
 
 ## Family AGENTS.md requirements
 
