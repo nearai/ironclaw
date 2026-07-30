@@ -12,9 +12,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
+use ironclaw_extension_host::inbound_batches::{
+    InboundBatchKey, InboundBatchStageOutcome, InboundBatchStageRequest, InboundBatchStore,
+};
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
     InboundSink, InboundSinkError, IngressConfigurationPort, IngressPortError,
@@ -24,15 +28,17 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    InstallationRecord, InstallationRecordStore, InstallationState, LifecycleError, LoadContext,
-    LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
+    FilesystemInboundBatchStore, InstallationRecord, InstallationRecordStore, InstallationState,
+    LifecycleError, LoadContext, LoadedExtension, RehydratedInstallationRecordStore,
+    SnapshotConflict,
 };
-use ironclaw_host_api::SecretHandle;
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::{SecretHandle, TenantId, UserId};
 use ironclaw_product::{
     ChannelAdapter, ChannelAttachmentRef, ChannelError, DeliveryReport, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, ImmediateResponse, InboundOutcome,
-    NormalizedInboundMessage, OutboundEnvelope, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductTriggerReason, VerifiedInbound,
+    ExternalConversationRef, ExternalEventId, ImmediateResponse, InboundBatchFragment,
+    InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, ProductAttachmentDescriptor,
+    ProductAttachmentKind, ProductTriggerReason, VerifiedInbound,
 };
 
 /// What the scripted adapter observed per call: forwarded headers, body,
@@ -112,6 +118,8 @@ enum AdapterMode {
     Message,
     /// Message with a `reply_context` payload attached.
     MessageWithReplyContext,
+    /// One provider batch fragment carrying one attachment.
+    BatchFragment,
     Respond,
     OversizedRespond,
     Ignore,
@@ -156,7 +164,9 @@ impl ChannelAdapter for ScriptedChannelAdapter {
                 content_type: None,
                 body: vec![0u8; 64 * 1024 + 1],
             })),
-            AdapterMode::Message | AdapterMode::MessageWithReplyContext => {
+            AdapterMode::Message
+            | AdapterMode::MessageWithReplyContext
+            | AdapterMode::BatchFragment => {
                 let value: serde_json::Value =
                     serde_json::from_slice(request.body).map_err(|error| ChannelError::Parse {
                         reason: error.to_string(),
@@ -164,17 +174,49 @@ impl ChannelAdapter for ScriptedChannelAdapter {
                 let text = value["text"].as_str().unwrap_or_default().to_string();
                 let event = value["event"].as_str().unwrap_or("event-1");
                 let conversation = value["conversation"].as_str().unwrap_or("conv-1");
-                Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
+                let attachments = if self.mode == AdapterMode::BatchFragment {
+                    vec![ChannelAttachmentRef {
+                        descriptor: ProductAttachmentDescriptor::new(
+                            value["fragment"].as_str().unwrap_or("fragment"),
+                            "text/plain",
+                            value["filename"].as_str().map(str::to_string),
+                            Some(1),
+                            ProductAttachmentKind::Document,
+                        )
+                        .expect("attachment descriptor"),
+                        vendor_ref: value["fragment"].as_str().unwrap_or("fragment").to_string(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let message = NormalizedInboundMessage {
                     actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
                     conversation: ExternalConversationRef::new(None, conversation, None, None)
                         .expect("conversation"),
                     event_id: ExternalEventId::new(event).expect("event id"),
                     text,
                     trigger: ProductTriggerReason::DirectChat,
-                    attachments: Vec::new(),
+                    attachments,
                     reply_context: matches!(self.mode, AdapterMode::MessageWithReplyContext)
                         .then(|| b"opaque-reply-route".to_vec()),
-                }]))
+                };
+                if self.mode == AdapterMode::BatchFragment {
+                    Ok(InboundOutcome::BatchFragment(Box::new(
+                        InboundBatchFragment {
+                            batch_key: value["batch"].as_str().unwrap_or("batch-1").to_string(),
+                            fragment_id: value["fragment"]
+                                .as_str()
+                                .unwrap_or("fragment")
+                                .to_string(),
+                            order: value["order"].as_u64().unwrap_or_default(),
+                            settle_millis: value["settle_millis"].as_u64().unwrap_or(50),
+                            triggered: value["triggered"].as_bool().unwrap_or(true),
+                            message,
+                        },
+                    )))
+                } else {
+                    Ok(InboundOutcome::Messages(vec![message]))
+                }
             }
         }
     }
@@ -252,6 +294,7 @@ enum SinkMode {
 struct RecordingSink {
     mode: SinkMode,
     admitted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    admitted_messages: Arc<std::sync::Mutex<Vec<NormalizedInboundMessage>>>,
 }
 
 #[async_trait]
@@ -273,6 +316,10 @@ impl InboundSink for RecordingSink {
                 reason: "scripted permanent rejection".to_string(),
             }),
             _ => {
+                self.admitted_messages
+                    .lock()
+                    .expect("admitted messages lock")
+                    .push(admission.message.clone());
                 self.admitted.lock().expect("admitted lock").push((
                     admission.extension_id,
                     admission.installation_id,
@@ -322,13 +369,14 @@ impl ExtensionLoader for FixedLoader {
 
 struct Harness {
     host: Arc<ExtensionHost>,
-    router: ExtensionIngressRouter,
+    router: Arc<ExtensionIngressRouter>,
     adapter_calls: Arc<AtomicUsize>,
     adapter_seen: Arc<std::sync::Mutex<Vec<SeenInbound>>>,
     secrets_calls: Arc<AtomicUsize>,
     configuration_calls: Arc<AtomicUsize>,
     configuration_seen_scopes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     admitted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    admitted_messages: Arc<std::sync::Mutex<Vec<NormalizedInboundMessage>>>,
     reply_context: Arc<TestReplyContextStore>,
 }
 
@@ -337,6 +385,17 @@ struct Harness {
 #[derive(Default)]
 struct TestReplyContextStore {
     entries: std::sync::Mutex<Vec<(ReplyContextKey, Vec<u8>)>>,
+}
+
+fn test_inbound_batch_store() -> Arc<dyn InboundBatchStore> {
+    Arc::new(
+        FilesystemInboundBatchStore::new(
+            Arc::new(InMemoryBackend::new()),
+            TenantId::new("tenant-test").expect("static tenant"),
+            UserId::new("user-test").expect("static user"),
+        )
+        .expect("static inbound batch store"),
+    )
 }
 
 #[async_trait::async_trait]
@@ -366,6 +425,7 @@ struct HarnessOptions {
     configuration_fail: bool,
     config: IngressRouterConfig,
     reserved_routes: std::collections::BTreeSet<String>,
+    inbound_batches: Option<Arc<dyn InboundBatchStore>>,
 }
 
 impl Default for HarnessOptions {
@@ -388,6 +448,7 @@ impl Default for HarnessOptions {
                 request_deadline: Duration::from_millis(500),
             },
             reserved_routes: Default::default(),
+            inbound_batches: None,
         }
     }
 }
@@ -419,6 +480,7 @@ async fn harness(options: HarnessOptions) -> Harness {
     let configuration_calls = Arc::new(AtomicUsize::new(0));
     let configuration_seen_scopes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let admitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let admitted_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
     let reply_context = Arc::new(TestReplyContextStore::default());
     let router = ExtensionIngressRouter::new(
         host.snapshot_watch(),
@@ -437,21 +499,26 @@ async fn harness(options: HarnessOptions) -> Harness {
             sink: Arc::new(RecordingSink {
                 mode: options.sink_mode,
                 admitted: Arc::clone(&admitted),
+                admitted_messages: Arc::clone(&admitted_messages),
             }),
             reply_context: Arc::clone(&reply_context) as Arc<dyn ReplyContextStore>,
+            inbound_batches: options
+                .inbound_batches
+                .unwrap_or_else(test_inbound_batch_store),
             channel_egress_transport: None,
         },
         options.config,
     );
     Harness {
         host,
-        router,
+        router: Arc::new(router),
         adapter_calls,
         adapter_seen,
         secrets_calls,
         configuration_calls,
         configuration_seen_scopes,
         admitted,
+        admitted_messages,
         reply_context,
     }
 }
@@ -511,7 +578,329 @@ fn signed_request(body: &[u8]) -> IngressRequest {
     }
 }
 
+fn active_binding_fingerprint(resolved: &ironclaw_extensions::ResolvedExtensionManifest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"active");
+    hasher.update([0]);
+    hasher.update(serde_json::to_vec(resolved).expect("resolved manifest serializes"));
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn batch_fragment(
+    batch_key: &str,
+    fragment_id: &str,
+    order: u64,
+    text: &str,
+) -> InboundBatchFragment {
+    InboundBatchFragment {
+        batch_key: batch_key.to_string(),
+        fragment_id: fragment_id.to_string(),
+        order,
+        settle_millis: 50,
+        triggered: true,
+        message: NormalizedInboundMessage {
+            actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
+            conversation: ExternalConversationRef::new(None, "conv-recovery", None, None)
+                .expect("conversation"),
+            event_id: ExternalEventId::new("recovery-event").expect("event"),
+            text: text.to_string(),
+            trigger: ProductTriggerReason::DirectChat,
+            attachments: vec![ChannelAttachmentRef {
+                descriptor: ProductAttachmentDescriptor::new(
+                    fragment_id,
+                    "text/plain",
+                    Some(format!("{fragment_id}.txt")),
+                    Some(1),
+                    ProductAttachmentKind::Document,
+                )
+                .expect("descriptor"),
+                vendor_ref: fragment_id.to_string(),
+            }],
+            reply_context: None,
+        },
+    }
+}
+
+async fn wait_for_admitted_count(harness: &Harness, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if harness
+                .admitted_messages
+                .lock()
+                .expect("admitted messages")
+                .len()
+                == expected
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("expected provider batch admission did not settle");
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn concurrent_provider_batch_fragments_admit_one_ordered_atomic_message() {
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        config: IngressRouterConfig {
+            request_deadline: Duration::from_secs(2),
+            ..IngressRouterConfig::default()
+        },
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+
+    let first = signed_request(
+        br#"{"batch":"album-1","fragment":"file-1","filename":"first.txt","order":1,"event":"album-event","conversation":"conv-1","text":""}"#,
+    );
+    let second = signed_request(
+        br#"{"batch":"album-1","fragment":"file-2","filename":"second.txt","order":2,"event":"album-event","conversation":"conv-1","text":"read both"}"#,
+    );
+    let (first_response, second_response) =
+        tokio::join!(harness.router.handle(first), harness.router.handle(second));
+
+    assert_eq!(first_response.status, 200);
+    assert_eq!(second_response.status, 200);
+    wait_for_admitted_count(&harness, 1).await;
+    let admitted = harness
+        .admitted_messages
+        .lock()
+        .expect("admitted messages")
+        .clone();
+    assert_eq!(
+        admitted.len(),
+        1,
+        "one provider batch must become one workflow admission"
+    );
+    assert_eq!(admitted[0].text, "read both");
+    assert_eq!(
+        admitted[0]
+            .attachments
+            .iter()
+            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("first.txt"), Some("second.txt")]
+    );
+}
+
+/// Telegram serializes media-group webhooks: it does not send fragment two
+/// until the first webhook receives 2xx. The router therefore must durably
+/// stage each fragment and acknowledge it without waiting for the settle
+/// window, then admit the merged batch asynchronously.
+#[tokio::test]
+async fn sequential_provider_batch_fragments_ack_before_settle_and_admit_once() {
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        config: IngressRouterConfig {
+            request_deadline: Duration::from_secs(2),
+            ..IngressRouterConfig::default()
+        },
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+
+    let first = signed_request(
+        br#"{"batch":"serialized-album","fragment":"file-1","filename":"first.txt","order":1,"event":"serialized-event","conversation":"conv-1","text":"","settle_millis":250}"#,
+    );
+    let second = signed_request(
+        br#"{"batch":"serialized-album","fragment":"file-2","filename":"second.txt","order":2,"event":"serialized-event","conversation":"conv-1","text":"read both","settle_millis":250}"#,
+    );
+
+    let first_response =
+        tokio::time::timeout(Duration::from_millis(100), harness.router.handle(first))
+            .await
+            .expect("durable staging must acknowledge before the settle window");
+    assert_eq!(first_response.status, 200);
+    let second_response =
+        tokio::time::timeout(Duration::from_millis(100), harness.router.handle(second))
+            .await
+            .expect("each serialized fragment must be acknowledged independently");
+    assert_eq!(second_response.status, 200);
+
+    wait_for_admitted_count(&harness, 1).await;
+
+    let admitted = harness
+        .admitted_messages
+        .lock()
+        .expect("admitted messages")
+        .clone();
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].text, "read both");
+    assert_eq!(
+        admitted[0]
+            .attachments
+            .iter()
+            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("first.txt"), Some("second.txt")]
+    );
+
+    let duplicate = signed_request(
+        br#"{"batch":"serialized-album","fragment":"file-1","filename":"first.txt","order":1,"event":"serialized-event","conversation":"conv-1","text":"","settle_millis":250}"#,
+    );
+    assert_eq!(harness.router.handle(duplicate).await.status, 200);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        harness
+            .admitted_messages
+            .lock()
+            .expect("admitted messages")
+            .len(),
+        1,
+        "the completed-batch tombstone must absorb provider redelivery"
+    );
+}
+
+#[tokio::test]
+async fn durably_staged_provider_batch_is_recovered_after_store_and_router_recreation() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let tenant_id = TenantId::new("tenant-recovery").expect("static tenant");
+    let user_id = UserId::new("user-recovery").expect("static user");
+    let before_restart =
+        FilesystemInboundBatchStore::new(backend.clone(), tenant_id.clone(), user_id.clone())
+            .expect("store before restart");
+    let key = InboundBatchKey {
+        extension_id: EXTENSION_ID.to_string(),
+        installation_id: format!("{EXTENSION_ID}-install"),
+        batch_key: "recovery-album".to_string(),
+    };
+    let fingerprint = active_binding_fingerprint(&manifest());
+    let staged_at = Utc::now()
+        .checked_sub_signed(chrono::TimeDelta::seconds(1))
+        .expect("test timestamp");
+    for fragment in [
+        batch_fragment("recovery-album", "first", 1, ""),
+        batch_fragment("recovery-album", "second", 2, "read both"),
+    ] {
+        assert!(matches!(
+            before_restart
+                .stage(InboundBatchStageRequest {
+                    key: key.clone(),
+                    binding_fingerprint: fingerprint.clone(),
+                    fragment,
+                    staged_at,
+                })
+                .await
+                .expect("stage before restart"),
+            InboundBatchStageOutcome::Pending(_)
+        ));
+    }
+    drop(before_restart);
+
+    let after_restart: Arc<dyn InboundBatchStore> = Arc::new(
+        FilesystemInboundBatchStore::new(backend, tenant_id, user_id).expect("store after restart"),
+    );
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        inbound_batches: Some(after_restart),
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+    harness.router.start_pending_batch_recovery();
+
+    wait_for_admitted_count(&harness, 1).await;
+    let admitted = harness
+        .admitted_messages
+        .lock()
+        .expect("admitted messages")
+        .clone();
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].text, "read both");
+    assert_eq!(
+        admitted[0]
+            .attachments
+            .iter()
+            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("first.txt"), Some("second.txt")]
+    );
+}
+
+#[tokio::test]
+async fn untriggered_provider_batch_is_an_authenticated_noop() {
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        config: IngressRouterConfig {
+            request_deadline: Duration::from_secs(2),
+            ..IngressRouterConfig::default()
+        },
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+
+    let first = signed_request(
+        br#"{"batch":"ambient-album","fragment":"file-1","filename":"first.txt","order":1,"event":"ambient-event","conversation":"group-1","text":"","triggered":false}"#,
+    );
+    let second = signed_request(
+        br#"{"batch":"ambient-album","fragment":"file-2","filename":"second.txt","order":2,"event":"ambient-event","conversation":"group-1","text":"","triggered":false}"#,
+    );
+    let (first_response, second_response) =
+        tokio::join!(harness.router.handle(first), harness.router.handle(second));
+
+    assert_eq!(first_response.status, 200);
+    assert_eq!(second_response.status, 200);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        harness
+            .admitted_messages
+            .lock()
+            .expect("admitted messages")
+            .is_empty(),
+        "an ambient provider batch must not enter the workflow"
+    );
+}
+
+#[tokio::test]
+async fn inconsistent_provider_batch_fails_closed_without_partial_admission() {
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        config: IngressRouterConfig {
+            request_deadline: Duration::from_secs(2),
+            ..IngressRouterConfig::default()
+        },
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+
+    let first = signed_request(
+        br#"{"batch":"album-1","fragment":"file-1","filename":"first.txt","order":1,"event":"event-one","conversation":"conv-1","text":""}"#,
+    );
+    let second = signed_request(
+        br#"{"batch":"album-1","fragment":"file-2","filename":"second.txt","order":2,"event":"event-two","conversation":"conv-1","text":"read both"}"#,
+    );
+    let (first_response, second_response) =
+        tokio::join!(harness.router.handle(first), harness.router.handle(second));
+
+    let mut statuses = [first_response.status, second_response.status];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        [200, 400],
+        "the first durable fragment is acknowledged, while the conflicting \
+         fragment rejects and tombstones the whole batch"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        harness
+            .admitted_messages
+            .lock()
+            .expect("admitted messages")
+            .is_empty()
+    );
+}
 
 /// ING-1: the route table is the active snapshot — activation serves the
 /// route, removal 404s it, with no router rebuild in between.
@@ -1329,6 +1718,7 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
             }),
             sink: sink.clone(),
             reply_context: Arc::new(TestReplyContextStore::default()),
+            inbound_batches: test_inbound_batch_store(),
             channel_egress_transport: Some(Arc::clone(&transport_port)),
         },
         IngressRouterConfig {

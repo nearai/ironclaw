@@ -28,7 +28,8 @@ pub use auth::{
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
 pub use channel_adapter::{
     ChannelAdapter, ChannelAttachmentRef, ChannelContext, ChannelError, DeliveryReport,
-    ImmediateResponse, InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES, MAX_REPLY_CONTEXT_BYTES,
+    ImmediateResponse, InboundBatchFragment, InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES,
+    MAX_INBOUND_BATCH_REF_BYTES, MAX_INBOUND_BATCH_SETTLE_MILLIS, MAX_REPLY_CONTEXT_BYTES,
     NormalizedInboundMessage, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
     TargetCandidate, TargetQuery, VerifiedInbound,
 };

@@ -1873,6 +1873,43 @@ async fn mutation_body_within_descriptor_cap_reaches_service() {
 }
 
 #[tokio::test]
+async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_service() {
+    // Inline attachment bodies legitimately exceed Axum's 2 MiB extractor
+    // default: 10 MiB decoded files need roughly 13.4 MiB after base64. The
+    // descriptor-driven 14 MiB middleware is the authority, so an otherwise
+    // valid body above 2 MiB must not be rejected by Json<T>'s implicit cap.
+    let (app, services) = build_app();
+    let payload = json!({
+        "client_action_id": "large-inline-attachment",
+        "content": "read this",
+        "attachments": [{
+            "mime_type": "text/plain",
+            "filename": "large.txt",
+            "data_base64": "A".repeat(3 * 1024 * 1024),
+        }],
+    })
+    .to_string();
+    assert!(payload.len() > 2 * 1024 * 1024);
+    assert!(payload.len() < 14 * 1024 * 1024);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-large/messages")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(services);
+}
+
+#[tokio::test]
 async fn timeline_route_rejects_nonempty_body_with_413() {
     // `get_timeline`'s descriptor declares `BodyLimitPolicy::NoBody`.
     // A GET with a non-empty body must be rejected upfront — regardless

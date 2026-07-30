@@ -334,17 +334,28 @@ oauth-connect integration test rather than adding a parallel one).
     key: `(installation, event_id)`), **then** 2xx; persistence failure →
     retryable 5xx. Then existing workflow: identity and conversation binding,
     turn submission.
+  - `BatchFragment` → validate bounded batch/fragment identities and settle
+    window, durably stage the verified fragment in the tenant-scoped
+    host-private filesystem, **then** 2xx. A leased worker atomically claims
+    the latest revision after the quiet window, merges fragments in provider
+    order, and performs one ordinary admission. Durable revisions prevent a
+    stale timer from admitting a partial batch; leases and startup recovery
+    cover crashes. Conflicts reject and tombstone the whole batch, while
+    completed tombstones absorb provider redelivery.
   - `Respond` → bounded immediate response (post-verification), no enqueue.
   - `Ignore` → 2xx after the same durable no-op commit.
 - `reply_context` from the message is stored host-side with the conversation
   source binding and handed back in `OutboundEnvelope`.
-- Inbound attachments are transient `ChannelAttachmentRef`s (descriptor +
-  opaque vendor reference), so `inbound` stays pure. After replay dedupe and
-  before-inbound policy, the product workflow bounds the original metadata;
-  after policy it reconciles rewritten descriptors, fetches through the exact
-  adapter generation and manifest-restricted egress, validates the returned
-  bytes, and lands them through the project filesystem before message
-  acceptance. Provider references never serialize or enter durable records.
+- Inbound attachments are host-private `ChannelAttachmentRef`s (descriptor +
+  opaque vendor reference), so `inbound` stays pure. Ordinary-message
+  references remain transient; provider-batch fragments serialize them only
+  into the bounded tenant-scoped staging snapshot required for safe
+  acknowledge-before-settle behavior. They never enter events, projections,
+  transcripts, or model-visible state. After replay dedupe and before-inbound
+  policy, the product workflow bounds the original metadata; after policy it
+  reconciles rewritten descriptors, fetches through the exact adapter
+  generation and manifest-restricted egress, validates the returned bytes, and
+  lands them through the project filesystem before message acceptance.
 - Conversation binding consumes the channel's declared `conversation_model`:
   `continuous` channels bind one IronClaw conversation per external
   conversation ref (today's Slack/Telegram behavior, now declared instead of

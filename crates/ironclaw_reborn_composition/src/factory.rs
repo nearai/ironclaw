@@ -5414,6 +5414,16 @@ async fn build_backend_production(
                 channel_egress_scope.tenant_id.clone(),
                 channel_egress_scope.user_id.clone(),
             )),
+            Arc::new(
+                ironclaw_extension_host::FilesystemInboundBatchStore::new(
+                    Arc::clone(&fold_filesystem),
+                    channel_egress_scope.tenant_id.clone(),
+                    channel_egress_scope.user_id.clone(),
+                )
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("inbound batch store could not be configured: {error}"),
+                })?,
+            ),
             channel_egress_transport.clone(),
         );
         let channel_pairing_registry_built = {

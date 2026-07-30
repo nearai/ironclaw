@@ -185,6 +185,9 @@ impl ChannelAdapter for TelegramChannelAdapter {
             })? {
             TelegramInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
             TelegramInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
+            TelegramInboundEvent::BatchFragment(fragment) => {
+                Ok(InboundOutcome::BatchFragment(fragment))
+            }
         }
     }
 

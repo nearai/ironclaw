@@ -470,6 +470,14 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             UserId::new(USER).expect("user"),       // safety: static test user id is valid.
         )),
+        Arc::new(
+            ironclaw_extension_host::FilesystemInboundBatchStore::new(
+                Arc::new(InMemoryBackend::new()),
+                TenantId::new(TENANT).expect("tenant"),
+                UserId::new(USER).expect("user"),
+            )
+            .expect("static inbound batch store configuration"),
+        ),
         None,
     );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(

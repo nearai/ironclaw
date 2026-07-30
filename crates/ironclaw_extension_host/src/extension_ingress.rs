@@ -361,8 +361,9 @@ pub trait ChannelPairingOutcomeObserver: Send + Sync {
 /// The generic [`InboundSink`]: builds the trusted inbound envelope from a
 /// normalized message and submits it synchronously through ProductSurface —
 /// the durable dedupe + admission commit the router requires
-/// before acking 2xx. Post-admission observers run on tracked background
-/// tasks drained at shutdown.
+/// before acking an ordinary-message 2xx, or before completing an
+/// asynchronously merged provider batch. Post-admission observers run on
+/// tracked background tasks drained at shutdown.
 pub struct GenericChannelInboundSink {
     config: ChannelInboundSinkConfig,
     pairing: Option<Arc<dyn ChannelPairingInterceptor>>,
@@ -661,6 +662,7 @@ pub fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
     deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
+    inbound_batches: Arc<dyn ironclaw_extension_host::inbound_batches::InboundBatchStore>,
     channel_egress_transport: Option<
         Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>,
     >,
@@ -674,12 +676,14 @@ pub fn build_extension_ingress(
                 configuration: Arc::clone(&registry) as Arc<dyn IngressConfigurationPort>,
                 sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
                 reply_context: Arc::clone(&reply_context),
+                inbound_batches,
                 channel_egress_transport,
             },
             ironclaw_extension_host::ingress::IngressRouterConfig::default(),
         )
         .with_deployment_channels(deployment_channels),
     );
+    router.start_pending_batch_recovery();
     ExtensionIngressParts {
         router,
         registry,

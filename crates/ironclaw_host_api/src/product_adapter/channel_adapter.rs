@@ -113,10 +113,71 @@ pub struct VerifiedInbound<'a> {
 pub enum InboundOutcome {
     /// Normalized message(s) for the workflow.
     Messages(Vec<NormalizedInboundMessage>),
+    /// One fragment of a provider-level message batch. The generic host
+    /// settles concurrent fragments before admitting one atomic normalized
+    /// message.
+    BatchFragment(Box<InboundBatchFragment>),
     /// Bounded immediate response (e.g. a URL-verification challenge).
     Respond(ImmediateResponse),
     /// Authenticated no-op (ignored event types).
     Ignore,
+}
+
+/// Maximum provider batch-key or fragment-id length accepted from an adapter.
+pub const MAX_INBOUND_BATCH_REF_BYTES: usize = 512;
+/// Maximum settle window an adapter may request for provider batch fragments.
+pub const MAX_INBOUND_BATCH_SETTLE_MILLIS: u64 = 2_000;
+
+/// One fragment of a provider-level message batch.
+///
+/// The adapter assigns every fragment in one provider batch the same
+/// `batch_key` and normalized `message.event_id`, while `fragment_id` remains
+/// unique per vendor delivery. `order` preserves provider order through the
+/// host-owned merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundBatchFragment {
+    pub batch_key: String,
+    pub fragment_id: String,
+    pub order: u64,
+    pub settle_millis: u64,
+    /// Whether this fragment independently satisfies the channel's trigger
+    /// policy. The host admits the merged batch only when at least one
+    /// fragment is triggered, allowing uncaptioned group-album fragments to
+    /// contribute attachments without forwarding ambient group traffic.
+    pub triggered: bool,
+    pub message: NormalizedInboundMessage,
+}
+
+impl InboundBatchFragment {
+    /// Validate untrusted adapter-supplied batching metadata and the enclosed
+    /// normalized message before the host retains it.
+    pub fn validate(&self) -> Result<(), ChannelError> {
+        validate_batch_ref("batch_key", &self.batch_key)?;
+        validate_batch_ref("fragment_id", &self.fragment_id)?;
+        if self.settle_millis == 0 || self.settle_millis > MAX_INBOUND_BATCH_SETTLE_MILLIS {
+            return Err(ChannelError::Parse {
+                reason: format!(
+                    "batch settle window must be between 1 and \
+                     {MAX_INBOUND_BATCH_SETTLE_MILLIS} milliseconds"
+                ),
+            });
+        }
+        self.message.validate()
+    }
+}
+
+fn validate_batch_ref(kind: &str, value: &str) -> Result<(), ChannelError> {
+    if value.is_empty()
+        || value.len() > MAX_INBOUND_BATCH_REF_BYTES
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(ChannelError::Parse {
+            reason: format!(
+                "{kind} must be 1..={MAX_INBOUND_BATCH_REF_BYTES} bytes without control characters"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// One normalized inbound message.
@@ -357,5 +418,65 @@ mod tests {
             body: vec![0u8; MAX_IMMEDIATE_RESPONSE_BYTES + 1],
         };
         assert!(response.validate().is_err());
+    }
+
+    fn valid_batch_fragment() -> InboundBatchFragment {
+        InboundBatchFragment {
+            batch_key: "album-1".to_string(),
+            fragment_id: "message-1".to_string(),
+            order: 1,
+            settle_millis: 1_000,
+            triggered: true,
+            message: NormalizedInboundMessage {
+                actor: ExternalActorRef::new("user", "u-1", None::<&str>).expect("actor"),
+                conversation: ExternalConversationRef::new(None, "c-1", None, None)
+                    .expect("conversation"),
+                event_id: ExternalEventId::new("album-event").expect("event"),
+                text: "read both".to_string(),
+                trigger: ProductTriggerReason::DirectChat,
+                attachments: Vec::new(),
+                reply_context: None,
+            },
+        }
+    }
+
+    #[test]
+    fn inbound_batch_metadata_bounds_fail_closed() {
+        let mut fragment = valid_batch_fragment();
+        assert!(fragment.validate().is_ok());
+
+        fragment.batch_key.clear();
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.fragment_id = "contains\ncontrol".to_string();
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.batch_key = "x".repeat(MAX_INBOUND_BATCH_REF_BYTES + 1);
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.settle_millis = 0;
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.settle_millis = MAX_INBOUND_BATCH_SETTLE_MILLIS + 1;
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
     }
 }

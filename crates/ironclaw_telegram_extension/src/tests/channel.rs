@@ -249,3 +249,64 @@ fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() {
     assert_eq!(messages[0].attachments.len(), 1);
     assert_eq!(messages[0].attachments[0].vendor_ref, "file-opaque-1");
 }
+
+#[test]
+fn private_media_group_update_becomes_a_triggered_batch_fragment() {
+    let outcome = inbound(
+        br#"{
+            "update_id": 46,
+            "message": {
+                "message_id": 11,
+                "media_group_id": "album-private",
+                "date": 1710000000,
+                "from": {"id": 1001, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 555, "type": "private"},
+                "document": {
+                    "file_id": "file-opaque-2",
+                    "file_name": "notes.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 12
+                }
+            }
+        }"#,
+    )
+    .expect("media-group update parses");
+    let InboundOutcome::BatchFragment(fragment) = outcome else {
+        panic!("expected BatchFragment");
+    };
+    assert!(fragment.triggered);
+    assert_eq!(fragment.batch_key, "album-private");
+    assert_eq!(
+        fragment.message.event_id.as_str(),
+        "tg-install_alpha-media-album-private"
+    );
+    assert_eq!(fragment.message.attachments.len(), 1);
+}
+
+#[test]
+fn uncaptioned_group_media_fragment_is_retained_but_not_triggered() {
+    let outcome = inbound(
+        br#"{
+            "update_id": 47,
+            "message": {
+                "message_id": 12,
+                "media_group_id": "album-group",
+                "date": 1710000000,
+                "from": {"id": 1002, "is_bot": false, "first_name": "Bob"},
+                "chat": {"id": -100200, "type": "group"},
+                "document": {
+                    "file_id": "file-opaque-3",
+                    "file_name": "ambient.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 12
+                }
+            }
+        }"#,
+    )
+    .expect("media-group update parses");
+    let InboundOutcome::BatchFragment(fragment) = outcome else {
+        panic!("expected BatchFragment");
+    };
+    assert!(!fragment.triggered);
+    assert_eq!(fragment.message.attachments.len(), 1);
+}
