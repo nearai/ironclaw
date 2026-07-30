@@ -18,27 +18,15 @@ typedef int (*connect_fn)(int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*sendmsg_fn)(int, const struct msghdr *, int);
 typedef ssize_t (*sendto_fn)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
 static connect_fn real_connect(void) {
-    static connect_fn function;
-    if (function == NULL) {
-        function = (connect_fn)dlsym(RTLD_NEXT, "connect");
-    }
-    return function;
+    return (connect_fn)dlsym(RTLD_NEXT, "connect");
 }
 
 static sendmsg_fn real_sendmsg(void) {
-    static sendmsg_fn function;
-    if (function == NULL) {
-        function = (sendmsg_fn)dlsym(RTLD_NEXT, "sendmsg");
-    }
-    return function;
+    return (sendmsg_fn)dlsym(RTLD_NEXT, "sendmsg");
 }
 
 static sendto_fn real_sendto(void) {
-    static sendto_fn function;
-    if (function == NULL) {
-        function = (sendto_fn)dlsym(RTLD_NEXT, "sendto");
-    }
-    return function;
+    return (sendto_fn)dlsym(RTLD_NEXT, "sendto");
 }
 #endif
 
