@@ -14,7 +14,9 @@ use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     SharedExtensionRegistry,
 };
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, InMemoryBackend, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     Action, CapabilityDescriptor, CapabilityId, CredentialStageError, Decision, ExecutionContext,
     ExtensionHostAssemblyConfig, FailureKind, MountAlias, MountGrant, MountPermissions, MountView,
@@ -46,13 +48,16 @@ use crate::{
 };
 use ironclaw_skills::ScopedSkillManagementPort;
 
-pub type TestApprovalRequestStore = ApprovalRequestStore<InMemoryBackend>;
-pub type TestCapabilityLeaseStore = CapabilityLeaseStore<InMemoryBackend>;
+pub type TestApprovalRequestStore = ApprovalRequestStore<FaultInjecting<InMemoryBackend>>;
+pub type TestCapabilityLeaseStore = CapabilityLeaseStore<FaultInjecting<InMemoryBackend>>;
 
 pub struct ExtensionLifecycleTestServices {
     pub host_runtime: Arc<dyn HostRuntime>,
     pub product_auth: Arc<RebornProductAuthServices>,
     pub extension_management: Arc<RebornLocalExtensionManagementPort>,
+    pub skill_management: Arc<ScopedSkillManagementPort>,
+    pub filesystem: Arc<dyn RootFilesystem>,
+    filesystem_faults: Arc<FaultInjecting<InMemoryBackend>>,
     pub lifecycle_service: Arc<ExtensionHostLifecycleProductService>,
     pub approval_requests: Arc<TestApprovalRequestStore>,
     pub capability_leases: Arc<TestCapabilityLeaseStore>,
@@ -69,6 +74,10 @@ impl ExtensionLifecycleTestServices {
     pub fn secret_store(&self) -> Arc<dyn SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
+
+    pub fn add_filesystem_fault(&self, fault: Fault) {
+        self.filesystem_faults.add_fault(fault);
+    }
 }
 
 pub async fn build_lifecycle_test_services(
@@ -77,7 +86,7 @@ pub async fn build_lifecycle_test_services(
     google_oauth_configured: bool,
 ) -> ExtensionLifecycleTestServices {
     let owner_user_id = ironclaw_host_api::UserId::new(owner_id).expect("valid owner id");
-    let filesystem = Arc::new(InMemoryBackend::new());
+    let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher> =
@@ -253,7 +262,7 @@ pub async fn build_lifecycle_test_services(
         MountPermissions::read_write_list_delete(),
     )])
     .expect("valid approval mounts");
-    let scoped_filesystem = Arc::new(ScopedFilesystem::new(filesystem, move |_| {
+    let scoped_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), move |_| {
         Ok(approval_mounts.clone())
     }));
     let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&scoped_filesystem)));
@@ -265,13 +274,13 @@ pub async fn build_lifecycle_test_services(
         .with_capability_leases(Arc::clone(&capability_leases))
         .with_persistent_approval_policies(persistent_approval_policies);
 
-    let skill_management = Arc::new(ScopedSkillManagementPort::new(
+    let skill_management = ironclaw_skills::build_scoped_skill_management_port(
         ironclaw_host_api::UserId::new(owner_id).expect("valid owner id"),
-        Arc::clone(&extension_filesystem),
-        MountView::default(),
-    ));
-    let mut lifecycle_service = ExtensionHostLifecycleProductService::new(skill_management)
-        .with_extension_management(Arc::clone(&extension_management));
+        Arc::clone(&filesystem),
+    );
+    let mut lifecycle_service =
+        ExtensionHostLifecycleProductService::new(Arc::clone(&skill_management))
+            .with_extension_management(Arc::clone(&extension_management));
     if let Some(runtime_http_egress) = host_services.runtime_http_egress() {
         lifecycle_service = lifecycle_service.with_runtime_http_egress(runtime_http_egress);
     }
@@ -283,6 +292,9 @@ pub async fn build_lifecycle_test_services(
         host_runtime: Arc::new(host_services.host_runtime_for_local_testing()),
         product_auth,
         extension_management: Arc::clone(&extension_management),
+        skill_management,
+        filesystem: extension_filesystem,
+        filesystem_faults: filesystem,
         lifecycle_service: Arc::new(lifecycle_service),
         approval_requests,
         capability_leases,

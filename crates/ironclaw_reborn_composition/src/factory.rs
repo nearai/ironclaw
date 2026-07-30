@@ -110,6 +110,10 @@ use ironclaw_extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
+    ironhub::{
+        extend_builtin_first_party_package as extend_builtin_ironhub_package,
+        insert_handlers as insert_ironhub_handlers,
+    },
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
         insert_handler as insert_operator_config_handler,
@@ -121,7 +125,7 @@ use ironclaw_extension_host::{
 };
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionRegistry, SharedExtensionRegistry,
+    ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::ScopedFilesystem;
 #[cfg(test)]
@@ -315,6 +319,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) host_runtime_http_egress: Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -1154,6 +1159,11 @@ fn production_builtin_extension_registry(
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension lifecycle package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_ironhub_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("IronHub package is invalid: {error}"),
         }
     })?;
     let package = extend_builtin_admin_configuration_package(package).map_err(|error| {

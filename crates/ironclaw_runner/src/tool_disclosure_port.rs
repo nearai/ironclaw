@@ -1473,6 +1473,7 @@ mod tests {
                         runtime: ironclaw_host_api::RuntimeKind::FirstParty,
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description.clone(),
+                        description_trust: Default::default(),
                         concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters.clone(),
                     })
