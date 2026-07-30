@@ -107,7 +107,109 @@
         "qa_9b_routine_dm_delivery_exactly_once",
         "qa_10a_slack_self_attribution"
       ],
-      "retired_cases": []
+      "retirement_evidence": {
+        "deterministic_test": "uv run --project tests/e2e --python 3.12 pytest tests/e2e/scenarios/test_reborn_qa_trace_replay.py::test_every_harvested_trace_replays -q",
+        "reason": "Retired from recurring live coverage after deterministic harvested-trace replay passed; representative drift remains scheduled.",
+        "retired_at": "2026-07-29"
+      },
+      "retired_cases": [
+        {
+          "case": "qa_2d_calendar_prep_live_chat",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_2d_calendar_prep_live_chat.json"
+        },
+        {
+          "case": "qa_2f_calendar_prep_email_delivery",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_2f_calendar_prep_email_delivery.json"
+        },
+        {
+          "case": "qa_3c_endpoint_status_slack_routine",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_3c_endpoint_status_slack_routine.json"
+        },
+        {
+          "case": "qa_3d_endpoint_status_slack_delivery",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_3d_endpoint_status_slack_delivery.json"
+        },
+        {
+          "case": "qa_4e_github_release_email_delivery",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_4e_github_release_email_delivery.json"
+        },
+        {
+          "case": "qa_5d_slack_strategy_doc_answer",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_5d_slack_strategy_doc_answer.json"
+        },
+        {
+          "case": "qa_6c_gmail_to_sheet_live_chat",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_6c_gmail_to_sheet_live_chat.json"
+        },
+        {
+          "case": "qa_6e_gmail_to_sheet_delivery",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_6e_gmail_to_sheet_delivery.json"
+        },
+        {
+          "case": "qa_7c_slack_bug_logger_routine",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_7c_slack_bug_logger_routine.json"
+        },
+        {
+          "case": "qa_7d_slack_bug_message_trigger",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_7d_slack_bug_message_trigger.json"
+        },
+        {
+          "case": "qa_7e_slack_bug_sheet_delivery",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_7e_slack_bug_sheet_delivery.json"
+        },
+        {
+          "case": "qa_8b_hn_keyword_live_chat",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_8b_hn_keyword_live_chat.json"
+        },
+        {
+          "case": "qa_8c_hn_keyword_slack_routine",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_8c_hn_keyword_slack_routine.json"
+        },
+        {
+          "case": "qa_8d_hn_keyword_slack_delivery",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_8d_hn_keyword_slack_delivery.json"
+        },
+        {
+          "case": "qa_9d_routine_per_trigger_delivery_target",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_9d_routine_per_trigger_delivery_target.json"
+        },
+        {
+          "case": "qa_10b_slack_ooo_status",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10b_slack_ooo_status.json"
+        },
+        {
+          "case": "qa_10c_slack_thread_replies",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10c_slack_thread_replies.json"
+        },
+        {
+          "case": "qa_10d_slack_channel_membership",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10d_slack_channel_membership.json"
+        },
+        {
+          "case": "qa_10e_slack_error_honesty",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10e_slack_error_honesty.json"
+        },
+        {
+          "case": "qa_10f_slack_mention_encoding",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10f_slack_mention_encoding.json"
+        },
+        {
+          "case": "qa_10g_slack_last_message_sent",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10g_slack_last_message_sent.json"
+        },
+        {
+          "case": "qa_10g_slack_last_message_sent_global",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10g_slack_last_message_sent_global.json"
+        },
+        {
+          "case": "qa_10h_slack_email_hallucination_guard",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10h_slack_email_hallucination_guard.json"
+        },
+        {
+          "case": "qa_10i_slack_raw_entity_hygiene",
+          "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10i_slack_raw_entity_hygiene.json"
+        }
+      ]
     }
   }
 }

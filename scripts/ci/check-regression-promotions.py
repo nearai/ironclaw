@@ -52,6 +52,7 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
         require_text(owning.get("registry"), "owning_journey.registry", errors)
 
     replay = metadata.get("last_successful_replay")
+    replay_command = ""
     max_age = metadata.get("max_replay_age_days")
     if not isinstance(max_age, int) or max_age <= 0:
         errors.append("max_replay_age_days must be a positive integer")
@@ -59,7 +60,9 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
         errors.append("missing last_successful_replay")
     else:
         require_text(replay.get("commit"), "last_successful_replay.commit", errors)
-        require_text(replay.get("command"), "last_successful_replay.command", errors)
+        replay_command = require_text(
+            replay.get("command"), "last_successful_replay.command", errors
+        )
         replay_date_text = require_text(
             replay.get("date"), "last_successful_replay.date", errors
         )
@@ -78,12 +81,14 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
     lifecycle = metadata.get("live_retirement")
     selected = set(manifest.get("selected_cases", []))
     no_model = set(manifest.get("no_model_cases", []))
+    quarantined = set(manifest.get("quarantined_model_cases", []))
     if not isinstance(lifecycle, dict):
         errors.append("missing live_retirement")
         return errors
     minimum = lifecycle.get("minimum_representative_drift_cases")
     drift = lifecycle.get("representative_drift_cases")
     retired = lifecycle.get("retired_cases")
+    retirement_evidence = lifecycle.get("retirement_evidence")
     if not isinstance(minimum, int) or minimum < 1:
         errors.append("minimum_representative_drift_cases must be positive")
     if not isinstance(drift, list) or len(set(drift)) < (minimum or 1):
@@ -94,11 +99,40 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
         errors.append(f"drift case is not in the harvested inventory: {case}")
     for case in sorted(drift_set & no_model):
         errors.append(f"drift case has no model replay evidence: {case}")
+    for case in sorted(drift_set & quarantined):
+        errors.append(f"drift case has quarantined replay evidence: {case}")
 
     if not isinstance(retired, list):
         errors.append("retired_cases must be a list")
         return errors
+    if not isinstance(retirement_evidence, dict):
+        errors.append("missing retirement_evidence")
+        retirement_evidence = {}
+    deterministic_test = require_text(
+        retirement_evidence.get("deterministic_test"),
+        "retirement_evidence.deterministic_test",
+        errors,
+    )
+    require_text(retirement_evidence.get("reason"), "retirement_evidence.reason", errors)
+    retired_at = require_text(
+        retirement_evidence.get("retired_at"), "retirement_evidence.retired_at", errors
+    )
+    if deterministic_test and deterministic_test != replay_command:
+        errors.append(
+            "retirement_evidence.deterministic_test must match "
+            "last_successful_replay.command"
+        )
+    if retired_at:
+        try:
+            retirement_date = dt.date.fromisoformat(retired_at)
+        except ValueError:
+            errors.append("retirement_evidence.retired_at must be YYYY-MM-DD")
+        else:
+            if retirement_date > today:
+                errors.append("retirement_evidence.retired_at cannot be in the future")
+
     repo_root = manifest_path.parents[5]
+    retired_set: set[str] = set()
     for index, entry in enumerate(retired):
         field = f"retired_cases[{index}]"
         if not isinstance(entry, dict):
@@ -108,15 +142,38 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
         fixture = require_text(
             entry.get("deterministic_fixture"), f"{field}.deterministic_fixture", errors
         )
-        require_text(entry.get("deterministic_test"), f"{field}.deterministic_test", errors)
-        require_text(entry.get("reason"), f"{field}.reason", errors)
-        require_text(entry.get("retired_at"), f"{field}.retired_at", errors)
+        if case in retired_set:
+            errors.append(f"{field}.case is duplicated")
+        if case:
+            retired_set.add(case)
         if case in drift_set:
             errors.append(f"{field}.case cannot also be representative drift")
         if case and case not in selected:
             errors.append(f"{field}.case is not in the harvested inventory")
-        if fixture and not (repo_root / fixture).is_file():
+        if case and case in no_model | quarantined:
+            errors.append(f"{field}.case has no active deterministic replay")
+        expected_fixture = (
+            f"tests/fixtures/llm_traces/reborn_qa/live_canary/{case}.json"
+        )
+        if case and fixture != expected_fixture:
+            errors.append(f"{field}.deterministic_fixture must match its case")
+        elif fixture and not (repo_root / fixture).is_file():
             errors.append(f"{field}.deterministic_fixture does not exist")
+
+    replayable = selected - no_model - quarantined
+    accounted = drift_set | retired_set
+    missing = sorted(replayable - accounted)
+    unexpected = sorted(accounted - replayable)
+    if missing:
+        errors.append(
+            "replayable cases must be representative drift or retired: "
+            + ", ".join(missing)
+        )
+    if unexpected:
+        errors.append(
+            "live/retired cases must have active deterministic replay: "
+            + ", ".join(unexpected)
+        )
 
     workflow = (repo_root / ".github/workflows/live-canary.yml").read_text(encoding="utf-8")
     scheduled_match = re.search(

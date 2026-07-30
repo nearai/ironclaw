@@ -72,7 +72,10 @@ Malformed run groups still fail the import instead of being silently skipped.
 fixture schema, journey ownership, last successful replay, and the retained
 representative drift set. `scripts/ci/check-regression-promotions.py` fails on
 missing metadata, stale replay, too few drift cases, or a retirement without an
-existing deterministic fixture, exact test command, reason, and date.
+existing deterministic fixture, exact replay command, reviewed reason, and
+date. Every replayable harvested case must be accounted for as either retained
+drift or retired; no-model and quarantined cases remain explicitly excluded
+until active deterministic replay evidence exists.
 
 During the 30-day review, retire a scheduled live case once its permanent
 purpose is covered deterministically. Keep only the manifest's representative

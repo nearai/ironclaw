@@ -37,6 +37,13 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
             workflow_path.write_text(
                 workflow_source.read_text(encoding="utf-8"), encoding="utf-8"
             )
+            lifecycle = manifest.get("promotion_metadata", {}).get("live_retirement", {})
+            for entry in lifecycle.get("retired_cases", []):
+                fixture = entry.get("deterministic_fixture")
+                if fixture:
+                    fixture_path = root / fixture
+                    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+                    fixture_path.touch()
             return MODULE.validate(path, dt.date(2026, 7, 30))
 
     def test_committed_metadata_is_complete_and_fresh(self) -> None:
@@ -57,12 +64,22 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
 
     def test_retirement_requires_deterministic_evidence(self) -> None:
         broken = copy.deepcopy(self.manifest)
-        broken["promotion_metadata"]["live_retirement"]["retired_cases"] = [
-            {"case": "qa_3c_endpoint_status_slack_routine"}
-        ]
+        del broken["promotion_metadata"]["live_retirement"]["retirement_evidence"]
         errors = self.validate(broken)
-        self.assertTrue(any("deterministic_fixture" in error for error in errors), errors)
+        self.assertIn("missing retirement_evidence", errors)
         self.assertTrue(any("deterministic_test" in error for error in errors), errors)
+
+    def test_every_replayable_case_is_live_or_retired_with_evidence(self) -> None:
+        broken = copy.deepcopy(self.manifest)
+        broken["promotion_metadata"]["live_retirement"]["retired_cases"] = []
+        errors = self.validate(broken)
+        self.assertTrue(
+            any(
+                "replayable cases must be representative drift or retired" in error
+                for error in errors
+            ),
+            errors,
+        )
 
 
 if __name__ == "__main__":
