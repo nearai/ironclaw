@@ -2809,6 +2809,13 @@ pub async fn build_reborn_runtime(
 }
 
 pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, RebornRuntimeError> {
+    let (runtime, _) = build_runtime_with_resource_governor(input).await?;
+    Ok(runtime)
+}
+
+pub(crate) async fn build_runtime_with_resource_governor(
+    input: RebornRuntimeInput,
+) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
     let RebornRuntimeInput {
         services: services_input,
         llm,
@@ -4090,7 +4097,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     if let Some(channel_connection) = runtime.generic_channel_connection_facade() {
         let _ = runtime.channel_facade_slot.set(channel_connection);
     }
-    Ok(runtime)
+    Ok((runtime, resource_governor))
 }
 
 /// Thin wrapper over

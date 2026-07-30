@@ -163,6 +163,12 @@ pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// Owned by `Arc<GroupSharedStorage>` so harnesses can outlive the group's
 /// stack frame (R6: `RebornIntegrationHarness` is `'static`).
 pub(crate) struct GroupSharedStorage {
+    /// Exact runtime-wiring recipe consumed by `restart_planned_runtime`.
+    ///
+    /// Retaining the configured builder prevents the restart harness from
+    /// silently falling back to defaults and thereby testing a different
+    /// runtime from the one that admitted the run.
+    pub(crate) restart_builder: RebornIntegrationGroupBuilder,
     /// Thread history + turn state composite, shared across all threads.
     pub(crate) composite: Arc<CompositeRootFilesystem>,
     /// Fresh-connection reopen handle per storage mode (SQLite file path /
@@ -459,6 +465,70 @@ impl RebornIntegrationGroup {
         }
     }
 
+    /// Gracefully stop and rebuild the group's complete planned runtime over a
+    /// genuinely fresh LibSQL connection to the same durable process rows.
+    ///
+    /// This consumes the group and requires every thread harness built from it
+    /// to have been dropped first. That requirement is intentional: a surviving
+    /// harness owns the old coordinator and would make a "restart" assertion
+    /// dishonest. The capability backend is retained because its durable gate
+    /// and approval stores model the external host state a restarted runner
+    /// reconnects to; the scheduler, coordinator, executor, scope gateway,
+    /// checkpoint adapters, and process journal are all reconstructed.
+    ///
+    /// Only LibSQL is supported because it is the hermetic integration backend
+    /// with an independent reopen recipe. Other storage modes fail loudly.
+    pub async fn restart_planned_runtime(self) -> HarnessResult<Self> {
+        let shared_count = Arc::strong_count(&self.shared);
+        let shared = Arc::try_unwrap(self.shared).map_err(|_| {
+            format!(
+                "restart_planned_runtime requires every thread harness to be dropped; \
+                 group shared state still has {shared_count} owners"
+            )
+        })?;
+        let GroupSharedStorage {
+            restart_builder,
+            storage_reopen,
+            turn_root,
+            product_harness,
+            capability,
+            canonical_binding,
+            scheduler_handle,
+            ..
+        } = shared;
+
+        // This awaits cancellation, aborts in-flight executor tasks, and
+        // relinquishes claimed runs before a replacement scheduler can claim
+        // them. Dropping the handle would only signal cancellation.
+        scheduler_handle.shutdown().await;
+
+        let composite = match &storage_reopen {
+            super::builder::StorageReopen::LibSql { db_path } => {
+                super::builder::reopen_fresh_libsql_composite(db_path).await?
+            }
+            super::builder::StorageReopen::None => {
+                return Err("restart_planned_runtime requires StorageMode::LibSql; \
+                     in-memory storage cannot survive a runtime restart"
+                    .into());
+            }
+            super::builder::StorageReopen::Postgres { .. } => {
+                return Err(
+                    "restart_planned_runtime does not yet have a fresh Postgres \
+                     composite reopen recipe"
+                        .into(),
+                );
+            }
+        };
+        let base = GroupBaseData {
+            product_harness,
+            composite,
+            storage_reopen,
+            turn_root,
+            canonical_binding,
+        };
+        restart_builder.into_group(base, capability).await
+    }
+
     /// Enabler (c): the trace scope key the production trace-capture sink was
     /// seeded with; `Some` only after `.with_trace_capture()`. Pair with
     /// `ironclaw_reborn_traces::contribution::queued_trace_envelope_paths_for_scope`
@@ -705,6 +775,7 @@ impl GroupBaseData {
 /// Builder for `RebornIntegrationGroup` with optional storage mode selection.
 /// Obtain via [`RebornIntegrationGroup::builder`]; defaults to
 /// `StorageMode::InMemory`.
+#[derive(Clone)]
 pub struct RebornIntegrationGroupBuilder {
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
@@ -851,6 +922,7 @@ impl RebornIntegrationGroupBuilder {
         base: GroupBaseData,
         capability: GroupCapability,
     ) -> HarnessResult<RebornIntegrationGroup> {
+        let restart_builder = self.clone();
         // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
         // if the override is set without Bridged mode also selected.
         if self.narrowed_bridged_allow_set.is_some()
@@ -1187,6 +1259,7 @@ impl RebornIntegrationGroupBuilder {
 
         Ok(RebornIntegrationGroup {
             shared: Arc::new(GroupSharedStorage {
+                restart_builder,
                 composite: base.composite,
                 storage_reopen: base.storage_reopen,
                 turn_root: base.turn_root,

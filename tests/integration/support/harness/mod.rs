@@ -48,7 +48,6 @@ use ironclaw_product::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
     OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
-    build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -205,6 +204,11 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// this harness is already `Arc`'d — the same chicken-and-egg constraint
     /// `io`/`result_writer_io` document above `install_durable_capability_io`.
     runtime: Mutex<Arc<dyn HostRuntime>>,
+    /// Exact governor owned by composed Reborn capability wiring. `Some` for
+    /// `new_with_options` profiles, which build through production
+    /// composition; lower-level seam-specific runtimes leave it unavailable
+    /// rather than fabricating an equivalent authority.
+    resource_governor: Option<Arc<dyn ironclaw_resources::ResourceGovernor>>,
     approval_parts: Option<RebornApprovalTestParts>,
     /// The durable gate-record store BOTH this harness's capability port
     /// (`GateRecord::Auth` save) and the turn executor (render-from-record read)
@@ -767,7 +771,11 @@ impl HostRuntimeCapabilityHarness {
                     reply_target_binding_id: service_label.to_string(),
                 });
         }
-        let services = build_runtime(runtime_input).await?;
+        let (services, resource_governor) =
+            ironclaw_reborn_composition::test_support::build_runtime_with_resource_governor_for_test(
+                runtime_input,
+            )
+            .await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
@@ -878,6 +886,7 @@ impl HostRuntimeCapabilityHarness {
         let runtime = services
             .host_runtime_for_test()
             .ok_or("local-dev Reborn services missing host runtime")?;
+        let resource_governor = Some(resource_governor);
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
             Arc::clone(&pending_approval_scopes),
@@ -891,6 +900,7 @@ impl HostRuntimeCapabilityHarness {
         let gate_record_store = resolve_harness_gate_record_store(&approval_parts);
         Ok(Self {
             runtime: Mutex::new(runtime),
+            resource_governor,
             approval_parts,
             gate_record_store,
             auto_approve_settings,
@@ -1342,6 +1352,13 @@ impl HostRuntimeCapabilityHarness {
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>> {
         Some(Arc::clone(&self.gate_record_store))
+    }
+
+    /// Exact composed capability-path governor, for invariant read-back.
+    pub(crate) fn resource_governor_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.resource_governor.clone()
     }
 
     /// The user id this capability harness's first-party tools execute under.
