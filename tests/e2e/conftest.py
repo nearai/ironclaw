@@ -501,6 +501,32 @@ def ironclaw_reborn_binary():
 
 
 @pytest.fixture(scope="session")
+def ironclaw_reborn_sso_binary():
+    """Build the debug-only Reborn binary variant used by the SSO mock."""
+    target_dir = _cargo_target_dir() / "e2e-sso"
+    binary = target_dir / "debug" / "ironclaw"
+    if _binary_needs_rebuild(binary):
+        print("Building Reborn ironclaw with test support (this may take a while)...")
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw",
+                "--features", "test-support",
+                "--target-dir", str(target_dir),
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
 def ironclaw_reborn_openai_compat_binary():
     """Ensure Reborn `ironclaw` is built for the OpenAI-compatible scenarios.
 
