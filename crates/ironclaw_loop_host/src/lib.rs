@@ -900,7 +900,7 @@ fn transcript_write_retry_delay(turn_run_id: &str, failed_attempt: usize) -> Dur
         .fold(failed_attempt as u64, |seed, byte| {
             seed.wrapping_mul(31).wrapping_add(u64::from(byte))
         });
-    Duration::from_millis(base_delay_ms + jitter_seed % base_delay_ms)
+    Duration::from_millis(base_delay_ms.saturating_add(jitter_seed % base_delay_ms))
 }
 
 impl<S> ThreadBackedLoopTranscriptPort<S>
@@ -2378,11 +2378,11 @@ fn context_read_error(error: SessionThreadError) -> AgentLoopHostError {
     )
 }
 
-fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
-    // Do not forward or log the backend error. This boundary may fail while
-    // handling assistant content, and backend diagnostics can contain that raw
-    // transcript or storage credentials. The typed kind plus fixed safe cause
-    // are sufficient for the terminal user projection.
+fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
+    // Log only the closed owner-defined variant name. The error message may
+    // contain raw transcript content or storage credentials and must never be
+    // forwarded or formatted here.
+    tracing::debug!(error_kind = error.kind_name(), "transcript write failed");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "assistant transcript write failed",
@@ -2600,6 +2600,14 @@ mod tests {
         let rendered = format!("{mapped:?}");
         assert!(!rendered.contains(secret));
         assert!(!rendered.contains(raw_reply));
+    }
+
+    #[test]
+    fn transcript_retry_delay_is_total_for_extreme_attempts() {
+        assert_eq!(
+            transcript_write_retry_delay("run:extreme-attempt", usize::MAX),
+            Duration::from_millis(u64::MAX)
+        );
     }
 
     /// CR review: `latest_user_message_text` returns the latest NON-BLANK user

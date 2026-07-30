@@ -12,7 +12,6 @@ mod support;
 
 use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
-use reborn_support::doubles::TRANSCRIPT_FAILURE_SECRET;
 use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
@@ -279,62 +278,10 @@ async fn transcript_write_failure_stops_without_another_model_or_tool_side_effec
         .wait_for_status(run_id, TurnStatus::Failed)
         .await
         .expect("transcript persistence failure reaches a terminal failed state");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("failed transcript persistence carries a durable failure");
-
-    assert_eq!(
-        failure.category(),
-        "transcript_write_failed",
-        "the transcript cause must survive the executor and runner"
-    );
-    assert_eq!(
-        failure.detail(),
-        Some("assistant transcript write failed"),
-        "only the bounded host-authored safe cause may be persisted"
-    );
-    assert!(
-        !format!("{failure:?}").contains(TRANSCRIPT_FAILURE_SECRET),
-        "the backend secret must not enter durable turn state"
-    );
-    assert!(
-        !format!("{failure:?}").contains(UNPERSISTED_ASSISTANT_REPLY),
-        "raw unpersisted assistant content must not enter durable failure state"
-    );
-
     harness
-        .assert_conversation_history_lacks(UNPERSISTED_ASSISTANT_REPLY)
+        .assert_transcript_failure_terminal(&state, UNPERSISTED_ASSISTANT_REPLY, 2)
         .await
-        .expect("no draft or fabricated finalized reply is persisted");
-    harness
-        .assert_interactive_model_provider_call_count(2)
-        .await
-        .expect("a failed transcript boundary must not trigger a third model call");
-    harness
-        .assert_text_model_provider_call_count(0)
-        .await
-        .expect("a failed transcript boundary must not trigger model inference");
-    harness
-        .assert_tool_invocation_count("builtin.http", 1)
-        .await
-        .expect("the prior capability is not repeated after final reply persistence fails");
-    harness
-        .assert_capability_result_count("builtin.http", 1)
-        .await
-        .expect("the prior capability effect is not repeated");
-    harness
-        .assert_egress_count(1)
-        .await
-        .expect("the prior external side effect is issued exactly once");
-    harness
-        .assert_model_message_content_occurrences("model error observation", 0)
-        .await
-        .expect("no model-visible observation is fabricated after persistence fails");
-    harness
-        .assert_turn_event_recorded(TurnEventKind::Failed)
-        .await
-        .expect("the terminal transcript failure is published durably");
+        .expect("assistant transcript failure stays terminal, redacted, and single-shot");
 }
 
 #[tokio::test]
@@ -366,55 +313,8 @@ async fn tool_result_transcript_failure_stops_without_duplicate_model_or_tool_si
         .wait_for_status(run_id, TurnStatus::Failed)
         .await
         .expect("tool-result transcript persistence failure reaches a terminal failed state");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("failed tool-result persistence carries a durable failure");
-
-    assert_eq!(failure.category(), "transcript_write_failed");
-    assert_eq!(
-        failure.detail(),
-        Some("assistant transcript write failed"),
-        "the terminal projection retains only the fixed host-authored cause"
-    );
-    let durable_failure = format!("{failure:?}");
-    assert!(!durable_failure.contains(TRANSCRIPT_FAILURE_SECRET));
-    assert!(!durable_failure.contains(UNPERSISTED_TOOL_RESULT));
-
     harness
-        .assert_conversation_history_lacks(TRANSCRIPT_FAILURE_SECRET)
+        .assert_transcript_failure_terminal(&state, UNPERSISTED_TOOL_RESULT, 1)
         .await
-        .expect("backend credentials do not enter conversation history");
-    harness
-        .assert_conversation_history_lacks(UNPERSISTED_TOOL_RESULT)
-        .await
-        .expect("unpersisted tool output does not enter conversation history");
-    harness
-        .assert_interactive_model_provider_call_count(1)
-        .await
-        .expect("tool-result persistence failure must not trigger another model call");
-    harness
-        .assert_text_model_provider_call_count(0)
-        .await
-        .expect("tool-result persistence failure must not trigger model inference");
-    harness
-        .assert_tool_invocation_count("builtin.http", 1)
-        .await
-        .expect("the capability executes exactly once");
-    harness
-        .assert_capability_result_count("builtin.http", 1)
-        .await
-        .expect("the capability effect is not repeated");
-    harness
-        .assert_egress_count(1)
-        .await
-        .expect("the external tool effect is issued exactly once");
-    harness
-        .assert_model_message_content_occurrences("model error observation", 0)
-        .await
-        .expect("no model-visible observation is fabricated after persistence fails");
-    harness
-        .assert_turn_event_recorded(TurnEventKind::Failed)
-        .await
-        .expect("the terminal transcript failure is published durably");
+        .expect("tool-result transcript failure stays terminal, redacted, and single-shot");
 }

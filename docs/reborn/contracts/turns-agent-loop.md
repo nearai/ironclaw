@@ -150,8 +150,8 @@ These terminal recovery rules are pinned through the production caller chain by
 `tests/integration/cancel.rs` and `tests/integration/model_recovery.rs`:
 
 ```bash
-cargo test --test reborn_integration_cancel
-cargo test --test reborn_integration_model_recovery
+cargo test -p ironclaw_reborn_integration_tests --test reborn_integration_cancel
+cargo test -p ironclaw_reborn_integration_tests --test reborn_integration_model_recovery
 ```
 
 ---

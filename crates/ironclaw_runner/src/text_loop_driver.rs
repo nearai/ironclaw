@@ -14,7 +14,7 @@ use ironclaw_turns::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
         AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopModelRequest,
-        LoopPromptBundleRequest, LoopSafeSummary, ParentLoopOutput, PromptMode,
+        LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
     },
 };
 
@@ -173,19 +173,13 @@ fn context_limit_hint(context_limit: usize) -> u32 {
 }
 
 fn map_host_error(stage: HostStage, error: AgentLoopHostError) -> AgentLoopDriverError {
+    let error = error.sanitize_transcript_write_failure();
     let stage_name = host_stage_name(stage);
-    let safe_summary_for_log = if error.kind == AgentLoopHostErrorKind::TranscriptWriteFailed {
-        LoopSafeSummary::assistant_transcript_write_failed()
-            .as_str()
-            .to_string()
-    } else {
-        error.safe_summary.clone()
-    };
     tracing::warn!(
         stage = stage_name,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
-        safe_summary = %safe_summary_for_log,
+        safe_summary = %error.safe_summary,
         "loop host port returned sanitized error"
     );
 
@@ -193,11 +187,7 @@ fn map_host_error(stage: HostStage, error: AgentLoopHostError) -> AgentLoopDrive
         let detail = if stage == HostStage::Transcript
             && error.kind == AgentLoopHostErrorKind::TranscriptWriteFailed
         {
-            Some(
-                LoopSafeSummary::assistant_transcript_write_failed()
-                    .as_str()
-                    .to_string(),
-            )
+            Some(error.safe_summary.clone())
         } else {
             // Model-stage details are already secret-scrubbed. Preserve the
             // bounded safe summary when no more specific diagnostic exists.

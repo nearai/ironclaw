@@ -257,14 +257,28 @@ pub(super) fn transcript_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     if error.kind == AgentLoopHostErrorKind::Cancelled {
         return AgentLoopExecutorError::Cancelled;
     }
+    let error = error.sanitize_transcript_write_failure();
+    let raw_summary = error.safe_summary;
+    let (safe_summary, rejected_summary_detail) = match LoopSafeSummary::new(raw_summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                kind = error.kind.as_str(),
+                validation_error = %validation_error,
+                "transcript host error summary rejected; using fallback"
+            );
+            (
+                LoopSafeSummary::model_gateway_failed(),
+                Some(sanitize_model_visible_text(raw_summary)),
+            )
+        }
+    };
     AgentLoopExecutorError::HostUnavailableWithDiagnostics {
         stage: HostStage::Transcript,
         kind: error.kind,
-        safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+        safe_summary,
         reason_kind: error.reason_kind,
-        // Fail closed even if a non-production host supplied detail: transcript
-        // diagnostics can contain raw assistant text or storage credentials.
-        detail: None,
+        detail: error.detail.or(rejected_summary_detail),
     }
 }
 
@@ -636,6 +650,28 @@ mod tests {
                 safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
                 reason_kind: None,
                 detail: None,
+            }
+        );
+    }
+
+    #[test]
+    fn non_transcript_finalization_error_preserves_its_sanitized_diagnostics() {
+        let mapped = transcript_host_error(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "thread scope did not match",
+            )
+            .with_detail("expected tenant scope"),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: HostStage::Transcript,
+                kind: AgentLoopHostErrorKind::ScopeMismatch,
+                safe_summary: LoopSafeSummary::new("thread scope did not match").expect("safe"),
+                reason_kind: None,
+                detail: Some("expected tenant scope".to_string()),
             }
         );
     }

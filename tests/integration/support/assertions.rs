@@ -20,10 +20,11 @@
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_turns::run_profile::LoopHostMilestoneKind;
+use ironclaw_turns::{TurnEventKind, TurnRunState, run_profile::LoopHostMilestoneKind};
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
+use super::doubles::TRANSCRIPT_FAILURE_SECRET;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -53,6 +54,53 @@ impl ToolErrorClass {
 }
 
 impl RebornIntegrationHarness {
+    /// Assert the complete fail-closed outcome shared by assistant and tool
+    /// transcript-write failures.
+    pub async fn assert_transcript_failure_terminal(
+        &self,
+        state: &TurnRunState,
+        forbidden_content: &str,
+        expected_interactive_model_calls: usize,
+    ) -> HarnessResult<()> {
+        let failure = state
+            .failure
+            .as_ref()
+            .ok_or("failed transcript persistence must carry a durable failure")?;
+        if failure.category() != "transcript_write_failed" {
+            return Err(format!(
+                "expected transcript_write_failed, saw {:?}",
+                failure.category()
+            )
+            .into());
+        }
+        if failure.detail() != Some("assistant transcript write failed") {
+            return Err(format!(
+                "expected only the fixed transcript cause, saw {:?}",
+                failure.detail()
+            )
+            .into());
+        }
+        let durable_failure = format!("{failure:?}");
+        for forbidden in [TRANSCRIPT_FAILURE_SECRET, forbidden_content] {
+            if durable_failure.contains(forbidden) {
+                return Err(
+                    format!("durable transcript failure must not contain {forbidden:?}").into(),
+                );
+            }
+            self.assert_conversation_history_lacks(forbidden).await?;
+        }
+        self.assert_interactive_model_provider_call_count(expected_interactive_model_calls)
+            .await?;
+        self.assert_text_model_provider_call_count(0).await?;
+        self.assert_tool_invocation_count("builtin.http", 1).await?;
+        self.assert_capability_result_count("builtin.http", 1)
+            .await?;
+        self.assert_egress_count(1).await?;
+        self.assert_model_message_content_occurrences("model error observation", 0)
+            .await?;
+        self.assert_turn_event_recorded(TurnEventKind::Failed).await
+    }
+
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.
     pub async fn assert_egress_count(&self, expected: usize) -> HarnessResult<()> {
         let actual = self.captured_egress_requests().len();
