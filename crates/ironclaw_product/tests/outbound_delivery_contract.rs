@@ -1038,6 +1038,47 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
 }
 
 #[tokio::test]
+async fn coordinator_collapses_markdown_links_for_materialized_workspace_attachments() {
+    let files = ScriptedProjectFilesystem::default();
+    files.insert_file("/workspace/report.txt", 3);
+    files.insert_file("/workspace/data.csv", 4);
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(
+        &files,
+        "Literal [ bracket stays.\nCreated both files:\n\
+         1. [Readable report](/workspace/report.txt)\n\
+         2. [/workspace/data.csv](/workspace/data.csv)\n\
+         3. [Not attached](/workspace/missing.txt)",
+        vec![
+            workspace_attachment_ref(
+                "report",
+                "/workspace/report.txt",
+                "report.txt",
+                "text/plain",
+                3,
+            ),
+            workspace_attachment_ref("data", "/workspace/data.csv", "data.csv", "text/csv", 4),
+        ],
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-text"), sent("file-report"), sent("file-data")],
+        })],
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        Ok(CoordinatedDeliveryOutcome::Delivered { .. })
+    ));
+    assert!(matches!(
+        &adapter.envelopes()[0].parts[0],
+        ironclaw_product::OutboundPart::Text(text)
+            if text == "Literal [ bracket stays.\nCreated both files:\n\
+                1. Readable report\n\
+                2. data.csv\n\
+                3. [Not attached](/workspace/missing.txt)"
+    ));
+}
+
+#[tokio::test]
 async fn coordinator_does_not_materialize_workspace_path_mentioned_only_in_prose() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_file("/workspace/report.pdf", 3);

@@ -387,6 +387,49 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
   ]);
 });
 
+test("messagesFromTimeline: replaces attached workspace links with readable file references", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "assistant-1",
+      kind: "assistant",
+      content:
+        "Literal [ bracket stays.\nCreated both files:\n" +
+        "1. [Readable report](/workspace/report.txt)\n" +
+        "2. [/workspace/data.csv](/workspace/data.csv)\n" +
+        "3. [Not attached](/workspace/missing.txt)",
+      sequence: 1,
+      status: "final",
+      attachments: [
+        {
+          id: "report",
+          kind: "document",
+          mime_type: "text/plain",
+          filename: "report.txt",
+          size_bytes: 3,
+          storage_key: "/workspace/report.txt",
+        },
+        {
+          id: "data",
+          kind: "document",
+          mime_type: "text/csv",
+          filename: "data.csv",
+          size_bytes: 4,
+          storage_key: "/workspace/data.csv",
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(
+    messages[0].content,
+    "Literal [ bracket stays.\nCreated both files:\n" +
+      "1. Readable report\n" +
+      "2. data.csv\n" +
+      "3. [Not attached](/workspace/missing.txt)",
+  );
+  assert.equal(messages[0].attachments.length, 2);
+});
+
 // A landed image gets a `fetch_url` so the bubble can lazily resolve a
 // thumbnail through the authenticated bytes endpoint. The URL must carry the
 // (thread, message, attachment) triple — the attachment id alone is not unique
