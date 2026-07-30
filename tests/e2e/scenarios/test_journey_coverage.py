@@ -176,8 +176,12 @@ def _assert_python_evidence(case: JourneyCase, evidence: PytestEvidence) -> None
     )
 
 
-def _rust_code_without_comments_or_strings(source: str) -> str:
-    """Mask Rust comments and strings while preserving line positions."""
+def _rust_code_without_comments_or_strings(
+    source: str,
+    *,
+    preserve_strings: bool = False,
+) -> str:
+    """Mask Rust comments and optionally strings, preserving positions."""
     result = list(source)
     index = 0
     block_depth = 0
@@ -213,9 +217,10 @@ def _rust_code_without_comments_or_strings(source: str) -> str:
             delimiter = f'"{hashes}'
             end = source.find(delimiter, index + raw_match.end())
             end = len(source) if end == -1 else end + len(delimiter)
-            for position in range(index, end):
-                if source[position] != "\n":
-                    result[position] = " "
+            if not preserve_strings:
+                for position in range(index, end):
+                    if source[position] != "\n":
+                        result[position] = " "
             index = end
             continue
         if source[index] == '"':
@@ -227,9 +232,10 @@ def _rust_code_without_comments_or_strings(source: str) -> str:
                 end += 1
                 if source[end - 1] == '"':
                     break
-            for position in range(index, min(end, len(source))):
-                if source[position] != "\n":
-                    result[position] = " "
+            if not preserve_strings:
+                for position in range(index, min(end, len(source))):
+                    if source[position] != "\n":
+                        result[position] = " "
             index = end
             continue
         index += 1
@@ -345,7 +351,14 @@ def _rust_function_body(
         elif masked[index] == "}":
             depth -= 1
             if depth == 0:
-                body_source = source if preserve_literals else masked
+                body_source = (
+                    _rust_code_without_comments_or_strings(
+                        source,
+                        preserve_strings=True,
+                    )
+                    if preserve_literals
+                    else masked
+                )
                 return body_source[body_start + 1 : index]
     raise AssertionError(f"Rust function {function_name!r} has no closing brace")
 
@@ -462,6 +475,21 @@ def _assert_delivery_address_is_citable(
         f"{case.case_id}: cited assertion {address.assertion!r} is not called "
         f"by {case.evidence.test!r} or its direct delegate"
     )
+
+
+def test_literal_preserving_rust_extraction_masks_comments():
+    """Commented-out evidence cannot satisfy the mechanical inventory."""
+    source = """
+fn evidence() {
+    // let comment_only = "C-FAKE";
+    /* let block_comment_only = "C-ALSO-FAKE"; */
+    let executable = "C777";
+}
+"""
+    body = _rust_function_body(source, "evidence", preserve_literals=True)
+    assert "comment_only" not in body
+    assert "block_comment_only" not in body
+    assert '"C777"' in body
 
 
 def test_provider_journey_registry_matches_every_harvested_emulate_journey():

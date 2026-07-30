@@ -1237,11 +1237,11 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
 
 fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
     let expected_conversation_id = "D-TRIGGER-DEFAULT";
-    let expected_thread_anchor: Option<&str> = None;
+    let expected_thread_anchor: Option<&Value> = None;
     let expected_count = 1;
     let matching = messages.iter().filter(|message| {
         message["channel"] == expected_conversation_id
-            && message.get("thread_ts").and_then(Value::as_str) == expected_thread_anchor
+            && message.get("thread_ts") == expected_thread_anchor
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(QA_9B_RESULT))
@@ -1255,11 +1255,11 @@ fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
 
 fn assert_slack_channel_delivery_evidence(messages: &[Value]) {
     let expected_conversation_id = "C-TRIGGER-OVERRIDE";
-    let expected_thread_anchor: Option<&str> = None;
+    let expected_thread_anchor: Option<&Value> = None;
     let expected_count = 1;
     let matching = messages.iter().filter(|message| {
         message["channel"] == expected_conversation_id
-            && message.get("thread_ts").and_then(Value::as_str) == expected_thread_anchor
+            && message.get("thread_ts") == expected_thread_anchor
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(QA_9D_RESULT))

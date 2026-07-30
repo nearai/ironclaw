@@ -690,14 +690,11 @@ fn assert_telegram_topic_delivery_evidence(messages: &[serde_json::Value]) {
 
 fn assert_telegram_chat_delivery_evidence(messages: &[serde_json::Value]) {
     let expected_conversation_id = "515151";
-    let expected_thread_anchor: Option<i64> = None;
+    let expected_thread_anchor: Option<&serde_json::Value> = None;
     let expected_count = 1;
     let matching = messages.iter().filter(|message| {
         message["chat_id"] == expected_conversation_id
-            && message
-                .get("message_thread_id")
-                .and_then(serde_json::Value::as_i64)
-                == expected_thread_anchor
+            && message.get("message_thread_id") == expected_thread_anchor
             && message["text"]
                 .as_str()
                 .is_some_and(|text| text.contains(TELEGRAM_REPLY))
