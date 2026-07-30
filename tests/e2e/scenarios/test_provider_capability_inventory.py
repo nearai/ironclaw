@@ -2,12 +2,11 @@
 
 import ast
 import json
-from pathlib import Path
 import re
-import tomllib
+from pathlib import Path
 
 import pytest
-
+import tomllib
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     COVERAGE_BACKLOG,
@@ -330,7 +329,13 @@ def _assert_python_symbol_called(
 
 
 def _assert_journey_evidence_is_executable(evidence: dict) -> None:
-    required = {"capability", "source", "test", "assertion"}
+    required = {
+        "capability",
+        "source",
+        "test",
+        "assertion_source",
+        "assertion",
+    }
     assert set(evidence) == required, (
         f"journey evidence fields must be exactly {sorted(required)}: {evidence}"
     )
@@ -344,10 +349,16 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
     )
     # The assertion helper is the part that actually reads provider state back.
     # Without it the named test still runs but proves nothing about the write.
+    assertion_source_path = ROOT / evidence["assertion_source"]
+    assert assertion_source_path.is_file(), (
+        "journey evidence assertion source is missing: "
+        f"{evidence['assertion_source']}"
+    )
+    assertion_source = assertion_source_path.read_text()
     helper = _python_function(
-        source,
+        assertion_source,
         evidence["assertion"],
-        evidence["source"],
+        evidence["assertion_source"],
         "journey evidence assertion helper",
     )
     # Declaring the helper is not enough: deleting the call from the test would

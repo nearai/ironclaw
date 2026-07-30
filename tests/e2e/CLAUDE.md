@@ -332,8 +332,8 @@ inventory now says so mechanically.** Coverage is counted per
   `slack__send_message` proves tool *choice*; it proves nothing about whether
   the provider committed the effect. Writes need a `ProviderOperationCase`
   with provider readback, an `integration_evidence` entry, or a
-  `journey_evidence` entry naming the exact test *and* the assertion helper
-  that performs the readback.
+  `journey_evidence` entry naming the exact test, provider-owned assertion
+  source, and assertion helper that performs the readback.
 - A read capability needs both a seeded `success` case and an `empty`-result
   case, so the runtime is proven to distinguish "no results" from "the call
   failed". Status and transport failures stay with the reusable fault
