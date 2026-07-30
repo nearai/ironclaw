@@ -268,7 +268,7 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw|ironclaw_reborn_composition)
+              ironclaw|ironclaw_reborn_composition|ironclaw_webui)
                 needs_webui_node=true
                 ;;
             esac
