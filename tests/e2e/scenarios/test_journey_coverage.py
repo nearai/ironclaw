@@ -1,6 +1,7 @@
 """Completeness gate for typed whole-path journey evidence."""
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -464,10 +465,8 @@ def _assert_delivery_address_is_citable(
     for delegate in set(re.findall(r"\b([a-z][A-Za-z0-9_]*_impl)\s*\(", test_body)):
         if delegate == address.assertion:
             continue
-        try:
+        with contextlib.suppress(AssertionError):
             reachable_bodies.append(_rust_function_body(source, delegate))
-        except AssertionError:
-            pass
     assert any(
         re.search(rf"\b{re.escape(address.assertion)}\s*\(", body)
         for body in reachable_bodies
@@ -695,6 +694,25 @@ def test_every_supported_ingress_and_delivery_target_has_journey_evidence():
     )
 
 
+def _assert_production_delivery_variants(
+    by_surface: dict[str, list[DeliveryAddressEvidence]],
+    production_capabilities: dict[str, dict],
+) -> None:
+    for surface, capabilities in production_capabilities.items():
+        addresses = by_surface.get(surface, [])
+        assert any(address.thread_anchor is None for address in addresses), (
+            f"{surface}: no unthreaded delivery address evidence"
+        )
+        supports_threads = capabilities.get("supports_threads")
+        assert isinstance(supports_threads, bool), (
+            f"{surface}: outbound manifest must declare supports_threads as a boolean"
+        )
+        if supports_threads:
+            assert any(address.thread_anchor is not None for address in addresses), (
+                f"{surface}: threaded delivery is implemented but lacks exact evidence"
+            )
+
+
 def test_external_delivery_variants_name_exact_caller_evidence():
     """Opaque destinations and optional anchors stay mechanically citable."""
     product_cases = [
@@ -706,15 +724,9 @@ def test_external_delivery_variants_name_exact_caller_evidence():
             _assert_delivery_address_is_citable(case, address)
             by_surface.setdefault(str(case.delivery_target), []).append(address)
 
-    for surface, capabilities in _production_channel_capabilities("outbound").items():
-        addresses = by_surface.get(surface, [])
-        assert any(address.thread_anchor is None for address in addresses), (
-            f"{surface}: no unthreaded delivery address evidence"
-        )
-        if capabilities.get("supports_threads") is True:
-            assert any(address.thread_anchor is not None for address in addresses), (
-                f"{surface}: threaded delivery is implemented but lacks exact evidence"
-            )
+    _assert_production_delivery_variants(
+        by_surface, _production_channel_capabilities("outbound")
+    )
 
     slack_destinations = {
         address.conversation_id for address in by_surface.get("slack", [])
@@ -723,6 +735,46 @@ def test_external_delivery_variants_name_exact_caller_evidence():
         "Slack's existing DM and shared-channel caller proofs must remain "
         "independently citable"
     )
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    ({}, {"supports_thread": True}, {"supports_threads": "true"}),
+)
+def test_delivery_variant_gate_requires_explicit_boolean_threading_declaration(
+    capabilities,
+):
+    """Missing, misspelled, or mistyped declarations cannot disable evidence."""
+    unthreaded = DeliveryAddressEvidence(
+        conversation_id="C-EXACT",
+        thread_anchor=None,
+        exact_count=1,
+        assertion="assert_exact_delivery",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="outbound manifest must declare supports_threads as a boolean",
+    ):
+        _assert_production_delivery_variants(
+            {"slack": [unthreaded]},
+            {"slack": capabilities},
+        )
+
+
+def test_channel_capability_inventory_requires_a_manifest_id(tmp_path: Path):
+    """Malformed production manifests fail with a path-specific diagnostic."""
+    manifest_dir = tmp_path / "missing-id"
+    manifest_dir.mkdir()
+    (manifest_dir / "manifest.toml").write_text(
+        "[channel]\noutbound = true\n\n"
+        "[channel.presentation]\nsupports_threads = false\n"
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"missing-id/manifest\.toml: channel manifest declares no non-empty id",
+    ):
+        _production_channel_capabilities("outbound", asset_root=tmp_path)
 
 
 def test_surface_gate_reports_a_new_uncovered_surface():

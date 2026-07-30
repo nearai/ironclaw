@@ -409,14 +409,20 @@ PRODUCT_JOURNEY_CASES = (
 ALL_JOURNEY_CASES = (*PROVIDER_JOURNEY_CASES, *PRODUCT_JOURNEY_CASES)
 
 
-def _production_channel_capabilities(direction: str) -> dict[str, dict]:
-    capabilities = {}
-    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+def _production_channel_capabilities(
+    direction: str, *, asset_root: Path = ASSET_ROOT
+) -> dict[str, dict]:
+    capabilities: dict[str, dict] = {}
+    for manifest_path in sorted(asset_root.glob("*/manifest.toml")):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         channel = manifest.get("channel")
         if channel is not None and channel.get(direction) is True:
-            capabilities[manifest["id"]] = channel.get("presentation") or {}
+            surface = manifest.get("id")
+            assert isinstance(surface, str) and surface, (
+                f"{manifest_path}: channel manifest declares no non-empty id"
+            )
+            capabilities[surface] = channel.get("presentation") or {}
     return capabilities
 
 
