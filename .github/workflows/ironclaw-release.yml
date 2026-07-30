@@ -120,6 +120,10 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Install Python for release smoke
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -155,6 +159,32 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Smoke exact binaries before packaging upload
+        shell: bash
+        env:
+          TARGETS: ${{ join(matrix.targets, ' ') }}
+        run: |
+          read -r -a targets <<< "$TARGETS"
+          if [[ "${#targets[@]}" -eq 0 ]]; then
+            echo "::error::cargo-dist local artifact job exposed no native targets"
+            exit 1
+          fi
+          for target in "${targets[@]}"; do
+            binary="ironclaw"
+            if [[ "$target" == *-windows-* ]]; then
+              binary="ironclaw.exe"
+            fi
+            shopt -s nullglob
+            archives=(target/distrib/*"$target"*.tar.gz)
+            if [[ "${#archives[@]}" -ne 1 ]]; then
+              echo "::error::expected one cargo-dist archive for $target, found ${#archives[@]}"
+              printf '%s\n' "${archives[@]}"
+              exit 1
+            fi
+            python scripts/ci/smoke-release-binary.py \
+              --archive "${archives[0]}" \
+              --binary-name "$binary"
+          done
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
