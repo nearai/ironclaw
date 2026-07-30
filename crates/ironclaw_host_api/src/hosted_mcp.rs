@@ -53,6 +53,26 @@ impl McpAuthMetadataLocation {
     }
 }
 
+/// Extract the only OAuth challenge values permitted to cross the runtime
+/// response-sanitization boundary. Raw challenge parameters and response text
+/// remain discarded; query and fragment data are removed by
+/// [`McpAuthMetadataLocation::new`].
+pub fn extract_mcp_auth_metadata_locations(value: &str) -> Vec<McpAuthMetadataLocation> {
+    value
+        .split([' ', ','])
+        .filter_map(|part| {
+            part.strip_prefix("resource_metadata=")
+                .or_else(|| part.strip_prefix("resource="))
+        })
+        .map(|part| part.trim_matches('"'))
+        .chain(
+            std::iter::once(value)
+                .filter(|value| value.starts_with("https://") || value.starts_with("http://")),
+        )
+        .filter_map(|value| McpAuthMetadataLocation::new(value).ok())
+        .collect()
+}
+
 /// Redacted protocol output for a hosted-MCP 401/403 response.
 ///
 /// It is intentionally limited to the status and metadata document locations
@@ -150,6 +170,9 @@ impl<'de> Deserialize<'de> for HostedMcpEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostedMcpAuthSelection {
+    /// Probe without credentials and derive no-auth, bearer, or OAuth setup
+    /// from the server's protocol response.
+    Auto,
     NoAuth,
     Bearer,
     #[serde(rename = "oauth")]
@@ -233,6 +256,10 @@ mod tests {
     #[test]
     fn auth_selection_wire_shapes_are_closed_and_exact() {
         assert_eq!(
+            serde_json::to_value(HostedMcpAuthSelection::Auto).expect("serialize"),
+            serde_json::json!({ "kind": "auto" })
+        );
+        assert_eq!(
             serde_json::to_value(HostedMcpAuthSelection::NoAuth).expect("serialize"),
             serde_json::json!({ "kind": "no_auth" })
         );
@@ -264,5 +291,17 @@ mod tests {
             "https://issuer.example.test/.well-known/oauth-protected-resource"
         );
         assert!(McpAuthMetadataLocation::new("not a location").is_err());
+    }
+
+    #[test]
+    fn notion_style_auth_challenge_extracts_only_metadata_location() {
+        let locations = extract_mcp_auth_metadata_locations(
+            "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.notion.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"",
+        );
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].as_str(),
+            "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp"
+        );
     }
 }

@@ -94,7 +94,7 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
             // Must match the bundled manifest's network policy
             // (deny_private_ip_ranges: true) or the dispatcher rejects the
             // request.
-            network_policy: hosted_mcp_network_policy(&endpoint),
+            network_policy: hosted_mcp_network_policy_for_endpoint(&endpoint),
             credential_injections,
             response_body_limit: Some(MCP_RESPONSE_BODY_LIMIT),
             timeout_ms: Some(MCP_TIMEOUT_MS),
@@ -174,7 +174,15 @@ fn normalize_mcp_path(path: &str) -> String {
     }
 }
 
-fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
+/// Canonical hosted-MCP egress policy for a package with a valid hosted HTTP
+/// endpoint. Callers retain ownership of their own missing/invalid-package
+/// error mapping.
+pub(crate) fn hosted_mcp_network_policy(package: &ExtensionPackage) -> Option<NetworkPolicy> {
+    hosted_http_mcp_endpoint(package)
+        .map(|endpoint| hosted_mcp_network_policy_for_endpoint(&endpoint))
+}
+
+fn hosted_mcp_network_policy_for_endpoint(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),

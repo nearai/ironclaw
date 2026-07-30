@@ -362,61 +362,55 @@ function installMutationHarness(authoritativeExtension) {
   };
 }
 
-test("custom MCP registration follows returned package_ref into setup", async () => {
-  const authoritativeExtension = {
+test("custom MCP registration refreshes only the registry and completes admission", async () => {
+  const registeredRegistryEntry = {
     package_ref: { kind: "extension", id: "mcp-linear" },
     display_name: "Linear MCP",
     installation_state: "setup_needed",
     surfaces: [{ kind: "auth" }],
   };
-  const harness = installMutationHarness(authoritativeExtension);
-  const setupRequests = [];
+  const harness = installMutationHarness(registeredRegistryEntry);
+  const registered = [];
 
   await harness.registerConfig.onSuccess(
     {
       success: true,
       package_ref: { kind: "extension", id: "mcp-linear" },
-      phase: "setup_needed",
     },
     {
       desiredId: "linear",
       desiredName: "Linear MCP",
-      onNeedsSetup: (extension) => setupRequests.push(extension),
+      onRegistered: () => registered.push(true),
     },
   );
 
-  assert.equal(setupRequests.length, 1);
-  assert.equal(setupRequests[0].packageRef.id, "mcp-linear");
-  assert.deepEqual(harness.refetches, ["extensions", "extension-registry"]);
+  assert.deepEqual(harness.refetches, ["extension-registry"]);
+  assert.deepEqual(registered, [true]);
 });
 
-test("custom MCP active result closes through onRegistered and does not open setup", async () => {
-  const authoritativeExtension = {
-    package_ref: { kind: "extension", id: "mcp-public" },
-    display_name: "Public MCP",
-    installation_state: "active",
-    surfaces: [{ kind: "tool" }],
-  };
-  const harness = installMutationHarness(authoritativeExtension);
-  const registered = [];
-  const setupRequests = [];
+test("rejected custom MCP admission returns the server message to the registration modal", async () => {
+  const harness = installMutationHarness(null);
+  const modalErrors = [];
 
   await harness.registerConfig.onSuccess(
+    { success: false, message: "Server ID is already registered" },
     {
-      success: true,
-      package_ref: { kind: "extension", id: "mcp-public" },
-      phase: "active",
-    },
-    {
-      desiredId: "public",
-      desiredName: "Public MCP",
-      onNeedsSetup: (extension) => setupRequests.push(extension),
-      onRegistered: (extension) => registered.push(extension),
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onRegistrationError: (message) => modalErrors.push(message),
     },
   );
 
-  assert.deepEqual(registered, [null]);
-  assert.deepEqual(setupRequests, []);
+  assert.deepEqual(
+    modalErrors,
+    ["Server ID is already registered"],
+    "the rejected registration response is handed to the modal's rendered error path",
+  );
+  assert.deepEqual(
+    harness.refetches,
+    [],
+    "a rejected admission must not pretend the registry changed",
+  );
 });
 
 test("install refreshes the authoritative projection before opening setup", async () => {

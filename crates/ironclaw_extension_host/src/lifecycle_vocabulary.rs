@@ -1,7 +1,7 @@
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, ResourceScope, RuntimeCredentialRequirement, RuntimeHttpEgress,
+    PermissionMode, RuntimeCredentialRequirement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,11 +19,6 @@ pub struct ActiveExtensionCapability {
     pub owner: InstallationOwner,
 }
 
-#[derive(Clone)]
-pub enum ExtensionActivationMode {
-    Static,
-}
-
 impl ActiveExtensionCapability {
     pub fn from_descriptor(descriptor: &CapabilityDescriptor, owner: InstallationOwner) -> Self {
         Self {
@@ -36,16 +31,5 @@ impl ActiveExtensionCapability {
             max_egress_bytes: descriptor.max_egress_bytes,
             owner,
         }
-    }
-}
-
-impl ExtensionActivationMode {
-    pub fn from_dispatch_context(
-        _scope: ResourceScope,
-        _runtime_http_egress: Option<std::sync::Arc<dyn RuntimeHttpEgress>>,
-    ) -> Self {
-        // A runtime egress capability no longer selects lifecycle behavior:
-        // hosted MCP discovery is performed only during pending preparation.
-        Self::Static
     }
 }

@@ -368,25 +368,6 @@ impl<'de> Deserialize<'de> for InstallationIncarnationId {
     }
 }
 
-/// Whether an installation can be projected as an ordinary ready package.
-///
-/// Pending preparation's evidence remains the aggregate's embedded resolved
-/// manifest. That keeps this generic store independent of hosted-MCP or any
-/// other runtime-specific preparation policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstallationPreparationState {
-    #[default]
-    Ready,
-    PendingPreparation,
-}
-
-impl InstallationPreparationState {
-    pub fn is_ready(self) -> bool {
-        matches!(self, Self::Ready)
-    }
-}
-
 impl fmt::Display for ExtensionInstallationId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -643,8 +624,6 @@ pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
     manifest_ref: ExtensionManifestRef,
-    #[serde(default)]
-    preparation_state: InstallationPreparationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation_id: Option<InstallationIncarnationId>,
     credential_bindings: Vec<ExtensionCredentialBinding>,
@@ -663,7 +642,6 @@ pub struct ExtensionInstallationPersistedParts {
     pub installation_id: ExtensionInstallationId,
     pub extension_id: ExtensionId,
     pub manifest_ref: ExtensionManifestRef,
-    pub preparation_state: InstallationPreparationState,
     pub incarnation_id: Option<InstallationIncarnationId>,
     pub credential_bindings: Vec<ExtensionCredentialBinding>,
     pub updated_at: DateTime<Utc>,
@@ -683,34 +661,11 @@ impl ExtensionInstallation {
             installation_id,
             extension_id,
             manifest_ref,
-            preparation_state: InstallationPreparationState::Ready,
             incarnation_id: Some(InstallationIncarnationId::fresh()),
             credential_bindings,
             updated_at,
             owner,
         })
-    }
-
-    /// Create a fresh aggregate which must be prepared before ordinary
-    /// activation. The new incarnation makes an older finalizer harmless.
-    pub fn new_pending(
-        installation_id: ExtensionInstallationId,
-        extension_id: ExtensionId,
-        manifest_ref: ExtensionManifestRef,
-        credential_bindings: Vec<ExtensionCredentialBinding>,
-        updated_at: DateTime<Utc>,
-        owner: InstallationOwner,
-    ) -> Result<Self, ExtensionInstallationError> {
-        let mut installation = Self::new(
-            installation_id,
-            extension_id,
-            manifest_ref,
-            credential_bindings,
-            updated_at,
-            owner,
-        )?;
-        installation.preparation_state = InstallationPreparationState::PendingPreparation;
-        Ok(installation)
     }
 
     /// Reconstruct an installation with all state read from persistence.
@@ -732,7 +687,6 @@ impl ExtensionInstallation {
             installation_id: parts.installation_id,
             extension_id: parts.extension_id,
             manifest_ref: parts.manifest_ref,
-            preparation_state: parts.preparation_state,
             incarnation_id: parts.incarnation_id,
             credential_bindings: parts.credential_bindings,
             updated_at: parts.updated_at,
@@ -750,10 +704,6 @@ impl ExtensionInstallation {
 
     pub fn manifest_ref(&self) -> &ExtensionManifestRef {
         &self.manifest_ref
-    }
-
-    pub fn preparation_state(&self) -> InstallationPreparationState {
-        self.preparation_state
     }
 
     pub fn incarnation_id(&self) -> Option<&InstallationIncarnationId> {
@@ -793,8 +743,6 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             extension_id: ExtensionId,
             manifest_ref: ExtensionManifestRef,
             #[serde(default)]
-            preparation_state: InstallationPreparationState,
-            #[serde(default)]
             incarnation_id: Option<InstallationIncarnationId>,
             credential_bindings: Vec<ExtensionCredentialBinding>,
             // The released aggregate row carries a diagnostic `health`
@@ -825,7 +773,6 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             installation_id: wire.installation_id,
             extension_id: wire.extension_id,
             manifest_ref: wire.manifest_ref,
-            preparation_state: wire.preparation_state,
             incarnation_id: wire.incarnation_id,
             credential_bindings: wire.credential_bindings,
             updated_at: wire.updated_at,
@@ -1185,8 +1132,6 @@ struct V2InstallationRecord {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
     manifest: WireManifestRecord,
-    #[serde(default)]
-    preparation_state: InstallationPreparationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation_id: Option<InstallationIncarnationId>,
     legacy_tenant_owner: bool,
@@ -1991,8 +1936,9 @@ impl ExtensionInstallationStore {
                             installation_id,
                         });
                     }
-                    if record.preparation_state != InstallationPreparationState::PendingPreparation
-                        || record.incarnation_id.as_ref() != Some(&incarnation_id)
+                    if record.manifest.resolved.as_ref().is_none_or(|resolved| {
+                        resolved.initial_preparation != PreparationRequirement::Required
+                    }) || record.incarnation_id.as_ref() != Some(&incarnation_id)
                         || record.manifest_ref() != expected_manifest_ref
                     {
                         return Err(
@@ -2057,13 +2003,19 @@ impl ExtensionInstallationStore {
                         })?
                         .id
                         .clone();
+                    let finalized_is_ready =
+                        finalized_wire.resolved.as_ref().is_some_and(|resolved| {
+                            resolved.initial_preparation == PreparationRequirement::Ready
+                        });
                     if record.installation_id != installation_id
                         || record.extension_id != finalized_extension_id
                         || !lease_matches
-                        || record.preparation_state
-                            != InstallationPreparationState::PendingPreparation
+                        || record.manifest.resolved.as_ref().is_none_or(|resolved| {
+                            resolved.initial_preparation != PreparationRequirement::Required
+                        })
                         || record.incarnation_id.as_ref() != Some(&incarnation_id)
                         || record.manifest_ref() != expected_manifest_ref
+                        || !finalized_is_ready
                     {
                         return Err(
                             ExtensionInstallationError::PreparationFinalizationRejected {
@@ -2072,7 +2024,6 @@ impl ExtensionInstallationStore {
                         );
                     }
                     record.manifest = finalized_wire;
-                    record.preparation_state = InstallationPreparationState::Ready;
                     record.lease = None;
                     record.updated_at = Utc::now();
                     Ok(CasApply::new(record.clone(), record))
@@ -2131,8 +2082,8 @@ impl ExtensionInstallationStore {
                         || record.manifest.source != next_wire.source
                         || current_resolved.root_binding != next_resolved.root_binding
                         || !lease_matches
-                        || record.preparation_state
-                            != InstallationPreparationState::PendingPreparation
+                        || current_resolved.initial_preparation != PreparationRequirement::Required
+                        || next_resolved.initial_preparation != PreparationRequirement::Required
                         || record.incarnation_id.as_ref() != Some(&incarnation_id)
                         || record.manifest_ref() != expected_manifest_ref
                     {
@@ -2194,7 +2145,6 @@ impl ExtensionInstallationStore {
                         installation_id: installation.installation_id().clone(),
                         extension_id: installation.extension_id().clone(),
                         manifest: wire,
-                        preparation_state: installation.preparation_state(),
                         incarnation_id: installation.incarnation_id().cloned(),
                         legacy_tenant_owner: installation.owner().is_tenant(),
                         updated_at: installation.updated_at(),
@@ -2929,7 +2879,6 @@ impl ExtensionInstallationStore {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
             manifest_ref: core.manifest_ref(),
-            preparation_state: core.preparation_state,
             incarnation_id: core.incarnation_id.clone(),
             credential_bindings,
             updated_at,
@@ -3358,10 +3307,6 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                         installation_id,
                         extension_id,
                         manifest: wire,
-                        preparation_state: current
-                            .as_ref()
-                            .map(|record| record.preparation_state)
-                            .unwrap_or_default(),
                         incarnation_id: current
                             .as_ref()
                             .and_then(|record| record.incarnation_id.clone()),
@@ -3525,7 +3470,8 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             .as_ref()
             .ok_or_else(|| invalid_installation_error("checkpoint manifest was not resolved"))?;
         if !current.is_visible()
-            || current.preparation_state != InstallationPreparationState::PendingPreparation
+            || current_resolved.initial_preparation != PreparationRequirement::Required
+            || next_resolved.initial_preparation != PreparationRequirement::Required
             || current.incarnation_id.as_ref() != Some(incarnation_id)
             || current.manifest_ref() != *expected_pending_manifest_ref
             || current.extension_id != next_resolved.id
@@ -4681,7 +4627,7 @@ mod tests {
 
     fn pending_installation(extension_id: &str, hash: Option<&str>) -> ExtensionInstallation {
         let extension_id = ExtensionId::new(extension_id.to_string()).expect("extension id");
-        ExtensionInstallation::new_pending(
+        ExtensionInstallation::new(
             ExtensionInstallationId::new(extension_id.as_str().to_string())
                 .expect("installation id"),
             extension_id.clone(),
@@ -4696,23 +4642,21 @@ mod tests {
         .expect("pending installation")
     }
 
+    fn pending_manifest_record(extension_id: &str, hash: Option<&str>) -> ExtensionManifestRecord {
+        manifest_record(extension_id, hash)
+            .with_initial_preparation(PreparationRequirement::Required)
+    }
+
     #[test]
-    fn legacy_installation_wire_defaults_to_ready_without_an_incarnation() {
+    fn legacy_installation_wire_loads_without_an_incarnation() {
         let installation = installation("fixture", Some("hash-1"));
         let mut wire = serde_json::to_value(&installation).expect("serialize installation");
-        wire.as_object_mut()
-            .expect("object wire")
-            .remove("preparation_state");
         wire.as_object_mut()
             .expect("object wire")
             .remove("incarnation_id");
 
         let restored: ExtensionInstallation =
             serde_json::from_value(wire).expect("legacy installation wire");
-        assert_eq!(
-            restored.preparation_state(),
-            InstallationPreparationState::Ready
-        );
         assert_eq!(restored.incarnation_id(), None);
     }
 
@@ -4720,10 +4664,6 @@ mod tests {
     fn fresh_pending_installations_have_distinct_opaque_incarnations() {
         let first = pending_installation("fixture", Some("hash-1"));
         let second = pending_installation("fixture", Some("hash-1"));
-        assert_eq!(
-            first.preparation_state(),
-            InstallationPreparationState::PendingPreparation
-        );
         assert_ne!(first.incarnation_id(), second.incarnation_id());
     }
 
@@ -4893,7 +4833,7 @@ mod tests {
     #[tokio::test]
     async fn finalization_swaps_only_the_matching_pending_aggregate() {
         let store = installation_store().await;
-        let pending_manifest = manifest_record("fixture", Some("hash-pending"));
+        let pending_manifest = pending_manifest_record("fixture", Some("hash-pending"));
         let pending = pending_installation("fixture", Some("hash-pending"));
         let installation_id = pending.installation_id().clone();
         let incarnation_id = pending
@@ -4912,10 +4852,6 @@ mod tests {
             .await
             .expect("matching finalizer wins");
         assert_eq!(
-            winner.preparation_state(),
-            InstallationPreparationState::Ready
-        );
-        assert_eq!(
             winner
                 .manifest_ref()
                 .manifest_hash()
@@ -4933,7 +4869,10 @@ mod tests {
         let incarnation = pending.incarnation_id().cloned().expect("incarnation");
         let expected_ref = pending.manifest_ref().clone();
         store
-            .upsert_manifest_and_installation(manifest_record("fixture", Some("hash-one")), pending)
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                pending,
+            )
             .await
             .expect("seed pending");
 
@@ -4942,14 +4881,10 @@ mod tests {
                 &installation_id,
                 &incarnation,
                 &expected_ref,
-                manifest_record("fixture", Some("hash-two")),
+                pending_manifest_record("fixture", Some("hash-two")),
             )
             .await
             .expect("checkpoint pending manifest");
-        assert_eq!(
-            checkpointed.preparation_state(),
-            InstallationPreparationState::PendingPreparation
-        );
         assert_eq!(checkpointed.incarnation_id(), Some(&incarnation));
         assert_eq!(
             checkpointed
@@ -4969,7 +4904,7 @@ mod tests {
         let expected_ref = pending.manifest_ref().clone();
         store
             .upsert_manifest_and_installation(
-                manifest_record("fixture", Some("hash-one")),
+                pending_manifest_record("fixture", Some("hash-one")),
                 pending.clone(),
             )
             .await
@@ -5069,7 +5004,10 @@ mod tests {
         let removed_incarnation = removed.incarnation_id().cloned().expect("incarnation");
         let removed_ref = removed.manifest_ref().clone();
         store
-            .upsert_manifest_and_installation(manifest_record("removed", Some("hash-one")), removed)
+            .upsert_manifest_and_installation(
+                pending_manifest_record("removed", Some("hash-one")),
+                removed,
+            )
             .await
             .expect("seed removed candidate");
         store
@@ -5109,7 +5047,10 @@ mod tests {
         let incarnation = pending.incarnation_id().cloned().expect("incarnation");
         let expected_ref = pending.manifest_ref().clone();
         store
-            .upsert_manifest_and_installation(manifest_record("fixture", Some("hash-one")), pending)
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                pending,
+            )
             .await
             .expect("seed pending");
         store
@@ -5133,19 +5074,15 @@ mod tests {
         )
         .await
         .expect("repair checkpoint lease");
-        let checkpointed = reopened
+        let _checkpointed = reopened
             .checkpoint_preparation(
                 &installation_id,
                 &incarnation,
                 &expected_ref,
-                manifest_record("fixture", Some("hash-two")),
+                pending_manifest_record("fixture", Some("hash-two")),
             )
             .await
             .expect("retry checkpoint");
-        assert_eq!(
-            checkpointed.preparation_state(),
-            InstallationPreparationState::PendingPreparation
-        );
     }
 
     #[tokio::test]
@@ -5156,7 +5093,10 @@ mod tests {
         let first_incarnation = first.incarnation_id().cloned().expect("fresh incarnation");
         let first_ref = first.manifest_ref().clone();
         store
-            .upsert_manifest_and_installation(manifest_record("fixture", Some("hash-one")), first)
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                first,
+            )
             .await
             .expect("persist first pending aggregate");
 
@@ -5167,7 +5107,7 @@ mod tests {
             .expect("replacement incarnation");
         store
             .upsert_manifest_and_installation(
-                manifest_record("fixture", Some("hash-two")),
+                pending_manifest_record("fixture", Some("hash-two")),
                 replacement,
             )
             .await
@@ -5191,10 +5131,6 @@ mod tests {
             .await
             .expect("load replacement")
             .expect("replacement stays present");
-        assert_eq!(
-            current.preparation_state(),
-            InstallationPreparationState::PendingPreparation
-        );
         assert_eq!(current.incarnation_id(), Some(&replacement_incarnation));
     }
 
@@ -5220,7 +5156,7 @@ mod tests {
         let pending_ref = pending.manifest_ref().clone();
         store
             .upsert_manifest_and_installation(
-                manifest_record("fixture", Some("hash-pending")),
+                pending_manifest_record("fixture", Some("hash-pending")),
                 pending,
             )
             .await
@@ -5244,10 +5180,6 @@ mod tests {
             .await
             .expect("load recovered aggregate")
             .expect("pending aggregate remains");
-        assert_eq!(
-            recovered.preparation_state(),
-            InstallationPreparationState::PendingPreparation
-        );
         assert_eq!(recovered.incarnation_id(), Some(&incarnation_id));
     }
 

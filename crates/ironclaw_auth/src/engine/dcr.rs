@@ -254,7 +254,10 @@ pub(crate) fn authorization_server_metadata_url(issuer: &str) -> Result<String, 
     if metadata.scheme() != "https" {
         return Err(AuthProductError::BackendUnavailable);
     }
-    metadata.set_path("/.well-known/oauth-authorization-server");
+    let issuer_path = metadata.path().trim_end_matches('/');
+    metadata.set_path(&format!(
+        "/.well-known/oauth-authorization-server{issuer_path}"
+    ));
     metadata.set_query(None);
     metadata.set_fragment(None);
     Ok(metadata.to_string())
@@ -285,6 +288,10 @@ mod tests {
         assert_eq!(
             authorization_server_metadata_url("https://auth.example.com").unwrap(),
             "https://auth.example.com/.well-known/oauth-authorization-server"
+        );
+        assert_eq!(
+            authorization_server_metadata_url("https://auth.example.com/issuer/path").unwrap(),
+            "https://auth.example.com/.well-known/oauth-authorization-server/issuer/path"
         );
         assert!(protected_resource_metadata_url("http://mcp.example.com/mcp").is_err());
     }

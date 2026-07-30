@@ -182,7 +182,7 @@ export function useExtensions() {
       registerCustomMcp({ desiredId, desiredName, endpoint, authSelection }),
     onSuccess: async (
       res,
-      { desiredName, onNeedsSetup, onRegistered, onRegistrationError },
+      { desiredName, onRegistered, onRegistrationError },
     ) => {
       if (!res.success) {
         const message = res.message || t("extensions.customMcpRegisterFailed");
@@ -190,23 +190,9 @@ export function useExtensions() {
         if (typeof onRegistrationError === "function") onRegistrationError(message);
         return;
       }
-      const [extensionsResult] = await refetch();
-      const registeredId = packageRefId(res.package_ref);
-      const extension = (extensionsResult?.data?.extensions || []).find(
-        (item) => packageId(item) === registeredId,
-      );
-      if (!extension) {
-        const message = t("extensions.customMcpProjectionMissing");
-        setActionResult({ type: "error", message });
-        if (typeof onRegistrationError === "function") onRegistrationError(message);
-        return;
-      }
-      if (extension?.installation_state === "setup_needed" && typeof onNeedsSetup === "function") {
-        onNeedsSetup(configureRequest(extension));
-        return;
-      }
+      await registryQuery.refetch();
       setActionResult({ type: "success", message: res.message || t("extensions.customMcpRegistered", { name: desiredName }) });
-      if (typeof onRegistered === "function") onRegistered(null);
+      if (typeof onRegistered === "function") onRegistered();
     },
     onError: (err, { onRegistrationError }) => {
       setActionResult({ type: "error", message: err.message });

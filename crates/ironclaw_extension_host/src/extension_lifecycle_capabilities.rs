@@ -9,7 +9,7 @@ use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
     DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError, InstallationState,
     OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -24,7 +24,6 @@ use serde::Deserialize;
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
-use ironclaw_extension_host::ExtensionActivationMode;
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -61,12 +60,10 @@ pub fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
-    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
-        runtime_http_egress,
     });
     for capability_id in EXTENSION_LIFECYCLE_HANDLER_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -185,7 +182,6 @@ fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
-    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,19 +237,10 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.scope.clone(),
                     Arc::clone(&self.credential_accounts),
                 );
-                let mode = ExtensionActivationMode::from_dispatch_context(
-                    request.scope.clone(),
-                    request
-                        .services
-                        .runtime_http_egress
-                        .clone()
-                        .or_else(|| self.runtime_http_egress.clone()),
-                );
                 match self
                     .extension_management
                     .activate_with_credential_gate(
                         package_ref.clone(),
-                        mode,
                         request.scope.clone(),
                         &credential_gate,
                         &request.scope.user_id,
@@ -315,14 +302,9 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     )
                     .with_usage(resource_usage(started)));
                 }
-                let mode = ExtensionActivationMode::from_dispatch_context(
-                    request.scope.clone(),
-                    request.services.runtime_http_egress.clone(),
-                );
                 self.extension_management
                     .activate_with_credential_gate(
                         package_ref,
-                        mode,
                         request.scope.clone(),
                         &credential_gate,
                         &request.scope.user_id,
@@ -518,7 +500,7 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductSurfaceFailure::InvalidBindingRequest { reason }
-            if reason.starts_with("hosted MCP discovery failed:")
+            if reason.starts_with("hosted MCP catalog preparation failed:")
                 || reason
                     == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
         {

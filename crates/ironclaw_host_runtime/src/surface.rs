@@ -295,9 +295,12 @@ impl<'a> CapabilityCatalog<'a> {
             .map(|package| package.manifest.source)
         {
             Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
-            Some(ManifestSource::HostBundled | ManifestSource::InstalledLocal) | None => {
-                CapabilityDescriptionTrust::Untrusted
-            }
+            Some(
+                ManifestSource::HostBundled
+                | ManifestSource::InstalledLocal
+                | ManifestSource::UserRegistered,
+            )
+            | None => CapabilityDescriptionTrust::Untrusted,
         }
     }
 

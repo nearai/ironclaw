@@ -355,28 +355,14 @@ test("custom MCP Done closes registration without opening configure", () => {
   assert.equal(componentProps(rendered, harness.ConfigureModal).length, 0);
 });
 
-test("custom MCP setup result closes registration and opens existing configure", () => {
+test("custom MCP registration does not expose a direct setup handoff", () => {
   const harness = renderExtensionsPage("registry");
   const [registration] = componentProps(
     harness.rendered,
     harness.CustomMcpRegistrationModal,
   );
-  const extension = {
-    packageRef: { kind: "extension", id: "mcp-linear" },
-    displayName: "Linear MCP",
-    installation_state: "setup_needed",
-  };
-
-  registration.onSetup(extension);
-
-  const rendered = harness.render();
-  const [updatedRegistration] = componentProps(
-    rendered,
-    harness.CustomMcpRegistrationModal,
-  );
-  const [configure] = componentProps(rendered, harness.ConfigureModal);
-  assert.equal(updatedRegistration.open, false);
-  assert.equal(configure.extension, extension);
+  assert.equal(registration.onSetup, undefined);
+  assert.equal(componentProps(harness.rendered, harness.ConfigureModal).length, 0);
 });
 
 test("templateText includes text nested inside arrays", () => {

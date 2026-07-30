@@ -1460,6 +1460,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,

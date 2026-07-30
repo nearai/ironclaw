@@ -8,10 +8,8 @@
 //! edge — it just relocates a pure classification over those inputs to the single
 //! authority site.
 
-use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, PackageRootBinding,
-};
-use ironclaw_host_api::{CapabilityId, PackageSource};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_host_api::CapabilityId;
 use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
 use tracing::debug;
 
@@ -92,7 +90,10 @@ fn trust_policy_input_for_package(
 ) -> Result<TrustPolicyInput, TrustEvaluationError> {
     package
         .trust_policy_input(
-            trust_policy_source(package)?,
+            package.trust_policy_source().map_err(|error| {
+                debug!(%error, "could not derive trust policy source from package");
+                TrustEvaluationError::TrustInput
+            })?,
             package.manifest_digest(),
             None,
         )
@@ -103,29 +104,6 @@ fn trust_policy_input_for_package(
             debug!(%error, "could not build trust policy input from package manifest");
             TrustEvaluationError::TrustInput
         })
-}
-
-fn trust_policy_source(package: &ExtensionPackage) -> Result<PackageSource, TrustEvaluationError> {
-    match package.package_root_binding() {
-        PackageRootBinding::Materialized(root) => Ok(PackageSource::LocalManifest {
-            path: format!("{}/manifest.toml", root.as_str().trim_end_matches('/')),
-        }),
-        // A hosted MCP registered by a tenant intentionally has no local
-        // package tree after its dynamic discovery projection. Its canonical
-        // HTTPS endpoint is the trust identity, not a fabricated local path.
-        PackageRootBinding::Virtual => match &package.manifest.runtime {
-            ExtensionRuntime::Mcp {
-                transport,
-                command: None,
-                args,
-                url: Some(endpoint),
-            } if transport == "http" && args.is_empty() => Ok(PackageSource::DirectRemote {
-                endpoint: endpoint.clone(),
-            }),
-            _ => Err(TrustEvaluationError::TrustInput),
-        },
-        PackageRootBinding::FabricateOnLoad => Err(TrustEvaluationError::TrustInput),
-    }
 }
 
 #[cfg(test)]

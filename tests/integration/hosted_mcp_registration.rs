@@ -25,13 +25,15 @@ use ironclaw_auth::{
 };
 use ironclaw_extension_host::lifecycle_test_support::{
     build_lifecycle_test_services, build_lifecycle_test_services_with_auth_provider,
-    invoke_with_local_dev_approval, lifecycle_product_context, webui_gate_resource_scope_for_owner,
+    invoke_with_standalone_approval, lifecycle_product_context,
+    rebuild_lifecycle_test_services_with_auth_provider, webui_gate_resource_scope_for_owner,
 };
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExtensionId,
     GrantConstraints, HostedMcpAuthSelection, HostedMcpEndpoint, LifecyclePackageId, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, RegisterHostedMcpRequest,
-    RuntimeKind, SecretHandle, TrustClass,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, RegisterHostedMcpRequest, RuntimeKind, SecretHandle, TrustClass,
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
@@ -65,7 +67,11 @@ fn runtime_context(
                 grantee: Principal::Extension(grantee),
                 issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
-                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+                    allowed_effects: vec![
+                        EffectKind::DispatchCapability,
+                        EffectKind::Network,
+                        EffectKind::UseSecret,
+                    ],
                     mounts: MountView::default(),
                     network: NetworkPolicy {
                         allowed_targets: vec![NetworkTargetPattern {
@@ -113,19 +119,29 @@ fn registration_request(auth_selection: HostedMcpAuthSelection) -> RegisterHoste
     }
 }
 
-fn no_auth_request() -> RegisterHostedMcpRequest {
-    registration_request(HostedMcpAuthSelection::NoAuth)
-}
-
-fn oauth_request() -> RegisterHostedMcpRequest {
-    registration_request(HostedMcpAuthSelection::OAuth {
-        client_profile_id: None,
-    })
+fn automatic_request() -> RegisterHostedMcpRequest {
+    registration_request(HostedMcpAuthSelection::Auto)
 }
 
 fn fixture_package_ref() -> LifecyclePackageRef {
     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-fixture")
         .expect("fixture package ref")
+}
+
+async fn install_fixture(
+    services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
+    scope: ironclaw_host_api::ResourceScope,
+) -> ironclaw_host_api::LifecycleProductResponse {
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("ordinary lifecycle install completes")
 }
 
 fn credential_provider_from_response(
@@ -231,6 +247,68 @@ fn fixture_digest(value: &str) -> String {
     )
 }
 
+async fn complete_fixture_oauth_callback(
+    services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
+    scope: &ironclaw_host_api::ResourceScope,
+    provider: ironclaw_auth::AuthProviderId,
+) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {
+    let auth_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+    let state_hash =
+        OpaqueStateHash::new(fixture_digest("hosted-oauth-state")).expect("state digest");
+    let pkce_hash =
+        PkceVerifierHash::new(fixture_digest("hosted-oauth-pkce")).expect("PKCE digest");
+    let flow = services
+        .product_auth
+        .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+            flow_id: None,
+            scope: auth_scope.clone(),
+            provider: provider.clone(),
+            requester_extension: Some(ExtensionId::new("mcp-fixture").expect("extension id")),
+            authorization_url: OAuthAuthorizationUrl::new("https://auth.example.test/authorize")
+                .expect("fixture authorization URL"),
+            opaque_state_hash: state_hash.clone(),
+            pkce_verifier_hash: pkce_hash.clone(),
+            pkce_verifier: SecretString::from("hosted-oauth-pkce".to_string()),
+            update_binding: None,
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("mcp-fixture")
+                    .expect("auth package ref"),
+            },
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .expect("existing product-auth OAuth flow starts");
+    services
+        .product_auth
+        .handle_oauth_callback(RebornOAuthCallbackRequest {
+            scope: auth_scope,
+            flow_id: flow.id,
+            opaque_state_hash: state_hash,
+            outcome: RebornOAuthCallbackOutcome::Authorized {
+                provider_request: OAuthProviderCallbackRequest {
+                    provider,
+                    account_label: CredentialAccountLabel::new("Fixture MCP OAuth")
+                        .expect("credential label"),
+                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
+                        "hosted-oauth-code".to_string(),
+                    ))
+                    .expect("authorization code"),
+                    authorization_code_hash: AuthorizationCodeHash::new(fixture_digest(
+                        "hosted-oauth-code",
+                    ))
+                    .expect("authorization code digest"),
+                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
+                        "hosted-oauth-pkce".to_string(),
+                    ))
+                    .expect("PKCE verifier"),
+                    pkce_verifier_hash: pkce_hash,
+                    scopes: Vec::<ProviderScope>::new(),
+                },
+            },
+        })
+        .await
+}
+
 fn mrc_trace_tools() -> Vec<HostedMcpTool> {
     let trace = serde_json::from_str::<serde_json::Value>(include_str!(
         "../fixtures/hosted_mcp/microsoft_mrc_streamable_http.json"
@@ -247,6 +325,18 @@ fn mrc_trace_tools() -> Vec<HostedMcpTool> {
             )
         })
         .collect()
+}
+
+/// Notion's authenticated catalog legitimately documents individual tools in
+/// several kilobytes of prose.  Keep this fixture below the structural 16 KiB
+/// field limit but above the former 2 KiB compatibility limit, so the OAuth
+/// callback journey proves catalog preparation can publish it end-to-end.
+fn notion_style_long_description() -> String {
+    let paragraph = "Search and retrieve pages, databases, blocks, comments, and users that the connected Notion account can access. Use structured filters when available, preserve the caller's workspace boundaries, and return enough context for a follow-up read without changing any page content. ";
+    let description = paragraph.repeat(24);
+    assert!(description.len() > 2_048);
+    assert!(description.len() <= 16 * 1024);
+    description
 }
 
 #[tokio::test]
@@ -267,14 +357,14 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
         .execute(
             lifecycle_product_context(scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
-                request: no_auth_request(),
+                request: automatic_request(),
             },
         )
         .await;
     let registration = match registration_result {
         Ok(response) => response,
         Err(error) => panic!(
-            "public lifecycle action registers, installs, and activates: {error:?}; fixture requests: {:?}",
+            "public lifecycle action persists the tenant definition: {error:?}; fixture requests: {:?}",
             server.requests(),
         ),
     };
@@ -289,16 +379,28 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     );
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Active,
-        "no-auth registration should finish preparation and activation; response: {registration:#?}; fixture requests: {:#?}",
-        server.requests(),
+        ironclaw_host_api::InstallationState::Installed,
+        "registration persists a catalog definition without implicit installation: {registration:#?}",
+    );
+    assert!(
+        server.requests().is_empty(),
+        "registration must not contact MCP"
+    );
+    assert!(
+        services
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capability projection")
+            .is_empty(),
+        "registration must not activate the definition"
     );
     let exact_retry = services
         .lifecycle_service
         .execute(
             lifecycle_product_context(scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
-                request: no_auth_request(),
+                request: automatic_request(),
             },
         )
         .await
@@ -306,9 +408,9 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert_eq!(exact_retry.package_ref, registration.package_ref);
     assert_eq!(
         exact_retry.phase,
-        ironclaw_host_api::InstallationState::Active
+        ironclaw_host_api::InstallationState::Installed
     );
-    let mut conflicting = no_auth_request();
+    let mut conflicting = automatic_request();
     conflicting.desired_name = "Different fixture MCP".to_string();
     assert!(
         services
@@ -322,6 +424,11 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
             .await
             .is_err(),
         "a different immutable definition with the same tenant package id conflicts"
+    );
+    let installed = install_fixture(&services, scope.clone()).await;
+    assert_eq!(
+        installed.phase,
+        ironclaw_host_api::InstallationState::Active
     );
     let active_capabilities = services
         .extension_management
@@ -346,7 +453,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
                     .collect::<Vec<_>>()
             )
         });
-    let outcome = invoke_with_local_dev_approval(
+    let outcome = invoke_with_standalone_approval(
         &services,
         &capability_id,
         runtime_context(scope.clone(), &capability_id),
@@ -372,6 +479,64 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
 }
 
 #[tokio::test]
+async fn reserved_hosted_mcp_id_is_rejected_without_registration_or_installation_side_effects() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-reserved-id",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-reserved-id");
+    let mut request = automatic_request();
+    request.desired_id = LifecyclePackageId::new("mcp-fixture").expect("package id is well-formed");
+
+    let error = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+        )
+        .await
+        .expect_err("the reserved mcp- prefix must be rejected before admission");
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert!(
+        server.requests().is_empty(),
+        "invalid registration must not contact the MCP"
+    );
+
+    let rejected_extension = ExtensionId::new("mcp-mcp-fixture").expect("derived extension id");
+    let installation_store = services.extension_management.installation_store_for_test();
+    assert!(
+        installation_store
+            .get_registered_package_definition(&rejected_extension)
+            .await
+            .expect("registered-definition lookup")
+            .is_none(),
+        "invalid registration must not create a tenant catalog definition"
+    );
+    let installations = installation_store
+        .list_installations()
+        .await
+        .expect("installation-store readback");
+    assert!(
+        installations
+            .iter()
+            .all(|installation| installation.extension_id() != &rejected_extension),
+        "invalid registration must not create an installation"
+    );
+}
+
+#[tokio::test]
 async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per_user() {
     let server = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::NoAuth,
@@ -393,11 +558,30 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
         .execute(
             lifecycle_product_context(admin_scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
-                request: no_auth_request(),
+                request: automatic_request(),
             },
         )
         .await
-        .expect("tenant admin registers and installs the definition");
+        .expect("tenant admin registers the definition");
+
+    let admin_before = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(admin_scope.clone()),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("admin installation list");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = admin_before.payload
+    else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "registration must not implicitly install for its creator"
+    );
 
     let member_search = services
         .lifecycle_service
@@ -450,6 +634,12 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
         .expect("member joins through the ordinary install lifecycle");
     assert_eq!(
         member_install.phase,
+        ironclaw_host_api::InstallationState::Active
+    );
+
+    let admin_install = install_fixture(&services, admin_scope.clone()).await;
+    assert_eq!(
+        admin_install.phase,
         ironclaw_host_api::InstallationState::Active
     );
 
@@ -526,7 +716,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         .execute(
             lifecycle_product_context(scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
-                request: registration_request(HostedMcpAuthSelection::Bearer),
+                request: automatic_request(),
             },
         )
         .await
@@ -536,11 +726,20 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         ironclaw_host_api::InstallationState::Installed
     );
     assert!(
-        registration.blockers.iter().any(|blocker| matches!(
+        registration.blockers.is_empty(),
+        "registration does not probe auth"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "registration must not contact MCP"
+    );
+    let unfinished_retry = install_fixture(&services, scope.clone()).await;
+    assert!(
+        unfinished_retry.blockers.iter().any(|blocker| matches!(
             blocker,
             ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
         )),
-        "registration exposes ordinary credential readiness"
+        "ordinary installation exposes credential readiness"
     );
     assert!(
         services
@@ -552,22 +751,12 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         "unfinished auth publishes no MCP tools"
     );
 
-    let unfinished_retry = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(scope.clone()),
-            LifecycleProductAction::ExtensionInstall {
-                package_ref: fixture_package_ref(),
-            },
-        )
-        .await
-        .expect("agent install retry remains actionable");
     assert_eq!(
         unfinished_retry.phase,
         ironclaw_host_api::InstallationState::Installed
     );
 
-    let provider = credential_provider_from_response(&registration);
+    let provider = credential_provider_from_response(&unfinished_retry);
     let wrong = submit_fixture_bearer(&services, scope.clone(), provider.clone(), "wrong-token")
         .await
         .expect("the secure form accepts an opaque token before the MCP validates it");
@@ -598,16 +787,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
                 .expect("auth package ref")
         }
     );
-    let completed_retry = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(scope.clone()),
-            LifecycleProductAction::ExtensionInstall {
-                package_ref: fixture_package_ref(),
-            },
-        )
-        .await
-        .expect("agent install converges after auth setup");
+    let completed_retry = install_fixture(&services, scope.clone()).await;
     let capabilities = services
         .extension_management
         .active_model_visible_capabilities()
@@ -627,15 +807,116 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
             .any(|request| request.authorization_matches),
         "activation reaches the MCP with the host-injected bearer"
     );
+    let capability = capabilities
+        .into_iter()
+        .find(|capability| capability.id.as_str().ends_with(".search"))
+        .expect("bearer MCP search capability");
+    let outcome = invoke_with_standalone_approval(
+        &services,
+        capability.id.as_str(),
+        runtime_context(scope, capability.id.as_str()),
+        json!({}),
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+        ),
+        "bearer MCP invocation must complete after setup: {outcome:#?}"
+    );
+    assert!(server.requests().iter().any(|request| {
+        request.rpc_method.as_deref() == Some("tools/call") && request.authorization_matches
+    }));
 }
 
 #[tokio::test]
-async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generic_auth_setup() {
+async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_setup() {
     let server = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::OAuth {
             access_token: "oauth-token".to_string(),
         },
         vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let initial_secret_store = Arc::new(OnceLock::new());
+    let services = build_lifecycle_test_services_with_auth_provider(
+        "hosted-mcp-oauth-restore",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&initial_secret_store),
+            access_token: "oauth-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(initial_secret_store.set(services.secret_store()).is_ok());
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-restore");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("registration admits the definition before setup");
+    let pending = install_fixture(&services, scope.clone()).await;
+    let pending_provider = credential_provider_from_response(&pending);
+    assert!(pending.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+    )));
+
+    let restored_secret_store = Arc::new(OnceLock::new());
+    let restored = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        "hosted-mcp-oauth-restore",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&restored_secret_store),
+            access_token: "oauth-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(restored_secret_store.set(restored.secret_store()).is_ok());
+
+    let resumed = install_fixture(&restored, scope).await;
+    assert_eq!(
+        credential_provider_from_response(&resumed),
+        pending_provider,
+        "a fresh host rebuild resumes the same generic OAuth setup requirement",
+    );
+    assert!(resumed.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+    )));
+    assert!(
+        restored
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("restored active capability projection")
+            .is_empty(),
+        "a pending OAuth install stays non-callable until the user completes setup",
+    );
+}
+
+#[tokio::test]
+async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generic_auth_setup() {
+    let mut notion_search = HostedMcpTool::read_only("search", json!("ok"));
+    notion_search.description = notion_style_long_description();
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        vec![notion_search],
     )
     .await;
     let fixture_secret_store = Arc::new(OnceLock::new());
@@ -651,9 +932,10 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         }),
     )
     .await;
-    fixture_secret_store
-        .set(services.secret_store())
-        .expect("fixture OAuth provider binds the product-auth secret store once");
+    assert!(
+        fixture_secret_store.set(services.secret_store()).is_ok(),
+        "fixture OAuth provider binds the product-auth secret store once"
+    );
     let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-user");
 
     let registration = services
@@ -661,23 +943,32 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         .execute(
             lifecycle_product_context(scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
-                request: oauth_request(),
+                request: automatic_request(),
             },
         )
         .await
-        .expect("OAuth MCP registration should discover its standards metadata before auth");
+        .expect("OAuth MCP registration persists the tenant definition");
 
     assert_eq!(
         registration.phase,
         ironclaw_host_api::InstallationState::Installed
     );
-    let provider = credential_provider_from_response(&registration);
     assert!(
-        registration.blockers.iter().any(|blocker| matches!(
+        registration.blockers.is_empty(),
+        "registration does not probe auth"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "registration must not contact MCP"
+    );
+    let install = install_fixture(&services, scope.clone()).await;
+    let provider = credential_provider_from_response(&install);
+    assert!(
+        install.blockers.iter().any(|blocker| matches!(
             blocker,
             ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
         )),
-        "OAuth discovery must return the ordinary credential setup blocker: {registration:#?}"
+        "ordinary install discovers OAuth and returns the credential setup blocker: {install:#?}"
     );
     assert!(
         services
@@ -713,60 +1004,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         "the metadata-derived credential requirement remains a generic provider identity"
     );
 
-    let auth_scope = AuthProductScope::credential_owner(&scope, AuthSurface::Api);
-    let state_hash =
-        OpaqueStateHash::new(fixture_digest("hosted-oauth-state")).expect("state digest");
-    let pkce_hash =
-        PkceVerifierHash::new(fixture_digest("hosted-oauth-pkce")).expect("PKCE digest");
-    let flow = services
-        .product_auth
-        .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
-            flow_id: None,
-            scope: auth_scope.clone(),
-            provider: provider.clone(),
-            requester_extension: Some(ExtensionId::new("mcp-fixture").expect("extension id")),
-            authorization_url: OAuthAuthorizationUrl::new("https://auth.example.test/authorize")
-                .expect("fixture authorization URL"),
-            opaque_state_hash: state_hash.clone(),
-            pkce_verifier_hash: pkce_hash.clone(),
-            pkce_verifier: SecretString::from("hosted-oauth-pkce".to_string()),
-            update_binding: None,
-            continuation: AuthContinuationRef::LifecycleActivation {
-                package_ref: ironclaw_auth::LifecyclePackageRef::new("mcp-fixture")
-                    .expect("auth package ref"),
-            },
-            expires_at: Utc::now() + ChronoDuration::minutes(5),
-        })
-        .await
-        .expect("existing product-auth OAuth flow starts");
-    let completed = services
-        .product_auth
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope: auth_scope,
-            flow_id: flow.id,
-            opaque_state_hash: state_hash,
-            outcome: RebornOAuthCallbackOutcome::Authorized {
-                provider_request: OAuthProviderCallbackRequest {
-                    provider,
-                    account_label: CredentialAccountLabel::new("Fixture MCP OAuth")
-                        .expect("credential label"),
-                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                        "hosted-oauth-code".to_string(),
-                    ))
-                    .expect("authorization code"),
-                    authorization_code_hash: AuthorizationCodeHash::new(fixture_digest(
-                        "hosted-oauth-code",
-                    ))
-                    .expect("authorization code digest"),
-                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                        "hosted-oauth-pkce".to_string(),
-                    ))
-                    .expect("PKCE verifier"),
-                    pkce_verifier_hash: pkce_hash,
-                    scopes: Vec::<ProviderScope>::new(),
-                },
-            },
-        })
+    let completed = complete_fixture_oauth_callback(&services, &scope, provider.clone())
         .await
         .expect("OAuth callback uses the production continuation dispatcher");
     assert_eq!(
@@ -776,6 +1014,75 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
                 .expect("auth package ref"),
         }
     );
+    let requester = ExtensionId::new("mcp-fixture").expect("extension id");
+    let provider_vendor = ironclaw_host_api::VendorId::new(provider.as_str())
+        .expect("metadata-derived provider remains a vendor id");
+    let account_request = ironclaw_auth::runtime_credential_account_selection_request(
+        &scope,
+        &provider_vendor,
+        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+        &[],
+        &requester,
+    )
+    .expect("runtime credential request");
+    let account = services
+        .product_auth
+        .runtime_credential_account_selection_service()
+        .select_unique_configured_runtime_account(account_request)
+        .await
+        .expect("completed OAuth account is selectable by the MCP extension");
+    let access_secret = account
+        .access_secret
+        .as_ref()
+        .expect("completed OAuth account retains an access secret");
+    assert!(
+        services
+            .secret_store()
+            .metadata(&account.scope.resource, access_secret)
+            .await
+            .expect("OAuth access-secret metadata read")
+            .is_some(),
+        "completed OAuth access-secret material remains in the shared secret store"
+    );
+    // Callback success is not sufficient: the ordinary lifecycle continuation
+    // must replace the provisional hosted-MCP manifest. This is the durable
+    // boundary behind the WebUI's "Finish setup" versus ready presentation.
+    let installation_store = services.extension_management.installation_store_for_test();
+    let installation = installation_store
+        .list_installations()
+        .await
+        .expect("installation-store readback")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "mcp-fixture")
+        .expect("OAuth installation remains durable after callback");
+    let manifest = installation_store
+        .get_manifest(installation.extension_id())
+        .await
+        .expect("installed manifest readback")
+        .expect("OAuth installation keeps its manifest");
+    assert_eq!(
+        manifest.initial_preparation(),
+        ironclaw_extensions::PreparationRequirement::Ready,
+        "a callback that publishes tools must durably finalize preparation: {manifest:#?}"
+    );
+    let listed = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("installation list after OAuth callback");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = listed.payload else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions.iter().any(|extension| {
+            extension.summary.package_ref == fixture_package_ref()
+                && extension.phase == ironclaw_host_api::InstallationState::Active
+        }),
+        "a callback that publishes tools must project as active: {extensions:#?}"
+    );
     let capability = services
         .extension_management
         .active_model_visible_capabilities()
@@ -784,20 +1091,254 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         .into_iter()
         .find(|capability| capability.id.as_str().ends_with(".search"))
         .expect("OAuth MCP search capability");
-    let outcome = invoke_with_local_dev_approval(
+    assert!(
+        capability.effects.contains(&EffectKind::UseSecret),
+        "credentialed MCP capability must declare the use-secret effect: {capability:#?}"
+    );
+    assert_eq!(
+        capability.runtime_credentials.len(),
+        1,
+        "credentialed MCP capability must retain its product-auth obligation: {capability:#?}"
+    );
+    let outcome = invoke_with_standalone_approval(
         &services,
         capability.id.as_str(),
         runtime_context(scope, capability.id.as_str()),
         json!({}),
     )
     .await;
-    assert!(matches!(
-        outcome,
-        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
-    ));
+    assert!(
+        matches!(
+            outcome,
+            ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+        ),
+        "OAuth MCP invocation must complete after callback activation: {outcome:#?}; requests: {:#?}",
+        server.requests()
+    );
     assert!(server.requests().iter().any(|request| {
         request.rpc_method.as_deref() == Some("tools/call") && request.authorization_matches
     }));
+}
+
+#[tokio::test]
+async fn oauth_callback_with_a_rejected_token_stays_setup_needed_and_publishes_no_tools() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "accepted-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let fixture_secret_store = Arc::new(OnceLock::new());
+    let services = build_lifecycle_test_services_with_auth_provider(
+        "hosted-mcp-oauth-rejected-token",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&fixture_secret_store),
+            access_token: "rejected-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(fixture_secret_store.set(services.secret_store()).is_ok());
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-rejected-token");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("OAuth registration persists the tenant definition");
+    let pending = install_fixture(&services, scope.clone()).await;
+    let provider = credential_provider_from_response(&pending);
+
+    let callback = complete_fixture_oauth_callback(&services, &scope, provider)
+        .await
+        .expect("the OAuth provider callback itself completed");
+    assert_eq!(callback.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert!(
+        services
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capability projection")
+            .is_empty(),
+        "a token the MCP rejects must not publish callable tools",
+    );
+    assert!(server.requests().iter().any(|request| {
+        request.rpc_method.as_deref() == Some("initialize")
+            && request.authorization_present
+            && !request.authorization_matches
+    }));
+
+    let installation_store = services.extension_management.installation_store_for_test();
+    let installation = installation_store
+        .list_installations()
+        .await
+        .expect("installation-store readback")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "mcp-fixture")
+        .expect("fixture installation remains durable after rejected token");
+    let manifest = installation_store
+        .get_manifest(installation.extension_id())
+        .await
+        .expect("installed manifest readback")
+        .expect("fixture manifest remains durable after rejected token");
+    assert_eq!(
+        manifest.initial_preparation(),
+        ironclaw_extensions::PreparationRequirement::Required,
+        "the user can retry setup after an MCP-side credential rejection",
+    );
+    let listed = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("installation list");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = listed.payload else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(extensions.iter().any(|extension| {
+        extension.summary.package_ref == fixture_package_ref()
+            && extension.phase == ironclaw_host_api::InstallationState::Installed
+    }));
+}
+
+#[tokio::test]
+async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed() {
+    // A provider can accept OAuth yet temporarily return no usable catalog.
+    // OAuth remains complete and its credential remains available, while the
+    // extension stays installed for a later catalog retry.
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    let fixture_secret_store = Arc::new(OnceLock::new());
+    let services = build_lifecycle_test_services_with_auth_provider(
+        "hosted-mcp-oauth-empty-catalog",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&fixture_secret_store),
+            access_token: "oauth-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(fixture_secret_store.set(services.secret_store()).is_ok());
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-empty-catalog");
+    let registration = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("OAuth registration persists the tenant definition");
+    assert!(
+        registration.blockers.is_empty(),
+        "registration does not probe auth"
+    );
+    let install = install_fixture(&services, scope.clone()).await;
+    let provider = credential_provider_from_response(&install);
+
+    let callback = complete_fixture_oauth_callback(&services, &scope, provider.clone())
+        .await
+        .expect("OAuth completion is not relabeled as a catalog authorization failure");
+    assert_eq!(callback.status, ironclaw_auth::AuthFlowStatus::Completed);
+
+    let requester = ExtensionId::new("mcp-fixture").expect("extension id");
+    let provider_vendor = ironclaw_host_api::VendorId::new(provider.as_str())
+        .expect("metadata-derived provider remains a vendor id");
+    let account_request = ironclaw_auth::runtime_credential_account_selection_request(
+        &scope,
+        &provider_vendor,
+        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+        &[],
+        &requester,
+    )
+    .expect("runtime credential request");
+    let account = services
+        .product_auth
+        .runtime_credential_account_selection_service()
+        .select_unique_configured_runtime_account(account_request)
+        .await
+        .expect("the completed OAuth account stays configured for retry");
+    let access_secret = account
+        .access_secret
+        .as_ref()
+        .expect("configured account retains the access-secret handle");
+    assert!(
+        services
+            .secret_store()
+            .metadata(&account.scope.resource, access_secret)
+            .await
+            .expect("OAuth access-secret metadata read")
+            .is_some(),
+        "a discovery failure must not purge a successfully exchanged credential"
+    );
+    assert!(server.requests().iter().any(|request| {
+        request.rpc_method.as_deref() == Some("tools/list") && request.authorization_matches
+    }));
+    assert!(
+        services
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capability projection")
+            .is_empty(),
+        "an empty post-auth catalog leaves no callable tools"
+    );
+    let installation_store = services.extension_management.installation_store_for_test();
+    let raw_installations = installation_store
+        .list_installations()
+        .await
+        .expect("raw installation-store readback");
+    let raw_installation = raw_installations
+        .iter()
+        .find(|installation| installation.extension_id().as_str() == "mcp-fixture")
+        .expect("fixture installation remains durable after OAuth completion");
+    let installed_manifest = installation_store
+        .get_manifest(raw_installation.extension_id())
+        .await
+        .expect("installed manifest readback")
+        .expect("fixture manifest remains durable after OAuth completion");
+    assert_eq!(
+        installed_manifest.initial_preparation(),
+        ironclaw_extensions::PreparationRequirement::Required,
+        "empty catalog must remain durably marked for preparation retry: {installed_manifest:#?}"
+    );
+    let listed = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("installation list");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = listed.payload else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions.iter().any(|extension| {
+            extension.summary.package_ref == fixture_package_ref()
+                && extension.phase == ironclaw_host_api::InstallationState::Installed
+        }),
+        "empty catalog remains installed for a later lifecycle retry: {extensions:#?}"
+    );
 }
 
 /// Manual smoke for the official unauthenticated Microsoft Release
@@ -805,6 +1346,59 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
 /// and public-network availability are intentionally outside the hermetic PR
 /// contract. It does, however, cross the same policy-mediated egress and
 /// lifecycle paths as the deterministic fixture journeys.
+#[tokio::test]
+#[ignore = "live public MCP smoke; set IRONCLAW_LIVE_MCP_TESTS=1 and run this exact test"]
+async fn live_notion_oauth_registration_reaches_generic_setup() {
+    assert_eq!(
+        std::env::var("IRONCLAW_LIVE_MCP_TESTS").ok().as_deref(),
+        Some("1"),
+        "refusing public-network smoke: set IRONCLAW_LIVE_MCP_TESTS=1"
+    );
+    let services =
+        build_lifecycle_test_services("hosted-mcp-live-notion", Some(live_network_egress()), false)
+            .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-live-notion");
+    let registration = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: RegisterHostedMcpRequest {
+                    desired_id: LifecyclePackageId::new("notion").expect("static package id"),
+                    desired_name: "Notion".to_string(),
+                    endpoint: HostedMcpEndpoint::new("https://mcp.notion.com/mcp")
+                        .expect("official public endpoint"),
+                    auth_selection: Some(HostedMcpAuthSelection::Auto),
+                },
+            },
+        )
+        .await
+        .expect("Notion OAuth registration persists its definition");
+    assert_eq!(
+        registration.phase,
+        ironclaw_host_api::InstallationState::Installed
+    );
+    assert!(registration.blockers.is_empty());
+    let install = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+                    .expect("static package ref"),
+            },
+        )
+        .await
+        .expect("Notion install should reach generic credential setup");
+    assert!(
+        install.blockers.iter().any(|blocker| matches!(
+            blocker,
+            ironclaw_host_api::LifecycleReadinessBlocker::Credential { .. }
+        )),
+        "Notion install must hand off to generic setup: {install:#?}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "live public MCP smoke; set IRONCLAW_LIVE_MCP_TESTS=1 and run this exact test"]
 async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
@@ -841,8 +1435,23 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
         .expect("public no-auth server registers through the standard lifecycle");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::InstallationState::Active
+        ironclaw_host_api::InstallationState::Installed
     );
+    let install = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: LifecyclePackageRef::new(
+                    LifecyclePackageKind::Extension,
+                    "microsoft-mrc",
+                )
+                .expect("static package ref"),
+            },
+        )
+        .await
+        .expect("public no-auth server installs through the standard lifecycle");
+    assert_eq!(install.phase, ironclaw_host_api::InstallationState::Active);
 
     let capabilities = services
         .extension_management
@@ -872,7 +1481,7 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
                 .ends_with(".get_recent_azure_updates")
         })
         .expect("documented read-only Azure list tool");
-    let outcome = invoke_with_local_dev_approval(
+    let outcome = invoke_with_standalone_approval(
         &services,
         capability.id.as_str(),
         runtime_context(scope, capability.id.as_str()),

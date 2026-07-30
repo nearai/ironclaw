@@ -617,16 +617,49 @@ pub(super) async fn build_backend_production(
     };
     #[cfg(not(any(test, feature = "test-support")))]
     let services = services.try_with_host_http_egress(default_host_http_egress()?)?;
-    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
+    // Provider-client assembly needs mediated HTTP and secret staging before
+    // product-auth itself exists. Account-backed credential resolution is
+    // attached below, after product-auth services have been composed.
+    let provider_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
+    let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+    let extension_host_ports =
+        ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host port catalog could not be loaded: {error}"),
+            }
+        })?;
+    let extension_host_api_contracts =
+        product_extension_host_api_contract_registry().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host API contracts could not be loaded: {error}"),
+            }
+        })?;
+    let extension_installation_state_path = ExtensionInstallationStore::default_state_path()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state path is invalid: {error}"),
+        })?;
+    let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
+        ExtensionInstallationStore::load_at(
+            extension_filesystem.clone(),
+            extension_installation_state_path,
+            extension_host_ports,
+            extension_host_api_contracts,
+        )
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be loaded: {error}"),
+        })?,
+    );
     let admin_configuration_credential_slot = AdminConfigurationCredentialSlot::default();
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
         Arc::clone(&secret_store),
-        product_auth_runtime_ports.clone(),
+        provider_runtime_ports,
         admin_configuration_credential_slot.clone(),
         &first_party_bundles,
+        Arc::clone(&extension_installation_store),
     )?;
     let services = if let Some(process_port) = local_process_port {
         services.with_runtime_process_port(Arc::new(process_port))
@@ -699,6 +732,10 @@ pub(super) async fn build_backend_production(
         ),
     ));
     services = attach_wasm_runtime(services)?;
+    // Re-project the ports after attaching product-auth. Hosted MCP
+    // preparation and first-party registrars must receive the account-aware
+    // obligation handler, not the earlier provider-bootstrap projection.
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let first_party_registrar_context = FirstPartyRegistrarContext {
         credential_account_service: product_auth_dependencies.credential_account_service(),
         credential_account_record_source: product_auth_dependencies
@@ -713,35 +750,6 @@ pub(super) async fn build_backend_production(
                 reason: format!("first-party capability handlers are invalid: {error}"),
             })?;
     }
-    let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
-    let extension_host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("extension host port catalog could not be loaded: {error}"),
-            }
-        })?;
-    let extension_host_api_contracts =
-        product_extension_host_api_contract_registry().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("extension host API contracts could not be loaded: {error}"),
-            }
-        })?;
-    let extension_installation_state_path = ExtensionInstallationStore::default_state_path()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state path is invalid: {error}"),
-        })?;
-    let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
-        ExtensionInstallationStore::load_at(
-            extension_filesystem.clone(),
-            extension_installation_state_path,
-            extension_host_ports,
-            extension_host_api_contracts,
-        )
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state could not be loaded: {error}"),
-        })?,
-    );
     let persisted_manifest_sources = extension_installation_store
         .list_manifests()
         .await
@@ -889,7 +897,7 @@ pub(super) async fn build_backend_production(
         Arc::new(ironclaw_trust::InvalidationBus::new()),
     );
     restore_extension_lifecycle_state(
-        &available_extensions,
+        &mut available_extensions,
         &extension_filesystem,
         &extension_installation_store,
         &extension_lifecycle_service,
@@ -924,7 +932,7 @@ pub(super) async fn build_backend_production(
             ))) as Arc<dyn ExtensionCredentialCleanup>),
             channel_egress_scope.user_id.clone(),
             ironclaw_extension_host::HostedMcpPreparationDependencies {
-                runtime_ports: product_auth_runtime_ports.clone(),
+                runtime_ports: Some(product_auth_runtime_ports.clone()),
                 catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
                     ironclaw_safety::Sanitizer::new(),
                 )),
@@ -967,7 +975,6 @@ pub(super) async fn build_backend_production(
             ))
             .with_extension_management(Arc::clone(&extension_management))
             .with_channel_config(Arc::clone(&admin_configuration_resolver))
-            .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
             .with_runtime_credential_accounts(
                 product_auth_dependencies.runtime_credential_account_selection_service(),
             ),
@@ -1007,13 +1014,13 @@ pub(super) async fn build_backend_production(
             channel_egress_scope.user_id.clone(),
         ),
     );
+    #[cfg(any(test, feature = "test-support"))]
     let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),
         product_auth_services.runtime_credential_account_selection_service(),
-        runtime_http_egress.clone(),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle handlers are invalid: {error}"),
@@ -1132,9 +1139,6 @@ pub(super) async fn build_backend_production(
             .await?;
         let pairing_installation_store = Arc::clone(&backend_extension_host.installation_store);
         extension_management.attach_generic_host(Arc::clone(&backend_extension_host.generic_host));
-        if let Some(ports) = services.product_auth_provider_runtime_ports() {
-            extension_management.attach_discovery_runtime_ports(ports.clone());
-        }
         services.set_extension_tool_resolver(backend_extension_host.resolver);
         let channel_pairing_registry_built =
             build_backend_channel_pairing(BackendChannelPairingAssemblyInput {
@@ -1216,6 +1220,7 @@ pub(super) async fn build_backend_production(
         channel_identity_store,
         channel_dm_target_store,
         channel_disconnect_slot,
+        #[cfg(any(test, feature = "test-support"))]
         runtime_http_egress,
         host_runtime_http_egress,
         skill_mounts,

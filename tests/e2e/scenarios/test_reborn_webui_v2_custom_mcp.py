@@ -2,9 +2,8 @@
 
 The server-side lifecycle journey is covered by the hosted-MCP integration
 suite. This file deliberately mocks only the browser-facing projection and
-mutation routes so it can prove the registration wizard hands off to the
-already-shipping install/setup UI without depending on a live credential
-provider.
+mutation routes so it can prove registration creates an available registry
+entry, while the existing install/setup UI owns installation and credentials.
 """
 
 import json
@@ -33,7 +32,19 @@ TENANT_CATALOG_MCP = {
 }
 
 
-def _registered_extension(auth_kind: str, state: str) -> dict:
+def _registered_catalog_entry() -> dict:
+    return {
+        "package_ref": {"kind": "extension", "id": "custom-weather-mcp"},
+        "display_name": "Custom weather MCP",
+        "runtime": "mcp",
+        "description": "A registered custom MCP server available to install.",
+        "keywords": ["custom", "mcp"],
+        "installed": False,
+        "surfaces": [{"kind": "tool"}],
+    }
+
+
+def _installed_extension(auth_kind: str, state: str) -> dict:
     return {
         "package_ref": {"kind": "extension", "id": "custom-weather-mcp"},
         "display_name": "Custom weather MCP",
@@ -79,6 +90,7 @@ async def _open_custom_mcp_page(
     page = await context.new_page()
     installed: list[dict] = []
     registrations: list[dict] = []
+    installations: list[dict] = []
     setup_submissions: list[dict] = []
 
     async def fulfill(route, payload: dict, status: int = 200) -> None:
@@ -97,21 +109,23 @@ async def _open_custom_mcp_page(
             await fulfill(route, {"extensions": installed})
             return
         if path == "/api/webchat/v2/extensions/registry" and request.method == "GET":
-            registered_catalog = [
-                {
-                    **extension,
-                    "installed": True,
-                    "keywords": ["custom", "mcp"],
-                }
-                for extension in installed
-            ]
+            installed_ids = {
+                extension["package_ref"]["id"] for extension in installed
+            }
+            registered_catalog = []
+            if registrations:
+                extension = _registered_catalog_entry()
+                registered_catalog.append(
+                    {
+                        **extension,
+                        "installed": extension["package_ref"]["id"] in installed_ids,
+                    }
+                )
             await fulfill(route, {"entries": [TENANT_CATALOG_MCP, *registered_catalog]})
             return
         if path == "/api/webchat/v2/extensions/register-hosted-mcp" and request.method == "POST":
             body = json.loads(request.post_data or "{}")
             registrations.append(body)
-            state = "active" if auth_kind == "no_auth" else "setup_needed"
-            installed[:] = [_registered_extension(auth_kind, state)]
             await fulfill(
                 route,
                 {
@@ -120,6 +134,13 @@ async def _open_custom_mcp_page(
                     "package_ref": {"kind": "extension", "id": "custom-weather-mcp"},
                 },
             )
+            return
+        if path == "/api/webchat/v2/extensions/install" and request.method == "POST":
+            body = json.loads(request.post_data or "{}")
+            installations.append(body)
+            state = "active" if auth_kind == "no_auth" else "setup_needed"
+            installed[:] = [_installed_extension(auth_kind, state)]
+            await fulfill(route, {"success": True, "message": "Custom weather MCP installed"})
             return
         if path.endswith("/setup") and request.method == "GET":
             package_id = unquote(path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/setup"))
@@ -142,24 +163,28 @@ async def _open_custom_mcp_page(
     await page.route("**/api/webchat/v2/extensions**", extensions_route)
     await page.goto(f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Registry").first).to_be_visible(timeout=15000)
-    return context, page, registrations, setup_submissions
+    return context, page, registrations, installations, setup_submissions
 
 
-async def _register(page, auth_kind: str) -> None:
-    await page.get_by_role("button", name="Add custom MCP").click()
-    await page.get_by_label("Extension name").fill("Custom weather MCP")
-    await page.get_by_label("Extension ID").fill("custom-weather-mcp")
-    await page.get_by_label("HTTPS endpoint").fill("https://weather.example.test/mcp")
+async def _register(page) -> None:
+    await page.get_by_role("button", name="Add MCP server").click()
+    await page.get_by_label("Server name").fill("Custom weather MCP")
+    await page.get_by_label("Server ID").fill("custom-weather-mcp")
+    await page.get_by_label("Server address").fill("https://weather.example.test/mcp")
     await page.get_by_role("button", name="Continue").click()
-    if auth_kind != "no_auth":
-        await page.get_by_role("radio", name={"bearer": "Bearer token", "oauth": "OAuth"}[auth_kind]).check()
-    await page.get_by_role("button", name="Register server").click()
+    await page.get_by_role("button", name="Add server").click()
 
 
-async def test_custom_mcp_no_auth_registration_is_active_and_tenant_catalog_stays_uninstalled(
+async def _install_registered_mcp(page) -> None:
+    card = page.get_by_test_id("extension-card").filter(has_text="Custom weather MCP")
+    await expect(card.get_by_role("button", name="Install")).to_be_visible()
+    await card.get_by_role("button", name="Install").click()
+
+
+async def test_custom_mcp_registration_creates_uninstalled_registry_entry(
     reborn_v2_server, reborn_v2_browser
 ):
-    context, page, registrations, _ = await _open_custom_mcp_page(
+    context, page, registrations, installations, _ = await _open_custom_mcp_page(
         reborn_v2_server, reborn_v2_browser, auth_kind="no_auth"
     )
     try:
@@ -168,37 +193,45 @@ async def test_custom_mcp_no_auth_registration_is_active_and_tenant_catalog_stay
         await expect(tenant_card).to_be_visible()
         await expect(page.get_by_role("button", name="Install")).to_be_visible()
 
-        await _register(page, "no_auth")
+        await _register(page)
         await expect(page.get_by_text("Registration complete", exact=True)).to_be_visible()
         assert registrations == [
             {
                 "desired_id": "custom-weather-mcp",
                 "desired_name": "Custom weather MCP",
                 "endpoint": "https://weather.example.test/mcp",
-                "auth_selection": {"kind": "no_auth"},
+                "auth_selection": {"kind": "auto"},
             }
         ]
+        assert installations == []
+        await expect(page.get_by_role("button", name="Continue setup")).to_have_count(0)
+        await page.get_by_role("button", name="Done").click()
+        await _install_registered_mcp(page)
+        assert len(installations) == 1
+        assert installations[0]["package_ref"] == {"kind": "extension", "id": "custom-weather-mcp"}
     finally:
         await context.close()
 
 
 @pytest.mark.parametrize("setup_result", ["unfinished", "wrong", "success"])
-async def test_custom_mcp_bearer_hands_off_to_existing_setup_states(
+async def test_custom_mcp_bearer_install_hands_off_to_existing_setup_states(
     reborn_v2_server, reborn_v2_browser, setup_result
 ):
-    context, page, registrations, submissions = await _open_custom_mcp_page(
+    context, page, registrations, installations, submissions = await _open_custom_mcp_page(
         reborn_v2_server,
         reborn_v2_browser,
         auth_kind="bearer",
         setup_result=setup_result,
     )
     try:
-        await _register(page, "bearer")
-        await expect(page.get_by_text("Registration complete — setup required")).to_be_visible()
-        await page.get_by_role("button", name="Continue setup").click()
+        await _register(page)
+        await expect(page.get_by_text("Registration complete", exact=True)).to_be_visible()
+        await page.get_by_role("button", name="Done").click()
+        await _install_registered_mcp(page)
         await expect(page.get_by_role("dialog")).to_contain_text("Configure Custom weather MCP")
         await expect(page.get_by_label("Bearer token")).to_be_visible()
-        assert registrations[0]["auth_selection"] == {"kind": "bearer"}
+        assert registrations[0]["auth_selection"] == {"kind": "auto"}
+        assert len(installations) == 1
 
         if setup_result == "unfinished":
             assert submissions == []
@@ -219,13 +252,16 @@ async def test_custom_mcp_bearer_hands_off_to_existing_setup_states(
 async def test_custom_mcp_oauth_uses_existing_authorize_setup_control(
     reborn_v2_server, reborn_v2_browser
 ):
-    context, page, registrations, _ = await _open_custom_mcp_page(
+    context, page, registrations, installations, _ = await _open_custom_mcp_page(
         reborn_v2_server, reborn_v2_browser, auth_kind="oauth"
     )
     try:
-        await _register(page, "oauth")
-        await page.get_by_role("button", name="Continue setup").click()
+        await _register(page)
+        await expect(page.get_by_text("Registration complete", exact=True)).to_be_visible()
+        await page.get_by_role("button", name="Done").click()
+        await _install_registered_mcp(page)
         await expect(page.get_by_role("button", name="Authorize")).to_be_visible()
-        assert registrations[0]["auth_selection"] == {"kind": "oauth"}
+        assert registrations[0]["auth_selection"] == {"kind": "auto"}
+        assert len(installations) == 1
     finally:
         await context.close()

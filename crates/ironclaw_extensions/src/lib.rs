@@ -262,7 +262,7 @@ pub use installations::{
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
     ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationIncarnationId,
-    InstallationOwner, InstallationPreparationState, ManifestHash, MembershipDeactivation,
+    InstallationOwner, ManifestHash, MembershipDeactivation,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

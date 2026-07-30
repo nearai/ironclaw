@@ -157,6 +157,7 @@ impl AvailableExtensionPackage {
                 ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
                 ManifestSource::InstalledLocal => LifecycleExtensionSource::Installed,
                 ManifestSource::RegistryInstalled => LifecycleExtensionSource::Registry,
+                ManifestSource::UserRegistered => LifecycleExtensionSource::Installed,
             },
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
@@ -772,7 +773,7 @@ fn bundled_extension_package(
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
         }
     })?;
-    let mut record = ExtensionManifestRecord::from_toml_with_root_binding(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
@@ -783,13 +784,6 @@ fn bundled_extension_package(
     .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
-    // Hosted MCP definitions require one discovery pass before activation can
-    // publish their real tool catalog. Encode that requirement in the package
-    // definition so the generic install/activate path stays source-agnostic.
-    if record.resolved().mcp.is_some() {
-        record =
-            record.with_initial_preparation(ironclaw_extensions::PreparationRequirement::Required);
-    }
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
     let channel_directions = channel_directions_from_manifest_record(&record, label)?;
     let channel_presentation = channel_presentation_from_manifest_record(&record);

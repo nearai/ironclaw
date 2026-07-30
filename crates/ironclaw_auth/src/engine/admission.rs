@@ -18,14 +18,12 @@ use crate::{AuthProductError, ResolvedVendorAuthRecipe};
 /// Bounded, decoded RFC 9728 document supplied by mediated egress. Keeping
 /// this typed prevents arbitrary provider bodies from entering admission.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProtectedResourceAdmissionMetadata {
     pub resource: HttpsEndpoint,
     pub authorization_servers: Vec<HttpsEndpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AuthorizationServerAdmissionMetadata {
     pub issuer: HttpsEndpoint,
     pub authorization_endpoint: HttpsEndpoint,
@@ -563,7 +561,99 @@ mod tests {
             }))
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<AuthorizationServerAdmissionMetadata>(serde_json::json!({
+                "issuer": "https://auth.example.test",
+                "authorization_endpoint": "https://auth.example.test/authorize",
+                "token_endpoint": "https://auth.example.test/token",
+                "registration_endpoint": "http://auth.example.test/register"
+            }))
+            .is_err()
+        );
     }
+
+    #[tokio::test]
+    async fn standard_metadata_extensions_are_ignored() {
+        let protected =
+            serde_json::from_value::<ProtectedResourceAdmissionMetadata>(serde_json::json!({
+                "resource": "https://mcp.notion.com/mcp",
+                "authorization_servers": ["https://mcp.notion.com"],
+                "scopes_supported": ["default"],
+                "bearer_methods_supported": ["header"],
+                "resource_name": "Notion MCP (Beta)"
+            }))
+            .expect("standard protected-resource extensions should be ignored");
+        assert_eq!(protected.resource.as_str(), "https://mcp.notion.com/mcp");
+        assert_eq!(
+            protected.authorization_servers[0].as_str(),
+            "https://mcp.notion.com"
+        );
+
+        let authorization = serde_json::from_value::<AuthorizationServerAdmissionMetadata>(
+            serde_json::json!({
+                "issuer": "https://mcp.notion.com",
+                "authorization_endpoint": "https://mcp.notion.com/authorize",
+                "token_endpoint": "https://mcp.notion.com/token",
+                "registration_endpoint": "https://mcp.notion.com/register",
+                "scopes_supported": ["default"],
+                "response_types_supported": ["code"],
+                "response_modes_supported": ["query"],
+                "grant_types_supported": ["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:jwt-bearer"],
+                "authorization_grant_profiles_supported": ["urn:ietf:params:oauth:grant-profile:id-jag"],
+                "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+                "revocation_endpoint": "https://mcp.notion.com/token",
+                "code_challenge_methods_supported": ["plain", "S256"],
+                "client_id_metadata_document_supported": true,
+                "introspection_endpoint": "https://mcp.notion.com/introspect",
+                "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"]
+            }),
+        )
+        .expect("standard authorization-server extensions should be ignored");
+        assert_eq!(
+            authorization
+                .registration_endpoint
+                .as_ref()
+                .map(HttpsEndpoint::as_str),
+            Some("https://mcp.notion.com/register")
+        );
+
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new(
+                    "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+                )
+                .expect("metadata location"),
+            ],
+            protected_resource_metadata: vec![],
+        };
+        let resource_fetch = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource(
+            "https://mcp.notion.com/mcp",
+            &challenge,
+        )
+        .expect("protected resource preflight");
+        let authorization_server_fetch =
+            OAuthRecipeAdmission::<Profiles>::preflight_authorization_server(
+                resource_fetch,
+                &protected,
+            )
+            .expect("authorization server preflight");
+        let admitted = admit(OAuthRecipeAdmissionRequest {
+            vendor: "mcp-notion".to_string(),
+            authorization_server_fetch,
+            authorization_server_metadata: authorization,
+            scopes: Vec::new(),
+            client_profile_id: None,
+            dcr_policy_allowed: true,
+        })
+        .await
+        .expect("Notion-compatible OAuth metadata should be admitted");
+        assert_eq!(
+            admitted.token_exchange_resource.as_deref(),
+            Some("https://mcp.notion.com/mcp")
+        );
+    }
+
     #[tokio::test]
     async fn malformed_metadata_shapes_reject() {
         assert!(

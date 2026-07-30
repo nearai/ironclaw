@@ -4,7 +4,6 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_host_api::{
     ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ResourceScope,
@@ -174,7 +173,6 @@ pub(crate) async fn bootstrap_nearai_mcp(
         extension_management
             .activate_with_credential_gate(
                 package_ref,
-                ExtensionActivationMode::Static,
                 resource_scope.clone(),
                 &credential_gate,
                 &bootstrap_caller,

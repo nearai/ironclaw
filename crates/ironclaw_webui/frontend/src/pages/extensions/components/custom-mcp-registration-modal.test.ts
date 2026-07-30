@@ -9,7 +9,7 @@ vi.mock("../../../lib/i18n", () => ({
   useT: () => (key: string) => key,
 }));
 
-const { CustomMcpRegistrationModal } = await import("./custom-mcp-registration-modal");
+const { CustomMcpRegistrationModal, customMcpIdFromName } = await import("./custom-mcp-registration-modal");
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -30,7 +30,6 @@ function renderModal(overrides: Partial<React.ComponentProps<typeof CustomMcpReg
     onClose: vi.fn(),
     onRegister: vi.fn(),
     isRegistering: false,
-    onSetup: vi.fn(),
     ...overrides,
   };
   act(() => root?.render(React.createElement(CustomMcpRegistrationModal, props)));
@@ -53,21 +52,24 @@ function clickButton(label: string) {
   act(() => button.click());
 }
 
-function advanceToAuthentication() {
-  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>("input"));
-  setInput(inputs[0], "Linear MCP");
-  setInput(inputs[1], "linear");
-  setInput(inputs[2], "https://mcp.linear.app/mcp");
+function advanceToReview() {
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Linear MCP");
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "https://mcp.linear.app/mcp");
   clickButton("common.continue");
 }
 
-test("renders connection then authentication and submits no credentials or schemas", () => {
+test("derives a stable lowercase ID from the human-facing extension name", () => {
+  assert.equal(customMcpIdFromName("Notion MCP / Team"), "notion-mcp-team");
+  assert.equal(customMcpIdFromName("  !!!  "), "extension");
+});
+
+test("renders connection then review and submits no credentials or schemas", () => {
   let payload: CustomMcpRegistrationPayload | null = null;
   renderModal({ onRegister: (request) => { payload = request; } });
 
   assert.match(document.body.textContent || "", /customMcpPhase\.connection/);
-  advanceToAuthentication();
-  assert.match(document.body.textContent || "", /customMcpPhase\.authentication/);
+  advanceToReview();
+  assert.match(document.body.textContent || "", /customMcpPhase\.review/);
   clickButton("extensions.customMcpRegister");
 
   assert.ok(payload);
@@ -79,73 +81,75 @@ test("renders connection then authentication and submits no credentials or schem
       authSelection: payload.authSelection,
     },
     {
-      desiredId: "linear",
+      desiredId: "linear-mcp",
       desiredName: "Linear MCP",
       endpoint: "https://mcp.linear.app/mcp",
-      authSelection: { kind: "no_auth" },
+      authSelection: { kind: "auto" },
     },
   );
   assert.equal(document.querySelector('input[type="password"]'), null);
   assert.equal(document.querySelector("textarea"), null);
 });
 
-test("OAuth registration submits without an unsupported client profile", () => {
+test("keeps the generated ID hidden until Advanced options and validates each connection field inline", () => {
+  renderModal();
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Bad\u0000name");
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "http://example.test/mcp");
+  clickButton("common.continue");
+
+  assert.equal(document.querySelectorAll('[role="alert"]').length, 2);
+  assert.match(document.body.textContent || "", /customMcpNameControls/);
+  assert.match(document.body.textContent || "", /customMcpEndpointHttps/);
+  assert.equal(document.querySelector('input[value="extension"]'), null);
+
+  const advanced = document.querySelector("details");
+  assert.ok(advanced);
+  act(() => { advanced.open = true; });
+  const advancedInput = Array.from(document.querySelectorAll<HTMLInputElement>("input")).find(
+    (input) => input.value === "bad-name",
+  );
+  assert.ok(advancedInput);
+  setInput(advancedInput, "Bad_ID");
+  assert.match(document.body.textContent || "", /customMcpIdInvalid/);
+  setInput(advancedInput, "bad..id");
+  assert.match(document.body.textContent || "", /customMcpIdInvalid/);
+});
+
+test("review submits automatic authentication without asking the user to classify the server", () => {
   let payload: CustomMcpRegistrationPayload | null = null;
   renderModal({ onRegister: (request) => { payload = request; } });
 
-  advanceToAuthentication();
-  const oauth = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]')).find(
-    (input) => input.parentElement?.textContent === "extensions.customMcpAuth.oauth",
-  );
-  assert.ok(oauth);
-  act(() => oauth.click());
+  advanceToReview();
+  assert.match(document.body.textContent || "", /customMcpReviewHint/);
+  assert.equal(document.querySelector('input[type="radio"]'), null);
   clickButton("extensions.customMcpRegister");
 
   assert.ok(payload);
-  assert.deepEqual(payload.authSelection, { kind: "oauth" });
-  assert.equal(document.body.textContent?.includes("customMcpProfile"), false);
+  assert.deepEqual(payload.authSelection, { kind: "auto" });
 });
 
-test("authoritative active result renders step three and Done closes", () => {
+test("registration completion renders step three and Done closes", () => {
   let payload: CustomMcpRegistrationPayload | null = null;
   const onClose = vi.fn();
   renderModal({
     onRegister: (request) => { payload = request; },
     onClose,
   });
-  advanceToAuthentication();
+  advanceToReview();
   clickButton("extensions.customMcpRegister");
   assert.ok(payload);
 
-  act(() => payload?.onRegistered(null));
+  act(() => payload?.onRegistered());
   assert.match(document.body.textContent || "", /customMcpPhase\.result/);
   assert.match(document.body.textContent || "", /customMcpReady/);
   clickButton("common.done");
   assert.equal(onClose.mock.calls.length, 1);
 });
 
-test("authoritative setup result renders step three and hands off to existing setup", () => {
-  let payload: CustomMcpRegistrationPayload | null = null;
-  const setupResults: unknown[] = [];
-  renderModal({
-    onRegister: (request) => { payload = request; },
-    onSetup: (extension) => setupResults.push(extension),
-  });
-  advanceToAuthentication();
-  clickButton("extensions.customMcpRegister");
-  assert.ok(payload);
-
-  const setupExtension = { packageRef: { kind: "extension", id: "mcp-linear" } };
-  act(() => payload?.onNeedsSetup(setupExtension));
-  assert.match(document.body.textContent || "", /customMcpSetupRequired/);
-  clickButton("extensions.customMcpContinueSetup");
-  assert.deepEqual(setupResults, [setupExtension]);
-});
-
 test("registration errors stay in the registration modal", () => {
   let payload: CustomMcpRegistrationPayload | null = null;
   renderModal({ onRegister: (request) => { payload = request; } });
-  advanceToAuthentication();
+  advanceToReview();
   clickButton("extensions.customMcpRegister");
   assert.ok(payload);
 
@@ -154,9 +158,5 @@ test("registration errors stay in the registration modal", () => {
   assert.ok(document.querySelector('[role="dialog"]'));
   clickButton("common.back");
   const inputs = Array.from(document.querySelectorAll<HTMLInputElement>("input"));
-  assert.deepEqual(inputs.map((input) => input.value), [
-    "Linear MCP",
-    "linear",
-    "https://mcp.linear.app/mcp",
-  ]);
+  assert.deepEqual(inputs.map((input) => input.value), ["Linear MCP", "linear-mcp", "https://mcp.linear.app/mcp"]);
 });

@@ -149,6 +149,37 @@ impl ExtensionPackage {
         self.root_binding.materialized_root()
     }
 
+    /// Return the immutable package source used for trust-policy evaluation.
+    ///
+    /// A materialized package is identified by its manifest path. A virtual
+    /// package has no filesystem identity, so it is eligible only when it is
+    /// the constrained direct HTTP MCP shape emitted by hosted-MCP discovery.
+    /// `FabricateOnLoad` is a legacy loading sentinel, never an identity a
+    /// trust policy may evaluate.
+    pub fn trust_policy_source(&self) -> Result<PackageSource, ExtensionError> {
+        match &self.root_binding {
+            PackageRootBinding::Materialized(root) => Ok(PackageSource::LocalManifest {
+                path: format!("{}/manifest.toml", root.as_str().trim_end_matches('/')),
+            }),
+            PackageRootBinding::Virtual => match &self.manifest.runtime {
+                ExtensionRuntime::Mcp {
+                    transport,
+                    command: None,
+                    args,
+                    url: Some(endpoint),
+                } if transport == "http" && args.is_empty() => Ok(PackageSource::DirectRemote {
+                    endpoint: endpoint.clone(),
+                }),
+                _ => Err(ExtensionError::InvalidManifest {
+                    reason: "virtual package is not a direct HTTP MCP endpoint".to_string(),
+                }),
+            },
+            PackageRootBinding::FabricateOnLoad => Err(ExtensionError::InvalidManifest {
+                reason: "package root must be materialized before trust evaluation".to_string(),
+            }),
+        }
+    }
+
     pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {
         if self.id != self.manifest.id {
             return Err(ExtensionError::InvalidManifest {
@@ -381,6 +412,34 @@ visibility = "model"
 input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
 "#;
 
+    const DIRECT_REMOTE_VIRTUAL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "remote-tools"
+name = "Remote Tools"
+version = "0.1.0"
+description = "Remote-only tool provider"
+trust = "untrusted"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/mcp"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "remote-tools.invoke"
+description = "Invoke a remote tool"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
+"#;
+
     fn contracts() -> HostApiContractRegistry {
         let mut contracts = HostApiContractRegistry::new();
         contracts
@@ -446,6 +505,74 @@ input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
             .validate_consistency()
             .expect_err("fabrication cannot survive packaging");
         assert!(matches!(error, ExtensionError::InvalidManifest { .. }));
+    }
+
+    #[test]
+    fn trust_policy_source_uses_the_package_root_binding() {
+        let materialized_manifest = ExtensionManifest::parse(
+            VIRTUAL_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let materialized = ExtensionPackage::from_manifest(
+            materialized_manifest,
+            VirtualPath::new("/system/extensions/remote-tools").expect("root"),
+        )
+        .expect("package");
+        assert_eq!(
+            materialized.trust_policy_source().expect("source"),
+            PackageSource::LocalManifest {
+                path: "/system/extensions/remote-tools/manifest.toml".to_string(),
+            }
+        );
+
+        let virtual_manifest = ExtensionManifest::parse(
+            DIRECT_REMOTE_VIRTUAL_MANIFEST,
+            ManifestSource::UserRegistered,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let capabilities =
+            capability_descriptors_from_manifest(&virtual_manifest).expect("descriptors");
+        let virtual_package =
+            ExtensionPackage::from_virtual_manifest(virtual_manifest, None, capabilities)
+                .expect("virtual package");
+        assert_eq!(
+            virtual_package.trust_policy_source().expect("source"),
+            PackageSource::DirectRemote {
+                endpoint: "https://mcp.example.test/mcp".to_string(),
+            }
+        );
+
+        let non_direct_manifest = ExtensionManifest::parse(
+            VIRTUAL_MANIFEST,
+            ManifestSource::UserRegistered,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let non_direct_capabilities =
+            capability_descriptors_from_manifest(&non_direct_manifest).expect("descriptors");
+        let non_direct = ExtensionPackage::from_virtual_manifest(
+            non_direct_manifest,
+            None,
+            non_direct_capabilities,
+        )
+        .expect("virtual package");
+        assert!(matches!(
+            non_direct.trust_policy_source(),
+            Err(ExtensionError::InvalidManifest { .. })
+        ));
+
+        let mut fabricated = materialized;
+        fabricated.root_binding = PackageRootBinding::FabricateOnLoad;
+        assert!(matches!(
+            fabricated.trust_policy_source(),
+            Err(ExtensionError::InvalidManifest { .. })
+        ));
     }
 }
 

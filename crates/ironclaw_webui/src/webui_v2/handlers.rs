@@ -2296,43 +2296,17 @@ pub async fn register_hosted_mcp_extension(
     };
     let resolution = invoke_product_capability(
         state.services(),
-        caller.clone(),
+        caller,
         EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
         request,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
-    let extension = read_registered_extension(state.services(), caller, &package_ref).await?;
     Ok(Json(RegisterHostedMcpResponse {
         success: true,
         message: "Custom MCP registered.".to_string(),
-        package_ref: extension.package_ref,
-        phase: extension.installation_state,
+        package_ref,
     }))
-}
-
-async fn read_registered_extension(
-    services: &std::sync::Arc<dyn ProductSurface>,
-    caller: ProductSurfaceCaller,
-    package_ref: &LifecyclePackageRef,
-) -> Result<ironclaw_product::RebornExtensionInfo, ProductSurfaceError> {
-    let page = query_product_page(
-        services,
-        caller,
-        RebornViewQuery {
-            view_id: EXTENSIONS_VIEW.id.to_string(),
-            params: serde_json::json!({}),
-            cursor: None,
-        },
-    )
-    .await?;
-    let inventory: RebornExtensionListResponse =
-        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
-    inventory
-        .extensions
-        .into_iter()
-        .find(|extension| extension.package_ref == *package_ref)
-        .ok_or_else(|| extension_lifecycle_unavailable(true))
 }
 
 /// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
@@ -3873,7 +3847,6 @@ pub struct RegisterHostedMcpResponse {
     pub success: bool,
     pub message: String,
     pub package_ref: LifecyclePackageRef,
-    pub phase: LifecyclePublicState,
 }
 
 fn bounded_hosted_mcp_name(name: String) -> Result<String, ProductSurfaceError> {

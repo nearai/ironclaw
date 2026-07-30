@@ -22,11 +22,11 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, McpAuthChallenge,
-    McpAuthMetadataLocation, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialInjection, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
-    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
-    RuntimeKind, SecretHandle,
+    NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeCredentialInjection,
+    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
+    SecretHandle,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -955,9 +955,13 @@ fn mcp_auth_challenge_from_response(response: &McpHostHttpResponse) -> McpAuthCh
     let mut protected_resource_metadata = Vec::new();
     for (name, value) in &response.headers {
         if name.eq_ignore_ascii_case("www-authenticate") {
-            www_authenticate_metadata.extend(mcp_auth_metadata_locations(value));
+            www_authenticate_metadata.extend(
+                ironclaw_host_api::extract_mcp_auth_metadata_locations(value),
+            );
         } else if name.eq_ignore_ascii_case("protected-resource-metadata") {
-            protected_resource_metadata.extend(mcp_auth_metadata_locations(value));
+            protected_resource_metadata.extend(
+                ironclaw_host_api::extract_mcp_auth_metadata_locations(value),
+            );
         }
     }
     McpAuthChallenge {
@@ -965,22 +969,6 @@ fn mcp_auth_challenge_from_response(response: &McpHostHttpResponse) -> McpAuthCh
         www_authenticate_metadata,
         protected_resource_metadata,
     }
-}
-
-fn mcp_auth_metadata_locations(value: &str) -> Vec<McpAuthMetadataLocation> {
-    value
-        .split([' ', ','])
-        .filter_map(|part| {
-            part.strip_prefix("resource_metadata=")
-                .or_else(|| part.strip_prefix("resource="))
-        })
-        .map(|part| part.trim_matches('"'))
-        .chain(
-            std::iter::once(value)
-                .filter(|value| value.starts_with("https://") || value.starts_with("http://")),
-        )
-        .filter_map(|value| McpAuthMetadataLocation::new(value).ok())
-        .collect()
 }
 
 fn effective_mcp_response_body_limit(host_limit: Option<u64>, client_limit: u64) -> Option<u64> {
@@ -1157,7 +1145,11 @@ fn parse_tools_list_result(
 ) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
     const HOST_MAX_DISCOVERED_TOOLS: usize = 1024;
     const MAX_TOOL_NAME_BYTES: usize = 128;
-    const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
+    // Real hosted catalogs may use several kilobytes to document one tool.
+    // Keep descriptions exact while bounding each value consistently with
+    // schema strings; the response-body and catalog-count limits remain the
+    // aggregate memory and prompt-size ceilings.
+    const MAX_TOOL_DESCRIPTION_BYTES: usize = 16 * 1024;
     const MAX_SCHEMA_DEPTH: u8 = 32;
     const MAX_SCHEMA_NODES: usize = 8192;
     const MAX_SCHEMA_STRING_BYTES: usize = 16 * 1024;

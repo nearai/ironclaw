@@ -106,9 +106,6 @@ pub async fn boot_installation_records(
         .await
         .map_err(|source| BootInstallationRecordsError::ListInstallations { source })?
     {
-        if !installation.preparation_state().is_ready() {
-            continue;
-        }
         let extension_id = installation.extension_id().clone();
         let Some(manifest_record) = installation_store
             .get_manifest(&extension_id)
@@ -117,6 +114,11 @@ pub async fn boot_installation_records(
         else {
             continue;
         };
+        if manifest_record.initial_preparation()
+            == ironclaw_extensions::PreparationRequirement::Required
+        {
+            continue;
+        }
         records.push(boot_installation_record(
             installation.installation_id().as_str(),
             &extension_id,

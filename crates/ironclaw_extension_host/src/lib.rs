@@ -59,6 +59,7 @@ pub mod generic_host;
 pub mod host_api_contracts;
 mod hosted_mcp_admission;
 mod hosted_mcp_discovery_authority;
+mod hosted_mcp_manifest;
 mod hosted_mcp_preparation;
 pub mod ingress;
 pub mod install_policy;
@@ -216,7 +217,7 @@ pub use lifecycle_restore::{
     ExtensionInstallPlan, available_manifest_hash, package_visible_capability_ids, prepare_install,
     restore_extension_lifecycle_state,
 };
-pub use lifecycle_vocabulary::{ActiveExtensionCapability, ExtensionActivationMode};
+pub use lifecycle_vocabulary::ActiveExtensionCapability;
 pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
 pub use mcp::{RegistryMcpEgressPlanner, hosted_http_mcp_runtime};
 pub use mcp_catalog_safety::{

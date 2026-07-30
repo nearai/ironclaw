@@ -140,10 +140,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   );
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
-  const handleCustomMcpSetup = React.useCallback((extension) => {
-    setRegisteringCustomMcp(false);
-    handleConfigure(extension, null);
-  }, [handleConfigure]);
   const handleConfirmRemove = React.useCallback(() => {
     if (!extensionToRemove) return;
     remove(extensionToRemove, {
@@ -279,7 +275,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
         onClose={() => setRegisteringCustomMcp(false)}
         onRegister={registerCustomMcp}
         isRegistering={isRegisteringCustomMcp}
-        onSetup={handleCustomMcpSetup}
       />
       <ConfirmDialog
         open={Boolean(extensionToRemove)}

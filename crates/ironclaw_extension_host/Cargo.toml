@@ -18,6 +18,7 @@ layer = "products"
 # downstream integration tests. Zero-byte in production.
 test-support = [
     "dep:ironclaw_first_party_extensions",
+    "ironclaw_filesystem/test-support",
     "ironclaw_processes/test-support",
 ]
 # Dormant marker for the two moved test modules that still require composition

@@ -5344,12 +5344,9 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
 }
 
 #[tokio::test]
-async fn register_hosted_mcp_uses_closed_wire_and_returns_authoritative_package() {
+async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
     let services = Arc::new(StubServices::default());
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
-    services.set_extensions_view(RebornExtensionListResponse {
-        extensions: vec![extension_info("mcp-linear", false)],
-    });
     let router = router_with(services.clone());
 
     let response = router
@@ -5370,7 +5367,7 @@ async fn register_hosted_mcp_uses_closed_wire_and_returns_authoritative_package(
     let body = read_json(response).await;
     assert_eq!(body["success"], true);
     assert_eq!(body["package_ref"]["id"], "mcp-linear");
-    assert_eq!(body["phase"], "setup_needed");
+    assert!(body.get("phase").is_none());
 
     let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
@@ -5386,6 +5383,10 @@ async fn register_hosted_mcp_uses_closed_wire_and_returns_authoritative_package(
             "endpoint": "https://mcp.linear.app/mcp",
             "auth_selection": { "kind": "oauth", "client_profile_id": "linear-default" },
         })
+    );
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "registration is admission only and must not read an installation projection"
     );
 }
 

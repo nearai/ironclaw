@@ -2,9 +2,6 @@
 //! journeys.  It deliberately records only redacted request facts so tests
 //! can prove credential routing without retaining bearer material.
 
-#![allow(dead_code)]
-
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -179,13 +176,9 @@ impl HostedMcpRegistrationServer {
         let address = listener.local_addr().expect("fixture listener address");
         let base_url = format!("http://{address}");
         let state = Arc::new(StateData {
-            base_url: base_url.clone(),
-            policy: Mutex::new(policy),
-            tools: Mutex::new(tools),
-            available: Mutex::new(true),
-            page_size: Mutex::new(None),
+            policy,
+            tools,
             requests: Mutex::new(Vec::new()),
-            token_responses: Mutex::new(VecDeque::new()),
         });
         let (shutdown, receiver) = oneshot::channel();
         let app = Router::new()
@@ -220,46 +213,8 @@ impl HostedMcpRegistrationServer {
     pub fn mcp_url(&self) -> String {
         format!("{}/mcp", self.base_url)
     }
-    pub fn protected_resource_url(&self) -> String {
-        format!("{}/.well-known/oauth-protected-resource", self.base_url)
-    }
-    pub fn authorization_server_url(&self) -> String {
-        format!("{}/.well-known/oauth-authorization-server", self.base_url)
-    }
     pub fn requests(&self) -> Vec<RecordedHostedMcpRequest> {
         self.state.requests.lock().expect("request lock").clone()
-    }
-    pub fn set_available(&self, available: bool) {
-        *self.state.available.lock().expect("availability lock") = available;
-    }
-    pub fn replace_tools(&self, tools: Vec<HostedMcpTool>) {
-        *self.state.tools.lock().expect("tool lock") = tools;
-    }
-    pub fn paginate_tools(&self, page_size: Option<usize>) {
-        assert!(
-            page_size.is_none_or(|size| size > 0),
-            "page size must be positive"
-        );
-        *self.state.page_size.lock().expect("pagination lock") = page_size;
-    }
-    pub fn set_auth_policy(&self, policy: HostedMcpAuthPolicy) {
-        *self.state.policy.lock().expect("policy lock") = policy;
-    }
-    pub fn queue_token_response(&self, response: Value) {
-        self.state
-            .token_responses
-            .lock()
-            .expect("token lock")
-            .push_back(response);
-    }
-
-    pub async fn shutdown(mut self) {
-        if let Some(sender) = self.shutdown.take() {
-            let _ = sender.send(());
-        }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
     }
 }
 
@@ -275,13 +230,9 @@ impl Drop for HostedMcpRegistrationServer {
 }
 
 struct StateData {
-    base_url: String,
-    policy: Mutex<HostedMcpAuthPolicy>,
-    tools: Mutex<Vec<HostedMcpTool>>,
-    available: Mutex<bool>,
-    page_size: Mutex<Option<usize>>,
+    policy: HostedMcpAuthPolicy,
+    tools: Vec<HostedMcpTool>,
     requests: Mutex<Vec<RecordedHostedMcpRequest>>,
-    token_responses: Mutex<VecDeque<Value>>,
 }
 
 async fn mcp(
@@ -289,14 +240,10 @@ async fn mcp(
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
-    if !*state.available.lock().expect("availability lock") {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
     let authorization = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok());
-    let policy = state.policy.lock().expect("policy lock").clone();
-    let expected = match &policy {
+    let expected = match &state.policy {
         HostedMcpAuthPolicy::NoAuth => None,
         HostedMcpAuthPolicy::ExactBearer { token }
         | HostedMcpAuthPolicy::OAuth {
@@ -321,7 +268,11 @@ async fn mcp(
                 .map(str::to_string),
         });
     if !matches {
-        return challenge(&state.base_url, StatusCode::UNAUTHORIZED);
+        return match state.policy {
+            HostedMcpAuthPolicy::OAuth { .. } => oauth_challenge(StatusCode::UNAUTHORIZED),
+            HostedMcpAuthPolicy::ExactBearer { .. } => bearer_challenge(StatusCode::UNAUTHORIZED),
+            HostedMcpAuthPolicy::NoAuth => StatusCode::UNAUTHORIZED.into_response(),
+        };
     }
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let result = match request.get("method").and_then(Value::as_str) {
@@ -333,33 +284,14 @@ async fn mcp(
         // semantics, but accepting it keeps the fixture protocol-complete.
         Some("notifications/initialized") => json!({}),
         Some("tools/list") => {
-            let tools = state.tools.lock().expect("tool lock");
-            let cursor = request
-                .pointer("/params/cursor")
-                .and_then(Value::as_str)
-                .and_then(|cursor| cursor.parse::<usize>().ok())
-                .unwrap_or(0)
-                .min(tools.len());
-            let end = state
-                .page_size
-                .lock()
-                .expect("pagination lock")
-                .map(|size| cursor.saturating_add(size).min(tools.len()))
-                .unwrap_or(tools.len());
-            let mut result =
-                json!({"tools": tools[cursor..end].iter().map(tool_wire).collect::<Vec<_>>()});
-            if end < tools.len() {
-                result["nextCursor"] = json!(end.to_string());
-            }
-            result
+            json!({"tools": state.tools.iter().map(tool_wire).collect::<Vec<_>>()})
         }
         Some("tools/call") => {
             let name = request
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let tools = state.tools.lock().expect("tool lock");
-            match tools.iter().find(|tool| tool.name == name) {
+            match state.tools.iter().find(|tool| tool.name == name) {
                 Some(tool) => json!({"content":[{"type":"text","text":tool.result.to_string()}]}),
                 None => {
                     return streamable_json_rpc(
@@ -397,11 +329,10 @@ fn tool_wire(tool: &HostedMcpTool) -> Value {
     value
 }
 
-fn challenge(_base_url: &str, status: StatusCode) -> Response {
+fn oauth_challenge(status: StatusCode) -> Response {
     // OAuth recipe admission intentionally rejects relative metadata locations:
     // the challenge must name the exact HTTPS document subsequently fetched
     // through the policy-mediated metadata lane.
-    let resource = "https://mcp.example.test/.well-known/oauth-protected-resource";
     let mut response = status.into_response();
     response.headers_mut().insert(
         "www-authenticate",
@@ -409,9 +340,14 @@ fn challenge(_base_url: &str, status: StatusCode) -> Response {
             "Bearer resource_metadata=\"https://mcp.example.test/.well-known/oauth-protected-resource\"",
         ),
     );
+    response
+}
+
+fn bearer_challenge(status: StatusCode) -> Response {
+    let mut response = status.into_response();
     response.headers_mut().insert(
-        "protected-resource-metadata",
-        HeaderValue::from_str(&resource).expect("static fixture header"),
+        "www-authenticate",
+        HeaderValue::from_static("Bearer realm=\"Hosted MCP fixture\""),
     );
     response
 }
@@ -433,16 +369,15 @@ fn record_metadata_request(state: &StateData, path: &str) {
 async fn protected_resource(State(state): State<Arc<StateData>>) -> Json<Value> {
     record_metadata_request(&state, "/.well-known/oauth-protected-resource");
     Json(
-        // Keep this exactly aligned with the admission DTO's
-        // `deny_unknown_fields` contract. Scope negotiation is intentionally
-        // outside v1 hosted-MCP registration.
-        json!({"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"]}),
+        // Representative protected-resource response: admission consumes only
+        // its security-critical URLs and tolerates unrelated standard fields.
+        json!({"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"],"scopes_supported":["default"],"bearer_methods_supported":["header"],"resource_name":"Hosted MCP fixture"}),
     )
 }
 async fn authorization_server(State(state): State<Arc<StateData>>) -> Json<Value> {
     record_metadata_request(&state, "/.well-known/oauth-authorization-server");
     Json(
-        json!({"issuer":"https://auth.example.test","authorization_endpoint":"https://auth.example.test/authorize","token_endpoint":"https://auth.example.test/token","registration_endpoint":"https://auth.example.test/register"}),
+        json!({"issuer":"https://auth.example.test","authorization_endpoint":"https://auth.example.test/authorize","token_endpoint":"https://auth.example.test/token","registration_endpoint":"https://auth.example.test/register","scopes_supported":["default"],"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"]}),
     )
 }
 async fn dynamic_client_registration() -> Json<Value> {
@@ -450,14 +385,6 @@ async fn dynamic_client_registration() -> Json<Value> {
         json!({"client_id":"fixture-client","client_secret":"fixture-secret","token_endpoint_auth_method":"none"}),
     )
 }
-async fn token(State(state): State<Arc<StateData>>) -> Json<Value> {
-    let value = state
-        .token_responses
-        .lock()
-        .expect("token lock")
-        .pop_front()
-        .unwrap_or_else(
-            || json!({"access_token":"oauth-token","token_type":"Bearer","expires_in":3600}),
-        );
-    Json(value)
+async fn token() -> Json<Value> {
+    Json(json!({"access_token":"oauth-token","token_type":"Bearer","expires_in":3600}))
 }

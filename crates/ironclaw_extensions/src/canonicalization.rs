@@ -42,16 +42,7 @@ pub fn canonicalize_installation_rows(
                     extension_id: extension_id.clone(),
                 });
             }
-            let preparation_state = first.preparation_state();
             let incarnation_id = first.incarnation_id().cloned();
-            if rows
-                .iter()
-                .any(|row| row.preparation_state() != preparation_state)
-            {
-                return Err(ExtensionInstallationError::ConflictingPreparationState {
-                    extension_id: extension_id.clone(),
-                });
-            }
             if rows
                 .iter()
                 .any(|row| row.incarnation_id() != incarnation_id.as_ref())
@@ -108,7 +99,6 @@ pub fn canonicalize_installation_rows(
                 installation_id,
                 extension_id,
                 manifest_ref,
-                preparation_state,
                 incarnation_id,
                 credential_bindings,
                 updated_at,
@@ -124,13 +114,11 @@ mod tests {
     use ironclaw_host_api::ExtensionId;
 
     use super::*;
-    use crate::installations::{
-        ExtensionManifestRef, InstallationOwner, InstallationPreparationState,
-    };
+    use crate::installations::{ExtensionManifestRef, InstallationOwner};
 
     fn pending() -> ExtensionInstallation {
         let extension_id = ExtensionId::new("fixture").expect("extension id");
-        ExtensionInstallation::new_pending(
+        ExtensionInstallation::new(
             ExtensionInstallationId::new("fixture").expect("installation id"),
             extension_id.clone(),
             ExtensionManifestRef::new(extension_id, None),
@@ -150,10 +138,6 @@ mod tests {
             .pop()
             .expect("one row");
 
-        assert_eq!(
-            canonical.preparation_state(),
-            InstallationPreparationState::PendingPreparation
-        );
         assert_eq!(canonical.incarnation_id(), expected_incarnation.as_ref());
     }
 

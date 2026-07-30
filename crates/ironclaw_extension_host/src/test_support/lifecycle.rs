@@ -104,10 +104,50 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
     google_oauth_configured: bool,
     auth_provider_client: Arc<dyn ironclaw_auth::AuthProviderClient>,
 ) -> ExtensionLifecycleTestServices {
+    build_lifecycle_test_services_over_backing(
+        owner_id,
+        network_http_egress,
+        google_oauth_configured,
+        auth_provider_client,
+        Arc::new(FaultInjecting::new(InMemoryBackend::new())),
+        Arc::new(SecretStore::ephemeral()),
+    )
+    .await
+}
+
+/// Reconstructs the lifecycle assembly over the same durable test backing.
+///
+/// This is intentionally a narrow test seam: restart journeys need a fresh
+/// host, registry, and auth service, but must retain the persisted lifecycle
+/// and pending-auth records. Production composition owns its own restart path.
+pub async fn rebuild_lifecycle_test_services_with_auth_provider(
+    previous: &ExtensionLifecycleTestServices,
+    owner_id: &str,
+    network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
+    google_oauth_configured: bool,
+    auth_provider_client: Arc<dyn ironclaw_auth::AuthProviderClient>,
+) -> ExtensionLifecycleTestServices {
+    build_lifecycle_test_services_over_backing(
+        owner_id,
+        network_http_egress,
+        google_oauth_configured,
+        auth_provider_client,
+        Arc::clone(&previous.filesystem_faults),
+        Arc::clone(&previous.secret_store),
+    )
+    .await
+}
+
+async fn build_lifecycle_test_services_over_backing(
+    owner_id: &str,
+    network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
+    google_oauth_configured: bool,
+    auth_provider_client: Arc<dyn ironclaw_auth::AuthProviderClient>,
+    filesystem: Arc<FaultInjecting<InMemoryBackend>>,
+    secret_store: Arc<dyn SecretStorePort>,
+) -> ExtensionLifecycleTestServices {
     let owner_user_id = ironclaw_host_api::UserId::new(owner_id).expect("valid owner id");
-    let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let auth_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), |scope| {
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/secrets")?,
@@ -154,7 +194,7 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         Arc::new(ExtensionRegistry::new()),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(AllowLifecycleDispatchAuthorizer),
+        Arc::new(LifecycleTestGrantAuthorizer),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("extension-lifecycle-test-v1")
             .expect("valid surface version"),
@@ -272,7 +312,6 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         &mut first_party_registry,
         Arc::clone(&extension_management),
         runtime_credential_accounts,
-        host_services.runtime_http_egress(),
     )
     .expect("insert lifecycle handlers");
     register_bundled_first_party_handlers_for_lifecycle_tests(&mut first_party_registry)
@@ -326,15 +365,12 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         ironclaw_host_api::UserId::new(owner_id).expect("valid owner id"),
         Arc::clone(&filesystem),
     );
-    let mut lifecycle_service =
+    let lifecycle_service =
         ExtensionHostLifecycleProductService::new(Arc::clone(&skill_management))
-            .with_extension_management(Arc::clone(&extension_management));
-    if let Some(runtime_http_egress) = host_services.runtime_http_egress() {
-        lifecycle_service = lifecycle_service.with_runtime_http_egress(runtime_http_egress);
-    }
-    lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
-        product_auth.runtime_credential_account_selection_service(),
-    );
+            .with_extension_management(Arc::clone(&extension_management))
+            .with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
     let lifecycle_service = Arc::new(lifecycle_service);
     let lifecycle_product_continuation = ironclaw_product::lifecycle_auth_continuation_dispatcher(
         Arc::clone(&lifecycle_service) as Arc<dyn LifecycleProductService>,
@@ -601,11 +637,15 @@ impl RebornAuthContinuationDispatcher for LateBoundAuthContinuationDispatcher {
     }
 }
 
-struct AllowLifecycleDispatchAuthorizer;
+/// Keeps lifecycle fixtures permissive while preserving the runtime
+/// obligations declared by the resolved descriptor. Production derives the
+/// same obligations through `GrantAuthorizer`; this fake exists only because
+/// dynamic fixture tools are not known when the test grant is constructed.
+struct LifecycleTestGrantAuthorizer;
 
 #[async_trait]
 impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer
-    for AllowLifecycleDispatchAuthorizer
+    for LifecycleTestGrantAuthorizer
 {
     async fn authorize_dispatch_with_trust(
         &self,
@@ -621,9 +661,33 @@ impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer
             .find(|grant| grant.capability == descriptor.id)
             .map(|grant| grant.constraints.network.clone())
             .unwrap_or_default();
+        let mut obligations = vec![Obligation::ApplyNetworkPolicy { policy }];
+        for credential in descriptor
+            .runtime_credentials
+            .iter()
+            .filter(|credential| credential.required)
+        {
+            match &credential.source {
+                ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle => {
+                    obligations.push(Obligation::InjectSecretOnce {
+                        handle: credential.handle.clone(),
+                    });
+                }
+                ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
+                    provider,
+                    setup,
+                } => obligations.push(Obligation::InjectCredentialAccountOnce {
+                    handle: credential.handle.clone(),
+                    provider: provider.clone(),
+                    setup: setup.clone(),
+                    provider_scopes: credential.provider_scopes.clone(),
+                    requester_extension: descriptor.provider.clone(),
+                }),
+            }
+        }
         Decision::Allow {
-            obligations: Obligations::new(vec![Obligation::ApplyNetworkPolicy { policy }])
-                .expect("single test network obligation is valid"),
+            obligations: Obligations::new(obligations)
+                .expect("lifecycle test descriptor obligations are valid"),
         }
     }
 }

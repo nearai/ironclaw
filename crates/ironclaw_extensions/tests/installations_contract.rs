@@ -11,8 +11,8 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
     ExtensionInstallationPersistedParts, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
-    HostApiContractRegistry, InstallationOwner, InstallationPreparationState,
-    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error, MembershipDeactivation,
+    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
+    ManifestSource, ManifestV2Error, MembershipDeactivation,
 };
 use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
@@ -416,7 +416,6 @@ fn persisted_reconstruction_preserves_timestamp_and_bindings() {
             installation_id: installation_id("acme-tools"),
             extension_id: extension_id.clone(),
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
-            preparation_state: InstallationPreparationState::Ready,
             incarnation_id: None,
             credential_bindings: vec![binding.clone()],
             updated_at,

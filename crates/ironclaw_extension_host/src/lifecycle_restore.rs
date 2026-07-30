@@ -36,10 +36,12 @@ pub async fn restore_extension_lifecycle_state(
         if let Some(manifest) = stored_manifest.as_ref()
             && manifest.manifest().source == ManifestSource::UserRegistered
         {
-            let available = crate::product_lifecycle::available_user_registered_package(manifest)?;
+            let available = crate::hosted_mcp_manifest::available_package(manifest)?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
         }
-        if !installation.preparation_state().is_ready() {
+        if stored_manifest.as_ref().is_some_and(|manifest| {
+            manifest.initial_preparation() == ironclaw_extensions::PreparationRequirement::Required
+        }) {
             tracing::debug!(
                 extension_id = installation.extension_id().as_str(),
                 "skipping pending extension installation during offline restore"
@@ -196,6 +198,11 @@ pub fn prepare_install(
         &contracts,
         Some(manifest_hash.clone()),
     )?
+    .with_initial_preparation(if available.resolved_manifest.mcp.is_some() {
+        ironclaw_extensions::PreparationRequirement::Required
+    } else {
+        ironclaw_extensions::PreparationRequirement::Ready
+    })
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let manifest_record = match retained_definition {
         Some(retained)
@@ -217,11 +224,7 @@ pub fn prepare_install(
     };
     let installation_id = ExtensionInstallationId::new(available.package.id.as_str().to_string())
         .map_err(map_extension_installation_error)?;
-    let constructor = match manifest_record.initial_preparation() {
-        ironclaw_extensions::PreparationRequirement::Ready => ExtensionInstallation::new,
-        ironclaw_extensions::PreparationRequirement::Required => ExtensionInstallation::new_pending,
-    };
-    let installation = constructor(
+    let installation = ExtensionInstallation::new(
         installation_id,
         available.package.id.clone(),
         ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),

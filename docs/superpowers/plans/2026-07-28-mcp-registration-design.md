@@ -14,6 +14,13 @@ remove lifecycle to make its discovered tools usable. It supports no-auth,
 manual bearer tokens, and OAuth. The WebUI supplies the custom-MCP modal and
 then returns to the established extension lifecycle UX.
 
+For v1, "tenant" means the tenant represented by the standalone Reborn
+runtime. The existing `ExtensionLifecycleManager` is intentionally
+`LocalSingleUser`; hosting multiple isolated tenants inside one process still
+requires the extension framework's tracked tenant-scoped store and registry
+work. Registration does not add a custom-MCP-only namespace workaround for
+that future framework change.
+
 ## Current source of truth
 
 The relevant implementation is:
@@ -65,12 +72,12 @@ removed, enabling a later install/retry without re-registering it.
 
 This operation deliberately does **not** create a hidden lifecycle core, add
 member rows, or make an installation atomic with catalog discovery. The public
-registration action admits the definition first and then immediately invokes
-the canonical install/activation path; these are intentionally separate steps.
-If that install is not attempted, cannot complete, or is later removed, the
-retained definition is registered-but-uninstalled and an ordinary install retry
-is the recovery path. The existing installation service owns per-user
-installation, activation, and removal.
+registration action admits the definition and stops. The retained definition is
+then registry-visible but uninstalled. A user or agent explicitly invokes the
+canonical install action, which owns preparation, credential readiness, and
+activation exactly as it does for bundled extensions. Registration never opens
+OAuth or manual-token setup. The existing installation service owns per-user
+installation, setup, activation, retry, and removal.
 
 Tenant visibility is definition/catalog visibility, not tool authority. A user
 must still use the existing install path and meet its own credential readiness
@@ -124,7 +131,7 @@ the extension manifest as raw secret material.
 |---|---|
 | NoAuth | Discovery and invocation proceed through policy-mediated egress without credential injection. |
 | Bearer | Existing manual-token account setup stores the token in the secret-backed account path; staged runtime credentials inject the bearer header. Missing/rejected credentials return the existing setup/readiness response. |
-| OAuth | A challenge triggers protected-resource and authorization-server metadata admission, then existing OAuth recipe/DCR/PKCE/continuation machinery. The admitted protected-resource metadata URL is retained exactly for DCR; it is not reconstructed from the MCP endpoint. The resulting account is selected and injected through the same runtime boundary. |
+| OAuth | A challenge triggers protected-resource and authorization-server metadata admission, then existing OAuth recipe/DCR/PKCE/continuation machinery. The admitted protected-resource metadata URL is retained exactly for DCR; it is not reconstructed from the MCP endpoint. Runtime recipe lookup is requester-bound: installed extensions resolve only their own durable manifest recipe, while built-in callers use the bundled static catalog, with no cross-boundary fallback. The resulting account is selected and injected through the same runtime boundary. |
 
 The hosted fixture and integration scenarios assert redacted request facts;
 they do not retain bearer values. A tenant catalog definition is shared for
@@ -150,8 +157,8 @@ only when a second concrete preparation implementation justifies extracting a
 shared abstraction. Linear-style scenarios remain ordinary lifecycle clients:
 
 ```text
-Linear (OAuth) -> register definition -> existing OAuth setup -> install -> invoke
-No-auth server  -> register definition -> install -> invoke
+Linear (OAuth) -> register definition -> ordinary install -> existing OAuth setup -> activate -> invoke
+No-auth server  -> register definition -> ordinary install -> activate -> invoke
 Future WASM     -> its own concrete preparation, if/when it exists -> activate
 Future skills   -> no hosted-MCP shortcut; retain their established lifecycle
 ```

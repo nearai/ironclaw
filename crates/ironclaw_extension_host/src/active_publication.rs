@@ -59,22 +59,38 @@ impl ActiveExtensionPublisher {
     }
 
     fn upsert_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
-        if package.manifest.source == ironclaw_extensions::ManifestSource::UserRegistered {
-            // Direct-remote packages remain on the trust engine's untrusted
-            // default. Registration is provenance, never an implicit admin
-            // elevation.
-            return Ok(());
-        }
         let input = extension_trust_policy_input(package)?;
-        let manifest_path = extension_local_manifest_path(package)?;
-        let entry = AdminEntry::for_local_manifest(
-            input.identity.package_id.clone(),
-            manifest_path,
-            package.manifest_digest(),
-            HostTrustAssignment::user_trusted(),
-            extension_allowed_effects(package),
-            None,
-        );
+        let entry = match &input.identity.source {
+            PackageSource::DirectRemote { endpoint } => {
+                // Registration only records untrusted provenance. Publication
+                // is reached after lifecycle activation; this source- and
+                // digest-pinned ceiling lets the kernel authorize that active
+                // package. It is not a grant: the owner-filtered active
+                // surface still mints the per-user invocation grant, so trust
+                // alone cannot make a tenant-registered MCP callable.
+                AdminEntry::for_direct_remote(
+                    input.identity.package_id.clone(),
+                    endpoint.clone(),
+                    package.manifest_digest(),
+                    HostTrustAssignment::user_trusted(),
+                    extension_allowed_effects(package),
+                    None,
+                )
+            }
+            PackageSource::LocalManifest { path } => AdminEntry::for_local_manifest(
+                input.identity.package_id.clone(),
+                path.clone(),
+                package.manifest_digest(),
+                HostTrustAssignment::user_trusted(),
+                extension_allowed_effects(package),
+                None,
+            ),
+            source => {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!("extension package has unsupported trust source: {source:?}"),
+                });
+            }
+        };
         self.trust_policy
             .mutate_with(
                 &self.trust_invalidation_bus,
@@ -90,12 +106,9 @@ impl ActiveExtensionPublisher {
     }
 
     fn remove_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
-        if package.manifest.source == ironclaw_extensions::ManifestSource::UserRegistered {
-            return Ok(());
-        }
         let input = extension_trust_policy_input(package)?;
         let package_id = input.identity.package_id.clone();
-        let source = extension_package_source(package)?;
+        let source = input.identity.source.clone();
         self.trust_policy
             .mutate_with(
                 &self.trust_invalidation_bus,
@@ -117,47 +130,11 @@ pub fn extension_trust_policy_input(
 ) -> Result<ironclaw_trust::TrustPolicyInput, ProductSurfaceFailure> {
     package
         .trust_policy_input(
-            extension_package_source(package)?,
+            package.trust_policy_source().map_err(map_extension_error)?,
             package.manifest_digest(),
             None,
         )
         .map_err(map_extension_error)
-}
-
-fn extension_package_source(
-    package: &ExtensionPackage,
-) -> Result<PackageSource, ProductSurfaceFailure> {
-    if package.manifest.source == ironclaw_extensions::ManifestSource::UserRegistered {
-        let ironclaw_extensions::ExtensionRuntime::Mcp {
-            url: Some(endpoint),
-            ..
-        } = &package.manifest.runtime
-        else {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
-                reason: "user-registered extension lacks a direct remote MCP endpoint".to_string(),
-            });
-        };
-        return Ok(PackageSource::DirectRemote {
-            endpoint: endpoint.clone(),
-        });
-    }
-    Ok(PackageSource::LocalManifest {
-        path: extension_local_manifest_path(package)?,
-    })
-}
-
-fn extension_local_manifest_path(
-    package: &ExtensionPackage,
-) -> Result<String, ProductSurfaceFailure> {
-    let root = package.materialized_root().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("local extension package has no materialized root: {error}"),
-        }
-    })?;
-    Ok(format!(
-        "{}/manifest.toml",
-        root.as_str().trim_end_matches('/')
-    ))
 }
 
 fn extension_allowed_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
@@ -200,5 +177,64 @@ fn compensation_failure(
         reason: format!(
             "{context}; original error: {original}; compensation error: {compensation}"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
+    use ironclaw_host_api::{ExtensionId, HostedMcpAuthSelection, HostedMcpEndpoint, TrustClass};
+    use ironclaw_trust::{
+        AdminConfig, HostTrustPolicy, InvalidationBus, TrustPolicy, TrustProvenance,
+    };
+
+    use super::{ActiveExtensionPublisher, extension_trust_policy_input};
+
+    #[test]
+    fn publishing_user_registered_mcp_elevates_only_the_active_pinned_definition() {
+        let policy = Arc::new(
+            HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("valid policy"),
+        );
+        let publisher = ActiveExtensionPublisher::new(
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new())),
+            Arc::clone(&policy),
+            Arc::new(InvalidationBus::new()),
+        );
+        let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
+            &HostedMcpEndpoint::new("https://mcp.linear.app/rpc".to_string())
+                .expect("valid endpoint"),
+        )
+        .expect("canonical endpoint");
+        let record = crate::hosted_mcp_manifest::pending_manifest(
+            &ExtensionId::new("mcp-linear").expect("valid extension id"),
+            "Linear",
+            &endpoint,
+            &HostedMcpAuthSelection::NoAuth,
+        )
+        .expect("valid pending hosted MCP manifest");
+        let package = crate::hosted_mcp_manifest::available_package(&record)
+            .expect("available user-registered package")
+            .package;
+        let input = extension_trust_policy_input(&package).expect("trust input");
+
+        let before = policy.evaluate(&input).expect("policy evaluates");
+        assert_eq!(before.effective_trust.class(), TrustClass::Sandbox);
+        assert_eq!(before.provenance, TrustProvenance::Default);
+
+        publisher
+            .publish(&package)
+            .expect("activation publishes package");
+        let active = policy.evaluate(&input).expect("policy evaluates");
+        assert_eq!(active.effective_trust.class(), TrustClass::UserTrusted);
+        assert_eq!(active.provenance, TrustProvenance::AdminConfig);
+
+        publisher
+            .unpublish(&package)
+            .expect("deactivation removes trust");
+        let removed = policy.evaluate(&input).expect("policy evaluates");
+        assert_eq!(removed.effective_trust.class(), TrustClass::Sandbox);
+        assert_eq!(removed.provenance, TrustProvenance::Default);
     }
 }

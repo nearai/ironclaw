@@ -75,22 +75,7 @@ impl ExtensionHostLifecycleProductService {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                let caller = lifecycle_caller(&context)?;
-                let registration = extension_management.register_hosted_mcp(request).await?;
-                let package_ref =
-                    registration
-                        .package_ref
-                        .ok_or_else(|| ProductSurfaceFailure::Transient {
-                            reason: "hosted MCP admission returned no package reference"
-                                .to_string(),
-                        })?;
-                self.execute_extension_install_with_activation(
-                    context,
-                    extension_management,
-                    package_ref,
-                    &caller,
-                )
-                .await
+                extension_management.register_hosted_mcp(request).await
             }
             LifecycleProductAction::SkillSearch { query } => {
                 let scope = self
@@ -345,7 +330,6 @@ impl ExtensionHostLifecycleProductService {
                 caller,
             )
             .await?;
-        let mode = ironclaw_extension_host::ExtensionActivationMode::Static;
         let unavailable_gate =
             ironclaw_extension_host::UnavailableExtensionActivationCredentialGate;
         let credential_gate: &dyn ironclaw_extension_host::ExtensionActivationCredentialGate =
@@ -356,7 +340,6 @@ impl ExtensionHostLifecycleProductService {
         extension_management
             .activate_with_credential_gate(
                 package_ref,
-                mode,
                 lifecycle_resource_scope(context)?,
                 credential_gate,
                 caller,
@@ -423,7 +406,7 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductSurfaceFailure::InvalidBindingRequest { reason }
-            if reason.starts_with("hosted MCP discovery failed:")
+            if reason.starts_with("hosted MCP catalog preparation failed:")
                 || reason
                     == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
         {
@@ -434,7 +417,14 @@ fn install_activation_error(
             );
             Ok(install_response)
         }
-        error => Err(error),
+        error => {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                reason = %error,
+                "post-install activation failed"
+            );
+            Err(error)
+        }
     }
 }
 

@@ -9,8 +9,6 @@ use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHtt
 
 use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
-const MCP_DISCOVERY_TOOL_LIMIT: u32 = 128;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedMcpDiscoveryError {
     Transient(String),
@@ -22,14 +20,17 @@ pub enum HostedMcpDiscoveryError {
 
 pub async fn discover_hosted_mcp_package(
     package: &ExtensionPackage,
+    max_tools: u32,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 ) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
-    discover_hosted_mcp_package_with_policy(package, scope, runtime_http_egress, None).await
+    discover_hosted_mcp_package_with_policy(package, max_tools, scope, runtime_http_egress, None)
+        .await
 }
 
 pub async fn discover_hosted_mcp_package_with_policy(
     package: &ExtensionPackage,
+    max_tools: u32,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     safety: Option<&crate::McpCatalogAdmissionPolicy>,
@@ -87,7 +88,7 @@ pub async fn discover_hosted_mcp_package_with_policy(
                 input: serde_json::Value::Null,
                 max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
             },
-            MCP_DISCOVERY_TOOL_LIMIT,
+            max_tools,
         )
         .await
         .map_err(|error| match error {
@@ -109,11 +110,9 @@ pub async fn discover_hosted_mcp_package_with_policy(
         )));
     }
     if let Some(safety) = safety
-        && matches!(
-            safety.admit(&output.tools),
-            crate::McpCatalogAdmission::Rejected { .. }
-        )
+        && let crate::McpCatalogAdmission::Rejected { report } = safety.admit(&output.tools)
     {
+        tracing::warn!(?report, "hosted MCP catalog rejected by safety policy");
         return Err(HostedMcpDiscoveryError::Permanent(
             "hosted MCP catalog rejected by safety policy".to_string(),
         ));
@@ -123,3 +122,130 @@ pub async fn discover_hosted_mcp_package_with_policy(
 }
 
 pub use ironclaw_extensions::is_hosted_http_mcp_package;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, PackageRootBinding};
+    use ironclaw_host_api::{
+        InvocationId, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+        UserId,
+    };
+
+    struct TwoToolEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for TwoToolEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).map_err(|_| {
+                RuntimeHttpEgressError::Request {
+                    reason: "invalid_json_rpc_body".to_string(),
+                    request_bytes: request.body.len() as u64,
+                    response_bytes: 0,
+                }
+            })?;
+            let method =
+                body["method"]
+                    .as_str()
+                    .ok_or_else(|| RuntimeHttpEgressError::Request {
+                        reason: "missing_json_rpc_method".to_string(),
+                        request_bytes: request.body.len() as u64,
+                        response_bytes: 0,
+                    })?;
+            let result = match method {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "test", "version": "1"}
+                }),
+                "notifications/initialized" => serde_json::json!({}),
+                "tools/list" => serde_json::json!({"tools": [
+                    {"name": "one", "description": "one", "inputSchema": {"type": "object"}},
+                    {"name": "two", "description": "two", "inputSchema": {"type": "object"}}
+                ]}),
+                _ => {
+                    return Err(RuntimeHttpEgressError::Request {
+                        reason: "unexpected_json_rpc_method".to_string(),
+                        request_bytes: request.body.len() as u64,
+                        response_bytes: 0,
+                    });
+                }
+            };
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("Mcp-Session-Id".to_string(), "session-1".to_string()),
+                ],
+                body: serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": result,
+                }))
+                .map_err(|_| RuntimeHttpEgressError::Request {
+                    reason: "serialize_json_rpc_response".to_string(),
+                    request_bytes: request.body.len() as u64,
+                    response_bytes: 0,
+                })?,
+                saved_body: None,
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            })
+        }
+    }
+
+    fn package_with_max_tools(max_tools: u32) -> ExtensionPackage {
+        let manifest = format!(
+            r#"schema_version = "reborn.extension_manifest.v3"
+id = "mcp-limit-test"
+name = "MCP limit test"
+version = "0.1.0"
+description = "fixture"
+trust = "third_party"
+
+[mcp]
+server = "https://mcp.example.test/mcp"
+namespace = "mcp-limit-test"
+max_tools = {max_tools}
+default_permission = "ask"
+effects = ["network"]
+"#
+        );
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
+            manifest,
+            ManifestSource::UserRegistered,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("test port catalog"),
+            None,
+            &crate::product_extension_host_api_contract_registry().expect("test contracts"),
+            PackageRootBinding::Virtual,
+        )
+        .expect("test manifest");
+        crate::hosted_mcp_manifest::available_package(&record)
+            .expect("test package")
+            .package
+    }
+
+    #[tokio::test]
+    async fn discovery_enforces_the_manifest_declared_tool_limit() {
+        let package = package_with_max_tools(1);
+        let scope = ResourceScope::local_default(
+            UserId::new("mcp-limit-user").expect("test user"),
+            InvocationId::new(),
+        )
+        .expect("test scope");
+
+        let error = discover_hosted_mcp_package(&package, 1, scope, Arc::new(TwoToolEgress))
+            .await
+            .expect_err("two tools must exceed the manifest's max_tools of one");
+
+        assert!(
+            matches!(error, HostedMcpDiscoveryError::Permanent(reason) if reason.contains("too_many_tools"))
+        );
+    }
+}
