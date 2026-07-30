@@ -50,6 +50,7 @@ function useExtensionsForTest({ extensions, registry }) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    registerCustomMcp: () => {},
     // The real surface-taxonomy helper, so grouping matches production.
     hasChannelSurface,
     removeExtension: () => {},
@@ -176,6 +177,7 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    registerCustomMcp: () => {},
     // The real surface-taxonomy helper, so grouping matches production.
     hasChannelSurface,
     removeExtension: () => {},
@@ -352,12 +354,70 @@ function installMutationHarness(authoritativeExtension) {
   context.globalThis.__testExports.useExtensions();
   return {
     installConfig: mutationConfigs[0],
+    registerConfig: mutationConfigs[1],
     openCalls,
     refetches,
     setupRequests,
     onNeedsSetup: (request) => setupRequests.push(request),
   };
 }
+
+test("custom MCP registration follows returned package_ref into setup", async () => {
+  const authoritativeExtension = {
+    package_ref: { kind: "extension", id: "mcp-linear" },
+    display_name: "Linear MCP",
+    installation_state: "setup_needed",
+    surfaces: [{ kind: "auth" }],
+  };
+  const harness = installMutationHarness(authoritativeExtension);
+  const setupRequests = [];
+
+  await harness.registerConfig.onSuccess(
+    {
+      success: true,
+      package_ref: { kind: "extension", id: "mcp-linear" },
+      phase: "setup_needed",
+    },
+    {
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onNeedsSetup: (extension) => setupRequests.push(extension),
+    },
+  );
+
+  assert.equal(setupRequests.length, 1);
+  assert.equal(setupRequests[0].packageRef.id, "mcp-linear");
+  assert.deepEqual(harness.refetches, ["extensions", "extension-registry"]);
+});
+
+test("custom MCP active result closes through onRegistered and does not open setup", async () => {
+  const authoritativeExtension = {
+    package_ref: { kind: "extension", id: "mcp-public" },
+    display_name: "Public MCP",
+    installation_state: "active",
+    surfaces: [{ kind: "tool" }],
+  };
+  const harness = installMutationHarness(authoritativeExtension);
+  const registered = [];
+  const setupRequests = [];
+
+  await harness.registerConfig.onSuccess(
+    {
+      success: true,
+      package_ref: { kind: "extension", id: "mcp-public" },
+      phase: "active",
+    },
+    {
+      desiredId: "public",
+      desiredName: "Public MCP",
+      onNeedsSetup: (extension) => setupRequests.push(extension),
+      onRegistered: (extension) => registered.push(extension),
+    },
+  );
+
+  assert.deepEqual(registered, [null]);
+  assert.deepEqual(setupRequests, []);
+});
 
 test("install refreshes the authoritative projection before opening setup", async () => {
   const packageRef = { kind: "extension", id: "notion" };

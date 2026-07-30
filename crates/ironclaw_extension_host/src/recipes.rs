@@ -13,9 +13,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
-use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::VendorAuthRecipe;
+use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
+use ironclaw_host_api::{ExtensionId, VendorAuthRecipe};
 
 use crate::SnapshotWatch;
 
@@ -59,6 +60,9 @@ pub fn unified_vendor_recipes<'a>(
                                 vendor,
                                 recipe: recipe.clone(),
                                 token_exchange_resource: resource.clone(),
+                                protected_resource_metadata_url: surface
+                                    .protected_resource_metadata_url
+                                    .clone(),
                             },
                         ),
                     );
@@ -85,11 +89,71 @@ pub fn unified_vendor_recipes<'a>(
                     if existing.token_exchange_resource.is_none() {
                         existing.token_exchange_resource = resource.clone();
                     }
+                    if existing.protected_resource_metadata_url.is_none() {
+                        existing.protected_resource_metadata_url =
+                            surface.protected_resource_metadata_url.clone();
+                    }
                 }
             }
         }
     }
     Ok(unified.into_values().map(|(_, recipe)| recipe).collect())
+}
+
+/// Resolve one recipe from exactly one manifest. A caller can never borrow a
+/// same-named vendor recipe from another installed extension.
+fn recipe_for_manifest(
+    manifest: &ResolvedExtensionManifest,
+    vendor: &str,
+) -> Option<ResolvedVendorAuthRecipe> {
+    let surface = manifest
+        .auth
+        .iter()
+        .find(|surface| surface.vendor.as_str() == vendor)?;
+    let recipe = surface.recipe.clone()?;
+    Some(ResolvedVendorAuthRecipe {
+        vendor: vendor.to_string(),
+        recipe,
+        token_exchange_resource: manifest.mcp.as_ref().map(|mcp| mcp.server.clone()),
+        protected_resource_metadata_url: surface.protected_resource_metadata_url.clone(),
+    })
+}
+
+/// Requester-bound resolver over the durable installation manifest source.
+///
+/// This deliberately reads the existing installation store instead of a
+/// recipe sidecar or a vendor-global registry. Store failures and missing
+/// manifests fail closed because a recipe is authorization-sensitive input.
+#[derive(Clone)]
+pub struct InstalledManifestAuthRecipeResolver {
+    store: Arc<dyn ExtensionInstallationStorePort>,
+}
+
+impl std::fmt::Debug for InstalledManifestAuthRecipeResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InstalledManifestAuthRecipeResolver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstalledManifestAuthRecipeResolver {
+    pub fn new(store: Arc<dyn ExtensionInstallationStorePort>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
+        let requester_extension = requester_extension?;
+        let record = self.store.get_manifest(requester_extension).await.ok()??;
+        recipe_for_manifest(record.resolved(), vendor)
+    }
 }
 
 /// [`AuthRecipeResolver`] over the live active snapshot, with a fallback
@@ -117,29 +181,23 @@ impl SnapshotAuthRecipeResolver {
     }
 }
 
+#[async_trait]
 impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
-    fn recipe_for_vendor(&self, vendor: &str) -> Option<ResolvedVendorAuthRecipe> {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
+        let requester_extension = requester_extension?;
         let snapshot = self.watch.current();
-        let manifests: Vec<Arc<ResolvedExtensionManifest>> = snapshot
-            .extension_ids()
-            .into_iter()
-            .filter_map(|id| snapshot.extension(&id))
-            .map(|extension| Arc::clone(&extension.resolved))
-            .collect();
-        match unified_vendor_recipes(manifests.iter().map(Arc::as_ref)) {
-            Ok(recipes) => {
-                if let Some(recipe) = recipes.into_iter().find(|recipe| recipe.vendor == vendor) {
-                    return Some(recipe);
-                }
-            }
-            Err(conflict) => {
-                // Activation-time conflict checks should have prevented this;
-                // fail closed for the conflicting vendor, still allow the
-                // fallback catalog to answer.
-                tracing::warn!(%conflict, "active snapshot carries conflicting vendor recipes");
-            }
+        if let Some(extension) = snapshot.extension(requester_extension.as_str())
+            && let Some(recipe) = recipe_for_manifest(&extension.resolved, vendor)
+        {
+            return Some(recipe);
         }
-        self.fallback.recipe_for_vendor(vendor)
+        self.fallback
+            .resolve(Some(requester_extension), vendor)
+            .await
     }
 }
 
@@ -176,7 +234,8 @@ mod tests {
             runtime: ironclaw_extensions::ExtensionRuntimeV2::FirstParty {
                 service: format!("{extension}/v1"),
             },
-            root: None,
+            root_binding: ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
+            initial_preparation: ironclaw_extensions::PreparationRequirement::Ready,
             mcp: None,
             tools: Vec::new(),
             channel: None,
@@ -186,6 +245,7 @@ mod tests {
                 vendor: ironclaw_host_api::VendorId::new(vendor).expect("vendor id"),
                 setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
                 recipe: Some(recipe),
+                protected_resource_metadata_url: None,
             }],
             host_apis: Vec::new(),
             section_surfaces: Vec::new(),
@@ -223,5 +283,17 @@ mod tests {
         assert_eq!(error.vendor, "vendorco");
         assert_eq!(error.first_extension, "mail-ext");
         assert_eq!(error.second_extension, "docs-ext");
+    }
+
+    #[test]
+    fn requester_manifest_recipe_lookup_does_not_cross_vendor() {
+        let manifest = manifest_with_recipe(
+            "calendar-ext",
+            "calendar-vendor",
+            oauth_recipe(&["calendar:read"], "https://vendor.example/token"),
+        );
+
+        assert!(recipe_for_manifest(&manifest, "calendar-vendor").is_some());
+        assert!(recipe_for_manifest(&manifest, "other-vendor").is_none());
     }
 }

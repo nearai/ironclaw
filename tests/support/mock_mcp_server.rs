@@ -145,13 +145,6 @@ struct MockState {
     base_url: String,
     /// Tool definitions served by tools/list.
     tools: Vec<McpToolDef>,
-    /// When `Some(n)`, `tools/list` is served paginated at `n` tools per page:
-    /// a response carries at most `n` tools plus a `nextCursor` string when
-    /// more remain, and honors an incoming `cursor` request param (an opaque
-    /// stringified page-start index) to resume from that offset. `None`
-    /// (default) serves the whole `tools` vec in one response, no cursor —
-    /// today's (pre-pagination-support) behavior.
-    page_size: Option<usize>,
     /// Pre-configured tool call responses keyed by tool name.
     /// Multiple calls to the same tool return responses in order.
     tool_responses: HashMap<String, Vec<serde_json::Value>>,
@@ -200,38 +193,12 @@ struct McpToolDef {
 /// `tool_responses` configures what `tools/call` returns for each tool name.
 /// Multiple responses for the same tool are returned in order.
 pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> MockMcpServer {
-    let (tools, response_map) = build_tools_and_responses(&tool_responses);
-    spawn_server(tools, response_map, None).await
-}
-
-/// Same as [`start_mock_mcp_server`], but `tools/list` is served paginated at
-/// `page_size` tools per page: each response carries at most `page_size`
-/// tools plus a `nextCursor` string when more tools remain, and an incoming
-/// `cursor` request param resumes from that page. Use this to exercise (or
-/// pin the absence of) client-side `tools/list` pagination handling — see
-/// `parse_tools_list_result` (`crates/ironclaw_mcp/src/lib.rs`), which today
-/// reads only the first response's `tools` array and never inspects
-/// `nextCursor`.
-///
-/// Panics if `page_size` is 0 (a page size of zero can never terminate
-/// pagination and almost certainly indicates a test bug).
-pub async fn start_mock_mcp_server_paginated(
-    tool_responses: Vec<MockToolResponse>,
-    page_size: usize,
-) -> MockMcpServer {
-    assert!(page_size > 0, "page_size must be at least 1");
-    let (tools, response_map) = build_tools_and_responses(&tool_responses);
-    spawn_server(tools, response_map, Some(page_size)).await
-}
-
-fn build_tools_and_responses(
-    tool_responses: &[MockToolResponse],
-) -> (Vec<McpToolDef>, HashMap<String, Vec<serde_json::Value>>) {
+    // Build tool definitions and response map.
     let mut tools = Vec::new();
     let mut response_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     let mut seen_tools = std::collections::HashSet::new();
 
-    for tr in tool_responses {
+    for tr in &tool_responses {
         if seen_tools.insert(tr.name.clone()) {
             tools.push(McpToolDef {
                 name: tr.name.clone(),
@@ -245,14 +212,7 @@ fn build_tools_and_responses(
             .or_default()
             .push(tr.content.clone());
     }
-    (tools, response_map)
-}
 
-async fn spawn_server(
-    tools: Vec<McpToolDef>,
-    response_map: HashMap<String, Vec<serde_json::Value>>,
-    page_size: Option<usize>,
-) -> MockMcpServer {
     // Bind to a random port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -263,7 +223,6 @@ async fn spawn_server(
     let state = Arc::new(MockState {
         base_url: base_url.clone(),
         tools,
-        page_size,
         tool_responses: response_map,
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
@@ -336,7 +295,57 @@ pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockM
             .push(spec.content.clone());
     }
 
-    spawn_server(tools, response_map, None).await
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind mock MCP server");
+    let addr: SocketAddr = listener.local_addr().expect("no local addr");
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let state = Arc::new(MockState {
+        base_url: base_url.clone(),
+        tools,
+        tool_responses: response_map,
+        tool_response_idx: std::sync::Mutex::new(HashMap::new()),
+        recorded_requests: std::sync::Mutex::new(Vec::new()),
+        session_counter: std::sync::Mutex::new(0),
+        force_status: std::sync::Mutex::new(None),
+        force_tool_call_error: std::sync::Mutex::new(None),
+        sse_framing: std::sync::Mutex::new(false),
+    });
+
+    let app = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(handle_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(handle_auth_server_metadata),
+        )
+        .route("/register", post(handle_register))
+        .route("/authorize", get(handle_authorize))
+        .route("/token", post(handle_token))
+        .route("/mcp", post(handle_mcp))
+        .with_state(Arc::clone(&state));
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("mock MCP server failed");
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    MockMcpServer {
+        base_url,
+        state,
+        shutdown_tx: Some(shutdown_tx),
+        handle: Some(handle),
+    }
 }
 
 // ── OAuth discovery endpoints ───────────────────────────────────────────
@@ -500,54 +509,18 @@ async fn handle_mcp(
             })
         }
         "tools/list" => {
-            match state.page_size {
-                None => {
-                    // Unpaginated (default/legacy): serve the whole catalog in
-                    // one response, no `nextCursor` — today's shape.
-                    let tools: Vec<serde_json::Value> = state
-                        .tools
-                        .iter()
-                        .map(|t| serde_json::to_value(t).unwrap())
-                        .collect();
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req.id,
-                        "result": {
-                            "tools": tools
-                        }
-                    })
+            let tools: Vec<serde_json::Value> = state
+                .tools
+                .iter()
+                .map(|t| serde_json::to_value(t).unwrap())
+                .collect();
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "result": {
+                    "tools": tools
                 }
-                Some(page_size) => {
-                    // Cursor is the opaque stringified start offset into
-                    // `state.tools`, per the MCP spec shape: the server mints
-                    // it and the client is only required to echo it back
-                    // unmodified — no cursor means "start from the top".
-                    let offset: usize = req
-                        .params
-                        .as_ref()
-                        .and_then(|p| p.get("cursor"))
-                        .and_then(|c| c.as_str())
-                        .and_then(|c| c.parse().ok())
-                        .unwrap_or(0);
-                    let page_end = (offset + page_size).min(state.tools.len());
-                    let page: Vec<serde_json::Value> = state
-                        .tools
-                        .get(offset..page_end)
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|t| serde_json::to_value(t).unwrap())
-                        .collect();
-                    let mut result = serde_json::json!({ "tools": page });
-                    if page_end < state.tools.len() {
-                        result["nextCursor"] = serde_json::Value::String(page_end.to_string());
-                    }
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req.id,
-                        "result": result
-                    })
-                }
-            }
+            })
         }
         "tools/call" => {
             let tool_name = req

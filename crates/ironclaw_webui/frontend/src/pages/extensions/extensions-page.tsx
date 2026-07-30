@@ -5,6 +5,7 @@ import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
 import { ConfigureModal } from "./components/configure-modal";
+import { CustomMcpRegistrationModal } from "./components/custom-mcp-registration-modal";
 import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
@@ -84,6 +85,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   const t = useT();
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
+  const [registeringCustomMcp, setRegisteringCustomMcp] = React.useState(false);
   const [extensionToRemove, setExtensionToRemove] = React.useState(null);
   const configureTriggerRef = React.useRef(
     /** @type {FocusTarget | null} */ (null),
@@ -106,6 +108,8 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     actionResult,
     clearResult,
     install,
+    registerCustomMcp,
+    isRegisteringCustomMcp,
     remove,
     isRemoving,
     importTool,
@@ -136,6 +140,10 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   );
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
+  const handleCustomMcpSetup = React.useCallback((extension) => {
+    setRegisteringCustomMcp(false);
+    handleConfigure(extension, null);
+  }, [handleConfigure]);
   const handleConfirmRemove = React.useCallback(() => {
     if (!extensionToRemove) return;
     remove(extensionToRemove, {
@@ -238,6 +246,15 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="space-y-5">
           <ActionToast result={actionResult} onDismiss={clearResult} />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+              onClick={() => setRegisteringCustomMcp(true)}
+            >
+              {t("extensions.addCustomMcp")}
+            </button>
+          </div>
           {secondaryError &&
           (<CatalogErrorBanner
             isCatalogError={tab !== "registry"}
@@ -257,6 +274,13 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           returnFocusTo={configureTriggerRef.current}
         />
       )}
+      <CustomMcpRegistrationModal
+        open={registeringCustomMcp}
+        onClose={() => setRegisteringCustomMcp(false)}
+        onRegister={registerCustomMcp}
+        isRegistering={isRegisteringCustomMcp}
+        onSetup={handleCustomMcpSetup}
+      />
       <ConfirmDialog
         open={Boolean(extensionToRemove)}
         title={`${t("common.remove")}: ${

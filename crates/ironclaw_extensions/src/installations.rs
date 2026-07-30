@@ -18,9 +18,11 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
-use crate::resolved::ResolvedExtensionManifest;
+use crate::resolved::{PackageRootBinding, PreparationRequirement, ResolvedExtensionManifest};
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
+use crate::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -163,6 +165,7 @@ pub struct ExtensionManifestRecord {
     resolved: ResolvedExtensionManifest,
     manifest_hash: Option<ManifestHash>,
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    definition_retention: PackageDefinitionRetention,
 }
 
 /// Minimal probe used to dispatch the single parse entry point on the
@@ -177,13 +180,8 @@ impl ExtensionManifestRecord {
     /// The single manifest parse entry point: dispatches on the declared
     /// `schema_version` (v2 or v3) and normalizes both into the same
     /// resolved model.
-    /// `root` is the extension's package root, when the caller already knows
-    /// it (e.g. materializing a filesystem/import package at a stable path).
-    /// It is an explicit required parameter — not a `with_root()` builder —
-    /// so every call site is forced to decide `Some(root)` or `None` rather
-    /// than silently inheriting a default a site forgot to set. `None`
-    /// callers accept the loader's historical `/system/extensions/{id}`
-    /// fabrication (`CompositionExtensionLoader::load`).
+    /// `root_binding` forces callers to distinguish a materialized package, a
+    /// remote-only package, and the legacy loader compatibility state.
     pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
@@ -191,6 +189,30 @@ impl ExtensionManifestRecord {
         manifest_hash: Option<ManifestHash>,
         contracts: &HostApiContractRegistry,
         root: Option<VirtualPath>,
+    ) -> Result<Self, ExtensionInstallationError> {
+        let root_binding = root.map_or(
+            PackageRootBinding::FabricateOnLoad,
+            PackageRootBinding::Materialized,
+        );
+        Self::from_toml_with_root_binding(
+            raw_toml,
+            source,
+            host_port_catalog,
+            manifest_hash,
+            contracts,
+            root_binding,
+        )
+    }
+
+    /// Parse while preserving the full package-root contract, including a
+    /// virtual definition which must never fabricate a filesystem root.
+    pub fn from_toml_with_root_binding(
+        raw_toml: impl Into<String>,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        manifest_hash: Option<ManifestHash>,
+        contracts: &HostApiContractRegistry,
+        root_binding: PackageRootBinding,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
         let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
@@ -211,13 +233,14 @@ impl ExtensionManifestRecord {
                 let resolved = ResolvedExtensionManifest::from_v2(&manifest);
                 (manifest, resolved)
             };
-        resolved.root = root;
+        resolved.root_binding = root_binding;
         Ok(Self {
             raw_toml,
             manifest,
             resolved,
             manifest_hash,
             removal_cleanup_requirements: Vec::new(),
+            definition_retention: PackageDefinitionRetention::RemoveWithLastInstallation,
         })
     }
 
@@ -237,6 +260,7 @@ impl ExtensionManifestRecord {
             resolved,
             manifest_hash,
             removal_cleanup_requirements: Vec::new(),
+            definition_retention: PackageDefinitionRetention::RemoveWithLastInstallation,
         })
     }
 
@@ -248,6 +272,16 @@ impl ExtensionManifestRecord {
         requirements: Vec<ExtensionRemovalCleanupRequirement>,
     ) -> Self {
         self.removal_cleanup_requirements = requirements;
+        self
+    }
+
+    pub fn with_initial_preparation(mut self, preparation: PreparationRequirement) -> Self {
+        self.resolved.initial_preparation = preparation;
+        self
+    }
+
+    pub fn with_definition_retention(mut self, retention: PackageDefinitionRetention) -> Self {
+        self.definition_retention = retention;
         self
     }
 
@@ -275,6 +309,14 @@ impl ExtensionManifestRecord {
     pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
         &self.removal_cleanup_requirements
     }
+
+    pub fn initial_preparation(&self) -> PreparationRequirement {
+        self.resolved.initial_preparation
+    }
+
+    pub fn definition_retention(&self) -> PackageDefinitionRetention {
+        self.definition_retention
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -290,6 +332,58 @@ impl ExtensionInstallationId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Opaque identity for one lifetime of an installation aggregate.
+///
+/// Reinstalling the same extension gets a different incarnation, preventing
+/// a delayed preparation finalizer from committing into the replacement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InstallationIncarnationId(String);
+
+impl InstallationIncarnationId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        let value = value.into();
+        validate_nonempty_noncontrol("installation_incarnation_id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn fresh() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for InstallationIncarnationId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Whether an installation can be projected as an ordinary ready package.
+///
+/// Pending preparation's evidence remains the aggregate's embedded resolved
+/// manifest. That keeps this generic store independent of hosted-MCP or any
+/// other runtime-specific preparation policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallationPreparationState {
+    #[default]
+    Ready,
+    PendingPreparation,
+}
+
+impl InstallationPreparationState {
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
     }
 }
 
@@ -549,6 +643,10 @@ pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
     manifest_ref: ExtensionManifestRef,
+    #[serde(default)]
+    preparation_state: InstallationPreparationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incarnation_id: Option<InstallationIncarnationId>,
     credential_bindings: Vec<ExtensionCredentialBinding>,
     updated_at: DateTime<Utc>,
     // `Tenant` is a read-only compatibility shape for records written before
@@ -565,6 +663,8 @@ pub struct ExtensionInstallationPersistedParts {
     pub installation_id: ExtensionInstallationId,
     pub extension_id: ExtensionId,
     pub manifest_ref: ExtensionManifestRef,
+    pub preparation_state: InstallationPreparationState,
+    pub incarnation_id: Option<InstallationIncarnationId>,
     pub credential_bindings: Vec<ExtensionCredentialBinding>,
     pub updated_at: DateTime<Utc>,
     pub owner: InstallationOwner,
@@ -583,10 +683,34 @@ impl ExtensionInstallation {
             installation_id,
             extension_id,
             manifest_ref,
+            preparation_state: InstallationPreparationState::Ready,
+            incarnation_id: Some(InstallationIncarnationId::fresh()),
             credential_bindings,
             updated_at,
             owner,
         })
+    }
+
+    /// Create a fresh aggregate which must be prepared before ordinary
+    /// activation. The new incarnation makes an older finalizer harmless.
+    pub fn new_pending(
+        installation_id: ExtensionInstallationId,
+        extension_id: ExtensionId,
+        manifest_ref: ExtensionManifestRef,
+        credential_bindings: Vec<ExtensionCredentialBinding>,
+        updated_at: DateTime<Utc>,
+        owner: InstallationOwner,
+    ) -> Result<Self, ExtensionInstallationError> {
+        let mut installation = Self::new(
+            installation_id,
+            extension_id,
+            manifest_ref,
+            credential_bindings,
+            updated_at,
+            owner,
+        )?;
+        installation.preparation_state = InstallationPreparationState::PendingPreparation;
+        Ok(installation)
     }
 
     /// Reconstruct an installation with all state read from persistence.
@@ -608,6 +732,8 @@ impl ExtensionInstallation {
             installation_id: parts.installation_id,
             extension_id: parts.extension_id,
             manifest_ref: parts.manifest_ref,
+            preparation_state: parts.preparation_state,
+            incarnation_id: parts.incarnation_id,
             credential_bindings: parts.credential_bindings,
             updated_at: parts.updated_at,
             owner: parts.owner,
@@ -624,6 +750,14 @@ impl ExtensionInstallation {
 
     pub fn manifest_ref(&self) -> &ExtensionManifestRef {
         &self.manifest_ref
+    }
+
+    pub fn preparation_state(&self) -> InstallationPreparationState {
+        self.preparation_state
+    }
+
+    pub fn incarnation_id(&self) -> Option<&InstallationIncarnationId> {
+        self.incarnation_id.as_ref()
     }
 
     pub fn credential_bindings(&self) -> &[ExtensionCredentialBinding] {
@@ -658,6 +792,10 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             installation_id: ExtensionInstallationId,
             extension_id: ExtensionId,
             manifest_ref: ExtensionManifestRef,
+            #[serde(default)]
+            preparation_state: InstallationPreparationState,
+            #[serde(default)]
+            incarnation_id: Option<InstallationIncarnationId>,
             credential_bindings: Vec<ExtensionCredentialBinding>,
             // The released aggregate row carries a diagnostic `health`
             // object. It is not modelled here -- the host's activation record
@@ -687,6 +825,8 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             installation_id: wire.installation_id,
             extension_id: wire.extension_id,
             manifest_ref: wire.manifest_ref,
+            preparation_state: wire.preparation_state,
+            incarnation_id: wire.incarnation_id,
             credential_bindings: wire.credential_bindings,
             updated_at: wire.updated_at,
             owner: wire.owner,
@@ -702,6 +842,29 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
 /// semantics when projecting their host-api sections from these records.
 #[async_trait]
 pub trait ExtensionInstallationStorePort: Send + Sync {
+    /// Immutably admit one package definition into the explicit catalog.
+    /// Replaying the exact same definition is idempotent; a different
+    /// definition for the same extension id is rejected without mutation.
+    async fn admit_package_definition(
+        &self,
+        record: ExtensionManifestRecord,
+    ) -> Result<PackageDefinitionAdmissionOutcome, ExtensionInstallationError> {
+        let _ = record;
+        Err(store_unavailable_error(
+            "extension installation store does not implement package definition admission",
+        ))
+    }
+
+    /// Read only definitions admitted through [`Self::admit_package_definition`].
+    /// Legacy manifest rows and installation-embedded manifests are excluded.
+    async fn get_registered_package_definition(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+        let _ = extension_id;
+        Ok(None)
+    }
+
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError>;
@@ -740,6 +903,46 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError>;
 
+    /// Conditionally commit a prepared manifest. Implementations must reject
+    /// a stale incarnation or pending-manifest reference without publication.
+    async fn finalize_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_pending_manifest_ref: &ExtensionManifestRef,
+        finalized_manifest: ExtensionManifestRecord,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        let _ = (
+            installation_id,
+            incarnation_id,
+            expected_pending_manifest_ref,
+            finalized_manifest,
+        );
+        Err(store_unavailable_error(
+            "extension installation store does not implement preparation finalization",
+        ))
+    }
+
+    /// Conditionally replace one pending manifest with another while keeping
+    /// the installation pending and non-callable.
+    async fn checkpoint_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_pending_manifest_ref: &ExtensionManifestRef,
+        next_pending_manifest: ExtensionManifestRecord,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        let _ = (
+            installation_id,
+            incarnation_id,
+            expected_pending_manifest_ref,
+            next_pending_manifest,
+        );
+        Err(store_unavailable_error(
+            "extension installation store does not implement preparation checkpointing",
+        ))
+    }
+
     async fn activate_membership(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -774,6 +977,22 @@ impl<T> ExtensionInstallationStorePort for Arc<T>
 where
     T: ExtensionInstallationStorePort + ?Sized,
 {
+    async fn admit_package_definition(
+        &self,
+        record: ExtensionManifestRecord,
+    ) -> Result<PackageDefinitionAdmissionOutcome, ExtensionInstallationError> {
+        (**self).admit_package_definition(record).await
+    }
+
+    async fn get_registered_package_definition(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+        (**self)
+            .get_registered_package_definition(extension_id)
+            .await
+    }
+
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -824,6 +1043,40 @@ where
         (**self).upsert_installation(installation).await
     }
 
+    async fn finalize_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_pending_manifest_ref: &ExtensionManifestRef,
+        finalized_manifest: ExtensionManifestRecord,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        (**self)
+            .finalize_preparation(
+                installation_id,
+                incarnation_id,
+                expected_pending_manifest_ref,
+                finalized_manifest,
+            )
+            .await
+    }
+
+    async fn checkpoint_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_pending_manifest_ref: &ExtensionManifestRef,
+        next_pending_manifest: ExtensionManifestRecord,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        (**self)
+            .checkpoint_preparation(
+                installation_id,
+                incarnation_id,
+                expected_pending_manifest_ref,
+                next_pending_manifest,
+            )
+            .await
+    }
+
     async fn activate_membership(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -859,6 +1112,7 @@ where
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations";
 const MANIFEST_RECORD_KIND: &str = "extension_manifest_record";
+const REGISTERED_DEFINITION_RECORD_KIND: &str = "extension_registered_definition_record";
 const INSTALLATION_RECORD_KIND: &str = "extension_installation_record";
 const EXTENSION_STATE_V2_SCHEMA: &str = "extension_state.v2";
 const INSTALLATION_RECORD_KIND_V2: &str = "extension_installation_record_v2";
@@ -880,16 +1134,42 @@ const FILESYSTEM_CAS_RETRIES: usize = 5;
 struct V2MutationLease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     member: Option<UserId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preparation: Option<V2PreparationLease>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V2PreparationLease {
+    incarnation_id: InstallationIncarnationId,
+    expected_manifest_ref: ExtensionManifestRef,
 }
 
 impl V2MutationLease {
     fn update() -> Self {
-        Self { member: None }
+        Self {
+            member: None,
+            preparation: None,
+        }
     }
 
     fn member_removal(user_id: UserId) -> Self {
         Self {
             member: Some(user_id),
+            preparation: None,
+        }
+    }
+
+    fn preparation(
+        incarnation_id: InstallationIncarnationId,
+        expected_manifest_ref: ExtensionManifestRef,
+    ) -> Self {
+        Self {
+            member: None,
+            preparation: Some(V2PreparationLease {
+                incarnation_id,
+                expected_manifest_ref,
+            }),
         }
     }
 }
@@ -905,6 +1185,10 @@ struct V2InstallationRecord {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
     manifest: WireManifestRecord,
+    #[serde(default)]
+    preparation_state: InstallationPreparationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incarnation_id: Option<InstallationIncarnationId>,
     legacy_tenant_owner: bool,
     updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1154,14 +1438,14 @@ impl ExtensionInstallationStore {
                     complete = true;
                     break;
                 }
-                let record = ExtensionManifestRecord::from_toml(
+                let record = ExtensionManifestRecord::from_toml_with_root_binding(
                     wire.raw_toml,
                     wire.source.into_manifest_source(),
                     &self.host_ports,
                     wire.manifest_hash,
                     &self.contracts,
                     // Legacy pre-REC-1 row: no root was ever persisted for it.
-                    None,
+                    PackageRootBinding::FabricateOnLoad,
                 )?
                 .with_removal_cleanup_requirements(wire.removal_cleanup_requirements);
                 match self
@@ -1196,6 +1480,10 @@ impl ExtensionInstallationStore {
         child_path(&self.root, "manifests")
     }
 
+    fn registered_definitions_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(&self.root, "registered-definitions")
+    }
+
     fn installations_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
         child_path(&self.root, "installations")
     }
@@ -1222,6 +1510,16 @@ impl ExtensionInstallationStore {
     ) -> Result<VirtualPath, ExtensionInstallationError> {
         child_path(
             &self.manifests_root()?,
+            &format!("{}.json", row_token(extension_id.as_str())),
+        )
+    }
+
+    fn registered_definition_path(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(
+            &self.registered_definitions_root()?,
             &format!("{}.json", row_token(extension_id.as_str())),
         )
     }
@@ -1657,6 +1955,204 @@ impl ExtensionInstallationStore {
         .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
+    async fn take_v2_preparation_lease(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let incarnation_id = incarnation_id.clone();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let incarnation_id = incarnation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if !record.is_visible() {
+                        return Err(ExtensionInstallationError::MembershipMutationInProgress {
+                            installation_id,
+                        });
+                    }
+                    if record.preparation_state != InstallationPreparationState::PendingPreparation
+                        || record.incarnation_id.as_ref() != Some(&incarnation_id)
+                        || record.manifest_ref() != expected_manifest_ref
+                    {
+                        return Err(
+                            ExtensionInstallationError::PreparationFinalizationRejected {
+                                installation_id,
+                            },
+                        );
+                    }
+                    record.lease = Some(V2MutationLease::preparation(
+                        incarnation_id,
+                        expected_manifest_ref,
+                    ));
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
+    }
+
+    async fn finish_v2_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+        finalized_manifest: &ExtensionManifestRecord,
+    ) -> Result<V2InstallationRecord, ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let incarnation_id = incarnation_id.clone();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        let finalized_wire = WireManifestRecord::from(finalized_manifest);
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let incarnation_id = incarnation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                let finalized_wire = finalized_wire.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    let lease_matches = record.lease.as_ref().and_then(|lease| {
+                        lease.preparation.as_ref().map(|preparation| {
+                            preparation.incarnation_id == incarnation_id
+                                && preparation.expected_manifest_ref == expected_manifest_ref
+                        })
+                    }) == Some(true);
+                    let finalized_extension_id = finalized_wire
+                        .resolved
+                        .as_ref()
+                        .ok_or_else(|| {
+                            invalid_installation_error("finalized manifest was not resolved")
+                        })?
+                        .id
+                        .clone();
+                    if record.installation_id != installation_id
+                        || record.extension_id != finalized_extension_id
+                        || !lease_matches
+                        || record.preparation_state
+                            != InstallationPreparationState::PendingPreparation
+                        || record.incarnation_id.as_ref() != Some(&incarnation_id)
+                        || record.manifest_ref() != expected_manifest_ref
+                    {
+                        return Err(
+                            ExtensionInstallationError::PreparationFinalizationRejected {
+                                installation_id,
+                            },
+                        );
+                    }
+                    record.manifest = finalized_wire;
+                    record.preparation_state = InstallationPreparationState::Ready;
+                    record.lease = None;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record.clone(), record))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
+    }
+
+    async fn finish_v2_preparation_checkpoint(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+        next_pending_manifest: &ExtensionManifestRecord,
+    ) -> Result<V2InstallationRecord, ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let incarnation_id = incarnation_id.clone();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        let next_wire = WireManifestRecord::from(next_pending_manifest);
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let incarnation_id = incarnation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                let next_wire = next_wire.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    let lease_matches = record
+                        .lease
+                        .as_ref()
+                        .and_then(|lease| lease.preparation.as_ref())
+                        .is_some_and(|preparation| {
+                            preparation.incarnation_id == incarnation_id
+                                && preparation.expected_manifest_ref == expected_manifest_ref
+                        });
+                    let current_resolved = record.manifest.resolved.as_ref().ok_or_else(|| {
+                        invalid_installation_error("pending manifest was not resolved")
+                    })?;
+                    let next_resolved = next_wire.resolved.as_ref().ok_or_else(|| {
+                        invalid_installation_error("checkpoint manifest was not resolved")
+                    })?;
+                    if record.installation_id != installation_id
+                        || record.extension_id != next_resolved.id
+                        || record.manifest.source != next_wire.source
+                        || current_resolved.root_binding != next_resolved.root_binding
+                        || !lease_matches
+                        || record.preparation_state
+                            != InstallationPreparationState::PendingPreparation
+                        || record.incarnation_id.as_ref() != Some(&incarnation_id)
+                        || record.manifest_ref() != expected_manifest_ref
+                    {
+                        return Err(
+                            ExtensionInstallationError::PreparationFinalizationRejected {
+                                installation_id,
+                            },
+                        );
+                    }
+                    record.manifest = next_wire;
+                    record.lease = None;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record.clone(), record))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
+    }
+
     async fn put_v2_installation_core(
         &self,
         installation: &ExtensionInstallation,
@@ -1698,6 +2194,8 @@ impl ExtensionInstallationStore {
                         installation_id: installation.installation_id().clone(),
                         extension_id: installation.extension_id().clone(),
                         manifest: wire,
+                        preparation_state: installation.preparation_state(),
+                        incarnation_id: installation.incarnation_id().cloned(),
                         legacy_tenant_owner: installation.owner().is_tenant(),
                         updated_at: installation.updated_at(),
                         removed_at: None,
@@ -2006,36 +2504,27 @@ impl ExtensionInstallationStore {
                 let installation_id = installation_id.clone();
                 let user_id = user_id.clone();
                 async move {
-                    if let Some(record) = current.as_ref()
-                        && (record.installation_id != installation_id || record.user_id != user_id)
-                    {
-                        return Err(invalid_installation_error(
-                            "v2 membership body identity did not match its key",
-                        ));
+                    if let Some(mut record) = current {
+                        if record.installation_id != installation_id || record.user_id != user_id {
+                            return Err(invalid_installation_error(
+                                "v2 membership body identity did not match its key",
+                            ));
+                        }
+                        let changed = !record.is_active();
+                        record.updated_at = now;
+                        record.removed_at = None;
+                        return Ok(CasApply::new(record, changed));
                     }
-                    let already_active =
-                        current.as_ref().is_some_and(V2MembershipRecord::is_active);
-                    let installed_at = current
-                        .as_ref()
-                        .map(|record| record.installed_at)
-                        .unwrap_or(now);
                     Ok(CasApply::new(
                         V2MembershipRecord {
                             schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                             installation_id,
                             user_id,
-                            installed_at,
-                            updated_at: if already_active {
-                                current
-                                    .as_ref()
-                                    .map(|record| record.updated_at)
-                                    .unwrap_or(now)
-                            } else {
-                                now
-                            },
+                            installed_at: now,
+                            updated_at: now,
                             removed_at: None,
                         },
-                        !already_active,
+                        true,
                     ))
                 }
             },
@@ -2124,13 +2613,19 @@ impl ExtensionInstallationStore {
                 let credential_handle = credential_handle.clone();
                 let secret_handle = secret_handle.clone();
                 async move {
-                    if current.as_ref().is_some_and(|record| {
-                        record.installation_id != installation_id
+                    if let Some(mut record) = current {
+                        if record.installation_id != installation_id
                             || record.credential_handle != credential_handle
-                    }) {
-                        return Err(invalid_installation_error(
-                            "v2 credential binding body identity did not match its key",
-                        ));
+                        {
+                            return Err(invalid_installation_error(
+                                "v2 credential binding body identity did not match its key",
+                            ));
+                        }
+                        record.secret_handle = secret_handle;
+                        record.position = position;
+                        record.updated_at = now;
+                        record.removed_at = None;
+                        return Ok(CasApply::new(record, ()));
                     }
                     Ok(CasApply::new(
                         V2CredentialBindingRecord {
@@ -2139,10 +2634,7 @@ impl ExtensionInstallationStore {
                             credential_handle,
                             secret_handle,
                             position,
-                            created_at: current
-                                .as_ref()
-                                .map(|record| record.created_at)
-                                .unwrap_or(now),
+                            created_at: now,
                             updated_at: now,
                             removed_at: None,
                         },
@@ -2252,11 +2744,16 @@ impl ExtensionInstallationStore {
         user_id: &UserId,
         now: DateTime<Utc>,
     ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+        let Some((_core, _)) = self.load_v2_installation_record(installation_id).await? else {
+            return Err(ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            });
+        };
         let active_memberships = self
             .query_v2_memberships(installation_id)
             .await?
             .into_iter()
-            .filter(V2MembershipRecord::is_active)
+            .filter(|membership| membership.is_active())
             .collect::<Vec<_>>();
         let caller_is_active = active_memberships
             .iter()
@@ -2393,7 +2890,7 @@ impl ExtensionInstallationStore {
         let membership_updated_at = all_memberships.iter().map(|record| record.updated_at).max();
         let memberships = all_memberships
             .into_iter()
-            .filter(V2MembershipRecord::is_active)
+            .filter(|membership| membership.is_active())
             .collect::<Vec<_>>();
         let owner = if core.legacy_tenant_owner {
             InstallationOwner::Tenant
@@ -2408,7 +2905,7 @@ impl ExtensionInstallationStore {
         let binding_updated_at = all_bindings.iter().map(|record| record.updated_at).max();
         let mut bindings = all_bindings
             .into_iter()
-            .filter(V2CredentialBindingRecord::is_active)
+            .filter(|binding| binding.is_active())
             .collect::<Vec<_>>();
         bindings.sort_by(|left, right| {
             left.position
@@ -2432,6 +2929,8 @@ impl ExtensionInstallationStore {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
             manifest_ref: core.manifest_ref(),
+            preparation_state: core.preparation_state,
+            incarnation_id: core.incarnation_id.clone(),
             credential_bindings,
             updated_at,
             owner,
@@ -2702,6 +3201,73 @@ impl ExtensionInstallationStore {
 
 #[async_trait]
 impl ExtensionInstallationStorePort for ExtensionInstallationStore {
+    async fn admit_package_definition(
+        &self,
+        record: ExtensionManifestRecord,
+    ) -> Result<PackageDefinitionAdmissionOutcome, ExtensionInstallationError> {
+        let path = self.registered_definition_path(record.extension_id())?;
+        match self
+            .filesystem
+            .put(
+                &path,
+                entry_for_registered_definition(&record)?,
+                CasExpectation::Absent,
+            )
+            .await
+        {
+            Ok(_) => Ok(PackageDefinitionAdmissionOutcome::Created),
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                let existing = self
+                    .get_registered_package_definition(record.extension_id())
+                    .await?
+                    .ok_or_else(|| {
+                        store_unavailable_error(
+                            "registered package definition disappeared after CAS conflict",
+                        )
+                    })?;
+                if existing == record {
+                    Ok(PackageDefinitionAdmissionOutcome::ExactExisting)
+                } else {
+                    Err(ExtensionInstallationError::PackageDefinitionConflict {
+                        extension_id: record.extension_id().clone(),
+                    })
+                }
+            }
+            Err(error) => Err(store_unavailable("admit package definition")(error)),
+        }
+    }
+
+    async fn get_registered_package_definition(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+        let path = self.registered_definition_path(extension_id)?;
+        let Some(row) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(store_unavailable("load registered package definition"))?
+        else {
+            return Ok(None);
+        };
+        ensure_entry_kind(&row.entry, REGISTERED_DEFINITION_RECORD_KIND, &path)?;
+        let record = row
+            .entry
+            .parse_json::<WireManifestRecord>()
+            .map_err(|error| {
+                corrupt_row("deserialize registered package definition", &path, error)
+            })?
+            .into_manifest_record()?;
+        if record.extension_id() != extension_id {
+            return Err(corrupt_row(
+                "validate registered package definition identity",
+                &path,
+                "row extension id does not match its path",
+            ));
+        }
+        Ok(Some(record))
+    }
+
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -2792,6 +3358,13 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                         installation_id,
                         extension_id,
                         manifest: wire,
+                        preparation_state: current
+                            .as_ref()
+                            .map(|record| record.preparation_state)
+                            .unwrap_or_default(),
+                        incarnation_id: current
+                            .as_ref()
+                            .and_then(|record| record.incarnation_id.clone()),
                         legacy_tenant_owner: current
                             .as_ref()
                             .map(|record| record.legacy_tenant_owner)
@@ -2893,6 +3466,100 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             .put_installation(&installation, CasExpectation::Any)
             .await;
         Ok(())
+    }
+
+    async fn finalize_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_pending_manifest_ref: &ExtensionManifestRef,
+        finalized_manifest: ExtensionManifestRecord,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        self.take_v2_preparation_lease(
+            installation_id,
+            incarnation_id,
+            expected_pending_manifest_ref,
+        )
+        .await?;
+        let core = self
+            .finish_v2_preparation(
+                installation_id,
+                incarnation_id,
+                expected_pending_manifest_ref,
+                &finalized_manifest,
+            )
+            .await?;
+        let installation = self.reconstruct_v2_installation(&core).await?;
+        // The v2 aggregate has committed. Compatibility rows are repaired at
+        // next open, so a projection failure must not make callers undo the
+        // winner or expose a partial publication.
+        let _ = self
+            .put_manifest(&finalized_manifest, CasExpectation::Any)
+            .await;
+        let _ = self
+            .put_installation(&installation, CasExpectation::Any)
+            .await;
+        Ok(installation)
+    }
+
+    async fn checkpoint_preparation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_pending_manifest_ref: &ExtensionManifestRef,
+        next_pending_manifest: ExtensionManifestRecord,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        let next_wire = WireManifestRecord::from(&next_pending_manifest);
+        let Some((current, _)) = self.load_v2_installation_record(installation_id).await? else {
+            return Err(ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            });
+        };
+        let current_resolved = current
+            .manifest
+            .resolved
+            .as_ref()
+            .ok_or_else(|| invalid_installation_error("pending manifest was not resolved"))?;
+        let next_resolved = next_wire
+            .resolved
+            .as_ref()
+            .ok_or_else(|| invalid_installation_error("checkpoint manifest was not resolved"))?;
+        if !current.is_visible()
+            || current.preparation_state != InstallationPreparationState::PendingPreparation
+            || current.incarnation_id.as_ref() != Some(incarnation_id)
+            || current.manifest_ref() != *expected_pending_manifest_ref
+            || current.extension_id != next_resolved.id
+            || current.manifest.source != next_wire.source
+            || current_resolved.root_binding != next_resolved.root_binding
+        {
+            return Err(
+                ExtensionInstallationError::PreparationFinalizationRejected {
+                    installation_id: installation_id.clone(),
+                },
+            );
+        }
+        self.take_v2_preparation_lease(
+            installation_id,
+            incarnation_id,
+            expected_pending_manifest_ref,
+        )
+        .await?;
+        let core = self
+            .finish_v2_preparation_checkpoint(
+                installation_id,
+                incarnation_id,
+                expected_pending_manifest_ref,
+                &next_pending_manifest,
+            )
+            .await?;
+        let installation = self.reconstruct_v2_installation(&core).await?;
+        let _ = self
+            .put_manifest(&next_pending_manifest, CasExpectation::Any)
+            .await;
+        let _ = self
+            .put_installation(&installation, CasExpectation::Any)
+            .await;
+        Ok(installation)
     }
 
     async fn activate_membership(
@@ -3122,16 +3789,113 @@ impl SaveRowError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct WireManifestRecord {
     raw_toml: String,
     source: WireManifestSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<ResolvedExtensionManifest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<ManifestHash>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    definition_retention: PackageDefinitionRetention,
+}
+
+#[derive(Serialize)]
+struct WireManifestRecordRef<'a> {
+    raw_toml: &'a str,
+    source: WireManifestSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved: &'a Option<ResolvedExtensionManifest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_hash: &'a Option<ManifestHash>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removal_cleanup_requirements: &'a Vec<ExtensionRemovalCleanupRequirement>,
+    #[serde(skip_serializing_if = "is_default_definition_retention")]
+    definition_retention: PackageDefinitionRetention,
+}
+
+impl Serialize for WireManifestRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        WireManifestRecordRef {
+            raw_toml: &self.raw_toml,
+            source: self.source,
+            resolved: &self.resolved,
+            manifest_hash: &self.manifest_hash,
+            removal_cleanup_requirements: &self.removal_cleanup_requirements,
+            definition_retention: self.definition_retention,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+struct WireManifestRecordValue {
+    raw_toml: String,
+    source: WireManifestSource,
+    #[serde(default)]
+    resolved: Option<serde_json::Value>,
+    #[serde(default)]
+    manifest_hash: Option<ManifestHash>,
+    #[serde(default)]
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    #[serde(default)]
+    definition_retention: PackageDefinitionRetention,
+}
+
+impl<'de> Deserialize<'de> for WireManifestRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WireManifestRecordValue::deserialize(deserializer)?;
+        let resolved = wire
+            .resolved
+            .map(normalize_resolved_root_binding)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            raw_toml: wire.raw_toml,
+            source: wire.source,
+            resolved,
+            manifest_hash: wire.manifest_hash,
+            removal_cleanup_requirements: wire.removal_cleanup_requirements,
+            definition_retention: wire.definition_retention,
+        })
+    }
+}
+
+fn normalize_resolved_root_binding(
+    mut resolved: serde_json::Value,
+) -> Result<ResolvedExtensionManifest, String> {
+    let fields = resolved
+        .as_object_mut()
+        .ok_or_else(|| "resolved extension manifest must be an object".to_string())?;
+    let legacy_root = fields.remove("root");
+    let had_legacy_root = legacy_root.is_some();
+    let legacy_binding = match legacy_root {
+        None | Some(serde_json::Value::Null) => PackageRootBinding::FabricateOnLoad,
+        Some(root) => PackageRootBinding::Materialized(
+            serde_json::from_value(root)
+                .map_err(|error| format!("invalid legacy extension package root: {error}"))?,
+        ),
+    };
+    if let Some(binding) = fields.get("root_binding") {
+        let binding: PackageRootBinding = serde_json::from_value(binding.clone())
+            .map_err(|error| format!("invalid extension package root binding: {error}"))?;
+        if had_legacy_root && binding != legacy_binding {
+            return Err("legacy root and root_binding disagree".to_string());
+        }
+    } else {
+        fields.insert(
+            "root_binding".to_string(),
+            serde_json::to_value(legacy_binding)
+                .map_err(|error| format!("failed to normalize package root binding: {error}"))?,
+        );
+    }
+    serde_json::from_value(resolved)
+        .map_err(|error| format!("invalid resolved extension manifest: {error}"))
 }
 
 impl WireManifestRecord {
@@ -3145,7 +3909,11 @@ impl WireManifestRecord {
             resolved,
             self.manifest_hash,
         )
-        .map(|record| record.with_removal_cleanup_requirements(self.removal_cleanup_requirements))
+        .map(|record| {
+            record
+                .with_removal_cleanup_requirements(self.removal_cleanup_requirements)
+                .with_definition_retention(self.definition_retention)
+        })
     }
 }
 
@@ -3157,8 +3925,13 @@ impl From<&ExtensionManifestRecord> for WireManifestRecord {
             resolved: Some(record.resolved().clone()),
             manifest_hash: record.manifest_hash().cloned(),
             removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
+            definition_retention: record.definition_retention(),
         }
     }
+}
+
+fn is_default_definition_retention(value: &PackageDefinitionRetention) -> bool {
+    *value == PackageDefinitionRetention::RemoveWithLastInstallation
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3228,6 +4001,15 @@ fn entry_for_manifest(
             index_key("manifest_source")?,
             IndexValue::Text(manifest_source_key(manifest.manifest().source).into()),
         ))
+}
+
+fn entry_for_registered_definition(
+    manifest: &ExtensionManifestRecord,
+) -> Result<Entry, ExtensionInstallationError> {
+    let payload = serde_json::to_value(WireManifestRecord::from(manifest))
+        .map_err(invalid_installation_error)?;
+    Entry::record(record_kind(REGISTERED_DEFINITION_RECORD_KIND)?, &payload)
+        .map_err(invalid_installation_error)
 }
 
 fn entry_for_installation(
@@ -3587,13 +4369,13 @@ mod tests {
     /// the same wire round trip used to persist/reload installation rows.
     #[test]
     fn wire_manifest_record_round_trips_user_registered_source() {
-        let record = ExtensionManifestRecord::from_toml(
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
             manifest_toml("user-registered-fixture"),
             ManifestSource::UserRegistered,
             &HostPortCatalog::empty(),
             None,
             &capability_provider_contracts(),
-            None,
+            PackageRootBinding::FabricateOnLoad,
         )
         .expect("user-registered manifest record");
         let wire = WireManifestRecord::from(&record);
@@ -3606,6 +4388,135 @@ mod tests {
         assert_eq!(
             round_tripped.manifest().source,
             ManifestSource::UserRegistered
+        );
+    }
+
+    #[test]
+    fn manifest_wire_writer_emits_only_the_canonical_root_binding() {
+        let root = VirtualPath::new("/system/extensions/wire-root").expect("root");
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
+            manifest_toml("wire-root"),
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            None,
+            &capability_provider_contracts(),
+            PackageRootBinding::Materialized(root.clone()),
+        )
+        .expect("manifest record");
+        let payload = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        let resolved = payload["resolved"].as_object().expect("resolved object");
+        assert!(!resolved.contains_key("root"));
+        assert_eq!(
+            serde_json::from_value::<PackageRootBinding>(resolved["root_binding"].clone())
+                .expect("root binding"),
+            PackageRootBinding::Materialized(root)
+        );
+    }
+
+    #[test]
+    fn manifest_wire_reads_both_legacy_root_shapes() {
+        let record = manifest_record("legacy-root", None);
+        let canonical = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        for (legacy_root, expected) in [
+            (serde_json::Value::Null, PackageRootBinding::FabricateOnLoad),
+            (
+                serde_json::json!("/system/extensions/legacy-root"),
+                PackageRootBinding::Materialized(
+                    VirtualPath::new("/system/extensions/legacy-root").expect("root"),
+                ),
+            ),
+        ] {
+            let mut payload = canonical.clone();
+            let resolved = payload["resolved"]
+                .as_object_mut()
+                .expect("resolved object");
+            resolved.remove("root_binding");
+            resolved.insert("root".to_string(), legacy_root);
+            let wire: WireManifestRecord =
+                serde_json::from_value(payload).expect("legacy root remains readable");
+            assert_eq!(wire.resolved.expect("resolved").root_binding, expected);
+        }
+
+        let mut payload = canonical;
+        payload["resolved"]
+            .as_object_mut()
+            .expect("resolved object")
+            .remove("root_binding");
+        let wire: WireManifestRecord =
+            serde_json::from_value(payload).expect("omitted legacy root remains readable");
+        assert_eq!(
+            wire.resolved.expect("resolved").root_binding,
+            PackageRootBinding::FabricateOnLoad
+        );
+    }
+
+    #[test]
+    fn manifest_wire_accepts_agreeing_legacy_and_canonical_roots() {
+        let root = VirtualPath::new("/system/extensions/dual-root").expect("root");
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
+            manifest_toml("dual-root"),
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            None,
+            &capability_provider_contracts(),
+            PackageRootBinding::Materialized(root.clone()),
+        )
+        .expect("manifest record");
+        let mut payload = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        payload["resolved"]
+            .as_object_mut()
+            .expect("resolved object")
+            .insert("root".to_string(), serde_json::json!(root.as_str()));
+        let wire: WireManifestRecord =
+            serde_json::from_value(payload).expect("agreeing dual fields remain readable");
+        assert_eq!(
+            wire.resolved.expect("resolved").root_binding,
+            PackageRootBinding::Materialized(root)
+        );
+    }
+
+    #[test]
+    fn manifest_wire_rejects_disagreeing_legacy_and_canonical_roots() {
+        let record = manifest_record("dual-root", None);
+        let mut payload = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        let resolved = payload["resolved"]
+            .as_object_mut()
+            .expect("resolved object");
+        resolved.insert(
+            "root".to_string(),
+            serde_json::json!("/system/extensions/dual-root"),
+        );
+        let error = serde_json::from_value::<WireManifestRecord>(payload)
+            .expect_err("disagreeing dual root fields must fail closed");
+        assert!(error.to_string().contains("root_binding disagree"));
+    }
+
+    #[test]
+    fn user_registered_virtual_binding_round_trips_without_a_root() {
+        let record = ExtensionManifestRecord::from_toml_with_root_binding(
+            manifest_toml("virtual-fixture"),
+            ManifestSource::UserRegistered,
+            &HostPortCatalog::empty(),
+            None,
+            &capability_provider_contracts(),
+            PackageRootBinding::Virtual,
+        )
+        .expect("virtual manifest record");
+        assert_eq!(
+            record.resolved().package_root_binding(),
+            &PackageRootBinding::Virtual
+        );
+        assert_eq!(
+            record.resolved().materialized_root(),
+            Err(crate::PackageRootError::Virtual)
+        );
+
+        let payload = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        assert!(payload["resolved"].get("root").is_none());
+        let wire: WireManifestRecord = serde_json::from_value(payload).expect("round trip");
+        assert_eq!(
+            wire.resolved.expect("resolved").root_binding,
+            PackageRootBinding::Virtual
         );
     }
 
@@ -3648,6 +4559,7 @@ mod tests {
             resolved: None,
             manifest_hash: record.manifest_hash().cloned(),
             removal_cleanup_requirements: Vec::new(),
+            definition_retention: PackageDefinitionRetention::RemoveWithLastInstallation,
         };
         let payload = serde_json::to_value(wire).expect("legacy wire payload");
         let entry = Entry::record(
@@ -3765,6 +4677,578 @@ mod tests {
             InstallationOwner::Tenant,
         )
         .expect("installation")
+    }
+
+    fn pending_installation(extension_id: &str, hash: Option<&str>) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new(extension_id.to_string()).expect("extension id");
+        ExtensionInstallation::new_pending(
+            ExtensionInstallationId::new(extension_id.as_str().to_string())
+                .expect("installation id"),
+            extension_id.clone(),
+            ExtensionManifestRef::new(
+                extension_id,
+                hash.map(|value| ManifestHash::new(value).expect("hash")),
+            ),
+            Vec::new(),
+            Utc::now(),
+            InstallationOwner::Tenant,
+        )
+        .expect("pending installation")
+    }
+
+    #[test]
+    fn legacy_installation_wire_defaults_to_ready_without_an_incarnation() {
+        let installation = installation("fixture", Some("hash-1"));
+        let mut wire = serde_json::to_value(&installation).expect("serialize installation");
+        wire.as_object_mut()
+            .expect("object wire")
+            .remove("preparation_state");
+        wire.as_object_mut()
+            .expect("object wire")
+            .remove("incarnation_id");
+
+        let restored: ExtensionInstallation =
+            serde_json::from_value(wire).expect("legacy installation wire");
+        assert_eq!(
+            restored.preparation_state(),
+            InstallationPreparationState::Ready
+        );
+        assert_eq!(restored.incarnation_id(), None);
+    }
+
+    #[test]
+    fn fresh_pending_installations_have_distinct_opaque_incarnations() {
+        let first = pending_installation("fixture", Some("hash-1"));
+        let second = pending_installation("fixture", Some("hash-1"));
+        assert_eq!(
+            first.preparation_state(),
+            InstallationPreparationState::PendingPreparation
+        );
+        assert_ne!(first.incarnation_id(), second.incarnation_id());
+    }
+
+    #[tokio::test]
+    async fn package_definition_admission_is_immutable_and_exactly_idempotent() {
+        let store = installation_store().await;
+        let record = manifest_record("registered", Some("hash-one"))
+            .with_initial_preparation(PreparationRequirement::Required)
+            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog);
+
+        assert_eq!(
+            store
+                .admit_package_definition(record.clone())
+                .await
+                .expect("create definition"),
+            PackageDefinitionAdmissionOutcome::Created
+        );
+        assert_eq!(
+            store
+                .admit_package_definition(record.clone())
+                .await
+                .expect("replay exact definition"),
+            PackageDefinitionAdmissionOutcome::ExactExisting
+        );
+
+        let mut changed_semantics = record.resolved().clone();
+        changed_semantics.description = "changed description".to_string();
+        let mut changed_root = record.resolved().clone();
+        changed_root.root_binding = PackageRootBinding::Materialized(
+            VirtualPath::new("/system/extensions/registered").expect("package root"),
+        );
+        let conflicts = [
+            manifest_record("registered", Some("hash-two"))
+                .with_initial_preparation(PreparationRequirement::Required)
+                .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
+            manifest_record("registered", Some("hash-one"))
+                .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
+            manifest_record("registered", Some("hash-one"))
+                .with_initial_preparation(PreparationRequirement::Required),
+            ExtensionManifestRecord::from_resolved(
+                format!("{}\n# byte drift", record.raw_toml()),
+                record.manifest().source,
+                record.resolved().clone(),
+                record.manifest_hash().cloned(),
+            )
+            .expect("raw-different record")
+            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
+            ExtensionManifestRecord::from_resolved(
+                record.raw_toml(),
+                record.manifest().source,
+                changed_semantics,
+                record.manifest_hash().cloned(),
+            )
+            .expect("semantic-different record")
+            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
+            ExtensionManifestRecord::from_resolved(
+                record.raw_toml(),
+                record.manifest().source,
+                changed_root,
+                record.manifest_hash().cloned(),
+            )
+            .expect("root-different record")
+            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
+        ];
+        for conflict in conflicts {
+            let error = store
+                .admit_package_definition(conflict)
+                .await
+                .expect_err("different definition conflicts");
+            assert!(matches!(
+                error,
+                ExtensionInstallationError::PackageDefinitionConflict { .. }
+            ));
+        }
+        assert_eq!(
+            store
+                .get_registered_package_definition(record.extension_id())
+                .await
+                .expect("read admitted definition"),
+            Some(record)
+        );
+        assert!(
+            store
+                .list_installations()
+                .await
+                .expect("installations")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_definition_survives_its_final_installation_removal() {
+        let store = installation_store().await;
+        let record = manifest_record("retained", Some("hash-one"))
+            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog);
+        store
+            .admit_package_definition(record.clone())
+            .await
+            .expect("admit definition");
+        let installed = installation("retained", Some("hash-one"));
+        let installation_id = installed.installation_id().clone();
+        store
+            .upsert_manifest_and_installation(record.clone(), installed)
+            .await
+            .expect("install");
+        store
+            .delete_installation(&installation_id)
+            .await
+            .expect("remove final installation");
+
+        assert_eq!(
+            store
+                .get_registered_package_definition(record.extension_id())
+                .await
+                .expect("retained definition"),
+            Some(record)
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_definition_accessor_ignores_legacy_installation_manifests() {
+        let store = installation_store().await;
+        let record = manifest_record("legacy-only", Some("hash-one"));
+        store
+            .upsert_manifest_and_installation(
+                record.clone(),
+                installation("legacy-only", Some("hash-one")),
+            )
+            .await
+            .expect("install legacy-shaped package");
+
+        assert!(
+            store
+                .get_manifest(record.extension_id())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .get_registered_package_definition(record.extension_id())
+                .await
+                .expect("registered definition lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_definition_wire_defaults_to_remove_with_last_installation() {
+        let record = manifest_record("legacy-retention", Some("hash-one"));
+        let mut payload = serde_json::to_value(WireManifestRecord::from(&record)).expect("wire");
+        payload
+            .as_object_mut()
+            .expect("wire object")
+            .remove("definition_retention");
+        let restored: WireManifestRecord = serde_json::from_value(payload).expect("legacy wire");
+
+        assert_eq!(
+            restored
+                .into_manifest_record()
+                .expect("manifest record")
+                .definition_retention(),
+            PackageDefinitionRetention::RemoveWithLastInstallation
+        );
+    }
+
+    #[tokio::test]
+    async fn finalization_swaps_only_the_matching_pending_aggregate() {
+        let store = installation_store().await;
+        let pending_manifest = manifest_record("fixture", Some("hash-pending"));
+        let pending = pending_installation("fixture", Some("hash-pending"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation_id = pending
+            .incarnation_id()
+            .cloned()
+            .expect("fresh incarnation");
+        let pending_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(pending_manifest, pending)
+            .await
+            .expect("persist pending aggregate");
+
+        let finalized = manifest_record("fixture", Some("hash-final"));
+        let winner = store
+            .finalize_preparation(&installation_id, &incarnation_id, &pending_ref, finalized)
+            .await
+            .expect("matching finalizer wins");
+        assert_eq!(
+            winner.preparation_state(),
+            InstallationPreparationState::Ready
+        );
+        assert_eq!(
+            winner
+                .manifest_ref()
+                .manifest_hash()
+                .map(ManifestHash::as_str),
+            Some("hash-final")
+        );
+        assert_eq!(winner.incarnation_id(), Some(&incarnation_id));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_replaces_only_the_manifest_and_remains_pending() {
+        let store = installation_store().await;
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(manifest_record("fixture", Some("hash-one")), pending)
+            .await
+            .expect("seed pending");
+
+        let checkpointed = store
+            .checkpoint_preparation(
+                &installation_id,
+                &incarnation,
+                &expected_ref,
+                manifest_record("fixture", Some("hash-two")),
+            )
+            .await
+            .expect("checkpoint pending manifest");
+        assert_eq!(
+            checkpointed.preparation_state(),
+            InstallationPreparationState::PendingPreparation
+        );
+        assert_eq!(checkpointed.incarnation_id(), Some(&incarnation));
+        assert_eq!(
+            checkpointed
+                .manifest_ref()
+                .manifest_hash()
+                .map(ManifestHash::as_str),
+            Some("hash-two")
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_rejects_stale_and_contract_mutating_requests_without_change() {
+        let store = installation_store().await;
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(
+                manifest_record("fixture", Some("hash-one")),
+                pending.clone(),
+            )
+            .await
+            .expect("seed pending");
+
+        let stale_incarnation = InstallationIncarnationId::fresh();
+        let stale_ref = ExtensionManifestRef::new(
+            ExtensionId::new("fixture").expect("extension id"),
+            Some(ManifestHash::new("hash-stale").expect("hash")),
+        );
+        let source_mutation = ExtensionManifestRecord::from_toml_with_root_binding(
+            manifest_toml("fixture"),
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            Some(ManifestHash::new("hash-two").expect("hash")),
+            &capability_provider_contracts(),
+            PackageRootBinding::FabricateOnLoad,
+        )
+        .expect("source mutation manifest");
+        let root_mutation = ExtensionManifestRecord::from_toml_with_root_binding(
+            manifest_toml("fixture"),
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            Some(ManifestHash::new("hash-two").expect("hash")),
+            &capability_provider_contracts(),
+            PackageRootBinding::Materialized(
+                VirtualPath::new("/system/extensions/fixture").expect("root"),
+            ),
+        )
+        .expect("root mutation manifest");
+        for (incarnation_arg, ref_arg, next) in [
+            (
+                &stale_incarnation,
+                &expected_ref,
+                manifest_record("fixture", Some("hash-two")),
+            ),
+            (
+                &incarnation,
+                &stale_ref,
+                manifest_record("fixture", Some("hash-two")),
+            ),
+            (&incarnation, &expected_ref, source_mutation),
+            (&incarnation, &expected_ref, root_mutation),
+            (
+                &incarnation,
+                &expected_ref,
+                manifest_record("other", Some("hash-two")),
+            ),
+        ] {
+            let error = store
+                .checkpoint_preparation(&installation_id, incarnation_arg, ref_arg, next)
+                .await
+                .expect_err("stale or contract-mutating checkpoint must fail");
+            assert!(matches!(
+                error,
+                ExtensionInstallationError::PreparationFinalizationRejected { .. }
+            ));
+            assert_eq!(
+                store
+                    .get_installation(&installation_id)
+                    .await
+                    .expect("load unchanged"),
+                Some(pending.clone())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_rejects_ready_and_removed_installations() {
+        let store = installation_store().await;
+        let ready = installation("ready", Some("hash-one"));
+        let ready_id = ready.installation_id().clone();
+        store
+            .upsert_manifest_and_installation(
+                manifest_record("ready", Some("hash-one")),
+                ready.clone(),
+            )
+            .await
+            .expect("seed ready");
+        let incarnation = InstallationIncarnationId::fresh();
+        let error = store
+            .checkpoint_preparation(
+                &ready_id,
+                &incarnation,
+                ready.manifest_ref(),
+                manifest_record("ready", Some("hash-two")),
+            )
+            .await
+            .expect_err("ready checkpoint rejected");
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::PreparationFinalizationRejected { .. }
+        ));
+
+        let removed = pending_installation("removed", Some("hash-one"));
+        let removed_id = removed.installation_id().clone();
+        let removed_incarnation = removed.incarnation_id().cloned().expect("incarnation");
+        let removed_ref = removed.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(manifest_record("removed", Some("hash-one")), removed)
+            .await
+            .expect("seed removed candidate");
+        store
+            .finish_v2_installation_removal(&removed_id, Utc::now())
+            .await
+            .expect("tombstone installation");
+        let error = store
+            .checkpoint_preparation(
+                &removed_id,
+                &removed_incarnation,
+                &removed_ref,
+                manifest_record("removed", Some("hash-two")),
+            )
+            .await
+            .expect_err("removed checkpoint rejected");
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::PreparationFinalizationRejected { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_retries_after_reopen_repairs_its_interrupted_lease() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root = VirtualPath::new("/system/extensions/.installations/checkpoint-recovery")
+            .expect("root");
+        let store = ExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("store");
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(manifest_record("fixture", Some("hash-one")), pending)
+            .await
+            .expect("seed pending");
+        store
+            .take_v2_preparation_lease(&installation_id, &incarnation, &expected_ref)
+            .await
+            .expect("take checkpoint lease");
+        assert_eq!(
+            store
+                .get_installation(&installation_id)
+                .await
+                .expect("hidden read"),
+            None
+        );
+        drop(store);
+
+        let reopened = ExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("repair checkpoint lease");
+        let checkpointed = reopened
+            .checkpoint_preparation(
+                &installation_id,
+                &incarnation,
+                &expected_ref,
+                manifest_record("fixture", Some("hash-two")),
+            )
+            .await
+            .expect("retry checkpoint");
+        assert_eq!(
+            checkpointed.preparation_state(),
+            InstallationPreparationState::PendingPreparation
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_finalizer_cannot_cross_a_replaced_pending_incarnation() {
+        let store = installation_store().await;
+        let first = pending_installation("fixture", Some("hash-one"));
+        let installation_id = first.installation_id().clone();
+        let first_incarnation = first.incarnation_id().cloned().expect("fresh incarnation");
+        let first_ref = first.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(manifest_record("fixture", Some("hash-one")), first)
+            .await
+            .expect("persist first pending aggregate");
+
+        let replacement = pending_installation("fixture", Some("hash-two"));
+        let replacement_incarnation = replacement
+            .incarnation_id()
+            .cloned()
+            .expect("replacement incarnation");
+        store
+            .upsert_manifest_and_installation(
+                manifest_record("fixture", Some("hash-two")),
+                replacement,
+            )
+            .await
+            .expect("replace pending aggregate");
+
+        let error = store
+            .finalize_preparation(
+                &installation_id,
+                &first_incarnation,
+                &first_ref,
+                manifest_record("fixture", Some("hash-final")),
+            )
+            .await
+            .expect_err("old finalizer must fail ABA");
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::PreparationFinalizationRejected { .. }
+        ));
+        let current = store
+            .get_installation(&installation_id)
+            .await
+            .expect("load replacement")
+            .expect("replacement stays present");
+        assert_eq!(
+            current.preparation_state(),
+            InstallationPreparationState::PendingPreparation
+        );
+        assert_eq!(current.incarnation_id(), Some(&replacement_incarnation));
+    }
+
+    #[tokio::test]
+    async fn reopen_recovers_a_crashed_pending_finalizer_without_publishing() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root = VirtualPath::new("/system/extensions/.installations/pending-recovery")
+            .expect("valid root");
+        let store = ExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("store");
+        let pending = pending_installation("fixture", Some("hash-pending"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation_id = pending
+            .incarnation_id()
+            .cloned()
+            .expect("fresh incarnation");
+        let pending_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(
+                manifest_record("fixture", Some("hash-pending")),
+                pending,
+            )
+            .await
+            .expect("persist pending aggregate");
+        store
+            .take_v2_preparation_lease(&installation_id, &incarnation_id, &pending_ref)
+            .await
+            .expect("take finalization lease");
+        drop(store);
+
+        let reopened = ExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("reopen repairs interrupted lease");
+        let recovered = reopened
+            .get_installation(&installation_id)
+            .await
+            .expect("load recovered aggregate")
+            .expect("pending aggregate remains");
+        assert_eq!(
+            recovered.preparation_state(),
+            InstallationPreparationState::PendingPreparation
+        );
+        assert_eq!(recovered.incarnation_id(), Some(&incarnation_id));
     }
 
     /// #5459 P1: legacy persisted rows predate the `owner` field and were all
@@ -3945,6 +5429,12 @@ pub enum ExtensionInstallationError {
     MembershipMutationInProgress {
         installation_id: ExtensionInstallationId,
     },
+    #[error(
+        "installation {installation_id} preparation finalization no longer matches its pending aggregate"
+    )]
+    PreparationFinalizationRejected {
+        installation_id: ExtensionInstallationId,
+    },
     #[error("extension manifest {extension_id} was not found")]
     ManifestNotFound { extension_id: ExtensionId },
     #[error("invalid installation: {reason}")]
@@ -3958,6 +5448,16 @@ pub enum ExtensionInstallationError {
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
     #[error("conflicting manifest references for extension {extension_id}")]
     ConflictingManifestReference { extension_id: ExtensionId },
+    #[error("conflicting preparation states for extension {extension_id}")]
+    ConflictingPreparationState { extension_id: ExtensionId },
+    #[error("conflicting installation incarnations for extension {extension_id}")]
+    ConflictingInstallationIncarnation { extension_id: ExtensionId },
+    #[error("conflicting admission identities for extension {extension_id}")]
+    ConflictingAdmissionIdentity { extension_id: ExtensionId },
+    #[error(
+        "package definition for extension {extension_id} conflicts with the admitted definition"
+    )]
+    PackageDefinitionConflict { extension_id: ExtensionId },
     #[error("conflicting credential bindings for extension {extension_id} and handle {handle}")]
     ConflictingCredentialBinding {
         extension_id: ExtensionId,

@@ -106,6 +106,9 @@ pub async fn boot_installation_records(
         .await
         .map_err(|source| BootInstallationRecordsError::ListInstallations { source })?
     {
+        if !installation.preparation_state().is_ready() {
+            continue;
+        }
         let extension_id = installation.extension_id().clone();
         let Some(manifest_record) = installation_store
             .get_manifest(&extension_id)
@@ -240,10 +243,25 @@ pub fn effective_resolved_for_package(
     base: &ResolvedExtensionManifest,
     package: &ExtensionPackage,
 ) -> ResolvedExtensionManifest {
-    ResolvedExtensionManifest {
+    let mut resolved = ResolvedExtensionManifest {
         tools: package.manifest.capabilities.clone(),
         ..base.clone()
+    };
+    if package.root_binding == ironclaw_extensions::PackageRootBinding::Virtual
+        && let Some(mcp) = resolved.mcp.as_mut()
+    {
+        mcp.dynamic_input_schemas = package
+            .capabilities
+            .iter()
+            .map(|descriptor| {
+                (
+                    descriptor.id.as_str().to_string(),
+                    descriptor.parameters_schema.clone(),
+                )
+            })
+            .collect();
     }
+    resolved
 }
 
 /// Loader over the host-runtime lanes and the binary-assembled native
@@ -305,9 +323,8 @@ impl ExtensionLoader for CompositionExtensionLoader {
 
         let manifest = ExtensionManifest::try_from(manifest_v2)
             .map_err(|error| load_error(format!("manifest rebuild failed: {error}")))?;
-        let root = resolve_package_root(ctx.resolved.root.as_ref(), &ctx.extension_id)?;
-        let package = ExtensionPackage::from_manifest(manifest, root)
-            .map_err(|error| load_error(format!("package rebuild failed: {error}")))?;
+        let package = rebuild_package_from_resolved(manifest, &ctx.resolved, &ctx.extension_id)
+            .map_err(load_error)?;
         let adapter = self
             .binder
             .bind_package(Arc::new(package))
@@ -341,11 +358,61 @@ fn load_error(reason: String) -> BindError {
 /// persisted before `ResolvedExtensionManifest::root` existed (back-compat
 /// with pre-existing installations) — this is the ONLY reason the fallback
 /// exists; do not remove it.
+pub(crate) fn rebuild_package_from_resolved(
+    manifest: ExtensionManifest,
+    resolved: &ResolvedExtensionManifest,
+    extension_id: &str,
+) -> Result<ExtensionPackage, String> {
+    use ironclaw_extensions::PackageRootBinding;
+    match &resolved.root_binding {
+        PackageRootBinding::Materialized(root) => {
+            ExtensionPackage::from_manifest(manifest, root.clone())
+        }
+        PackageRootBinding::FabricateOnLoad => {
+            let root = VirtualPath::new(format!("/system/extensions/{extension_id}"))
+                .map_err(|error| format!("extension root invalid: {error}"))?;
+            ExtensionPackage::from_manifest(manifest, root)
+        }
+        PackageRootBinding::Virtual => {
+            let schemas = resolved
+                .mcp
+                .as_ref()
+                .map(|mcp| &mcp.dynamic_input_schemas)
+                .ok_or_else(|| "virtual package lacks MCP catalog metadata".to_string())?;
+            let capabilities = manifest
+                .capabilities
+                .iter()
+                .map(|capability| ironclaw_host_api::CapabilityDescriptor {
+                    id: capability.id.clone(),
+                    provider: manifest.id.clone(),
+                    runtime: manifest.runtime.kind(),
+                    trust_ceiling: manifest.descriptor_trust_default,
+                    description: capability.description.clone(),
+                    parameters_schema: schemas
+                        .get(capability.id.as_str())
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    effects: capability.effects.clone(),
+                    default_permission: capability.default_permission,
+                    runtime_credentials: capability.runtime_credentials.clone(),
+                    network_targets: capability.network_targets.clone(),
+                    max_egress_bytes: capability.max_egress_bytes,
+                    resource_profile: capability.resource_profile.clone(),
+                    origin_gate_matrix: capability.origin_gate_matrix.clone(),
+                })
+                .collect();
+            ExtensionPackage::from_virtual_manifest(manifest, None, capabilities)
+        }
+    }
+    .map_err(|error| format!("package rebuild failed: {error}"))
+}
+
+#[cfg(test)]
 fn resolve_package_root(
-    resolved_root: Option<&VirtualPath>,
+    persisted: Option<&VirtualPath>,
     extension_id: &str,
 ) -> Result<VirtualPath, BindError> {
-    match resolved_root {
+    match persisted {
         Some(root) => Ok(root.clone()),
         None => VirtualPath::new(format!("/system/extensions/{extension_id}"))
             .map_err(|error| load_error(format!("extension root invalid: {error}"))),

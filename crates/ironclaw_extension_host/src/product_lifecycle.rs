@@ -12,13 +12,13 @@ use ironclaw_auth::{
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
-    InstallationOwner, MembershipDeactivation, canonicalize_installation_rows,
+    InstallationOwner, ManifestSource, MembershipDeactivation, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
-    ProductSurfaceError, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    UserId, VendorId, VirtualPath,
+    ProductSurfaceError, RegisterHostedMcpRequest, ResourceScope, RuntimeCredentialAuthRequirement,
+    UserId, VendorId,
 };
 use ironclaw_product::{
     ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
@@ -67,8 +67,7 @@ use crate::{
 };
 use crate::{ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry};
 use crate::{
-    HostedMcpDiscoveryError, channel_connect_strategy, channel_connection_requirement,
-    discover_hosted_mcp_package, is_hosted_http_mcp_package,
+    channel_connect_strategy, channel_connection_requirement,
     manifest_runtime_credential_auth_requirements, package_declares_inbound_product_adapter,
     package_runtime_credential_auth_requirements,
 };
@@ -133,6 +132,7 @@ pub struct ExtensionLifecycleManager {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
+    hosted_mcp_preparation: Arc<crate::hosted_mcp_preparation::HostedMcpPreparationService>,
     // Genuinely optional (not an `optional_arc` smell): a composition without
     // product auth cannot have minted a reusable OAuth credential, so there is
     // nothing to revoke on removal.
@@ -146,14 +146,6 @@ pub struct ExtensionLifecycleManager {
     /// resolver. Weak ownership avoids the cycle created by that resolver's
     /// reactivation port pointing back to this lifecycle service.
     channel_config: std::sync::OnceLock<Weak<crate::ChannelConfigService>>,
-    // Late-attached with `generic_host` (both need the fully wired host
-    // runtime): stages hosted-MCP discovery authority — the connection
-    // credential and the server network policy — under the discovery scope.
-    // Discovery runs at activation, outside the dispatch obligation
-    // pipeline, so nothing else stages these (the pre-P2 gap that made
-    // live `tools/list` always fail transient and fall back).
-    discovery_runtime_ports:
-        std::sync::OnceLock<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     /// Bounds concurrent zip decode/validation in `import_bundle`. Each decode
     /// may expand up to [`crate::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
     /// memory, so without a bound N concurrent operator uploads turn the
@@ -211,6 +203,26 @@ pub struct ExtensionLifecycleManager {
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
 
 impl ExtensionLifecycleManager {
+    pub async fn register_hosted_mcp(
+        &self,
+        request: RegisterHostedMcpRequest,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        self.hosted_mcp_preparation.register(request).await
+    }
+
+    /// Run the composed preparation strategy, if this installation's generic
+    /// definition declared that preparation is required.
+    pub async fn prepare_if_pending(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: ResourceScope,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
+        caller: &UserId,
+    ) -> Result<Option<LifecycleProductResponse>, ProductSurfaceFailure> {
+        self.hosted_mcp_preparation
+            .prepare_if_pending(package_ref, scope, credential_gate, caller)
+            .await
+    }
     pub fn new(
         filesystem: Arc<dyn RootFilesystem>,
         catalog: AvailableExtensionCatalog,
@@ -219,69 +231,36 @@ impl ExtensionLifecycleManager {
         active_extensions: ActiveExtensionPublisher,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
         tenant_operator_user_id: UserId,
+        hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies,
     ) -> Self {
+        let catalog = Arc::new(RwLock::new(catalog));
+        let operation_lock = Arc::new(Mutex::new(()));
+        let hosted_mcp_preparation = Arc::new(
+            crate::hosted_mcp_preparation::HostedMcpPreparationService::new(
+                Arc::clone(&installation_store),
+                Arc::clone(&catalog),
+                Arc::clone(&lifecycle_service),
+                Arc::clone(&operation_lock),
+                hosted_mcp_dependencies,
+            ),
+        );
         Self {
             filesystem,
-            catalog: Arc::new(RwLock::new(catalog)),
+            catalog,
             installation_store,
             lifecycle_service,
             active_extensions,
-            operation_lock: Arc::new(Mutex::new(())),
+            operation_lock,
+            hosted_mcp_preparation,
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
             channel_config: std::sync::OnceLock::new(),
-            discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
             provider_instance_readiness: std::collections::BTreeMap::new(),
-        }
-    }
-
-    /// Attach the staging ports hosted-MCP discovery uses to make its
-    /// authority available under the discovery scope.
-    pub fn attach_discovery_runtime_ports(
-        &self,
-        ports: ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
-    ) {
-        let _ = self.discovery_runtime_ports.set(ports);
-    }
-
-    /// Stage the hosted-MCP connection credential and server network policy
-    /// for the discovery call. Best-effort by design: a staging failure
-    /// leaves discovery to fail transient; activation may use a real declared
-    /// static tool as fallback, but never the host-internal connection
-    /// template alone. A successful stage lets live `tools/list` run with the
-    /// same injected authority a dispatched invocation would carry.
-    async fn stage_hosted_mcp_discovery_authority(
-        &self,
-        scope: &ResourceScope,
-        package: &ExtensionPackage,
-    ) {
-        let Some(ports) = self.discovery_runtime_ports.get() else {
-            return;
-        };
-        let Some(descriptor) = package.capabilities.first() else {
-            return;
-        };
-        if let Some(policy) = hosted_mcp_discovery_network_policy(package) {
-            ports.stage_network_policy_once(scope, &descriptor.id, policy);
-        }
-        for requirement in &descriptor.runtime_credentials {
-            if let Err(error) = ports
-                .stage_credential_requirement_once(scope, &descriptor.id, requirement, &package.id)
-                .await
-            {
-                tracing::debug!(
-                    extension_id = package.id.as_str(),
-                    capability_id = descriptor.id.as_str(),
-                    required = requirement.required,
-                    error = ?error,
-                    "hosted MCP discovery credential staging failed; discovery will fail or use a declared static fallback"
-                );
-            }
         }
     }
 
@@ -400,13 +379,13 @@ impl ExtensionLifecycleManager {
                             ),
                         }
                     })?;
-                ironclaw_extensions::ExtensionManifestRecord::from_toml(
+                ironclaw_extensions::ExtensionManifestRecord::from_toml_with_root_binding(
                     available.manifest_toml.clone(),
                     ironclaw_extensions::ManifestSource::HostBundled,
                     &host_ports,
                     None,
                     &contracts,
-                    Some(package.root.clone()),
+                    package.root_binding.clone(),
                 )
                 .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!("bundled extension manifest is invalid: {error}"),
@@ -972,7 +951,7 @@ impl ExtensionLifecycleManager {
             .get_installation(&installation_id)
             .await
             .map_err(map_extension_installation_error)?;
-        match existing {
+        let preparation_ready = match existing {
             // The id is already installed: the policy decision authorizes the
             // caller (tenant rows and non-member shapes error here), and the
             // store's membership operation performs the single-row join —
@@ -981,30 +960,44 @@ impl ExtensionLifecycleManager {
             // already registered, materialized, and (if enabled) published,
             // so there is nothing to compensate.
             Some(existing) => {
+                let preparation_ready = existing.preparation_state().is_ready();
                 decide_install_on_existing(
                     &available.package.id,
                     existing.owner(),
                     caller,
                     &self.tenant_operator_user_id,
                 )?;
+                self.ensure_lifecycle_package_registered_from_aggregate(&available.package.id)
+                    .await?;
                 self.installation_store
                     .activate_membership(&installation_id, caller)
                     .await
                     .map_err(map_extension_installation_error)?;
+                preparation_ready
             }
             None => {
                 self.install_fresh_locked(&available, caller).await?;
+                true
             }
-        }
+        };
+
+        // A hosted MCP Pending aggregate contains only its registration seed.
+        // Its placeholder capability declarations are not callable catalog
+        // entries and must never be projected as visible tools.
+        let visible_capability_ids = if preparation_ready {
+            visible_capability_ids(&available)
+                .map(|id| id.as_str().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         Ok(response_with_payload(
             Some(package_ref.clone()),
             InstallationState::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
-                visible_capability_ids: visible_capability_ids(&available)
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
+                visible_capability_ids,
                 next_step: format!(
                     "Installation will attempt activation for extension_id \"{}\". If credentials are missing, the install response opens the auth gate; otherwise the tools are published.",
                     package_ref.id.as_str()
@@ -1022,24 +1015,13 @@ impl ExtensionLifecycleManager {
         available: &AvailableExtensionPackage,
         caller: &UserId,
     ) -> Result<(), ProductSurfaceFailure> {
-        // An orphaned manifest row without an installation still counts as
-        // occupied (pre-#5459 behavior, kept fail-closed).
-        if self
+        let owner = derive_owner(caller, &self.tenant_operator_user_id);
+        let retained_definition = self
             .installation_store
             .get_manifest(&available.package.id)
             .await
-            .map_err(map_extension_installation_error)?
-            .is_some()
-        {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} is already installed; if a previous removal was interrupted, run remove again to finish its cleanup, then retry the install",
-                    available.package.id.as_str()
-                ),
-            });
-        }
-        let owner = derive_owner(caller, &self.tenant_operator_user_id);
-        let plan = prepare_install(available, owner)?;
+            .map_err(map_extension_installation_error)?;
+        let plan = prepare_install(available, owner, retained_definition)?;
         self.register_lifecycle_package(&available.package).await?;
 
         if let Err(error) =
@@ -1058,7 +1040,7 @@ impl ExtensionLifecycleManager {
         }
         if let Err(error) = self.persist_install_plan(plan).await {
             if let Err(cleanup_error) = self
-                .delete_materialized_extension_files(&available.package.id)
+                .delete_materialized_extension_files(&available.package)
                 .await
             {
                 tracing::debug!(
@@ -1095,10 +1077,17 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        credential_gate: impl ExtensionActivationCredentialGate,
+        scope: ResourceScope,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
-        self.activate_inner(package_ref, mode, &credential_gate, caller)
+        if let Some(response) = self
+            .prepare_if_pending(&package_ref, scope, credential_gate, caller)
+            .await?
+        {
+            return Ok(response);
+        }
+        self.activate_inner(package_ref, mode, credential_gate, caller)
             .await
     }
 
@@ -1126,145 +1115,41 @@ impl ExtensionLifecycleManager {
     async fn activate_inner(
         &self,
         package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
+        _mode: ExtensionActivationMode,
         credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
 
-        let discovery = {
-            let _operation_guard = self.operation_lock.lock().await;
-            let installation = self
-                .load_installation(&extension_id, &installation_id)
-                .await?;
-            ensure_caller_may_operate(&installation, caller)?;
-            ensure_caller_may_mutate_tenant_installation(
-                &installation,
-                caller,
-                &self.tenant_operator_user_id,
-                "activate",
-            )?;
-            let package = self.lifecycle_package(&extension_id).await?;
-            if let ExtensionActivationCredentialReadiness::Missing(missing) =
-                credential_gate.credential_readiness(&package).await?
-            {
-                return activation_credentials_incomplete_response(package_ref, missing);
-            }
-            match mode {
-                ExtensionActivationMode::HostedMcpDiscovery {
-                    scope,
-                    runtime_http_egress,
-                } if is_hosted_http_mcp_package(&package) => HostedMcpDiscoveryRequest {
-                    base_package: package,
-                    scope,
-                    runtime_http_egress,
-                },
-                _ => {
-                    return self
-                        .commit_activation(
-                            package_ref,
-                            &extension_id,
-                            &installation_id,
-                            installation.activation_state(),
-                            package,
-                        )
-                        .await;
-                }
-            }
-        };
-
-        self.stage_hosted_mcp_discovery_authority(&discovery.scope, &discovery.base_package)
-            .await;
-        let active_package = match discover_hosted_mcp_package(
-            &discovery.base_package,
-            discovery.scope,
-            discovery.runtime_http_egress,
-        )
-        .await
-        {
-            Ok(active_package) => active_package,
-            Err(HostedMcpDiscoveryError::Transient(reason)) => {
-                if package_visible_capability_ids(&discovery.base_package).is_empty() {
-                    // The bundled hosted-MCP declaration may contain only the
-                    // host-internal connection template. That template is
-                    // discovery authority, not a callable fallback surface;
-                    // reporting activation success here would publish no
-                    // model-usable tools. Keep the install retryable instead.
-                    return Err(hosted_mcp_discovery_error(
-                        HostedMcpDiscoveryError::Transient(reason),
-                    ));
-                }
-                tracing::debug!(
-                    extension_id = %extension_id.as_str(),
-                    reason,
-                    "hosted MCP discovery failed during activation; falling back to bundled manifest"
-                );
-                discovery.base_package.clone()
-            }
-            Err(error @ HostedMcpDiscoveryError::Permanent(_)) => {
-                return Err(hosted_mcp_discovery_error(error));
-            }
-        };
-
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
             .load_installation(&extension_id, &installation_id)
-            .await
-            .map_err(|error| {
-                tracing::debug!(
-                    %error,
-                    extension_id = %extension_id.as_str(),
-                    installation_id = %installation_id.as_str(),
-                    "hosted MCP activation could not recheck the installation after discovery"
-                );
-                hosted_mcp_changed_during_discovery_error()
-            })?;
-        // #5459 P1: the installation's owner or member set may have changed
-        // while the lock was dropped for discovery (eviction+reinstall /
-        // remove+reinstall reuse the same installation id), so re-check
-        // ownership before committing — phase 1's check is stale. A foreign
-        // row must not be flipped to Enabled under this caller's action.
-        ensure_caller_may_operate(&installation, caller).map_err(|error| {
-            tracing::debug!(
-                %error,
-                extension_id = %extension_id.as_str(),
-                installation_id = %installation_id.as_str(),
-                "hosted MCP activation caller ownership changed during discovery"
+            .await?;
+        ensure_caller_may_operate(&installation, caller)?;
+        if !installation.preparation_state().is_ready() {
+            let mut response = response_with_payload(
+                Some(package_ref),
+                InstallationState::Installed,
+                LifecycleProductPayload::ExtensionActivate {
+                    activated: false,
+                    visible_capability_ids: Vec::new(),
+                    connection_required: None,
+                },
             );
-            hosted_mcp_changed_during_discovery_error()
-        })?;
+            response.message = Some(
+                "Hosted MCP catalog preparation or account setup is still required.".to_string(),
+            );
+            return Ok(response);
+        }
         ensure_caller_may_mutate_tenant_installation(
             &installation,
             caller,
             &self.tenant_operator_user_id,
             "activate",
-        )
-        .map_err(|error| {
-            tracing::debug!(
-                %error,
-                extension_id = %extension_id.as_str(),
-                installation_id = %installation_id.as_str(),
-                "hosted MCP activation caller is not the tenant operator after discovery"
-            );
-            hosted_mcp_changed_during_discovery_error()
-        })?;
-        let current_package = self
-            .lifecycle_package(&extension_id)
-            .await
-            .map_err(|error| {
-                tracing::debug!(
-                    %error,
-                    extension_id = %extension_id.as_str(),
-                    "hosted MCP activation could not recheck the lifecycle package after discovery"
-                );
-                hosted_mcp_changed_during_discovery_error()
-            })?;
-        if current_package != discovery.base_package {
-            return Err(hosted_mcp_changed_during_discovery_error());
-        };
-        if let ExtensionActivationCredentialReadiness::Missing(missing) = credential_gate
-            .credential_readiness(&active_package)
-            .await?
+        )?;
+        let package = self.lifecycle_package(&extension_id).await?;
+        if let ExtensionActivationCredentialReadiness::Missing(missing) =
+            credential_gate.credential_readiness(&package).await?
         {
             return activation_credentials_incomplete_response(package_ref, missing);
         }
@@ -1273,7 +1158,7 @@ impl ExtensionLifecycleManager {
             &extension_id,
             &installation_id,
             installation.activation_state(),
-            active_package,
+            package,
         )
         .await
     }
@@ -1422,10 +1307,10 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: &LifecyclePackageRef,
     ) -> Result<bool, ProductSurfaceFailure> {
-        let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
-        let _operation_guard = self.operation_lock.lock().await;
-        let package = self.lifecycle_package(&extension_id).await?;
-        Ok(is_hosted_http_mcp_package(&package))
+        let _ = package_ref;
+        // Kept as a compatibility query for callers that have not yet moved
+        // to aggregate readiness. Discovery is never an activation branch.
+        Ok(false)
     }
 
     /// Remove an installed extension. This is the single convergence point both
@@ -1509,9 +1394,12 @@ impl ExtensionLifecycleManager {
                 prepare_install(
                     &available,
                     derive_owner(caller, &self.tenant_operator_user_id),
+                    None,
                 )?
                 .manifest_record
             };
+            let retain_definition = removal_manifest.definition_retention()
+                == ironclaw_extensions::PackageDefinitionRetention::RetainInCatalog;
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
             let cleanup_requirements = removal_manifest.removal_cleanup_requirements().to_vec();
@@ -1655,7 +1543,7 @@ impl ExtensionLifecycleManager {
             // `remove_locked` retains the manifest as a cleanup tombstone. A
             // membership-only removal leaves the shared installation in place,
             // so its manifest remains too.
-            if self.search_installation(&extension_id).await?.is_none() {
+            if !retain_definition && self.search_installation(&extension_id).await?.is_none() {
                 match self.installation_store.delete_manifest(&extension_id).await {
                     Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
                     Err(error) => return Err(map_extension_installation_error(error)),
@@ -1933,7 +1821,10 @@ impl ExtensionLifecycleManager {
             }
             return Err(error);
         }
-        if let Err(error) = self.delete_materialized_extension_files(extension_id).await {
+        let package_for_cleanup = lifecycle_package.as_ref().or(active_package.as_ref());
+        if let Some(package) = package_for_cleanup
+            && let Err(error) = self.delete_materialized_extension_files(package).await
+        {
             let restore_package = lifecycle_package.as_ref().or(active_package.as_ref());
             if let Some(package) = restore_package {
                 let previous_state = if active_package.is_some() {
@@ -2195,7 +2086,7 @@ impl ExtensionLifecycleManager {
             return Err(original_error);
         }
         if let Err(error) = self
-            .delete_materialized_extension_files(&extension_id)
+            .delete_materialized_extension_files(&lifecycle_package)
             .await
         {
             if let Err(restore_error) = self
@@ -2249,6 +2140,46 @@ impl ExtensionLifecycleManager {
             .await
             .map_err(map_extension_error)?;
         Ok(())
+    }
+
+    /// Repair the in-memory lifecycle registry from the durable aggregate.
+    /// Admission and restart may legitimately leave a Pending or Ready row
+    /// present before its package has been registered in this process.
+    async fn ensure_lifecycle_package_registered_from_aggregate(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductSurfaceFailure> {
+        let record = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has no installed manifest",
+                    extension_id.as_str()
+                ),
+            })?;
+        let manifest: ironclaw_extensions::ExtensionManifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .map_err(map_extension_error)?;
+        let package = crate::generic_host::rebuild_package_from_resolved(
+            manifest,
+            record.resolved(),
+            extension_id.as_str(),
+        )
+        .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason })?;
+        let mut lifecycle = self.lifecycle_service.lock().await;
+        match lifecycle.registry().get_extension(extension_id) {
+            None => lifecycle
+                .install(package)
+                .await
+                .map_err(map_extension_error),
+            Some(current) if current == &package => Ok(()),
+            Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
+        }
     }
 
     /// Fail-closed id check for the catalog import path (#5499): reject a
@@ -2438,17 +2369,15 @@ impl ExtensionLifecycleManager {
 
     async fn delete_materialized_extension_files(
         &self,
-        extension_id: &ExtensionId,
+        package: &ExtensionPackage,
     ) -> Result<(), ProductSurfaceFailure> {
-        let Ok(extension_root) =
-            VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
-        else {
+        let Ok(extension_root) = package.materialized_root() else {
             return Ok(());
         };
-        match self.filesystem.delete(&extension_root).await {
+        match self.filesystem.delete(extension_root).await {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
             Err(error) => {
-                tracing::debug!(%error, %extension_id, "extension file removal failed");
+                tracing::debug!(%error, extension_id = %package.id, "extension file removal failed");
                 Err(ProductSurfaceFailure::Transient {
                     reason: "failed to remove extension files; retry removal".to_string(),
                 })
@@ -2506,12 +2435,6 @@ impl crate::ChannelConfigReactivation for ExtensionLifecycleManager {
     }
 }
 
-struct HostedMcpDiscoveryRequest {
-    base_package: ExtensionPackage,
-    scope: ResourceScope,
-    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-}
-
 fn response_with_payload(
     package_ref: Option<LifecyclePackageRef>,
     phase: InstallationState,
@@ -2524,6 +2447,320 @@ fn response_with_payload(
         message: None,
         payload: Some(payload),
     }
+}
+
+pub(crate) fn hosted_mcp_registration_response(
+    package_ref: LifecyclePackageRef,
+) -> LifecycleProductResponse {
+    let mut response = response_with_payload(
+        Some(package_ref),
+        InstallationState::Installed,
+        LifecycleProductPayload::ExtensionInstall {
+            installed: true,
+            visible_capability_ids: Vec::new(),
+            next_step: "Hosted MCP registration is pending catalog preparation.".to_string(),
+        },
+    );
+    response.message = Some("Hosted MCP registration accepted.".to_string());
+    response
+}
+
+pub(crate) fn hosted_mcp_name_unavailable() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::InvalidBindingRequest {
+        reason: "hosted MCP extension name is unavailable".to_string(),
+    }
+}
+
+pub(crate) fn hosted_mcp_discovery_error(
+    error: crate::HostedMcpDiscoveryError,
+) -> ProductSurfaceFailure {
+    match error {
+        crate::HostedMcpDiscoveryError::Transient(reason) => ProductSurfaceFailure::Transient {
+            reason: format!("hosted MCP catalog preparation failed: {reason}"),
+        },
+        crate::HostedMcpDiscoveryError::Permanent(reason) => {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!("hosted MCP catalog preparation failed: {reason}"),
+            }
+        }
+        crate::HostedMcpDiscoveryError::CredentialsRejected(_) => {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: "hosted MCP account setup is required".to_string(),
+            }
+        }
+    }
+}
+
+pub(crate) fn hosted_mcp_oauth_admission_error(
+    _error: ironclaw_auth::AuthProductError,
+) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::InvalidBindingRequest {
+        reason: "hosted MCP OAuth metadata was not admissible".to_string(),
+    }
+}
+
+pub(crate) fn hosted_mcp_metadata_network_policy(
+    url: &str,
+) -> Result<ironclaw_host_api::NetworkPolicy, ProductSurfaceFailure> {
+    let parsed = url::Url::parse(url).map_err(|_| {
+        hosted_mcp_oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig)
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.host_str().is_none()
+        || parsed.fragment().is_some()
+    {
+        return Err(hosted_mcp_oauth_admission_error(
+            ironclaw_auth::AuthProductError::MalformedConfig,
+        ));
+    }
+    Ok(ironclaw_host_api::NetworkPolicy {
+        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            host_pattern: parsed.host_str().unwrap_or_default().to_ascii_lowercase(),
+            port: parsed.port(),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(64 * 1024),
+    })
+}
+
+pub(crate) fn hosted_mcp_manifest_with_admitted_oauth(
+    seed: ExtensionManifestRecord,
+    endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
+    admitted: ironclaw_auth::ResolvedVendorAuthRecipe,
+) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+    if admitted.token_exchange_resource.as_deref() != Some(endpoint.as_str()) {
+        return Err(hosted_mcp_oauth_admission_error(
+            ironclaw_auth::AuthProductError::MalformedConfig,
+        ));
+    }
+    let vendor = VendorId::new(admitted.vendor.clone()).map_err(|_| {
+        hosted_mcp_oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig)
+    })?;
+    let scopes = admitted.recipe.scope_ceiling().to_vec();
+    let setup = ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+        scopes: scopes.clone(),
+    };
+    let parsed_endpoint = url::Url::parse(endpoint.as_str()).map_err(|_| {
+        hosted_mcp_oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig)
+    })?;
+    let handle = ironclaw_host_api::SecretHandle::new("hosted_mcp_account").map_err(|_| {
+        hosted_mcp_oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig)
+    })?;
+    let requirement = ironclaw_host_api::RuntimeCredentialRequirement {
+        handle: handle.clone(),
+        source: ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: vendor.clone(),
+            setup: setup.clone(),
+        },
+        provider_scopes: scopes,
+        audience: ironclaw_host_api::NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            host_pattern: parsed_endpoint
+                .host_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            port: parsed_endpoint.port(),
+        },
+        target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    };
+    let mut resolved = seed.resolved().clone();
+    resolved.auth = vec![ironclaw_extensions::ResolvedAuthSurface {
+        vendor,
+        setup,
+        recipe: Some(admitted.recipe),
+        protected_resource_metadata_url: admitted.protected_resource_metadata_url,
+    }];
+    let mcp = resolved.mcp.as_mut().ok_or_else(|| {
+        hosted_mcp_oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig)
+    })?;
+    mcp.credential_handles = vec![handle];
+    for tool in &mut resolved.tools {
+        tool.runtime_credentials = vec![requirement.clone()];
+    }
+    ExtensionManifestRecord::from_resolved(
+        seed.raw_toml(),
+        ManifestSource::UserRegistered,
+        resolved,
+        seed.manifest_hash().cloned(),
+    )
+    .map(|record| record.with_definition_retention(seed.definition_retention()))
+    .map_err(map_extension_installation_error)
+}
+
+pub(crate) fn pending_hosted_mcp_manifest(
+    extension_id: &ExtensionId,
+    desired_name: &str,
+    endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
+    selection: &ironclaw_host_api::HostedMcpAuthSelection,
+) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+    if desired_name.trim().is_empty() || desired_name.len() > 256 {
+        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            reason: "hosted MCP extension name is invalid".to_string(),
+        });
+    }
+    if let ironclaw_host_api::HostedMcpAuthSelection::OAuth {
+        client_profile_id: Some(profile),
+    } = selection
+        && (profile.trim().is_empty()
+            || profile.len() > 128
+            || profile.chars().any(char::is_control))
+    {
+        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            reason: "hosted MCP OAuth client profile is invalid".to_string(),
+        });
+    }
+    let quoted_name = toml::Value::String(desired_name.trim().to_string()).to_string();
+    let quoted_endpoint = toml::Value::String(endpoint.as_str().to_string()).to_string();
+    let id = extension_id.as_str();
+    let auth = match selection {
+        ironclaw_host_api::HostedMcpAuthSelection::NoAuth => String::new(),
+        ironclaw_host_api::HostedMcpAuthSelection::Bearer => {
+            let vendor = crate::hosted_mcp_admission::hosted_mcp_vendor_id(endpoint)
+                .map_err(|_| hosted_mcp_name_unavailable())?;
+            format!(
+                r#"
+[[mcp.credentials]]
+handle = "hosted_mcp_account"
+vendor = "{}"
+injection = {{ type = "header", name = "authorization", prefix = "Bearer " }}
+
+[auth.{}]
+method = "api_key"
+display_name = "Hosted MCP bearer token"
+fields = [{{ handle = "hosted_mcp_account", label = "Bearer token", secret = true }}]
+"#,
+                vendor.as_str(),
+                vendor.as_str()
+            )
+        }
+        ironclaw_host_api::HostedMcpAuthSelection::OAuth { .. } => String::new(),
+    };
+    let raw = format!(
+        r#"schema_version = "reborn.extension_manifest.v3"
+id = "{id}"
+name = {quoted_name}
+version = "0.1.0"
+description = "User-registered hosted MCP server"
+trust = "third_party"
+
+[mcp]
+origin_gate_matrix = {{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }}
+server = {quoted_endpoint}
+namespace = "{id}"
+max_tools = 1024
+default_permission = "ask"
+effects = ["network", "use_secret"]
+{auth}"#
+    );
+    let manifest_hash = ironclaw_extensions::ManifestHash::new(
+        ironclaw_host_api::sha256_digest_token(raw.as_bytes()),
+    )
+    .map_err(map_extension_installation_error)?;
+    let parsed = ExtensionManifestRecord::from_toml_with_root_binding(
+        raw.clone(),
+        ManifestSource::UserRegistered,
+        &ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected hosted MCP registration: {error}"),
+            }
+        })?,
+        Some(manifest_hash.clone()),
+        &crate::product_extension_host_api_contract_registry().map_err(|error| {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!("host API contracts rejected hosted MCP registration: {error}"),
+            }
+        })?,
+        ironclaw_extensions::PackageRootBinding::Virtual,
+    )
+    .map_err(map_extension_installation_error)?;
+    let mut resolved = parsed.resolved().clone();
+    resolved.root_binding = ironclaw_extensions::PackageRootBinding::Virtual;
+    if let Some(mcp) = resolved.mcp.as_mut() {
+        mcp.registration_auth = selection.clone();
+    }
+    ExtensionManifestRecord::from_resolved(
+        raw,
+        ManifestSource::UserRegistered,
+        resolved,
+        Some(manifest_hash),
+    )
+    .map(|record| {
+        record
+            .with_initial_preparation(ironclaw_extensions::PreparationRequirement::Required)
+            .with_definition_retention(
+                ironclaw_extensions::PackageDefinitionRetention::RetainInCatalog,
+            )
+    })
+    .map_err(map_extension_installation_error)
+}
+
+pub(crate) fn available_user_registered_package(
+    record: &ExtensionManifestRecord,
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+    let id = record.resolved().id.as_str();
+    let manifest: ironclaw_extensions::ExtensionManifest =
+        record.manifest().clone().try_into().map_err(|error| {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!("hosted MCP package manifest is invalid: {error}"),
+            }
+        })?;
+    let schemas = record
+        .resolved()
+        .mcp
+        .as_ref()
+        .map(|mcp| &mcp.dynamic_input_schemas);
+    let capabilities = manifest
+        .capabilities
+        .iter()
+        .map(|capability| ironclaw_host_api::CapabilityDescriptor {
+            id: capability.id.clone(),
+            provider: manifest.id.clone(),
+            runtime: manifest.runtime.kind(),
+            trust_ceiling: manifest.descriptor_trust_default,
+            description: capability.description.clone(),
+            parameters_schema: schemas
+                .and_then(|schemas| schemas.get(capability.id.as_str()))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            effects: capability.effects.clone(),
+            default_permission: capability.default_permission,
+            runtime_credentials: capability.runtime_credentials.clone(),
+            network_targets: capability.network_targets.clone(),
+            max_egress_bytes: capability.max_egress_bytes,
+            resource_profile: capability.resource_profile.clone(),
+            origin_gate_matrix: capability.origin_gate_matrix.clone(),
+        })
+        .collect();
+    let package = ExtensionPackage::from_virtual_manifest(
+        manifest,
+        Some(ironclaw_host_api::sha256_digest_token(
+            record.raw_toml().as_bytes(),
+        )),
+        capabilities,
+    )
+    .map_err(map_extension_error)?;
+    Ok(AvailableExtensionPackage {
+        package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)?,
+        manifest_toml: record.raw_toml().to_string(),
+        resolved_manifest: Arc::new(record.resolved().clone()),
+        source: ManifestSource::UserRegistered,
+        package,
+        cleanup_requirements: Vec::new(),
+        surface_kinds: crate::surface_kinds_from_manifest_record(record, id)?,
+        channel_directions: None,
+        channel_presentation: None,
+        assets: Vec::new(),
+        onboarding_override: None,
+        oauth_setup_override: None,
+        search_aliases: Vec::new(),
+    })
 }
 
 fn activation_success_response(
@@ -2561,7 +2798,7 @@ fn activation_success_response(
     response
 }
 
-fn activation_credentials_incomplete_response(
+pub(crate) fn activation_credentials_incomplete_response(
     package_ref: LifecyclePackageRef,
     missing: Vec<RuntimeCredentialAuthRequirement>,
 ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
@@ -2655,30 +2892,6 @@ fn activation_success_message(
 // no backend mounts the generic proof-code redeem route — the first
 // inbound channel must mount one alongside this requirement or its submit
 // will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
-/// The discovery call's network authority: the declared hosted-MCP server
-/// host only (the same ceiling the dispatch pipeline derives for the
-/// connection-template capability).
-fn hosted_mcp_discovery_network_policy(
-    package: &ExtensionPackage,
-) -> Option<ironclaw_host_api::NetworkPolicy> {
-    let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
-        &package.manifest.runtime
-    else {
-        return None;
-    };
-    let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    Some(ironclaw_host_api::NetworkPolicy {
-        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
-            host_pattern: host.to_string(),
-            port: parsed.port(),
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    })
-}
-
 fn generic_host_error(error: crate::LifecycleError) -> ProductSurfaceFailure {
     ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("generic extension host rejected the activation: {error}"),
@@ -2692,7 +2905,7 @@ fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductSurfaceF
     }
 }
 
-fn extension_ids_from_package_ref(
+pub(crate) fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductSurfaceFailure> {
     package_ref.require_kind(LifecyclePackageKind::Extension)?;
@@ -2874,7 +3087,7 @@ fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceF
     }
 }
 
-fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
+pub(crate) fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
             ProductSurfaceFailure::Transient {
@@ -2887,7 +3100,9 @@ fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
     }
 }
 
-fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductSurfaceFailure {
+pub(crate) fn map_extension_installation_error(
+    error: ExtensionInstallationError,
+) -> ProductSurfaceFailure {
     match error {
         // #4091: a store IO/backend outage is retryable backend trouble, not a
         // malformed lifecycle request — surface it in the same Transient class
@@ -2946,26 +3161,6 @@ fn ensure_caller_may_mutate_tenant_installation(
         });
     }
     Ok(())
-}
-
-fn hosted_mcp_discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceFailure {
-    match error {
-        HostedMcpDiscoveryError::Transient(reason) => ProductSurfaceFailure::Transient {
-            reason: format!("hosted MCP discovery failed: {reason}"),
-        },
-        HostedMcpDiscoveryError::Permanent(reason) => {
-            ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("hosted MCP discovery failed: {reason}"),
-            }
-        }
-    }
-}
-
-fn hosted_mcp_changed_during_discovery_error() -> ProductSurfaceFailure {
-    ProductSurfaceFailure::Transient {
-        reason: "extension changed while hosted MCP discovery was running; retry activation"
-            .to_string(),
-    }
 }
 
 fn compensation_failure(
@@ -3034,6 +3229,13 @@ mod tests {
             active_extensions,
             None,
             owner.clone(),
+            crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("package ref");
@@ -3123,6 +3325,13 @@ mod tests {
             active_extensions,
             None,
             alice.clone(),
+            crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("package ref");

@@ -19,7 +19,7 @@ use crate::{
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
 pub async fn restore_extension_lifecycle_state(
-    catalog: &AvailableExtensionCatalog,
+    catalog: &mut AvailableExtensionCatalog,
     filesystem: &Arc<dyn RootFilesystem>,
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
@@ -29,6 +29,23 @@ pub async fn restore_extension_lifecycle_state(
     for installation in
         canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
     {
+        let stored_manifest = installation_store
+            .get_manifest(installation.extension_id())
+            .await
+            .map_err(map_extension_installation_error)?;
+        if let Some(manifest) = stored_manifest.as_ref()
+            && manifest.manifest().source == ManifestSource::UserRegistered
+        {
+            let available = crate::product_lifecycle::available_user_registered_package(manifest)?;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
+        }
+        if !installation.preparation_state().is_ready() {
+            tracing::debug!(
+                extension_id = installation.extension_id().as_str(),
+                "skipping pending extension installation during offline restore"
+            );
+            continue;
+        }
         if remove_retired_internal_installation(installation_store, &installation).await? {
             continue;
         }
@@ -57,7 +74,9 @@ pub async fn restore_extension_lifecycle_state(
             )
             .await?;
         }
-        materialize_available_extension(filesystem.as_ref(), &available).await?;
+        if available.source != ManifestSource::UserRegistered {
+            materialize_available_extension(filesystem.as_ref(), &available).await?;
+        }
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
@@ -158,6 +177,7 @@ pub struct ExtensionInstallPlan {
 pub fn prepare_install(
     available: &AvailableExtensionPackage,
     owner: InstallationOwner,
+    retained_definition: Option<ExtensionManifestRecord>,
 ) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
     let manifest_hash = available_manifest_hash(available)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
@@ -170,19 +190,38 @@ pub fn prepare_install(
             reason: format!("host API contract registry rejected extension install: {error}"),
         }
     })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
+    let catalog_record = manifest_record_for_available(
+        available,
         &host_ports,
-        Some(manifest_hash.clone()),
         &contracts,
-        Some(available.package.root.clone()),
-    )
-    .map_err(map_extension_installation_error)?
+        Some(manifest_hash.clone()),
+    )?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    let manifest_record = match retained_definition {
+        Some(retained)
+            if retained.raw_toml() == catalog_record.raw_toml()
+                && retained.resolved() == catalog_record.resolved()
+                && retained.manifest_hash() == catalog_record.manifest_hash() =>
+        {
+            retained
+        }
+        Some(_) => {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has a conflicting registered definition",
+                    available.package.id.as_str()
+                ),
+            });
+        }
+        None => catalog_record,
+    };
     let installation_id = ExtensionInstallationId::new(available.package.id.as_str().to_string())
         .map_err(map_extension_installation_error)?;
-    let installation = ExtensionInstallation::new(
+    let constructor = match manifest_record.initial_preparation() {
+        ironclaw_extensions::PreparationRequirement::Ready => ExtensionInstallation::new,
+        ironclaw_extensions::PreparationRequirement::Required => ExtensionInstallation::new_pending,
+    };
+    let installation = constructor(
         installation_id,
         available.package.id.clone(),
         ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
@@ -195,6 +234,24 @@ pub fn prepare_install(
         manifest_record,
         installation,
     })
+}
+
+fn manifest_record_for_available(
+    available: &AvailableExtensionPackage,
+    host_ports: &ironclaw_host_api::HostPortCatalog,
+    contracts: &ironclaw_extensions::HostApiContractRegistry,
+    manifest_hash: Option<ironclaw_extensions::ManifestHash>,
+) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+    let _ = (host_ports, contracts);
+    let mut resolved = available.resolved_manifest.as_ref().clone();
+    resolved.root_binding = available.package.root_binding.clone();
+    ExtensionManifestRecord::from_resolved(
+        &available.manifest_toml,
+        available.source,
+        resolved,
+        manifest_hash,
+    )
+    .map_err(map_extension_installation_error)
 }
 
 fn prepare_manifest_migration(
@@ -212,15 +269,12 @@ fn prepare_manifest_migration(
             reason: format!("host API contract registry rejected manifest migration: {error}"),
         }
     })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
+    let manifest_record = manifest_record_for_available(
+        available,
         &host_ports,
-        Some(manifest_hash.clone()),
         &contracts,
-        Some(available.package.root.clone()),
-    )
-    .map_err(map_extension_installation_error)?
+        Some(manifest_hash.clone()),
+    )?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let installation = ExtensionInstallation::new(
         existing.installation_id().clone(),

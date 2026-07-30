@@ -100,6 +100,10 @@ pub enum PackageSource {
     /// Fetched from a remote registry. Trust requires signature verification
     /// and a host-policy entry; PR1b only validates the source tag.
     Registry { url: String },
+    /// A tenant-registered remote package whose exact canonical endpoint is
+    /// part of its trust identity. Untrusted by default; policy may only match
+    /// the complete source value, including endpoint.
+    DirectRemote { endpoint: String },
     /// Operator/admin configuration assertion (e.g., trusted-package list set
     /// outside any user-controlled file).
     Admin,

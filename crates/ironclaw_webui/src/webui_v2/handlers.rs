@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -37,20 +38,21 @@ use ironclaw_product::{
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
     CREATE_THREAD_COMMAND, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW,
-    LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND,
-    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND,
-    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeResult, NearAiLoginStart, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
-    OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND,
-    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW,
+    FS_READ_COMMAND, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY,
+    LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
+    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LifecyclePackageKind,
+    LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
+    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
+    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY,
+    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities, ProductCancelRunRequest,
@@ -105,9 +107,11 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, LifecyclePublicState, ProductSurface, ProductSurfaceCaller,
+    ActivityId, Blocked, FailureKind, HostedMcpAuthSelection, HostedMcpEndpoint,
+    LifecyclePackageId, LifecyclePublicState, ProductSurface, ProductSurfaceCaller,
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
+    ProductSurfaceValidationCode, RegisterHostedMcpRequest, Resolution, SecretHandle, ThreadId,
+    UserId, hosted_mcp_extension_id,
 };
 use uuid::Uuid;
 
@@ -2207,6 +2211,72 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/register-hosted-mcp`
+///
+/// Accepts only admission inputs. Caller identity, package source, manifests,
+/// discovered tools, and credentials remain owned by the product lifecycle.
+pub async fn register_hosted_mcp_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    body: Result<Json<RegisterHostedMcpBody>, JsonRejection>,
+) -> Result<Json<RegisterHostedMcpResponse>, WebUiV2HttpError> {
+    let Json(body) = body.map_err(|_| {
+        ProductSurfaceError::validation("request", ProductSurfaceValidationCode::InvalidValue)
+    })?;
+    let desired_name = bounded_hosted_mcp_name(body.desired_name)?;
+    let package_ref = extension_package_ref_for_request(
+        hosted_mcp_extension_id(&body.desired_id).and_then(|extension_id| {
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
+        }),
+        "desired_id",
+    )?;
+    let request = RegisterHostedMcpRequest {
+        desired_id: body.desired_id,
+        desired_name,
+        endpoint: body.endpoint,
+        auth_selection: body.auth_selection,
+    };
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+        request,
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    let extension = read_registered_extension(state.services(), caller, &package_ref).await?;
+    Ok(Json(RegisterHostedMcpResponse {
+        success: true,
+        message: "Custom MCP registered.".to_string(),
+        package_ref: extension.package_ref,
+        phase: extension.installation_state,
+    }))
+}
+
+async fn read_registered_extension(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+    package_ref: &LifecyclePackageRef,
+) -> Result<ironclaw_product::RebornExtensionInfo, ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: EXTENSIONS_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    let inventory: RebornExtensionListResponse =
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
+    inventory
+        .extensions
+        .into_iter()
+        .find(|extension| extension.package_ref == *package_ref)
+        .ok_or_else(|| extension_lifecycle_unavailable(true))
+}
+
 /// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
 /// tool bundle (a zip with manifest.toml + wasm/ + schemas/ + prompts/). The
 /// bundle is unpacked, validated, written under `/system/extensions/<id>/`, and
@@ -3728,6 +3798,35 @@ pub struct InstallExtensionBody {
     /// Client gesture id (#6520): one distinct install gesture = one stable
     /// ActivityId; a response-lost retry replays the same gesture.
     pub client_action_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterHostedMcpBody {
+    pub desired_id: LifecyclePackageId,
+    pub desired_name: String,
+    pub endpoint: HostedMcpEndpoint,
+    #[serde(default)]
+    pub auth_selection: Option<HostedMcpAuthSelection>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterHostedMcpResponse {
+    pub success: bool,
+    pub message: String,
+    pub package_ref: LifecyclePackageRef,
+    pub phase: LifecyclePublicState,
+}
+
+fn bounded_hosted_mcp_name(name: String) -> Result<String, ProductSurfaceError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 || trimmed.chars().any(char::is_control) {
+        return Err(ProductSurfaceError::validation(
+            "desired_name",
+            ProductSurfaceValidationCode::InvalidValue,
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[derive(Debug, Deserialize)]

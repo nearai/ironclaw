@@ -5,7 +5,7 @@
 //! the product surface that produced the command.
 
 use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::{HostApiError, RegisterHostedMcpRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -289,6 +289,9 @@ fn parse_lifecycle_command_payload(
     payload: &InboundCommandPayload,
 ) -> ProductCommandParseResult {
     Ok(match kind {
+        LifecycleCommandKind::ExtensionRegisterHostedMcp => {
+            parse_register_hosted_mcp_command(payload)?
+        }
         LifecycleCommandKind::ExtensionSearch => ProductCommand::Lifecycle {
             action: LifecycleProductAction::ExtensionSearch {
                 query: payload.arguments.trim().to_string(),
@@ -323,6 +326,19 @@ fn parse_lifecycle_command_payload(
         },
         LifecycleCommandKind::SkillInstall => parse_skill_install_command(payload)?,
         LifecycleCommandKind::SkillRemove => parse_skill_remove_command(payload)?,
+    })
+}
+
+fn parse_register_hosted_mcp_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    let request = serde_json::from_str::<RegisterHostedMcpRequest>(payload.arguments.trim())
+        .map_err(|_| {
+            ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "extension_register_hosted_mcp expects a registration JSON payload",
+            )
+        })?;
+    Ok(ProductCommand::Lifecycle {
+        action: LifecycleProductAction::ExtensionRegisterHostedMcp { request },
     })
 }
 
@@ -471,4 +487,43 @@ fn lifecycle_package_ref(
     id: impl Into<String>,
 ) -> Result<LifecyclePackageRef, HostApiError> {
     LifecyclePackageRef::new(kind, id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProductTriggerReason;
+    use ironclaw_host_api::{HostedMcpAuthSelection, HostedMcpEndpoint, LifecyclePackageId};
+
+    #[test]
+    fn register_hosted_mcp_command_parses_the_registration_wire_shape() {
+        let payload = InboundCommandPayload::new(
+            "extension_register_hosted_mcp",
+            r#"{
+                "desired_id": "calendar",
+                "desired_name": "Calendar",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_selection": { "kind": "oauth", "client_profile_id": "default" }
+            }"#,
+            ProductTriggerReason::BotCommand,
+        )
+        .expect("valid command payload");
+
+        assert_eq!(
+            ProductCommand::from_payload(&payload).expect("parse registration command"),
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionRegisterHostedMcp {
+                    request: RegisterHostedMcpRequest {
+                        desired_id: LifecyclePackageId::new("calendar").expect("valid id"),
+                        desired_name: "Calendar".to_string(),
+                        endpoint: HostedMcpEndpoint::new("https://mcp.example.test/rpc")
+                            .expect("valid endpoint"),
+                        auth_selection: Some(HostedMcpAuthSelection::OAuth {
+                            client_profile_id: Some("default".to_string()),
+                        }),
+                    },
+                },
+            }
+        );
+    }
 }

@@ -8,7 +8,9 @@
 //! edge — it just relocates a pure classification over those inputs to the single
 //! authority site.
 
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, PackageRootBinding,
+};
 use ironclaw_host_api::{CapabilityId, PackageSource};
 use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
 use tracing::debug;
@@ -75,7 +77,7 @@ pub(crate) fn evaluate_invocation_trust(
     if package_descriptor != descriptor {
         return Err(TrustEvaluationError::ConflictingPackageDescriptor);
     }
-    let input = trust_policy_input_for_local_manifest(package)?;
+    let input = trust_policy_input_for_package(package)?;
     trust_policy.evaluate(&input).map_err(|error| {
         // The kernel→host mapping collapses this to `Policy`; log the bound
         // `TrustError` so the underlying policy refusal is recoverable
@@ -85,12 +87,12 @@ pub(crate) fn evaluate_invocation_trust(
     })
 }
 
-fn trust_policy_input_for_local_manifest(
+fn trust_policy_input_for_package(
     package: &ExtensionPackage,
 ) -> Result<TrustPolicyInput, TrustEvaluationError> {
     package
         .trust_policy_input(
-            local_manifest_source(package),
+            trust_policy_source(package)?,
             package.manifest_digest(),
             None,
         )
@@ -103,12 +105,26 @@ fn trust_policy_input_for_local_manifest(
         })
 }
 
-fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {
-    PackageSource::LocalManifest {
-        path: format!(
-            "{}/manifest.toml",
-            package.root.as_str().trim_end_matches('/')
-        ),
+fn trust_policy_source(package: &ExtensionPackage) -> Result<PackageSource, TrustEvaluationError> {
+    match package.package_root_binding() {
+        PackageRootBinding::Materialized(root) => Ok(PackageSource::LocalManifest {
+            path: format!("{}/manifest.toml", root.as_str().trim_end_matches('/')),
+        }),
+        // A hosted MCP registered by a tenant intentionally has no local
+        // package tree after its dynamic discovery projection. Its canonical
+        // HTTPS endpoint is the trust identity, not a fabricated local path.
+        PackageRootBinding::Virtual => match &package.manifest.runtime {
+            ExtensionRuntime::Mcp {
+                transport,
+                command: None,
+                args,
+                url: Some(endpoint),
+            } if transport == "http" && args.is_empty() => Ok(PackageSource::DirectRemote {
+                endpoint: endpoint.clone(),
+            }),
+            _ => Err(TrustEvaluationError::TrustInput),
+        },
+        PackageRootBinding::FabricateOnLoad => Err(TrustEvaluationError::TrustInput),
     }
 }
 
@@ -178,7 +194,7 @@ output_schema_ref = "schemas/test.output.json"
         )
         .unwrap();
 
-        let input = trust_policy_input_for_local_manifest(&package).unwrap();
+        let input = trust_policy_input_for_package(&package).unwrap();
 
         assert_eq!(
             input.identity.source,

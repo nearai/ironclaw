@@ -59,8 +59,14 @@ impl ActiveExtensionPublisher {
     }
 
     fn upsert_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+        if package.manifest.source == ironclaw_extensions::ManifestSource::UserRegistered {
+            // Direct-remote packages remain on the trust engine's untrusted
+            // default. Registration is provenance, never an implicit admin
+            // elevation.
+            return Ok(());
+        }
         let input = extension_trust_policy_input(package)?;
-        let manifest_path = extension_local_manifest_path(package);
+        let manifest_path = extension_local_manifest_path(package)?;
         let entry = AdminEntry::for_local_manifest(
             input.identity.package_id.clone(),
             manifest_path,
@@ -84,9 +90,12 @@ impl ActiveExtensionPublisher {
     }
 
     fn remove_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+        if package.manifest.source == ironclaw_extensions::ManifestSource::UserRegistered {
+            return Ok(());
+        }
         let input = extension_trust_policy_input(package)?;
         let package_id = input.identity.package_id.clone();
-        let source = extension_local_manifest_source(package);
+        let source = extension_package_source(package)?;
         self.trust_policy
             .mutate_with(
                 &self.trust_invalidation_bus,
@@ -108,24 +117,47 @@ pub fn extension_trust_policy_input(
 ) -> Result<ironclaw_trust::TrustPolicyInput, ProductSurfaceFailure> {
     package
         .trust_policy_input(
-            extension_local_manifest_source(package),
+            extension_package_source(package)?,
             package.manifest_digest(),
             None,
         )
         .map_err(map_extension_error)
 }
 
-fn extension_local_manifest_source(package: &ExtensionPackage) -> PackageSource {
-    PackageSource::LocalManifest {
-        path: extension_local_manifest_path(package),
+fn extension_package_source(
+    package: &ExtensionPackage,
+) -> Result<PackageSource, ProductSurfaceFailure> {
+    if package.manifest.source == ironclaw_extensions::ManifestSource::UserRegistered {
+        let ironclaw_extensions::ExtensionRuntime::Mcp {
+            url: Some(endpoint),
+            ..
+        } = &package.manifest.runtime
+        else {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: "user-registered extension lacks a direct remote MCP endpoint".to_string(),
+            });
+        };
+        return Ok(PackageSource::DirectRemote {
+            endpoint: endpoint.clone(),
+        });
     }
+    Ok(PackageSource::LocalManifest {
+        path: extension_local_manifest_path(package)?,
+    })
 }
 
-fn extension_local_manifest_path(package: &ExtensionPackage) -> String {
-    format!(
+fn extension_local_manifest_path(
+    package: &ExtensionPackage,
+) -> Result<String, ProductSurfaceFailure> {
+    let root = package.materialized_root().map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!("local extension package has no materialized root: {error}"),
+        }
+    })?;
+    Ok(format!(
         "{}/manifest.toml",
-        package.root.as_str().trim_end_matches('/')
-    )
+        root.as_str().trim_end_matches('/')
+    ))
 }
 
 fn extension_allowed_effects(package: &ExtensionPackage) -> Vec<EffectKind> {

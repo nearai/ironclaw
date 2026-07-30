@@ -220,6 +220,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
             scope: auth_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -559,6 +560,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
                     vendor: "vendorco".to_string(),
                     recipe,
                     token_exchange_resource: Some("https://mcp.vendorco.example/mcp".to_string()),
+                    protected_resource_metadata_url: None,
                 },
             ])),
             client_credentials: Arc::new(StaticTestCredentials),
@@ -1009,6 +1011,7 @@ async fn create_provider_flow(
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider,
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -1036,6 +1039,7 @@ async fn create_vendor_flow(
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: vendor_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://mcp.vendorco.example/authorize"),
                 expires_at: Utc::now() + Duration::minutes(5),

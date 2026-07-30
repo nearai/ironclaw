@@ -1,4 +1,5 @@
 use super::*;
+use crate::LifecycleProductAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProductCommandHandler {
@@ -280,6 +281,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderUpsert,
     LlmProviderDelete,
     LlmActiveSet,
+    ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
     ProjectUpdate,
@@ -307,6 +309,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID => Some(Self::LlmProviderUpsert),
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
             PROJECT_UPDATE_CAPABILITY_ID => Some(Self::ProjectUpdate),
@@ -335,6 +338,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderUpsert => "llm provider updated",
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
+            Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
             Self::ProjectUpdate => "project updated",
@@ -374,6 +378,23 @@ impl ProductCapabilityHandler {
             }
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
+            Self::ExtensionRegisterHostedMcp => {
+                let request: ironclaw_host_api::RegisterHostedMcpRequest =
+                    product_command_input(input)?;
+                services
+                    .lifecycle_service
+                    .execute(
+                        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                            tenant_id: caller.tenant_id,
+                            user_id: caller.user_id,
+                            agent_id: caller.agent_id,
+                            project_id: caller.project_id,
+                        }),
+                        LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+                    )
+                    .await?;
+                Ok(())
+            }
             Self::ExtensionImport => {
                 extensions::import_extension_capability(
                     services.lifecycle_service.as_ref(),
@@ -535,6 +556,7 @@ mod tests {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
             PROJECT_UPDATE_CAPABILITY_ID,

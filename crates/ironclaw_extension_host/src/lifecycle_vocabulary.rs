@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
@@ -24,10 +22,6 @@ pub struct ActiveExtensionCapability {
 #[derive(Clone)]
 pub enum ExtensionActivationMode {
     Static,
-    HostedMcpDiscovery {
-        scope: ResourceScope,
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    },
 }
 
 impl ActiveExtensionCapability {
@@ -47,15 +41,11 @@ impl ActiveExtensionCapability {
 
 impl ExtensionActivationMode {
     pub fn from_dispatch_context(
-        scope: ResourceScope,
-        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+        _scope: ResourceScope,
+        _runtime_http_egress: Option<std::sync::Arc<dyn RuntimeHttpEgress>>,
     ) -> Self {
-        match runtime_http_egress {
-            Some(runtime_http_egress) => Self::HostedMcpDiscovery {
-                scope,
-                runtime_http_egress,
-            },
-            None => Self::Static,
-        }
+        // A runtime egress capability no longer selects lifecycle behavior:
+        // hosted MCP discovery is performed only during pending preparation.
+        Self::Static
     }
 }

@@ -19,6 +19,7 @@ use ironclaw_host_api::{
     VirtualPath,
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::ExtensionAdminConfigurationDescriptor;
 
@@ -27,6 +28,46 @@ use crate::v2::{
     HookSectionEntryV2, HostApiId, HostApiRefV2, ManifestSectionPath, ManifestSource,
     ManifestV2Error, requested_trust_to_descriptor_trust,
 };
+
+/// Whether an extension package has a filesystem tree, and if so where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageRootBinding {
+    /// Compatibility state for rows written before package roots were typed.
+    /// A designated materialization boundary must resolve this before the
+    /// manifest reaches a filesystem consumer.
+    FabricateOnLoad,
+    /// A real package tree exists at this path.
+    Materialized(VirtualPath),
+    /// The package is remote-only and has no filesystem tree.
+    Virtual,
+}
+
+impl Default for PackageRootBinding {
+    fn default() -> Self {
+        Self::FabricateOnLoad
+    }
+}
+
+/// A caller requested filesystem access for a package without a materialized
+/// root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PackageRootError {
+    #[error("the legacy package root must be materialized before filesystem access")]
+    FabricationRequired,
+    #[error("virtual packages do not have a filesystem root")]
+    Virtual,
+}
+
+impl PackageRootBinding {
+    pub fn materialized_root(&self) -> Result<&VirtualPath, PackageRootError> {
+        match self {
+            Self::Materialized(root) => Ok(root),
+            Self::FabricateOnLoad => Err(PackageRootError::FabricationRequired),
+            Self::Virtual => Err(PackageRootError::Virtual),
+        }
+    }
+}
 
 /// The persisted, serializable projection of one validated extension
 /// manifest. Everything production needs to project surfaces, dispatch
@@ -40,21 +81,14 @@ pub struct ResolvedExtensionManifest {
     pub description: String,
     pub requested_trust: RequestedTrustClass,
     pub runtime: ExtensionRuntimeV2,
-    /// The extension's package root, when known at compile time. `None` from
-    /// [`ResolvedExtensionManifest::from_v2`] and the v3 parse path — neither
-    /// has a genuine root in scope at TOML-parse time.
-    /// `ExtensionManifestRecord::from_toml`
-    /// (`crates/ironclaw_extensions/src/installations.rs`) overwrites `root`
-    /// with the caller-supplied value afterward, so installed records carry a
-    /// real root wherever the caller has one. When this is still `None` — a
-    /// caller that had no root to pass, or a row persisted before this field
-    /// existed — the loader falls back to fabricating
-    /// `/system/extensions/{id}`. `#[serde(default)]` is required: this
-    /// struct is embedded in `WireManifestRecord`
-    /// (`crates/ironclaw_extensions/src/installations.rs`) and already-persisted
-    /// rows have no `root` key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<VirtualPath>,
+    /// Canonical package-root contract. Compatibility for the former
+    /// `root: Option<VirtualPath>` wire is private to `WireManifestRecord`.
+    #[serde(default)]
+    pub root_binding: PackageRootBinding,
+    /// Whether a fresh installation can activate immediately or must first
+    /// pass through the composed preparation strategy.
+    #[serde(default)]
+    pub initial_preparation: PreparationRequirement,
     /// Present iff the manifest declares `[mcp]` (v3 hosted MCP servers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<ResolvedMcpDeclaration>,
@@ -86,6 +120,14 @@ pub struct ResolvedExtensionManifest {
     pub hooks: Vec<HookSectionEntryV2>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationRequirement {
+    #[default]
+    Ready,
+    Required,
+}
+
 /// A hosted-MCP server declaration (`[mcp]`): the proxied server whose
 /// `tools/list` is the tool source of truth, plus the ceiling every
 /// discovered tool must fit.
@@ -103,6 +145,16 @@ pub struct ResolvedMcpDeclaration {
     /// The server-connection credential handles (injected on every server
     /// call; discovered tools cannot declare their own).
     pub credential_handles: Vec<SecretHandle>,
+    /// Admission-validated schemas for a remote-only discovered catalog.
+    /// Filesystem-backed packages leave this empty and resolve schema refs
+    /// through their materialized package root.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub dynamic_input_schemas: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Immutable registration-time authentication selection for a remote
+    /// user-registered MCP definition. Bundled/static providers use NoAuth
+    /// here because their concrete auth recipe remains the authority.
+    #[serde(default)]
+    pub registration_auth: ironclaw_host_api::HostedMcpAuthSelection,
 }
 
 /// One vendor the extension authenticates against: the account setup this
@@ -115,6 +167,11 @@ pub struct ResolvedAuthSurface {
     /// `None` for v2 manifests (no recipe vocabulary); required in v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<VendorAuthRecipe>,
+    /// Exact RFC 9728 document admitted while preparing a user-registered
+    /// OAuth MCP. This stays with the recipe so later DCR uses the advertised
+    /// location rather than guessing a well-known resource path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_resource_metadata_url: Option<ironclaw_host_api::HttpsEndpoint>,
 }
 
 /// Serializable mirror of a v2 `[[host_api]]` reference.
@@ -133,6 +190,14 @@ pub struct ResolvedSectionSurface {
 }
 
 impl ResolvedExtensionManifest {
+    pub fn package_root_binding(&self) -> &PackageRootBinding {
+        &self.root_binding
+    }
+
+    pub fn materialized_root(&self) -> Result<&VirtualPath, PackageRootError> {
+        self.root_binding.materialized_root()
+    }
+
     /// Project a validated v2 manifest into the resolved contract.
     pub fn from_v2(manifest: &ExtensionManifestV2) -> Self {
         let auth = manifest
@@ -143,6 +208,7 @@ impl ResolvedExtensionManifest {
                     vendor: provider,
                     setup,
                     recipe: None,
+                    protected_resource_metadata_url: None,
                 }),
                 _ => None,
             })
@@ -171,9 +237,10 @@ impl ResolvedExtensionManifest {
             description: manifest.description.clone(),
             requested_trust: manifest.requested_trust,
             runtime: manifest.runtime.clone(),
-            // No package root is in scope at v2 parse time (TOML parsing
-            // precedes materialization); the loader fabricates one.
-            root: None,
+            // Parsing precedes package materialization. Only the designated
+            // legacy loader may resolve this compatibility state.
+            root_binding: PackageRootBinding::FabricateOnLoad,
+            initial_preparation: PreparationRequirement::Ready,
             mcp: None,
             tools: manifest.capabilities.clone(),
             channel: None,

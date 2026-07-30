@@ -303,7 +303,7 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
     }
 }
 
-fn compose_provider_client(
+async fn compose_provider_client(
     configs: Vec<OAuthProviderBackendConfig>,
     dcr_callback: Option<OAuthDcrCallbackConfig>,
     secret_store: Arc<dyn SecretStorePort>,
@@ -322,7 +322,7 @@ fn compose_provider_client(
 
     let mut client_credentials = CompositionClientCredentials::default();
     for config in &configs {
-        register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
+        register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config).await;
     }
     client_credentials.with_admin_configuration(admin_configuration_credentials);
     let callback_base = dcr_callback
@@ -351,14 +351,14 @@ fn compose_provider_client(
     )
 }
 
-fn register_vendor_client_config(
+async fn register_vendor_client_config(
     credentials: &mut CompositionClientCredentials,
     recipes: &dyn AuthRecipeResolver,
     config: &OAuthProviderBackendConfig,
 ) {
     use secrecy::ExposeSecret as _;
 
-    let Some(resolved) = recipes.recipe_for_vendor(&config.vendor) else {
+    let Some(resolved) = recipes.resolve(None, &config.vendor).await else {
         tracing::warn!(
             vendor = config.vendor,
             "no bundled recipe for configured OAuth vendor; client material not wired"
@@ -719,66 +719,6 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
     }
 }
 
-struct ProductContinuationFromAuth {
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
-}
-
-impl ProductContinuationFromAuth {
-    fn new(inner: Arc<dyn RebornAuthContinuationDispatcher>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl ironclaw_product::ProductAuthContinuationDispatcher for ProductContinuationFromAuth {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_auth_continuation(event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
-}
-
-pub(crate) fn product_auth_continuation_dispatcher(
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
-) -> Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher> {
-    Arc::new(ProductContinuationFromAuth::new(inner))
-}
-
-struct AuthContinuationFromProduct {
-    inner: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
-}
-
-impl AuthContinuationFromProduct {
-    fn new(inner: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RebornAuthContinuationDispatcher for AuthContinuationFromProduct {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_auth_continuation(event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
-}
-
 /// Output of [`build_local_runtime_root_filesystem`]: the composed local-dev
 /// root filesystem and the backend-specific durable substrate. The libSQL
 /// variant retains the shared runtime and filesystem so local-dev state,
@@ -1057,7 +997,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
-    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -4726,7 +4665,8 @@ async fn build_backend_production(
         product_auth_runtime_ports.clone(),
         admin_configuration_credential_slot.clone(),
         &first_party_bundles,
-    )?;
+    )
+    .await?;
     let services = if let Some(process_port) = local_process_port {
         services.with_runtime_process_port(Arc::new(process_port))
     } else {
@@ -5014,7 +4954,7 @@ async fn build_backend_production(
         Arc::new(ironclaw_trust::InvalidationBus::new()),
     );
     restore_extension_lifecycle_state(
-        &available_extensions,
+        &mut available_extensions,
         &extension_filesystem,
         &extension_installation_store,
         &extension_lifecycle_service,
@@ -5048,6 +4988,13 @@ async fn build_backend_production(
                 &product_auth_dependencies,
             ))) as Arc<dyn ExtensionCredentialCleanup>),
             channel_egress_scope.user_id.clone(),
+            ironclaw_extension_host::HostedMcpPreparationDependencies {
+                runtime_ports: services.product_auth_provider_runtime_ports(),
+                catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
         )
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
@@ -5093,21 +5040,21 @@ async fn build_backend_production(
             ))
             .with_extension_management(Arc::clone(&extension_management))
             .with_channel_config(Arc::clone(&admin_configuration_resolver))
-            .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
             .with_runtime_credential_accounts(
                 product_auth_dependencies.runtime_credential_account_selection_service(),
             ),
         );
     let base_product_continuation: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher> =
-        product_auth_continuation_dispatcher(base_auth_continuation);
+        ironclaw_product::product_auth_continuation_dispatcher(base_auth_continuation);
     let lifecycle_wrapped_product_continuation =
         ironclaw_product::lifecycle_auth_continuation_dispatcher(
             lifecycle_continuation_facade,
             base_product_continuation,
         );
-    let lifecycle_wrapped_auth_continuation: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
-        AuthContinuationFromProduct::new(Arc::clone(&lifecycle_wrapped_product_continuation)),
-    );
+    let lifecycle_wrapped_auth_continuation: Arc<dyn RebornAuthContinuationDispatcher> =
+        ironclaw_product::auth_continuation_from_product(Arc::clone(
+            &lifecycle_wrapped_product_continuation,
+        ));
     let product_auth_services = Arc::new(
         product_auth_core
             .with_continuation_dispatcher(Arc::clone(&lifecycle_wrapped_auth_continuation)),
@@ -5296,9 +5243,6 @@ async fn build_backend_production(
         )
         .await;
         extension_management.attach_generic_host(Arc::clone(&generic.host));
-        if let Some(ports) = services.product_auth_provider_runtime_ports() {
-            extension_management.attach_discovery_runtime_ports(ports.clone());
-        }
         services.set_extension_tool_resolver(generic.resolver);
         let ingress_parts = ironclaw_extension_host::extension_ingress::build_extension_ingress(
             generic.host.snapshot_watch(),
@@ -5528,7 +5472,6 @@ async fn build_backend_production(
         channel_identity_store,
         channel_dm_target_store,
         channel_disconnect_slot,
-        runtime_http_egress,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,

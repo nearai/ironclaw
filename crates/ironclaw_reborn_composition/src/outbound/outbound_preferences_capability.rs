@@ -26,7 +26,13 @@ pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.push(manifest()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub(crate) fn insert_handler(

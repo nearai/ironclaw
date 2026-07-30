@@ -376,6 +376,7 @@ async fn create_flow_with_continuation(
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),

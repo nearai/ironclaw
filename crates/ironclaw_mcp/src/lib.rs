@@ -21,12 +21,12 @@ use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
 use ironclaw_host_api::{
-    CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, NetworkMethod,
-    NetworkPolicy, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeCredentialInjection,
-    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
-    SecretHandle,
+    CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, McpAuthChallenge,
+    McpAuthMetadataLocation, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialInjection, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
+    RuntimeKind, SecretHandle,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -172,6 +172,11 @@ pub enum McpClientError {
         reason: String,
     },
     AuthRequired,
+    /// A hosted server returned 401/403. The challenge is header-derived and
+    /// deliberately redacted; it contains no remote response body or tokens.
+    AuthChallenge {
+        challenge: McpAuthChallenge,
+    },
 }
 
 impl McpClientError {
@@ -190,7 +195,7 @@ impl McpClientError {
     pub fn stable_reason(&self) -> &str {
         match self {
             Self::Client { reason } | Self::InvalidToolCatalog { reason } => reason,
-            Self::AuthRequired => "auth_required",
+            Self::AuthRequired | Self::AuthChallenge { .. } => "auth_required",
         }
     }
 }
@@ -549,7 +554,9 @@ where
 
         if !(200..300).contains(&response.status) {
             if is_mcp_auth_response_status(response.status) {
-                return Err(McpClientError::AuthRequired);
+                return Err(McpClientError::AuthChallenge {
+                    challenge: mcp_auth_challenge_from_response(&response),
+                });
             }
             return Err(McpClientError::client(response_error(
                 McpResponseErrorCause::HttpStatus(response.status),
@@ -768,36 +775,78 @@ where
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
 
-        let tools_list_id = self.next_request_id();
-        let tools_list_plan = self.plan_json_rpc(
-            &request,
-            Some(tools_list_id),
-            McpJsonRpcMethod::ToolsList,
-            None,
-        )?;
-        validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)
-            .map_err(McpClientError::client)?;
-
-        let mut usage = self.initialize_session(&request, &session_key).await?;
-        let tools = self
-            .send_planned_json_rpc(&request, &session_key, tools_list_plan)
-            .await?;
-        accumulate_usage(&mut usage, tools.usage);
-        self.update_session_id(&session_key, tools.session_id.clone())?;
-        if let Some(error) = tools.response.error {
-            return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError {
-                    code: error.code,
-                    message: error.message,
-                },
+        if max_tools == 0 {
+            return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                McpInvalidToolListCause::TooManyTools,
             )));
         }
-        let result = tools.response.result.ok_or_else(|| {
-            McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
-        })?;
+
+        let mut usage = self.initialize_session(&request, &session_key).await?;
+        let mut discovered = Vec::new();
+        let mut accepted_catalog_bytes = 0usize;
+        let mut cursor = None;
+        for page in 1..=50usize {
+            let tools_list_id = self.next_request_id();
+            let tools_list_plan = self.plan_json_rpc(
+                &request,
+                Some(tools_list_id),
+                McpJsonRpcMethod::ToolsList,
+                cursor
+                    .as_ref()
+                    .map(|cursor| serde_json::json!({ "cursor": cursor })),
+            )?;
+            validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)
+                .map_err(McpClientError::client)?;
+
+            let tools = self
+                .send_planned_json_rpc(&request, &session_key, tools_list_plan)
+                .await?;
+            accumulate_usage(&mut usage, tools.usage);
+            self.update_session_id(&session_key, tools.session_id.clone())?;
+            if let Some(error) = tools.response.error {
+                return Err(McpClientError::client(response_error(
+                    McpResponseErrorCause::JsonRpcError {
+                        code: error.code,
+                        message: error.message,
+                    },
+                )));
+            }
+            let result = tools.response.result.ok_or_else(|| {
+                McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
+            })?;
+            let page_bytes = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .and_then(|tools| serde_json::to_vec(tools).ok())
+                .map_or(usize::MAX, |bytes| bytes.len());
+            let (page_tools, next_cursor) =
+                parse_tools_list_page(&result).map_err(McpClientError::invalid_tool_catalog)?;
+            accepted_catalog_bytes = accepted_catalog_bytes.saturating_add(page_bytes);
+            if discovered.len().saturating_add(page_tools.len()) > 1024
+                || discovered.len().saturating_add(page_tools.len()) > max_tools as usize
+            {
+                return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                    McpInvalidToolListCause::TooManyTools,
+                )));
+            }
+            if accepted_catalog_bytes > 16 * 1024 * 1024 {
+                return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                    McpInvalidToolListCause::CatalogTooLarge,
+                )));
+            }
+            discovered.extend(page_tools);
+            match next_cursor {
+                Some(_next_cursor) if page == 50 => {
+                    return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                        McpInvalidToolListCause::TooManyPages,
+                    )));
+                }
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
         Ok(McpToolDiscoveryOutput {
-            tools: parse_tools_list_result(&result, max_tools)
-                .map_err(McpClientError::invalid_tool_catalog)?,
+            tools: discovered,
             usage,
         })
     }
@@ -899,6 +948,39 @@ fn mcp_client_http_error(error: McpHostHttpError) -> McpClientError {
 
 fn is_mcp_auth_response_status(status: u16) -> bool {
     matches!(status, 401 | 403)
+}
+
+fn mcp_auth_challenge_from_response(response: &McpHostHttpResponse) -> McpAuthChallenge {
+    let mut www_authenticate_metadata = Vec::new();
+    let mut protected_resource_metadata = Vec::new();
+    for (name, value) in &response.headers {
+        if name.eq_ignore_ascii_case("www-authenticate") {
+            www_authenticate_metadata.extend(mcp_auth_metadata_locations(value));
+        } else if name.eq_ignore_ascii_case("protected-resource-metadata") {
+            protected_resource_metadata.extend(mcp_auth_metadata_locations(value));
+        }
+    }
+    McpAuthChallenge {
+        status: response.status,
+        www_authenticate_metadata,
+        protected_resource_metadata,
+    }
+}
+
+fn mcp_auth_metadata_locations(value: &str) -> Vec<McpAuthMetadataLocation> {
+    value
+        .split([' ', ','])
+        .filter_map(|part| {
+            part.strip_prefix("resource_metadata=")
+                .or_else(|| part.strip_prefix("resource="))
+        })
+        .map(|part| part.trim_matches('"'))
+        .chain(
+            std::iter::once(value)
+                .filter(|value| value.starts_with("https://") || value.starts_with("http://")),
+        )
+        .filter_map(|value| McpAuthMetadataLocation::new(value).ok())
+        .collect()
 }
 
 fn effective_mcp_response_body_limit(host_limit: Option<u64>, client_limit: u64) -> Option<u64> {
@@ -1091,19 +1173,11 @@ fn parse_tools_list_result(
         return Err(invalid_tool_list(McpInvalidToolListCause::TooManyTools));
     }
 
-    // Catalog acceptance distinguishes shape-only defects from security/bounds
-    // violations. A single tool with a shape-only defect (an unsupported name,
-    // an invalid description, or malformed annotations) is dropped from this
-    // generation and recorded, so one malformed entry cannot brick an otherwise
-    // valid integration that has no prior generation to fall back to. A
-    // security/bounds violation (missing or unsafe input schema — checked first
-    // per tool so a co-occurring cosmetic defect cannot downgrade it — or a
-    // catalog that overflows the host cap) still rejects the whole generation
-    // with a stable safe subcause; the previous published generation, if any,
-    // remains authoritative until a complete bounded catalog is discovered.
+    // Catalog acceptance is atomic. Discovery must neither truncate provider
+    // metadata nor publish a partial subset: callers need an exact snapshot of
+    // the accepted remote catalog before lifecycle replaces a generation.
     let mut published = Vec::with_capacity(tools.len());
-    let mut first_skipped_cause: Option<McpInvalidToolListCause> = None;
-    for (index, tool) in tools.iter().enumerate() {
+    for tool in tools {
         match classify_discovered_tool(
             tool,
             MAX_TOOL_NAME_BYTES,
@@ -1116,28 +1190,29 @@ fn parse_tools_list_result(
         {
             DiscoveredToolClassification::Published(discovered) => published.push(discovered),
             DiscoveredToolClassification::SkippedShapeViolation(cause) => {
-                first_skipped_cause.get_or_insert(cause);
-                // Bounded, provider-neutral record: the tool index and stable
-                // cause token only — never the raw provider-supplied content.
-                tracing::debug!(
-                    tool_index = index,
-                    skip_cause = cause.stable_token(),
-                    "skipping shape-nonconforming hosted MCP tool from discovery catalog"
-                );
+                return Err(invalid_tool_list(cause));
             }
         }
     }
-    if published.is_empty()
-        && let Some(cause) = first_skipped_cause
-    {
-        // Every advertised tool was shape-nonconforming: there is nothing to
-        // publish, so fail this generation non-retryably with a stable subcause
-        // rather than activating on an empty catalog. An empty provider list
-        // (no tools advertised, nothing skipped) is left as an empty result the
-        // caller treats as "no tools discovered yet".
-        return Err(invalid_tool_list(cause));
-    }
     Ok(published)
+}
+
+fn parse_tools_list_page(
+    value: &Value,
+) -> Result<(Vec<HostedMcpDiscoveredTool>, Option<String>), String> {
+    let tools = parse_tools_list_result(value, 1024)?;
+    let next_cursor = match value.get("nextCursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(cursor))
+            if !cursor.is_empty()
+                && cursor.len() <= 4_096
+                && !cursor.chars().any(|character| character.is_control()) =>
+        {
+            Some(cursor.clone())
+        }
+        Some(_) => return Err(invalid_tool_list(McpInvalidToolListCause::InvalidCursor)),
+    };
+    Ok((tools, next_cursor))
 }
 
 /// Result of classifying one advertised MCP tool during discovery.
@@ -1256,15 +1331,17 @@ fn validate_mcp_schema_value(
                 nodes,
             )
         }),
-        Value::Object(values) => values.values().all(|value| {
-            validate_mcp_schema_value(
-                value,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                max_string_bytes,
-                nodes,
-            )
+        Value::Object(values) => values.iter().all(|(key, value)| {
+            key.len() <= max_string_bytes
+                && !key.chars().any(is_unsupported_description_char)
+                && validate_mcp_schema_value(
+                    value,
+                    depth + 1,
+                    max_depth,
+                    max_nodes,
+                    max_string_bytes,
+                    nodes,
+                )
         }),
         _ => true,
     }
@@ -1274,10 +1351,8 @@ fn is_unsupported_description_char(value: char) -> bool {
     value.is_control() && !matches!(value, '\n' | '\r' | '\t')
 }
 
-/// Preserve a provider's otherwise-valid tool catalog when only descriptive
-/// prose exceeds the host display/prompt budget. Names and schemas remain
-/// fail-closed because truncating either could change capability semantics;
-/// descriptions are presentation metadata and can be safely bounded.
+/// Validate descriptive metadata without changing it. Hosted discovery
+/// publishes accepted descriptions byte-for-byte rather than truncating them.
 fn bound_mcp_tool_description(value: &str, max_bytes: usize) -> Option<String> {
     if value.chars().any(is_unsupported_description_char) {
         return None;
@@ -1285,21 +1360,7 @@ fn bound_mcp_tool_description(value: &str, max_bytes: usize) -> Option<String> {
     if value.len() <= max_bytes {
         return Some(value.to_string());
     }
-
-    const TRUNCATION_MARKER: &str = "...";
-    if max_bytes <= TRUNCATION_MARKER.len() {
-        return Some(".".repeat(max_bytes));
-    }
-
-    let mut end = max_bytes - TRUNCATION_MARKER.len();
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    let prefix = value.get(..end)?;
-    let mut bounded = String::with_capacity(max_bytes);
-    bounded.push_str(prefix);
-    bounded.push_str(TRUNCATION_MARKER);
-    Some(bounded)
+    None
 }
 
 fn parse_tool_annotations(
@@ -1311,7 +1372,17 @@ fn parse_tool_annotations(
     let object = value
         .as_object()
         .ok_or(McpInvalidToolListCause::InvalidAnnotations)?;
+    let title = object
+        .get("title")
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(|title| bound_mcp_tool_description(title, 2_048))
+                .ok_or(McpInvalidToolListCause::InvalidAnnotations)
+        })
+        .transpose()?;
     Ok(HostedMcpDiscoveredToolAnnotations {
+        title,
         destructive_hint: object
             .get("destructiveHint")
             .and_then(Value::as_bool)
@@ -1324,6 +1395,8 @@ fn parse_tool_annotations(
             .get("readOnlyHint")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        idempotent_hint: object.get("idempotentHint").and_then(Value::as_bool),
+        open_world_hint: object.get("openWorldHint").and_then(Value::as_bool),
     })
 }
 
@@ -1483,6 +1556,9 @@ enum McpInvalidToolListCause {
     MissingInputSchema,
     UnsafeInputSchema,
     InvalidAnnotations,
+    InvalidCursor,
+    TooManyPages,
+    CatalogTooLarge,
 }
 
 impl McpInvalidToolListCause {
@@ -1495,6 +1571,9 @@ impl McpInvalidToolListCause {
             Self::MissingInputSchema => "missing_input_schema",
             Self::UnsafeInputSchema => "unsafe_input_schema",
             Self::InvalidAnnotations => "invalid_annotations",
+            Self::InvalidCursor => "invalid_cursor",
+            Self::TooManyPages => "too_many_pages",
+            Self::CatalogTooLarge => "catalog_too_large",
         }
     }
 }
@@ -1758,10 +1837,12 @@ fn mcp_error_from_client_error(error: McpClientError, auth_context: McpAuthConte
     match error {
         McpClientError::Client { reason } => McpError::Client { reason },
         McpClientError::InvalidToolCatalog { reason } => McpError::InvalidToolCatalog { reason },
-        McpClientError::AuthRequired => McpError::AuthRequired {
-            required_secrets: auth_context.required_secrets,
-            credential_requirements: auth_context.credential_requirements,
-        },
+        McpClientError::AuthRequired | McpClientError::AuthChallenge { .. } => {
+            McpError::AuthRequired {
+                required_secrets: auth_context.required_secrets,
+                credential_requirements: auth_context.credential_requirements,
+            }
+        }
     }
 }
 
@@ -1942,17 +2023,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_list_result_bounds_utf8_description_at_character_boundary() {
+    fn parse_tools_list_result_rejects_description_that_would_require_truncation() {
         let mut tool = valid_tool("search", json!({"type": "object"}));
         tool["description"] = json!("🔧".repeat(600));
 
-        let tools = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
-            .expect("descriptive prose must not invalidate the catalog");
-        let description = &tools[0].description;
-
-        assert!(description.len() <= 2_048);
-        assert!(description.ends_with("..."));
-        assert!(description.is_char_boundary(description.len()));
+        let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
+            .expect_err("discovery must not truncate remote descriptions");
+        assert_eq!(error, "mcp_invalid_tool_list: invalid_description");
     }
 
     #[test]
@@ -2019,38 +2096,16 @@ mod tests {
     }
 
     #[test]
-    #[tracing_test::traced_test]
-    fn parse_tools_list_result_skips_shape_invalid_tools_and_publishes_bounded_remainder() {
-        // A real MCP server can advertise a mostly-valid catalog alongside a
-        // few shape-nonconforming entries (an uppercase tool name, a
-        // control-char description). Those individual tools are dropped and
-        // recorded, but the remaining valid tools must still publish so one
-        // malformed entry cannot brick the whole integration on first install.
+    fn parse_tools_list_result_rejects_shape_invalid_tool_without_partial_success() {
         let mut tools = (0..24)
             .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
             .collect::<Vec<_>>();
         tools[5]["name"] = json!("UppercaseName");
         tools[10]["description"] = json!("bad\u{0000}description");
 
-        let published = parse_tools_list_result(&json!({ "tools": tools }), 128)
-            .expect("a bounded catalog must survive a few shape-nonconforming tools");
-
-        assert_eq!(published.len(), 22);
-        assert!(
-            published.iter().all(|tool| tool.name != "UppercaseName"),
-            "the uppercase-named tool must not be published"
-        );
-        assert!(
-            published.iter().any(|tool| tool.name == "tool-0"),
-            "valid tools before the skipped entries must still publish"
-        );
-        assert!(
-            published.iter().any(|tool| tool.name == "tool-23"),
-            "valid tools after the skipped entries must still publish"
-        );
-        assert!(logs_contain("skipping shape-nonconforming hosted MCP tool"));
-        assert!(logs_contain("invalid_tool_name"));
-        assert!(logs_contain("invalid_description"));
+        let error = parse_tools_list_result(&json!({ "tools": tools }), 128)
+            .expect_err("discovery must not publish a partial catalog");
+        assert_eq!(error, "mcp_invalid_tool_list: invalid_tool_name");
     }
 
     #[test]
@@ -2072,7 +2127,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_list_result_fails_when_every_tool_is_shape_invalid() {
+    fn parse_tools_list_result_fails_when_first_tool_is_shape_invalid() {
         // When nothing survives the shape filter there is nothing to publish,
         // so discovery still fails non-retryably with a stable subcause rather
         // than activating on an empty catalog.
@@ -2378,6 +2433,77 @@ data: }
             message: error.message,
         });
         assert_eq!(reason, "mcp_jsonrpc_error");
+    }
+
+    #[test]
+    fn auth_challenge_redacts_response_body_and_preserves_only_metadata_locations() {
+        let response = McpHostHttpResponse {
+            status: 401,
+            headers: vec![
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Bearer resource_metadata=\"https://issuer.example.test/.well-known/oauth-protected-resource?access_token=secret\"".to_string(),
+                ),
+                (
+                    "protected-resource-metadata".to_string(),
+                    "https://resource.example.test/.well-known/oauth-protected-resource#secret"
+                        .to_string(),
+                ),
+            ],
+            body: b"token=super-secret remote diagnostic".to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 42,
+            redaction_applied: false,
+        };
+
+        let challenge = mcp_auth_challenge_from_response(&response);
+        assert_eq!(challenge.status, 401);
+        assert_eq!(
+            challenge.www_authenticate_metadata[0].as_str(),
+            "https://issuer.example.test/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            challenge.protected_resource_metadata[0].as_str(),
+            "https://resource.example.test/.well-known/oauth-protected-resource"
+        );
+        let rendered = format!("{challenge:?}");
+        assert!(!rendered.contains("super-secret"));
+        assert!(!rendered.contains("access_token"));
+    }
+
+    #[test]
+    fn tools_list_page_preserves_accepted_catalog_fields_exactly() {
+        let schema = json!({"type": "object", "properties": {"q": {"type": "string"}}});
+        let value = json!({
+            "tools": [{
+                "name": "search.docs",
+                "description": "Find docs\nwithout rewriting provider text.",
+                "inputSchema": schema,
+                "annotations": {"readOnlyHint": true}
+            }],
+            "nextCursor": "second-page"
+        });
+
+        let (tools, cursor) = parse_tools_list_page(&value).expect("valid page");
+        assert_eq!(cursor.as_deref(), Some("second-page"));
+        assert_eq!(tools[0].name, "search.docs");
+        assert_eq!(
+            tools[0].description,
+            "Find docs\nwithout rewriting provider text."
+        );
+        assert_eq!(tools[0].input_schema, schema);
+        assert!(tools[0].annotations.read_only_hint);
+    }
+
+    #[test]
+    fn tools_list_page_rejects_non_string_cursor() {
+        let error = parse_tools_list_page(&json!({
+            "tools": [valid_tool("search", json!({"type": "object"}))],
+            "nextCursor": 12
+        }))
+        .expect_err("cursor is protocol data, not a value to normalize");
+        assert_eq!(error, "mcp_invalid_tool_list: invalid_cursor");
     }
 
     #[test]

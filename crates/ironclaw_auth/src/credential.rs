@@ -938,7 +938,15 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                 scopes: account.scopes.clone(),
             };
 
-            match self.provider.refresh_token(provider_request).await {
+            let requester_extension = match account.ownership {
+                CredentialOwnership::ExtensionOwned => account.owner_extension.clone(),
+                _ => None,
+            };
+            match self
+                .provider
+                .refresh_token_for_requester(requester_extension, provider_request)
+                .await
+            {
                 Ok(refresh) => {
                     let current = self
                         .accounts

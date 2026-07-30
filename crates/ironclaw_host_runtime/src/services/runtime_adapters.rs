@@ -969,7 +969,12 @@ where
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
-                .resolve_under(&request.package.root)
+                .resolve_under(request.package.materialized_root().map_err(|error| {
+                    DispatchError::Wasm {
+                        kind: RuntimeDispatchErrorKind::Manifest,
+                        model_visible_cause: Some(error.to_string()),
+                    }
+                })?)
                 .map_err(|error| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
                     model_visible_cause: Some(error.to_string()),

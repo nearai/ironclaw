@@ -323,10 +323,6 @@ name = "reborn_integration_extension_user_lifecycle_isolation"
 path = "tests/integration/extension_user_lifecycle_isolation.rs"
 
 [[test]]
-name = "reborn_integration_extension_lifecycle_approval_gate"
-path = "tests/integration/extension_lifecycle_approval_gate.rs"
-
-[[test]]
 name = "reborn_integration_golden_payload"
 path = "tests/integration/golden_payload.rs"
 
@@ -357,6 +353,10 @@ path = "tests/integration/lease_wedge.rs"
 [[test]]
 name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
+
+[[test]]
+name = "reborn_integration_hosted_mcp_registration"
+path = "tests/integration/hosted_mcp_registration.rs"
 
 [[test]]
 name = "reborn_integration_oauth_connect"

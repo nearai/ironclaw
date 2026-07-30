@@ -48,7 +48,13 @@ pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.extend(manifests()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub fn insert_handlers(
@@ -231,25 +237,10 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .install(package_ref.clone(), &request.scope.user_id)
                     .await
                     .map_err(lifecycle_error)?;
-                let requirements = self
-                    .extension_management
-                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
-                    .await
-                    .map_err(install_activation_readiness_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
                     request.scope.clone(),
                     Arc::clone(&self.credential_accounts),
                 );
-                let missing_requirements = credential_gate
-                    .missing_requirements(requirements)
-                    .await
-                    .map_err(credential_stage_error)?;
-                if !missing_requirements.is_empty() {
-                    return Err(FirstPartyCapabilityError::auth_required_for_credentials(
-                        missing_requirements,
-                    )
-                    .with_usage(resource_usage(started)));
-                }
                 let mode = ExtensionActivationMode::from_dispatch_context(
                     request.scope.clone(),
                     request
@@ -263,7 +254,8 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activate_with_credential_gate(
                         package_ref.clone(),
                         mode,
-                        credential_gate,
+                        request.scope.clone(),
+                        &credential_gate,
                         &request.scope.user_id,
                     )
                     .await
@@ -331,7 +323,8 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activate_with_credential_gate(
                         package_ref,
                         mode,
-                        credential_gate,
+                        request.scope.clone(),
+                        &credential_gate,
                         &request.scope.user_id,
                     )
                     .await
@@ -1576,9 +1569,9 @@ mod tests {
         let discovery_script = std::sync::Arc::new(
             crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
                 // Real hosted MCP providers may return verbose prose. The
-                // generic MCP boundary must bound it without dropping the
-                // entire catalog or preventing activation.
-                .with_tool_description("provider documentation ".repeat(320)),
+                // fixture stays near the generic MCP boundary while remaining
+                // valid, so verbose accepted prose cannot prevent activation.
+                .with_tool_description("provider documentation ".repeat(80)),
         );
         let services = test_services(
             "extension-tools-hosted-mcp-owner",

@@ -3197,6 +3197,7 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider.clone(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),

@@ -349,6 +349,11 @@ impl<'a> CapabilityCatalog<'a> {
         let Some(package) = self.registry.get_extension(&descriptor.provider) else {
             return Ok(descriptor);
         };
+        if package.descriptor_schema_mode
+            == ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic
+        {
+            return Ok(descriptor);
+        }
         descriptor.parameters_schema =
             resolve_package_input_schema_ref(filesystem, package, &descriptor.id, &reference)
                 .await?;
@@ -378,9 +383,14 @@ async fn resolve_package_input_schema_ref(
             declaration.input_schema_ref.as_str()
         )));
     }
+    let root = package.materialized_root().map_err(|error| {
+        HostRuntimeError::invalid_request(format!(
+            "capability {capability_id} requires a package filesystem schema: {error}"
+        ))
+    })?;
     read_json_ref(
         filesystem,
-        &package.root,
+        root,
         &declaration.input_schema_ref,
         "input_schema_ref",
     )

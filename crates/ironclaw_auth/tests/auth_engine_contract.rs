@@ -23,7 +23,7 @@ use ironclaw_auth::{
     ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 use ironclaw_host_api::{
-    InvocationId, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
+    HttpsEndpoint, InvocationId, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
     UserId, VendorAuthRecipe,
 };
@@ -286,6 +286,7 @@ fn manifest_recipe(package: &str, vendor: &str) -> ResolvedVendorAuthRecipe {
         vendor: vendor.to_string(),
         recipe,
         token_exchange_resource,
+        protected_resource_metadata_url: None,
     }
 }
 
@@ -323,6 +324,7 @@ fn synthetic_recipe(vendor: &str, toml_text: &str) -> ResolvedVendorAuthRecipe {
         vendor: vendor.to_string(),
         recipe,
         token_exchange_resource: None,
+        protected_resource_metadata_url: None,
     }
 }
 
@@ -409,6 +411,7 @@ async fn authorize_url_is_host_constructed_for_every_oauth_vendor_row() {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: vendor.clone(),
+                requester_extension: None,
                 scope: scope.clone(),
                 flow_id: AuthFlowId::new(),
                 account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -473,6 +476,7 @@ async fn google_extra_authorize_params_come_from_recipe_data() {
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "google".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -522,6 +526,7 @@ async fn recipes_cannot_supply_or_override_reserved_authorize_params() {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: "acme".to_string(),
+                requester_extension: None,
                 scope: test_scope(),
                 flow_id: AuthFlowId::new(),
                 account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -552,6 +557,7 @@ async fn authorization_endpoint_predefining_reserved_params_is_rejected() {
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "acme".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -571,6 +577,7 @@ async fn scope_widening_is_rejected_before_any_vendor_call() {
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "slack".to_string(),
+            requester_extension: None,
             scope: scope.clone(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -1181,18 +1188,111 @@ async fn refresh_invalid_grant_is_a_typed_permanent_failure() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn dcr_requires_advertised_protected_resource_metadata() {
+    let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
+    harness.server.script(
+        "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+        404,
+        serde_json::json!({}),
+    );
+
+    let error = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect_err("DCR must not invent an issuer when metadata is absent");
+
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::MalformedConfig);
+    assert_eq!(harness.server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
+    recipe.protected_resource_metadata_url = Some(
+        HttpsEndpoint::new("https://mcp.example.test/admitted-metadata".to_string())
+            .expect("admitted metadata URL"),
+    );
+    let harness = Harness::new(vec![recipe]);
+    harness.server.script(
+        "https://mcp.example.test/admitted-metadata",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.example.test/mcp",
+            "authorization_servers": ["https://auth.example.test"]
+        }),
+    );
+    harness.server.script(
+        "https://auth.example.test/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://auth.example.test",
+            "authorization_endpoint": "https://auth.example.test/authorize",
+            "token_endpoint": "https://auth.example.test/token",
+            "registration_endpoint": "https://auth.example.test/register"
+        }),
+    );
+    harness.server.script(
+        "https://auth.example.test/register",
+        201,
+        serde_json::json!({ "client_id": "admitted-metadata-dcr-client" }),
+    );
+
+    harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("DCR must use the admitted metadata location");
+
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://mcp.example.test/admitted-metadata")
+            .len(),
+        1,
+        "DCR reuses the exact metadata document admitted from the challenge"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://mcp.example.test/mcp/.well-known/oauth-protected-resource")
+            .is_empty(),
+        "DCR must not reconstruct a different metadata URL from the resource"
+    );
+}
+
+#[tokio::test]
 async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
     let scope = test_scope();
     harness.server.script(
         "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
         200,
-        serde_json::json!({ "authorization_servers": ["https://mcp.notion.com"] }),
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
     );
     harness.server.script(
         "https://mcp.notion.com/.well-known/oauth-authorization-server",
         200,
         serde_json::json!({
+            "issuer": "https://mcp.notion.com",
             "authorization_endpoint": "https://mcp.notion.com/discovered/authorize",
             "token_endpoint": "https://mcp.notion.com/discovered/token",
             "registration_endpoint": "https://mcp.notion.com/register"
@@ -1207,6 +1307,7 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let prepare = |flow_id| {
         harness.engine.prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
+            requester_extension: None,
             scope: scope.clone(),
             flow_id,
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -1295,29 +1396,28 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     );
 }
 
-/// A compromised protected-resource metadata document must not be able to
-/// redirect dynamic client registration to an attacker host that shares only
-/// a multi-part public suffix with the resource. The pre-PSL validation took
-/// the final two host labels, so `mcp.example.co.uk` and `attacker.co.uk`
-/// both resolved to "co.uk" and the attacker issuer passed (the PR #6116
-/// security-high finding). The discriminating assertion is the request count:
-/// the engine must stop after the protected-resource metadata fetch and never
-/// contact the attacker authorization server.
+/// Protected-resource metadata is authoritative only for the exact resource
+/// that was challenged. A document for another resource must fail before its
+/// advertised authorization server is contacted.
 #[tokio::test]
-async fn dcr_issuer_sharing_only_a_public_suffix_is_rejected_before_any_attacker_contact() {
+async fn dcr_rejects_protected_metadata_for_a_different_resource_before_issuer_fetch() {
     let mut recipe = manifest_recipe("notion-mcp", "notion");
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
         "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
         200,
-        serde_json::json!({ "authorization_servers": ["https://attacker.co.uk"] }),
+        serde_json::json!({
+            "resource": "https://different.example.co.uk/mcp",
+            "authorization_servers": ["https://login.identity.test"]
+        }),
     );
 
     let result = harness
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -1327,47 +1427,49 @@ async fn dcr_issuer_sharing_only_a_public_suffix_is_rejected_before_any_attacker
 
     assert!(
         result.is_err(),
-        "an issuer on a foreign registrable domain under a shared public suffix must fail the flow"
+        "metadata for a different protected resource must fail the flow"
     );
     assert_eq!(
         harness.server.request_count(),
         1,
-        "the engine stops at the protected-resource metadata fetch; no request reaches the attacker host"
+        "the engine stops at the protected-resource metadata fetch"
     );
     assert!(
         harness
             .server
-            .requests_for("https://attacker.co.uk/.well-known/oauth-authorization-server")
+            .requests_for("https://login.identity.test/.well-known/oauth-authorization-server")
             .is_empty(),
-        "the attacker authorization-server metadata is never fetched"
+        "the advertised authorization-server metadata is never fetched"
     );
 }
 
-/// The positive companion: an issuer under the SAME registrable domain as the
-/// resource — including on a multi-part public suffix — keeps working end to
-/// end (discovery, registration, authorize URL), so the fix cannot overblock
-/// legitimate vendors whose auth host is a sibling of the MCP host.
+/// RFC 9728 binds the exact protected resource to its advertised issuer; it
+/// does not require their origins or registrable domains to match.
 #[tokio::test]
-async fn dcr_issuer_on_same_registrable_domain_under_multi_part_suffix_registers() {
+async fn dcr_accepts_exact_resource_binding_to_a_cross_origin_issuer() {
     let mut recipe = manifest_recipe("notion-mcp", "notion");
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
         "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
         200,
-        serde_json::json!({ "authorization_servers": ["https://auth.example.co.uk"] }),
-    );
-    harness.server.script(
-        "https://auth.example.co.uk/.well-known/oauth-authorization-server",
-        200,
         serde_json::json!({
-            "authorization_endpoint": "https://auth.example.co.uk/authorize",
-            "token_endpoint": "https://auth.example.co.uk/token",
-            "registration_endpoint": "https://auth.example.co.uk/register"
+            "resource": "https://mcp.example.co.uk/mcp",
+            "authorization_servers": ["https://login.identity.test"]
         }),
     );
     harness.server.script(
-        "https://auth.example.co.uk/register",
+        "https://login.identity.test/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://login.identity.test",
+            "authorization_endpoint": "https://login.identity.test/authorize",
+            "token_endpoint": "https://login.identity.test/token",
+            "registration_endpoint": "https://login.identity.test/register"
+        }),
+    );
+    harness.server.script(
+        "https://login.identity.test/register",
         201,
         serde_json::json!({ "client_id": "couk-dcr-client-1" }),
     );
@@ -1376,19 +1478,74 @@ async fn dcr_issuer_on_same_registrable_domain_under_multi_part_suffix_registers
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
             requested_scopes: Vec::new(),
         })
         .await
-        .expect("sibling issuer under the same registrable domain is accepted");
+        .expect("the exact protected resource may advertise a cross-origin issuer");
     assert!(
         prepared
             .authorization_url
             .as_str()
-            .starts_with("https://auth.example.co.uk/authorize"),
-        "the discovered sibling authorize endpoint is used"
+            .starts_with("https://login.identity.test/authorize"),
+        "the discovered cross-origin authorize endpoint is used"
+    );
+}
+
+/// The authorization-server document must self-identify as the exact issuer
+/// selected by the protected-resource metadata. Discovery stops before DCR
+/// when that second binding does not match.
+#[tokio::test]
+async fn dcr_rejects_authorization_server_metadata_with_a_different_issuer() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
+    let harness = Harness::new(vec![recipe]);
+    harness.server.script(
+        "https://mcp.example.test/mcp/.well-known/oauth-protected-resource",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.example.test/mcp",
+            "authorization_servers": ["https://login.identity.test"]
+        }),
+    );
+    harness.server.script(
+        "https://login.identity.test/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://different.identity.test",
+            "authorization_endpoint": "https://login.identity.test/authorize",
+            "token_endpoint": "https://login.identity.test/token",
+            "registration_endpoint": "https://login.identity.test/register"
+        }),
+    );
+
+    let result = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await;
+
+    assert!(result.is_err(), "an issuer mismatch must fail discovery");
+    assert_eq!(
+        harness.server.request_count(),
+        2,
+        "both metadata documents are fetched, but registration is not attempted"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://login.identity.test/register")
+            .is_empty(),
+        "DCR is not attempted for mismatched issuer metadata"
     );
 }
 
@@ -1436,6 +1593,7 @@ fn new_flow(
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: AuthProviderId::new("acme").unwrap(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new("https://auth.acme.example/authorize")
                 .unwrap(),

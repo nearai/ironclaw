@@ -180,6 +180,7 @@ async fn request_manual_token_flow_with(
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: flow_provider,
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id: *interaction_id,
                 provider: provider.clone(),

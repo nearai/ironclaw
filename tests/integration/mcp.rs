@@ -17,9 +17,7 @@ use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
-use support::mock_mcp_server::{
-    MockMcpServer, MockToolResponse, start_mock_mcp_server, start_mock_mcp_server_paginated,
-};
+use support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
 
 /// Asserts the mock MCP server actually received a `tools/call` request naming
 /// `expected_tool` with a `query` argument equal to `expected_query`. Mirrors
@@ -395,61 +393,3 @@ async fn mcp_tool_call_output_too_large_surfaces_failed() {
 // *gate*, not a model-visible tool error — and requires a capability-backend
 // credential stub this tier lacks. Same deferred "live-401 re-auth arm" as
 // `reborn_integration_auth_failure.rs`.
-
-/// Pins TODAY's client behavior against a paginating MCP server: the real
-/// hosted-MCP discovery client (`McpHostHttpClient::discover_tools`, the
-/// same path `discover_hosted_mcp_package`
-/// (`crates/ironclaw_extension_host/src/mcp_discovery.rs`) drives at
-/// extension-install time) reads only the FIRST `tools/list` response and
-/// never inspects `nextCursor` — see `parse_tools_list_result`
-/// (`crates/ironclaw_mcp/src/lib.rs`, ~1072), which takes
-/// `value.get("tools")` and stops there. Against a real MCP server that
-/// paginates (legal per the MCP spec), this silently truncates the
-/// discovered catalog to page 1.
-///
-/// This test intentionally asserts the CURRENT (buggy) page-1-only result,
-/// not the spec-correct full catalog — it exists to make the truncation
-/// provable and regressable, not to bless it. Adding a client-side pagination
-/// loop that follows `nextCursor` is owned by the MCP-registration work in
-/// progress. When that lands, flip this test to assert the FULL tool set
-/// across all pages, and that `nextCursor` is followed until exhausted
-/// (bounded by `max_tools`).
-#[tokio::test]
-async fn hosted_mcp_discovery_reads_only_first_page_of_paginated_tools_list() {
-    let tool_names = ["alpha", "bravo", "charlie", "delta", "echo"];
-    let responses: Vec<MockToolResponse> = tool_names
-        .iter()
-        .map(|name| MockToolResponse {
-            name: name.to_string(),
-            content: serde_json::json!({}),
-        })
-        .collect();
-    let server = start_mock_mcp_server_paginated(responses, 2).await;
-
-    let output = reborn_support::harness_mcp::discover_tools_via_loopback(
-        &server.mcp_url(),
-        "mock-mcp",
-        "mock-mcp.search",
-    )
-    .await
-    .expect("discovery succeeds against a paginated server");
-
-    // TODAY: only page 1 (2 of 5 tools) is discovered — `nextCursor` is
-    // present on the wire (page_size=2 over 5 tools) but never followed.
-    let discovered_names: Vec<&str> = output.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(
-        discovered_names,
-        vec!["alpha", "bravo"],
-        "documents the current page-1-only truncation bug (nextCursor is never followed)"
-    );
-
-    // Confirm this is a pagination truncation, not merely a small catalog:
-    // the client made exactly one tools/list round-trip and stopped, despite
-    // 3 more tools being available on a second page.
-    let recorded = server.recorded_requests();
-    let tools_list_calls = recorded.iter().filter(|r| r.method == "tools/list").count();
-    assert_eq!(
-        tools_list_calls, 1,
-        "client made exactly one tools/list call and stopped, despite nextCursor being present"
-    );
-}

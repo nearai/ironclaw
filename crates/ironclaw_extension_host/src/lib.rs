@@ -56,7 +56,9 @@ pub mod extension_lifecycle_command;
 pub mod first_party_package;
 pub mod generic_host;
 pub mod host_api_contracts;
+mod hosted_mcp_admission;
 mod hosted_mcp_discovery_authority;
+mod hosted_mcp_preparation;
 pub mod ingress;
 pub mod install_policy;
 pub mod lifecycle;
@@ -65,6 +67,7 @@ pub mod lifecycle_restore;
 pub mod lifecycle_vocabulary;
 pub mod loaders;
 pub mod mcp;
+pub mod mcp_catalog_safety;
 pub mod mcp_discovery;
 pub mod nearai_mcp;
 pub mod operator_config_capability;
@@ -86,7 +89,7 @@ pub mod webui_extension_credentials;
 mod build_error;
 #[cfg(test)]
 mod host_remediation_contract_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "test_support/lifecycle.rs"]
 pub mod lifecycle_test_support;
 
@@ -193,6 +196,7 @@ pub use generic_host::{
     boot_installation_records, build_generic_extension_host, effective_resolved_for_package,
 };
 pub use host_api_contracts::product_extension_host_api_contract_registry;
+pub use hosted_mcp_preparation::HostedMcpPreparationDependencies;
 pub use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,
@@ -213,8 +217,13 @@ pub use lifecycle_restore::{
 pub use lifecycle_vocabulary::{ActiveExtensionCapability, ExtensionActivationMode};
 pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
 pub use mcp::{RegistryMcpEgressPlanner, hosted_http_mcp_runtime};
+pub use mcp_catalog_safety::{
+    McpCatalogAdmission, McpCatalogAdmissionPolicy, McpCatalogField, McpCatalogFinding,
+    McpCatalogSafetyReport,
+};
 pub use mcp_discovery::{
-    HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
+    HostedMcpDiscoveryError, discover_hosted_mcp_package, discover_hosted_mcp_package_with_policy,
+    is_hosted_http_mcp_package,
 };
 pub use nearai_mcp::{
     DEFAULT_NEARAI_MCP_BASE_URL, NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError,
@@ -225,7 +234,10 @@ pub use product_lifecycle::{ExtensionCredentialCleanup, ExtensionLifecycleManage
 pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };
-pub use recipes::{SnapshotAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes};
+pub use recipes::{
+    InstalledManifestAuthRecipeResolver, SnapshotAuthRecipeResolver, VendorRecipeConflict,
+    unified_vendor_recipes,
+};
 pub use removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupAdapterId,
     ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupContext,

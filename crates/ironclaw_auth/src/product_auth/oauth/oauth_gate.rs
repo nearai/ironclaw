@@ -58,7 +58,13 @@ impl OAuthGateFlowDriver {
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
         for requirement in request.requirements {
             let vendor = requirement.provider.as_str();
-            if self.engine.recipes().recipe_for_vendor(vendor).is_none() {
+            if self
+                .engine
+                .recipes()
+                .resolve(Some(&requirement.requester_extension), vendor)
+                .await
+                .is_none()
+            {
                 continue;
             }
             match self.challenge_for_requirement(request, requirement).await {
@@ -121,6 +127,7 @@ impl OAuthGateFlowDriver {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: vendor.to_string(),
+                requester_extension: Some(requirement.requester_extension.clone()),
                 scope: auth_scope.clone(),
                 flow_id,
                 account_label: CredentialAccountLabel::new(vendor)?,
@@ -141,6 +148,7 @@ impl OAuthGateFlowDriver {
                 scope: auth_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: provider.clone(),
+                requester_extension: prepared.requester_extension,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: prepared.authorization_url,
                     expires_at,
@@ -372,6 +380,7 @@ mod tests {
             vendor: "acmevendor".to_string(),
             recipe,
             token_exchange_resource: None,
+            protected_resource_metadata_url: None,
         }
     }
 
@@ -528,6 +537,11 @@ mod tests {
         let fixture = GateFixture::new();
         let flow = fixture.challenge().await;
         assert_eq!(flow.provider.as_str(), "acmevendor");
+        assert_eq!(
+            flow.requester_extension.as_ref(),
+            Some(&fixture.requirement.requester_extension),
+            "the gate flow durably retains the extension whose recipe was resolved"
+        );
         let AuthChallenge::OAuthUrl {
             authorization_url: url,
             ..
@@ -555,6 +569,7 @@ mod tests {
                 scope: expired_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: AuthProviderId::new("acmevendor").unwrap(),
+                requester_extension: None,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: OAuthAuthorizationUrl::new(
                         "https://auth.acme.example/authorize?state=expired".to_string(),
@@ -631,6 +646,7 @@ mod tests {
                 scope: auth_scope,
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: AuthProviderId::new("othervendor").unwrap(),
+                requester_extension: None,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: OAuthAuthorizationUrl::new(
                         "https://auth.other.example/authorize?state=existing".to_string(),

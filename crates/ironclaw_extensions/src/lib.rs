@@ -12,6 +12,8 @@ use ironclaw_host_api::{
 };
 use thiserror::Error;
 
+mod definition_admission;
+
 /// Extension manifest and registry failures.
 #[derive(Debug, Error)]
 pub enum ExtensionError {
@@ -223,6 +225,7 @@ pub mod resolved;
 pub mod v2;
 pub mod v3;
 
+pub use definition_admission::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 pub use package::{CapabilityDescriptorSchemaMode, ExtensionPackage};
 
 pub use admin_configuration::{
@@ -237,8 +240,8 @@ pub use hosted_mcp_discovery::{
     package_with_discovered_hosted_mcp_tools,
 };
 pub use resolved::{
-    ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration,
-    ResolvedSectionSurface,
+    PackageRootBinding, PackageRootError, PreparationRequirement, ResolvedAuthSurface,
+    ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration, ResolvedSectionSurface,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
@@ -258,8 +261,8 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
-    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationOwner,
-    ManifestHash, MembershipDeactivation,
+    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationIncarnationId,
+    InstallationOwner, InstallationPreparationState, ManifestHash, MembershipDeactivation,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

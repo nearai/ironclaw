@@ -62,11 +62,12 @@ impl HookProjection {
         if package.manifest.hooks.is_empty() {
             return None;
         }
+        let root = package.materialized_root().ok()?.clone();
         Some(Self {
             extension_id: package.manifest.id.clone(),
             version: package.manifest.version.clone(),
             source: package.manifest.source,
-            root: package.root.clone(),
+            root,
             hooks: package.manifest.hooks.clone(),
         })
     }

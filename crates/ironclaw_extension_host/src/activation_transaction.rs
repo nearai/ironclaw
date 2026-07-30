@@ -292,7 +292,7 @@ where
     commit_activation(operations, extension_id, installation_id, active_package).await
 }
 
-fn hosted_mcp_discovery_network_policy(
+pub(crate) fn hosted_mcp_discovery_network_policy(
     package: &ExtensionPackage,
 ) -> Result<NetworkPolicy, ExtensionInstallationError> {
     const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
@@ -329,7 +329,6 @@ fn hosted_mcp_discovery_network_policy(
     if parsed.scheme() != "https"
         || !parsed.username().is_empty()
         || parsed.password().is_some()
-        || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
         return Err(ExtensionInstallationError::InvalidInstallation {

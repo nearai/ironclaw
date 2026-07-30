@@ -250,6 +250,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new(
                     "https://example.com/oauth/authorize",
@@ -651,6 +652,7 @@ async fn lifecycle_cleanup_dispatches_each_canceled_turn_gate_continuation_once(
                 scope: flow_scope,
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: provider(),
+                requester_extension: None,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: OAuthAuthorizationUrl::new(
                         "https://example.com/oauth/authorize",

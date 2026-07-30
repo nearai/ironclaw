@@ -130,6 +130,10 @@ pub struct RebornOAuthStartFlowRequest {
     pub flow_id: Option<AuthFlowId>,
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    /// Extension whose manifest supplied the recipe. Ordinary product OAuth
+    /// leaves this absent; extension-owned setup must retain it durably so
+    /// callback and refresh resolve the same manifest-local recipe.
+    pub requester_extension: Option<ExtensionId>,
     pub authorization_url: OAuthAuthorizationUrl,
     pub opaque_state_hash: OpaqueStateHash,
     pub pkce_verifier_hash: PkceVerifierHash,
@@ -140,6 +144,13 @@ pub struct RebornOAuthStartFlowRequest {
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     pub continuation: AuthContinuationRef,
     pub expires_at: crate::Timestamp,
+}
+
+/// Minimum durable identity needed before a callback may resolve recipe data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornOAuthCallbackFlowIdentity {
+    pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
 }
 
 /// Host-route OAuth callback parse result.
@@ -1105,7 +1116,8 @@ impl RebornProductAuthServices {
                 } else {
                     let exchange = match self
                         .provider_client
-                        .exchange_callback(
+                        .exchange_callback_for_requester(
+                            claimed.requester_extension.clone(),
                             OAuthProviderExchangeContext {
                                 scope: request.scope.clone(),
                                 flow_id: request.flow_id,
@@ -1278,7 +1290,7 @@ impl RebornProductAuthServices {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         state_hash: &OpaqueStateHash,
-    ) -> Result<AuthProviderId, RebornOAuthCallbackError> {
+    ) -> Result<RebornOAuthCallbackFlowIdentity, RebornOAuthCallbackError> {
         let Some(record) = self
             .flow_manager
             .get_flow(scope, flow_id)
@@ -1310,7 +1322,10 @@ impl RebornProductAuthServices {
         {
             return Err(AuthProductError::CrossScopeDenied.into());
         }
-        Ok(record.provider)
+        Ok(RebornOAuthCallbackFlowIdentity {
+            provider: record.provider,
+            requester_extension: record.requester_extension,
+        })
     }
 
     /// Read a scoped flow's durable lifecycle status for the origin-independent
@@ -1432,6 +1447,7 @@ impl RebornProductAuthServices {
                 scope: request.scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: request.provider,
+                requester_extension: request.requester_extension,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: request.authorization_url,
                     expires_at: request.expires_at,

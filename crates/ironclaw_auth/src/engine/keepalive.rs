@@ -43,8 +43,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::credential::{
-    CredentialAccount, CredentialAccountService, CredentialAccountStatus, CredentialRefreshReport,
-    CredentialRefreshRequest, ProviderBackedCredentialAccountService,
+    CredentialAccount, CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    CredentialRefreshReport, CredentialRefreshRequest, ProviderBackedCredentialAccountService,
 };
 use crate::engine::AuthRecipeResolver;
 use crate::error::AuthProductError;
@@ -305,7 +305,22 @@ pub async fn sweep_once(
         if !is_refreshable(&account) {
             continue;
         }
-        let Some(resolved) = deps.recipes.recipe_for_vendor(account.provider.as_str()) else {
+        let requester_extension = match account.ownership {
+            CredentialOwnership::ExtensionOwned => {
+                // An extension-owned account cannot outlive the installed
+                // manifest that declared its recipe.
+                let Some(extension) = account.owner_extension.as_ref() else {
+                    continue;
+                };
+                Some(extension)
+            }
+            _ => None,
+        };
+        let Some(resolved) = deps
+            .recipes
+            .resolve(requester_extension, account.provider.as_str())
+            .await
+        else {
             continue;
         };
         let Some(lifetime) = resolved.recipe.keepalive_idle_threshold() else {

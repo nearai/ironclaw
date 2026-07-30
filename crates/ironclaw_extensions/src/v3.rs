@@ -30,7 +30,9 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::ExtensionAdminConfigurationDescriptor;
-use crate::resolved::{ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration};
+use crate::resolved::{
+    PackageRootBinding, ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration,
+};
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
     MAX_MANIFEST_BYTES, ManifestSource, RawCapabilityV2, RawRuntimeCredentialV2,
@@ -584,6 +586,7 @@ pub(crate) fn parse_v3(
                 vendor,
                 setup,
                 recipe: Some(recipe),
+                protected_resource_metadata_url: None,
             }
         })
         .collect();
@@ -595,9 +598,10 @@ pub(crate) fn parse_v3(
         description: manifest.description.clone(),
         requested_trust: manifest.requested_trust,
         runtime: manifest.runtime.clone(),
-        // No package root is in scope at v3 parse time either; the loader
-        // fabricates one when this is `None`.
-        root: None,
+        // Parsing precedes package materialization. The manifest-record
+        // boundary replaces this for materialized and remote-only packages.
+        root_binding: PackageRootBinding::FabricateOnLoad,
+        initial_preparation: crate::PreparationRequirement::Ready,
         mcp: mcp.map(|mcp| ResolvedMcpDeclaration {
             server: mcp.server.as_str().to_string(),
             namespace: mcp.namespace,
@@ -615,6 +619,8 @@ pub(crate) fn parse_v3(
                         .collect()
                 })
                 .unwrap_or_default(),
+            dynamic_input_schemas: std::collections::BTreeMap::new(),
+            registration_auth: ironclaw_host_api::HostedMcpAuthSelection::NoAuth,
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,

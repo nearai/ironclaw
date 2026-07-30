@@ -5,13 +5,16 @@ use ironclaw_host_api::{
 use ironclaw_trust::TrustPolicyInput;
 use std::collections::{BTreeSet, HashSet};
 
-use crate::{CapabilityManifest, ExtensionError, ExtensionManifest, ManifestSource};
+use crate::{
+    CapabilityManifest, ExtensionError, ExtensionManifest, ExtensionRuntime, ManifestSource,
+    PackageRootBinding, PackageRootError,
+};
 
 /// Validated package rooted under `/system/extensions/<extension>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionPackage {
     pub id: ExtensionId,
-    pub root: VirtualPath,
+    pub root_binding: PackageRootBinding,
     pub manifest: ExtensionManifest,
     pub capabilities: Vec<CapabilityDescriptor>,
     pub manifest_digest: Option<String>,
@@ -54,11 +57,48 @@ impl ExtensionPackage {
         manifest_digest: Option<String>,
     ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
+        Self::from_manifest_with_binding(
+            manifest,
+            PackageRootBinding::Materialized(root),
+            manifest_digest,
+        )
+    }
+
+    /// Construct a remote-only user-registered package. Such a package has no
+    /// filesystem tree and may never be routed through asset or schema I/O.
+    pub fn from_virtual_manifest(
+        manifest: ExtensionManifest,
+        manifest_digest: Option<String>,
+        capabilities: Vec<CapabilityDescriptor>,
+    ) -> Result<Self, ExtensionError> {
+        ensure_virtual_manifest(&manifest)?;
+        let expected = capability_descriptors_from_manifest(&manifest)?;
+        if !descriptors_match_except_schema(&capabilities, &expected) {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "inline virtual capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(Self {
+            id: manifest.id.clone(),
+            root_binding: PackageRootBinding::Virtual,
+            manifest,
+            capabilities,
+            manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
+        })
+    }
+
+    fn from_manifest_with_binding(
+        manifest: ExtensionManifest,
+        root_binding: PackageRootBinding,
+        manifest_digest: Option<String>,
+    ) -> Result<Self, ExtensionError> {
         let capabilities = capability_descriptors_from_manifest(&manifest)?;
 
         Ok(Self {
             id: manifest.id.clone(),
-            root,
+            root_binding,
             manifest,
             capabilities,
             manifest_digest,
@@ -89,7 +129,7 @@ impl ExtensionPackage {
         }
         Ok(Self {
             id: manifest.id.clone(),
-            root,
+            root_binding: PackageRootBinding::Materialized(root),
             manifest,
             capabilities,
             manifest_digest,
@@ -101,6 +141,14 @@ impl ExtensionPackage {
         self.manifest_digest.clone()
     }
 
+    pub fn package_root_binding(&self) -> &PackageRootBinding {
+        &self.root_binding
+    }
+
+    pub fn materialized_root(&self) -> Result<&VirtualPath, PackageRootError> {
+        self.root_binding.materialized_root()
+    }
+
     pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {
         if self.id != self.manifest.id {
             return Err(ExtensionError::InvalidManifest {
@@ -110,12 +158,23 @@ impl ExtensionPackage {
                 ),
             });
         }
-        ensure_extension_root_matches(&self.manifest.id, &self.root)?;
+        match &self.root_binding {
+            PackageRootBinding::Materialized(root) => {
+                ensure_extension_root_matches(&self.manifest.id, root)?;
+            }
+            PackageRootBinding::Virtual => ensure_virtual_manifest(&self.manifest)?,
+            PackageRootBinding::FabricateOnLoad => {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: "package root must be materialized before packaging".to_string(),
+                });
+            }
+        }
         let expected = capability_descriptors_from_manifest(&self.manifest)?;
         let consistent = match self.descriptor_schema_mode {
             CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
             CapabilityDescriptorSchemaMode::InlineDynamic => {
-                self.manifest.source == ManifestSource::HostBundled
+                (self.manifest.source == ManifestSource::HostBundled
+                    || matches!(self.root_binding, PackageRootBinding::Virtual))
                     && descriptors_match_except_schema(&self.capabilities, &expected)
             }
         };
@@ -170,6 +229,30 @@ impl ExtensionPackage {
                 .collect::<BTreeSet<_>>(),
         })
     }
+}
+
+fn ensure_virtual_manifest(manifest: &ExtensionManifest) -> Result<(), ExtensionError> {
+    if manifest.source != ManifestSource::UserRegistered {
+        return Err(ExtensionError::InvalidManifest {
+            reason: "virtual packages require user-registered provenance".to_string(),
+        });
+    }
+    if matches!(manifest.runtime, ExtensionRuntime::Wasm { .. }) {
+        return Err(ExtensionError::InvalidManifest {
+            reason: "virtual packages cannot declare a filesystem-backed runtime".to_string(),
+        });
+    }
+    if manifest
+        .capabilities
+        .iter()
+        .any(|capability| capability.prompt_doc_ref.is_some())
+    {
+        return Err(ExtensionError::InvalidManifest {
+            reason: "virtual packages cannot declare filesystem-backed prompt documents"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn descriptors_match_except_schema(
@@ -261,6 +344,109 @@ fn capability_descriptors_from_manifest(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::HostPortCatalog;
+
+    use super::*;
+    use crate::{CapabilityProviderHostApiContract, HostApiContractRegistry};
+
+    const VIRTUAL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "remote-tools"
+name = "Remote Tools"
+version = "0.1.0"
+description = "Remote-only tool provider"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "remote"
+command = "invoke"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "remote-tools.invoke"
+description = "Invoke a remote tool"
+effects = ["dispatch_capability"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
+"#;
+
+    fn contracts() -> HostApiContractRegistry {
+        let mut contracts = HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register contract");
+        contracts
+    }
+
+    #[test]
+    fn virtual_package_requires_inline_descriptors_and_never_exposes_a_root() {
+        let manifest = ExtensionManifest::parse(
+            VIRTUAL_MANIFEST,
+            ManifestSource::UserRegistered,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let mut capabilities =
+            capability_descriptors_from_manifest(&manifest).expect("descriptors");
+        capabilities[0].parameters_schema = serde_json::json!({"type": "object"});
+
+        let package = ExtensionPackage::from_virtual_manifest(manifest, None, capabilities)
+            .expect("virtual package");
+        assert_eq!(package.root_binding, PackageRootBinding::Virtual);
+        assert_eq!(package.materialized_root(), Err(PackageRootError::Virtual));
+        package.validate_consistency().expect("consistent package");
+    }
+
+    #[test]
+    fn virtual_package_rejects_non_user_registered_provenance() {
+        let manifest = ExtensionManifest::parse(
+            VIRTUAL_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let capabilities = capability_descriptors_from_manifest(&manifest).expect("descriptors");
+        let error = ExtensionPackage::from_virtual_manifest(manifest, None, capabilities)
+            .expect_err("local provenance cannot become virtual");
+        assert!(matches!(
+            error,
+            ExtensionError::InvalidManifest { reason }
+                if reason.contains("user-registered provenance")
+        ));
+    }
+
+    #[test]
+    fn packaged_fabrication_state_fails_consistency() {
+        let manifest = ExtensionManifest::parse(
+            VIRTUAL_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let root = VirtualPath::new("/system/extensions/remote-tools").expect("root");
+        let mut package = ExtensionPackage::from_manifest(manifest, root).expect("package");
+        package.root_binding = PackageRootBinding::FabricateOnLoad;
+        let error = package
+            .validate_consistency()
+            .expect_err("fabrication cannot survive packaging");
+        assert!(matches!(error, ExtensionError::InvalidManifest { .. }));
+    }
 }
 
 fn invalid_package_root(root: &VirtualPath) -> ExtensionError {

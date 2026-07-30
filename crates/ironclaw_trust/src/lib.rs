@@ -92,6 +92,28 @@ mod tests {
     }
 
     #[test]
+    fn fail_closed_policy_keeps_direct_remote_untrusted() {
+        use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
+        let identity = PackageIdentity::new(
+            PackageId::new("mcp-linear").unwrap(),
+            PackageSource::DirectRemote {
+                endpoint: "https://mcp.linear.example/rpc".to_string(),
+            },
+            None,
+            None,
+        );
+        let decision = HostTrustPolicy::fail_closed()
+            .evaluate(&TrustPolicyInput {
+                identity,
+                requested_trust: RequestedTrustClass::SystemRequested,
+                requested_authority: std::collections::BTreeSet::new(),
+            })
+            .unwrap();
+        assert_eq!(decision.provenance, TrustProvenance::Default);
+        assert!(!decision.effective_trust.is_privileged());
+    }
+
+    #[test]
     fn empty_policy_alias_is_fail_closed() {
         use ironclaw_host_api::{PackageId, PackageIdentity, PackageSource, RequestedTrustClass};
         let identity = PackageIdentity::new(

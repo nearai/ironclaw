@@ -47,6 +47,12 @@ pub use credential::{
     binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
+pub use engine::admission::{
+    AdmissionClientProfile, AuthorizationServerAdmissionMetadata, AuthorizationServerMetadataFetch,
+    EmptyOAuthClientProfileRegistry, OAuthClientProfileRegistry, OAuthRecipeAdmission,
+    OAuthRecipeAdmissionRequest, ProtectedResourceAdmissionMetadata,
+    ProtectedResourceMetadataFetch,
+};
 pub use engine::keepalive;
 pub use engine::keepalive::{
     AlwaysLeaderKeepaliveLock, KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT, KeepaliveCandidateSource,
@@ -90,8 +96,9 @@ pub use product_auth::api::auth::{
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
     RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornOAuthStartFlowRequest, RebornProductAuthServicePorts, RebornProductAuthServices,
+    RebornOAuthCallbackFlowIdentity, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornOAuthCallbackResponse, RebornOAuthStartFlowRequest, RebornProductAuthServicePorts,
+    RebornProductAuthServices,
 };
 pub use product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock;
 pub use product_auth::credentials::runtime_credentials::{

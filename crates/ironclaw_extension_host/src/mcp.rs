@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, ManifestSource, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRuntime, SharedExtensionRegistry, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
@@ -107,6 +107,7 @@ pub struct HostedMcpEndpoint {
     host_pattern: String,
     port: Option<u16>,
     path: String,
+    query: Option<String>,
 }
 
 impl HostedMcpEndpoint {
@@ -115,7 +116,6 @@ impl HostedMcpEndpoint {
         if parsed.scheme() != "https"
             || !parsed.username().is_empty()
             || parsed.password().is_some()
-            || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
             return None;
@@ -124,6 +124,7 @@ impl HostedMcpEndpoint {
             host_pattern: parsed.host_str()?.to_ascii_lowercase(),
             port: parsed.port(),
             path: normalize_mcp_path(parsed.path()),
+            query: parsed.query().map(str::to_string),
         })
     }
 
@@ -139,7 +140,7 @@ impl HostedMcpEndpoint {
 }
 
 pub fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
-    if package.manifest.source != ManifestSource::HostBundled {
+    if !is_hosted_http_mcp_package(package) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -422,6 +423,24 @@ mod tests {
         ));
         assert!(!hosted_mcp_url_allowed(
             "https://user@mcp.notion.com/mcp",
+            &endpoint
+        ));
+    }
+
+    #[test]
+    fn hosted_mcp_url_allowed_preserves_registered_query_exactly() {
+        let endpoint = HostedMcpEndpoint::parse("https://mcp.example.com/mcp?tenant=acme").unwrap();
+
+        assert!(hosted_mcp_url_allowed(
+            "https://mcp.example.com/mcp?tenant=acme",
+            &endpoint
+        ));
+        assert!(!hosted_mcp_url_allowed(
+            "https://mcp.example.com/mcp",
+            &endpoint
+        ));
+        assert!(!hosted_mcp_url_allowed(
+            "https://mcp.example.com/mcp?tenant=other",
             &endpoint
         ));
     }

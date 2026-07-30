@@ -114,6 +114,7 @@ mod tests {
             vendor: vendor.to_string(),
             recipe,
             token_exchange_resource: None,
+            protected_resource_metadata_url: None,
         }
     }
 

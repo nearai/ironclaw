@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ResourceScope,
-    RuntimeHttpEgress, UserId,
+    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ResourceScope, UserId,
 };
 use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
@@ -29,7 +28,6 @@ pub struct ExtensionHostLifecycleProductService {
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     channel_config: Option<Arc<ironclaw_extension_host::ChannelConfigService>>,
-    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
 
@@ -39,7 +37,6 @@ impl ExtensionHostLifecycleProductService {
             skill_management,
             extension_management: None,
             channel_config: None,
-            runtime_http_egress: None,
             credential_accounts: None,
         }
     }
@@ -60,14 +57,6 @@ impl ExtensionHostLifecycleProductService {
         self
     }
 
-    pub fn with_runtime_http_egress(
-        mut self,
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    ) -> Self {
-        self.runtime_http_egress = Some(runtime_http_egress);
-        self
-    }
-
     pub fn with_runtime_credential_accounts(
         mut self,
         credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
@@ -82,6 +71,27 @@ impl ExtensionHostLifecycleProductService {
         action: LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         match action {
+            LifecycleProductAction::ExtensionRegisterHostedMcp { request } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                let caller = lifecycle_caller(&context)?;
+                let registration = extension_management.register_hosted_mcp(request).await?;
+                let package_ref =
+                    registration
+                        .package_ref
+                        .ok_or_else(|| ProductSurfaceFailure::Transient {
+                            reason: "hosted MCP admission returned no package reference"
+                                .to_string(),
+                        })?;
+                self.execute_extension_install_with_activation(
+                    context,
+                    extension_management,
+                    package_ref,
+                    &caller,
+                )
+                .await
+            }
             LifecycleProductAction::SkillSearch { query } => {
                 let scope = self
                     .skill_management
@@ -201,68 +211,13 @@ impl ExtensionHostLifecycleProductService {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
-                let credential_gate = self
-                    .extension_activation_credential_gate(
-                        &context,
-                        extension_management,
-                        &package_ref,
-                        &caller,
-                    )
-                    .await?;
-                if extension_management
-                    .package_requires_hosted_mcp_discovery(&package_ref)
-                    .await?
-                {
-                    let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
-                        return Err(ProductSurfaceFailure::InvalidBindingRequest {
-                            reason: format!(
-                                "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle service",
-                                package_ref.id
-                            ),
-                        });
-                    };
-                    let scope = lifecycle_resource_scope(&context)?;
-                    let mode =
-                        ironclaw_extension_host::ExtensionActivationMode::HostedMcpDiscovery {
-                            scope,
-                            runtime_http_egress,
-                        };
-                    return match credential_gate {
-                        Some(credential_gate) => {
-                            extension_management
-                                .activate_with_credential_gate(
-                                    package_ref,
-                                    mode,
-                                    credential_gate,
-                                    &caller,
-                                )
-                                .await
-                        }
-                        None => {
-                            extension_management
-                                .activate(package_ref, mode, &caller)
-                                .await
-                        }
-                    };
-                }
-                let mode = ironclaw_extension_host::ExtensionActivationMode::Static;
-                match credential_gate {
-                    Some(credential_gate) => {
-                        extension_management
-                            .activate_with_credential_gate(
-                                package_ref,
-                                mode,
-                                credential_gate,
-                                &caller,
-                            )
-                            .await
-                    }
-                    None => {
-                        extension_management
-                            .activate(package_ref, mode, &caller)
-                            .await
-                    }
-                }
+                self.execute_extension_activation(
+                    &context,
+                    extension_management,
+                    package_ref,
+                    &caller,
+                )
+                .await
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -349,57 +304,9 @@ impl ExtensionHostLifecycleProductService {
         let install_response = extension_management
             .install(package_ref.clone(), caller)
             .await?;
-        let activation_response = async {
-            let credential_gate = self
-                .extension_activation_credential_gate(
-                    &context,
-                    extension_management,
-                    &package_ref,
-                    caller,
-                )
-                .await?;
-            if extension_management
-                .package_requires_hosted_mcp_discovery(&package_ref)
-                .await?
-            {
-                let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
-                    return Err(ProductSurfaceFailure::InvalidBindingRequest {
-                        reason: format!(
-                            "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle service",
-                            package_ref.id
-                        ),
-                    });
-                };
-                let scope = lifecycle_resource_scope(&context)?;
-                let mode = ironclaw_extension_host::ExtensionActivationMode::HostedMcpDiscovery {
-                    scope,
-                    runtime_http_egress,
-                };
-                return match credential_gate {
-                    Some(credential_gate) => {
-                        extension_management
-                            .activate_with_credential_gate(
-                                package_ref,
-                                mode,
-                                credential_gate,
-                                caller,
-                            )
-                            .await
-                    }
-                    None => extension_management.activate(package_ref, mode, caller).await,
-                };
-            }
-            let mode = ironclaw_extension_host::ExtensionActivationMode::Static;
-            match credential_gate {
-                Some(credential_gate) => {
-                    extension_management
-                        .activate_with_credential_gate(package_ref, mode, credential_gate, caller)
-                        .await
-                }
-                None => extension_management.activate(package_ref, mode, caller).await,
-            }
-        }
-        .await;
+        let activation_response = self
+            .execute_extension_activation(&context, extension_management, package_ref, caller)
+            .await;
         match activation_response {
             Ok(activation_response) if activation_response.phase == InstallationState::Active => {
                 Ok(install_response_with_activation(
@@ -418,6 +325,43 @@ impl ExtensionHostLifecycleProductService {
             Ok(_) => Ok(install_response),
             Err(error) => install_activation_error(error, install_response),
         }
+    }
+
+    /// The one post-install and explicit-activation path. Every package uses
+    /// the same credential preflight, optional preparation boundary, and
+    /// ordinary static activation sequence.
+    async fn execute_extension_activation(
+        &self,
+        context: &LifecycleProductContext,
+        extension_management: &RebornLocalExtensionManagementPort,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        let credential_gate = self
+            .extension_activation_credential_gate(
+                context,
+                extension_management,
+                &package_ref,
+                caller,
+            )
+            .await?;
+        let mode = ironclaw_extension_host::ExtensionActivationMode::Static;
+        let unavailable_gate =
+            ironclaw_extension_host::UnavailableExtensionActivationCredentialGate;
+        let credential_gate: &dyn ironclaw_extension_host::ExtensionActivationCredentialGate =
+            credential_gate
+                .as_ref()
+                .map(|gate| gate as &dyn ironclaw_extension_host::ExtensionActivationCredentialGate)
+                .unwrap_or(&unavailable_gate);
+        extension_management
+            .activate_with_credential_gate(
+                package_ref,
+                mode,
+                lifecycle_resource_scope(context)?,
+                credential_gate,
+                caller,
+            )
+            .await
     }
 }
 
@@ -794,15 +738,18 @@ mod tests {
 
         for index in 0..55 {
             service
-                .execute_action(lifecycle_test_context(), LifecycleProductAction::SkillInstall {
-                    name: Some(
-                        LifecyclePackageId::new(format!("bulk-skill-{index:02}"))
-                            .expect("valid skill id"),
-                    ),
-                    content: format!(
+                .execute_action(
+                    lifecycle_test_context(),
+                    LifecycleProductAction::SkillInstall {
+                        name: Some(
+                            LifecyclePackageId::new(format!("bulk-skill-{index:02}"))
+                                .expect("valid skill id"),
+                        ),
+                        content: format!(
                         "---\nname: bulk-skill-{index:02}\ndescription: bulk test\n---\nUse bulk.\n"
                     ),
-                })
+                    },
+                )
                 .await
                 .expect("install bulk skill");
         }

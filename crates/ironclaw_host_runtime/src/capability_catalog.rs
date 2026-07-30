@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    CapabilityDescriptorSchemaMode, CapabilityVisibility, ExtensionPackage, ExtensionRegistry,
+};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, VirtualPath,
@@ -85,24 +87,32 @@ where
             continue;
         }
 
-        let input_schema = read_json_ref(
-            fs,
-            &package.root,
-            &declaration.input_schema_ref,
-            "input_schema_ref",
-        )
-        .await?;
-        let output_schema = match &declaration.output_schema_ref {
-            Some(reference) => {
-                read_json_ref(fs, &package.root, reference, "output_schema_ref").await?
-            }
-            // No declared output schema (manifest v3): any output shape is
-            // allowed.
-            None => Value::Object(serde_json::Map::new()),
-        };
-        let prompt_doc = match &declaration.prompt_doc_ref {
-            Some(prompt_ref) => Some(read_text_ref(fs, &package.root, prompt_ref).await?),
-            None => None,
+        let (input_schema, output_schema, prompt_doc) = if package.descriptor_schema_mode
+            == CapabilityDescriptorSchemaMode::InlineDynamic
+        {
+            (
+                descriptor.parameters_schema.clone(),
+                Value::Object(serde_json::Map::new()),
+                None,
+            )
+        } else {
+            let root = package.materialized_root().map_err(|error| {
+                HostRuntimeError::invalid_request(format!(
+                    "capability {} requires package filesystem schemas: {error}",
+                    descriptor.id
+                ))
+            })?;
+            let input_schema =
+                read_json_ref(fs, root, &declaration.input_schema_ref, "input_schema_ref").await?;
+            let output_schema = match &declaration.output_schema_ref {
+                Some(reference) => read_json_ref(fs, root, reference, "output_schema_ref").await?,
+                None => Value::Object(serde_json::Map::new()),
+            };
+            let prompt_doc = match &declaration.prompt_doc_ref {
+                Some(prompt_ref) => Some(read_text_ref(fs, root, prompt_ref).await?),
+                None => None,
+            };
+            (input_schema, output_schema, prompt_doc)
         };
 
         let mut hot_descriptor = descriptor.clone();
