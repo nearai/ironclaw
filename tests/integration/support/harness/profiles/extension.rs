@@ -5,7 +5,8 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InvocationId, MountPermissions, MountView, ProjectId, ResourceScope, SecretHandle,
+    TenantId, UserId,
 };
 
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress, VendorResponseRouter,
     bundled_extension_provider_trust, capability_ids_from_strs, standalone_all_effects,
-    wildcard_test_policy,
+    wildcard_test_policy, workspace_mounts,
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
@@ -960,6 +961,12 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
         .push(ironclaw_host_api::CapabilityId::new(
             ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         )?);
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::CapabilityId::new(
+            ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+        )?);
+    profile.options.mounts = workspace_mounts(MountPermissions::read_only())?;
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ExtensionId::new("telegram")?,

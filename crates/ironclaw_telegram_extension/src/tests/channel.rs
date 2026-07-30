@@ -275,10 +275,13 @@ fn private_media_group_update_becomes_a_triggered_batch_fragment() {
         panic!("expected BatchFragment");
     };
     assert!(fragment.triggered);
-    assert_eq!(fragment.batch_key, "album-private");
+    assert_eq!(
+        fragment.batch_key,
+        "chat-555-thread-none-group-album-private"
+    );
     assert_eq!(
         fragment.message.event_id.as_str(),
-        "tg-install_alpha-media-album-private"
+        "tg-install_alpha-media-chat-555-thread-none-group-album-private"
     );
     assert_eq!(fragment.message.attachments.len(), 1);
 }

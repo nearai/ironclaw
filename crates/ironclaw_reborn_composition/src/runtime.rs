@@ -955,6 +955,17 @@ impl RebornRuntime {
         Some(Arc::clone(&self.outbound_preferences))
     }
 
+    /// Test-only handle for the exact reply-attachment intent port production
+    /// gives both the built-in attachment capability and the planned runtime
+    /// finalizer (`build_reborn_runtime` below). Integration harnesses use this
+    /// to preserve that shared-store identity while driving the real tool path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reply_attachment_intent_port_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort> {
+        Arc::clone(&self.reply_attachment_intents)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::type_complexity)]
     pub fn outbound_delivery_stores_for_test(

@@ -92,7 +92,6 @@ use ironclaw_product::{
 };
 use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
-use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
@@ -1902,10 +1901,28 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         }
     })
     .to_string();
-    // Same conversation → same scope → the already-registered paused
-    // gateway serves the attachment run too; pre-release its next permit so
-    // the run replies immediately.
-    paused_gateway.release();
+    // This private DM is a distinct provider conversation from the earlier
+    // supergroup topic. Resolve and register its own model scope so the
+    // transcript assertion cannot accidentally read the topic thread.
+    let (attachment_scope, attachment_actor_user_id) = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_delivery_bot".to_string(),
+        )],
+        &evidence,
+        &attachment_body,
+    )
+    .await;
+    let attachment_gateway = Arc::new(PausedReplyGateway::new("Attachment received."));
+    inbound.register_scope_gateway_for_test(
+        attachment_scope.clone(),
+        Arc::clone(&attachment_gateway) as Arc<dyn HostManagedModelGateway>,
+    );
+    attachment_gateway.release();
     let get_file_urls = |requests: &[ironclaw_network::NetworkHttpRequest]| {
         requests
             .iter()
@@ -1955,6 +1972,30 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .await;
     assert_eq!(status, StatusCode::OK, "the redelivered update is accepted");
     ingress.drain().await;
+    let attachment_run_id = attachment_gateway.wait_for_run_id().await;
+    let coordinator = inbound.turn_coordinator_for_test();
+    wait_for_run_status_in_scope(
+        &coordinator,
+        &attachment_scope,
+        attachment_run_id,
+        TurnStatus::Completed,
+    )
+    .await;
+    let attachment_run = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: attachment_scope.clone(),
+            run_id: attachment_run_id,
+        })
+        .await
+        .expect("completed Telegram attachment run remains readable");
+    assert_eq!(
+        attachment_run
+            .actor
+            .as_ref()
+            .expect("attachment run actor")
+            .user_id,
+        attachment_actor_user_id
+    );
 
     let requests = inbound.captured_network_requests_for_test();
     assert_eq!(
@@ -1978,22 +2019,12 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
 
     // The accepted transcript message carries the canonical byte-free
     // workspace ref the agent's file tools resolve.
-    let vendor_thread_scope = ThreadScope {
-        tenant_id: vendor_scope.tenant_id.clone(),
-        agent_id: vendor_scope
-            .agent_id
-            .clone()
-            .expect("vendor scope agent id"),
-        project_id: vendor_scope.project_id.clone(),
-        owner_user_id: vendor_scope.explicit_owner_user_id().cloned(),
-        mission_id: None,
-    };
     let history = inbound
         .thread_service_for_test()
         .expect("group thread service")
         .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
-            scope: vendor_thread_scope,
-            thread_id: vendor_scope.thread_id.clone(),
+            scope: thread_scope_for_turn(&attachment_scope),
+            thread_id: attachment_scope.thread_id.clone(),
         })
         .await
         .expect("vendor thread history");
@@ -2043,10 +2074,11 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     );
 
     // ── Outbound half: a final reply in a NEW conversation (same paired
-    // actor, so the same project workspace) references the landed workspace
-    // file; the coordinator materializes the bytes through the real
-    // project-scoped reader and the adapter delivers them natively as
-    // `sendDocument` — raw bytes transient, token injected host-side.
+    // actor, so the same project workspace) explicitly invokes the generic
+    // reply-attachment capability for the landed file. Transcript finalization
+    // seals that run-scoped intent into the assistant message; the coordinator
+    // materializes the bytes through the real project-scoped reader and the
+    // adapter delivers them natively as `sendDocument`.
     let outbound_body = json!({
         "update_id": 503,
         "message": {
@@ -2071,9 +2103,20 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         &outbound_body,
     )
     .await;
-    let file_reply: &'static str = Box::leak(format!("here it is: {storage_key}").into_boxed_str());
-    inbound
-        .register_scope_gateway_for_test(outbound_scope, Arc::new(StaticReplyGateway(file_reply)));
+    group
+        .register_scope_script_for_test(
+            outbound_scope,
+            "telegram-outbound-reply-attachment",
+            [
+                RebornScriptedReply::tool_call(
+                    ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+                    json!({"path": storage_key}),
+                ),
+                RebornScriptedReply::text("Here is the report."),
+            ],
+        )
+        .await
+        .expect("outbound attachment scope uses the real scripted provider chain");
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
@@ -2122,6 +2165,10 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         multipart.contains("424242"),
         "the document targets the replying conversation"
     );
+    inbound
+        .assert_tool_invoked(ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID)
+        .await
+        .expect("Telegram file delivery was sourced from the explicit reply-attachment tool");
 }
 
 /// §5.5 WebGeneratedCode pairing on the generic route (the P2 seam, DEL-10

@@ -391,8 +391,15 @@ On a harness built from a `live_approvals` group:
 - `build_secret_store_for_test(root, scoped)` — constructs the `StandaloneSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 - `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
-`RebornRuntime` (returned by `build_runtime`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`RebornRuntime` (returned by `build_runtime`, test-only methods defined in
+`crates/ironclaw_reborn_composition/src/runtime.rs` and
+`crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 
+- `reply_attachment_intent_port_for_test()` — the exact composition-owned
+  reply-intent store shared by the built-in reply-attachment capability and
+  planned-runtime transcript finalizer. Group harnesses must wire this same
+  handle; a separate store makes successful tool intents disappear at
+  finalization.
 - `standalone_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
 - `standalone_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
