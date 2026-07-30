@@ -32,7 +32,7 @@ The runtime security mechanisms are preserved — the same checks run in the sam
 
 ## The family map
 
-Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. Crate names are shown without their `ironclaw_` prefix. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below. Crates tagged `NEW` exist only in the target; the map shows the steady state (one transitional crate, `run_state`, remains under `kernel/` until its scheduled deletion — PROPOSAL §5).
+Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. Crate names are shown without their `ironclaw_` prefix. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below. Naming follows one written rule (PROPOSAL §5.1): a crate is named for what it *is*, never namespaced by its family — the directory does that job. Crates tagged `NEW` exist only in the target; the map shows the steady state (one transitional crate, `run_state`, remains under `kernel/` until its scheduled deletion — PROPOSAL §5).
 
 ```text
 crates/
@@ -45,7 +45,7 @@ crates/
 │   ├── extension_contracts    extension surfaces, adapters, recipes   NEW
 │   └── product_contracts      ProductSurface, DTOs & product ports    NEW
 │
-├── substrate/                 privileged mechanisms the kernel mediates
+├── substrates/                privileged mechanisms the kernel mediates
 │   ├── filesystem             storage fabric: mounts, containment, CAS
 │   ├── secrets                secret custody & one-shot leases
 │   ├── network                egress policy & hardened transport
@@ -70,7 +70,7 @@ crates/
 │   ├── projects               project entity & membership ACL
 │   ├── identity               external identity → stable UserId
 │   ├── llm                    provider contract & reliability stack
-│   ├── traces                 Trace Commons client & redaction
+│   ├── trace_commons          Trace Commons client & redaction
 │   └── outbound               outbound authority: sealed grants
 │
 ├── kernel/                    the authority perimeter — one crate per stage
@@ -94,14 +94,14 @@ crates/
 ├── loop/                      agent behavior & its hosting
 │   ├── agent_loop             the canonical loop, sealed strategies
 │   ├── loop_host              port adapters over kernel services
-│   ├── runner                 drivers & the agent-turn executor
+│   ├── turn_runner            drivers & the agent-turn executor
 │   └── hooks                  trust-tiered hook middleware
 │
 ├── extensions/                everything "installable package"
 │   ├── extension_registry     manifests & installation records
 │   ├── extension_host         generic host: verify, bind, deliver
 │   ├── extension_manager      product-side management                 NEW
-│   ├── first_party            shared native executors & the package inventory
+│   ├── extension_support      shared native executors & the package inventory
 │   └── packages/              one self-contained dir per package
 │       ├── slack/             adapter crate + manifest + assets
 │       ├── telegram/          adapter crate + manifest + assets
@@ -121,7 +121,7 @@ crates/
     ├── composition            the assembly root: selection & wiring
     ├── cli                    the binary `ironclaw`
     ├── config                 boot contract & config.toml schema
-    └── architecture           mechanical enforcement tests
+    └── architecture_tests     mechanical enforcement tests
 
 tools/                         developer diagnostics & excluded helpers
 ```
@@ -130,7 +130,7 @@ tools/                         developer diagnostics & excluded helpers
 
 **[`contracts/`](families/contracts.md).** The shared vocabulary and ports every tier may see: identities and scopes, the capability/decision/approval vocabulary, the sealed `Authorized` witness and dispatch port, and the loop, extension, and product port sets. Nothing here executes, persists, or names a vendor — a contracts crate defines shapes and seals constructors; implementations always live above it.
 
-**[`substrate/`](families/substrate.md).** The privileged mechanisms the kernel mediates: the storage fabric with mount containment and CAS, encrypted secrets with one-shot leases, hardened network policy and egress, safety scanning and redaction, and the tracing macros. Substrates enforce local invariants but never make authority decisions and never hold domain records or product behavior.
+**[`substrates/`](families/substrates.md).** The privileged mechanisms the kernel mediates: the storage fabric with mount containment and CAS, encrypted secrets with one-shot leases, hardened network policy and egress, safety scanning and redaction, and the tracing macros. Substrates enforce local invariants but never make authority decisions and never hold domain records or product behavior.
 
 **[`events/`](families/events.md).** What already happened, kept in three deliberately separate contracts: canonical redacted evidence (vocabulary plus durable backends with fail-closed production profiles), rebuildable read models derived by replay, and transport-neutral streams with admission control. Projections and streams can never write state or become authority, and no transport framing lives here.
 

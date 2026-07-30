@@ -1,6 +1,6 @@
 # `crates/loop/` — the loop-hosting tier
 
-**Layer(s):** loops (all four crates) · **Crates:** 4 — `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_runner`, `ironclaw_hooks` · **Security posture:** owns no authority of its own — every privileged effect crosses a `loop_contracts` port into the kernel; this family's own decorators restrict or observe what the kernel has already granted, and never expand it.
+**Layer(s):** loops (all four crates) · **Crates:** 4 — `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turn_runner`, `ironclaw_hooks` · **Security posture:** owns no authority of its own — every privileged effect crosses a `loop_contracts` port into the kernel; this family's own decorators restrict or observe what the kernel has already granted, and never expand it.
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -8,13 +8,13 @@
 crates/loop/
 ├── ironclaw_agent_loop    the canonical loop: executor & sealed strategies
 ├── ironclaw_loop_host     host-port adapters over kernel services
-├── ironclaw_runner        drivers & the agent-turn executor
+├── ironclaw_turn_runner   drivers & the agent-turn executor
 └── ironclaw_hooks         trust-tiered hook middleware
 ```
 
 ## Role
 
-`crates/loop/` hosts replaceable agent behavior and the adapters that connect it to the kernel. `ironclaw_agent_loop` is the sealed strategy-and-executor framework: it decides what a turn does next. `ironclaw_loop_host` implements every host-port contract that framework calls, over kernel services. `ironclaw_runner` is the agent-turn executor, the driver registry, and the loop-host factory, registered as the executor the process supervisor invokes for turn-shaped work. `ironclaw_hooks` is the trust-tiered hook framework wrapping every port call with policy and audit. Together, the four let an agent's behavior be replaced or extended without any of the replacement code ever touching a privileged handle directly.
+`crates/loop/` hosts replaceable agent behavior and the adapters that connect it to the kernel. `ironclaw_agent_loop` is the sealed strategy-and-executor framework: it decides what a turn does next. `ironclaw_loop_host` implements every host-port contract that framework calls, over kernel services. `ironclaw_turn_runner` is the agent-turn executor, the driver registry, and the loop-host factory, registered as the executor the process supervisor invokes for turn-shaped work. `ironclaw_hooks` is the trust-tiered hook framework wrapping every port call with policy and audit. Together, the four let an agent's behavior be replaced or extended without any of the replacement code ever touching a privileged handle directly.
 
 ## Boundaries — what makes this family distinct
 
@@ -30,7 +30,7 @@ crates/loop/
 
 `loop/` crates depend on `contracts/` (`host_api`, `common`, `loop_contracts`) and, for the host-adapter and control-plane crates, on the kernel services they wrap and the domain crates their adapters need. `ironclaw_agent_loop` alone depends on `contracts/` and nothing else. No crate in this family depends on `products/` or `app/`.
 
-**The single sanctioned `Loop*Port` decorator chain, declared:** `ironclaw_loop_host` implements the base, kernel-facing adapter for every port directly over kernel services. `ironclaw_runner` composes that base adapter into the concrete host it hands to each claimed run, adding its own driver-facing and capability-surface-tracking layers. `ironclaw_hooks` wraps the composed host outermost, so every port call is policy-checked and logged before it reaches `runner`'s composition and `loop_host`'s kernel-facing base beneath it. No other crate, inside or outside this family, implements a `Loop*Port`.
+**The single sanctioned `Loop*Port` decorator chain, declared:** `ironclaw_loop_host` implements the base, kernel-facing adapter for every port directly over kernel services. `ironclaw_turn_runner` composes that base adapter into the concrete host it hands to each claimed run, adding its own driver-facing and capability-surface-tracking layers. `ironclaw_hooks` wraps the composed host outermost, so every port call is policy-checked and logged before it reaches `runner`'s composition and `loop_host`'s kernel-facing base beneath it. No other crate, inside or outside this family, implements a `Loop*Port`.
 
 ## Security & authority
 
@@ -43,7 +43,7 @@ A claimed run receives only the ports scoped to its own execution — never an a
 - **Purpose:** the canonical, sealed loop-family and strategy-executor framework — the one artifact in the system meant to be replaced wholesale without touching anything privileged.
 - **Owns:** loop-family identity and the strategy registry; the planner service and its built-in strategy composition; the canonical executor and its ordered lifecycle stages; resumable execution state limited to refs, cursors, counters, versions, and safe summaries.
 - **Never contains:** any kernel, host-runtime, or product dependency of any kind; raw prompts, raw model output, tool arguments, secrets, host paths, or provider diagnostics anywhere in state; a strategy trait exposed outside the crate; a driver-facing type — the framework never sees a driver, only its own executor contract.
-- **Public surface:** the canonical executor and the loop-family registry, consumed by `ironclaw_runner`; consumes the full `loop_contracts` port set.
+- **Public surface:** the canonical executor and the loop-family registry, consumed by `ironclaw_turn_runner`; consumes the full `loop_contracts` port set.
 - **Depends on:** `common`, `host_api`, `loop_contracts` — contracts only.
 - **Never depends on:** any substrate, domain, kernel, lanes, extensions, product, or app crate.
 - **Security & authority role:** none. No privileged type is importable from this crate's dependency set, so "a shipped loop is not trusted" is a fact the compiler enforces rather than a review convention.
@@ -54,13 +54,13 @@ A claimed run receives only the ports scoped to its own execution — never an a
 - **Purpose:** the concrete implementation of every `loop_contracts` port over kernel services — the one crate licensed to hold both port types and kernel handles in the same module.
 - **Owns:** the base capability-port adapter and its capability-surface-filtering decorators; the subagent-spawn port; the budget accountant; the checkpoint-state store; the input queue and cancellation port; the model-gateway port adapter; identity, skill, and memory prompt-context builders that produce safe summaries and refs for the prompt port to assemble.
 - **Never contains:** a provider client or dispatcher internal beyond what a single port adapter strictly needs; product binding; a database migration; driver registration; a decorator that performs a turn-lifecycle state transition — that belongs to the turn-admission crate's own runner-facing seam, never to a port adapter.
-- **Public surface:** implementations of every `loop_contracts` port, consumed by `ironclaw_runner` and, through its composition, by the executor.
+- **Public surface:** implementations of every `loop_contracts` port, consumed by `ironclaw_turn_runner` and, through its composition, by the executor.
 - **Depends on:** `ironclaw_capabilities`, `ironclaw_host_runtime`, `ironclaw_resources`, `ironclaw_turns`, `ironclaw_safety`, `ironclaw_skills`, `ironclaw_memory`, `ironclaw_threads`, and `loop_contracts`.
 - **Never depends on:** `ironclaw_assistant`, `ironclaw_extension_host`, `ironclaw_extension_manager`, or any package crate.
 - **Security & authority role:** the concrete membrane implementation — every privileged effect a loop requests passes through an adapter defined here before it reaches the kernel. It must never bypass the capability host or the dispatcher.
-- **Why a separate crate:** it is the only place kernel handles and `loop_contracts` types are permitted to coexist; keeping it apart from `ironclaw_agent_loop` is what keeps that crate's contracts-only rule true, and keeping it apart from `ironclaw_runner` keeps port-adaptation concerns separate from driver-registry and claim-control-plane concerns.
+- **Why a separate crate:** it is the only place kernel handles and `loop_contracts` types are permitted to coexist; keeping it apart from `ironclaw_agent_loop` is what keeps that crate's contracts-only rule true, and keeping it apart from `ironclaw_turn_runner` keeps port-adaptation concerns separate from driver-registry and claim-control-plane concerns.
 
-### `ironclaw_runner`
+### `ironclaw_turn_runner`
 
 - **Purpose:** the agent-turn executor, the driver registry, and the loop-host factory — the trusted adapter between a kernel-claimed run and loop userland, registered as the executor the process supervisor invokes for turn-shaped work.
 - **Owns:** the driver registry and its readiness validation; the two production drivers — a planned driver that adapts `ironclaw_agent_loop`'s families and executor to the driver contract, and a text-only driver for the smallest supported behavior; the loop-host factory assembly that composes a claimed run's port set; failure-lane and retry disposition; submitting the loop's claimed outcome to the turn kernel's exit applier, which validates it before anything durable commits.

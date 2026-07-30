@@ -1,11 +1,11 @@
-# `crates/substrate/` — privileged mechanism substrates
+# `crates/substrates/` — privileged mechanism substrates
 
 **Layer(s):** substrates · **Crates:** 5 — `ironclaw_filesystem`, `ironclaw_secrets`, `ironclaw_network`, `ironclaw_safety`, `ironclaw_observability` · **Security posture:** each crate is a mediated mechanism invoked on behalf of an already-decided effect; none of the five makes an authority decision itself — containment, custody, policy enforcement, and detection only, fail-closed by local invariant, never by ambient trust.
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
 ```text
-crates/substrate/
+crates/substrates/
 ├── ironclaw_filesystem        storage fabric: mounts, containment, CAS
 ├── ironclaw_secrets           secret custody & one-shot leases
 ├── ironclaw_network           egress policy & hardened transport
@@ -131,7 +131,7 @@ Every crate in this family executes a kernel-mediated responsibility without dec
 
 ## Family AGENTS.md requirements
 
-Each family root states, for every crate beneath it, the same four things a reviewer needs without reading source: what admission test a new type must pass before it can live here; which two-or-more consumers justify it; which crate implements each port declared here, and where the boundary between declaring a port and implementing one sits; and the closed set of frameworks and cross-family dependencies this family may never acquire. `crates/substrate/AGENTS.md` states, specifically:
+Each family root states, for every crate beneath it, the same four things a reviewer needs without reading source: what admission test a new type must pass before it can live here; which two-or-more consumers justify it; which crate implements each port declared here, and where the boundary between declaring a port and implementing one sits; and the closed set of frameworks and cross-family dependencies this family may never acquire. `crates/substrates/AGENTS.md` states, specifically:
 
 - Each crate's mediation story: who may call it directly, and which callers must instead go through kernel mediation — since this is the one thing every crate in the family answers differently, and the tightest of the five, secrets, shows why that boundary matters most.
 - The "mechanism, not authority" line: a substrate crate enforces its own local invariant but never decides whether the caller was entitled to invoke it — that decision always comes from the kernel before the call reaches here.

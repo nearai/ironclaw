@@ -1,7 +1,7 @@
 
 # `crates/domains/` — typed record/service domains
 
-**Layer(s):** substrates · **Crates:** 13 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_traces, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint and seal trust narrowly (outbound, triggers), and one is a credential-custody domain (auth).
+**Layer(s):** substrates · **Crates:** 13 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint and seal trust narrowly (outbound, triggers), and one is a credential-custody domain (auth).
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -18,7 +18,7 @@ crates/domains/
 ├── ironclaw_projects         project entity & membership ACL
 ├── ironclaw_identity         external identity → stable UserId
 ├── ironclaw_llm              provider contract, providers & decorators
-├── ironclaw_traces           Trace Commons client & redaction
+├── ironclaw_trace_commons    Trace Commons client & redaction
 └── ironclaw_outbound         outbound authority: sealed grants, at-most-once
 ```
 
@@ -32,7 +32,7 @@ The family favors narrow, single-purpose crates over shared infrastructure. Most
 
 ## Boundaries — what makes this family distinct
 
-- **vs `substrate/`** (filesystem, secrets, network, safety, observability): substrate crates are generic mechanism with no domain grammar — the filesystem substrate has no notion of a "trigger" or a "thread." Domains crates are the typed grammar layered on top of that mechanism; strip away every Reborn product concept and a substrate crate still compiles, a domains crate does not.
+- **vs `substrates/`** (filesystem, secrets, network, safety, observability): substrate crates are generic mechanism with no domain grammar — the filesystem substrate has no notion of a "trigger" or a "thread." Domains crates are the typed grammar layered on top of that mechanism; strip away every Reborn product concept and a substrate crate still compiles, a domains crate does not.
 - **vs `kernel/`** (trust, authorization, approvals, resources, capabilities, processes, turns, host_runtime): kernel crates decide whether and how an effect happens; domains crates decide what a record means once the kernel has already admitted the request. No domains crate depends on a kernel crate, and no domains crate can construct a capability-authorization witness or a lease.
 - **vs `events/`** (event_log, event_store, event_projections, event_streams): events are immutable, replayable evidence of what happened; domains own live state, mutated in place under compare-and-swap. A projection is a rebuildable read cache derived from events and is never a second write authority.
 - **vs `product/`** (assistant, operator, openai_compat, webui, host_ingress): product orchestrates user-facing workflow, admission, and delivery across many domains at once inside a single request; a domains crate knows nothing about channels, commands, or views — it owns one record type's invariants only.
@@ -51,15 +51,15 @@ The family favors narrow, single-purpose crates over shared infrastructure. Most
 
 ## Dependency direction
 
-Domains crates depend only on `substrate/`, `events/`, and `contracts/` — never on `kernel/`, `loop/`, `extensions/`, `product/`, or `app/`.
+Domains crates depend only on `substrates/`, `events/`, and `contracts/` — never on `kernel/`, `loop/`, `extensions/`, `product/`, or `app/`.
 
 | May depend on | Never depends on |
 |---|---|
-| `substrate/` — filesystem for every crate; secrets and network only where a crate's charter needs them (auth) · `events/` — chiefly event_projections · `contracts/` — host_api, common, prompt_envelope | `kernel/` in full — capabilities, host_runtime, authorization, approvals, resources, trust, turns, processes · `loop/` · `extensions/` · `product/` · `app/` |
+| `substrates/` — filesystem for every crate; secrets and network only where a crate's charter needs them (auth) · `events/` — chiefly event_projections · `contracts/` — host_api, common, prompt_envelope | `kernel/` in full — capabilities, host_runtime, authorization, approvals, resources, trust, turns, processes · `loop/` · `extensions/` · `product/` · `app/` |
 
-HTTP and vendor SDKs are permitted only inside `ironclaw_llm`, `ironclaw_traces`, and `ironclaw_auth`'s engine — the family's three named vendor and external-service cones. No other domains crate reaches HTTP directly.
+HTTP and vendor SDKs are permitted only inside `ironclaw_llm`, `ironclaw_trace_commons`, and `ironclaw_auth`'s engine — the family's three named vendor and external-service cones. No other domains crate reaches HTTP directly.
 
-Inside the family, dependency edges are shallow and few: `ironclaw_conversations` depends on `ironclaw_triggers` for trusted-submission binding vocabulary; `ironclaw_attachments` depends on `ironclaw_extractors` for pure bytes-to-text transformation; `ironclaw_traces` depends on `ironclaw_llm` to reuse its recording vocabulary. No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh.
+Inside the family, dependency edges are shallow and few: `ironclaw_conversations` depends on `ironclaw_triggers` for trusted-submission binding vocabulary; `ironclaw_attachments` depends on `ironclaw_extractors` for pure bytes-to-text transformation; `ironclaw_trace_commons` depends on `ironclaw_llm` to reuse its recording vocabulary. No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh.
 
 ## Security & authority
 
@@ -269,7 +269,7 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
 - **Security & authority role:** none directly — provider selection, credentials, and session refresh are its job, never the authorization decision itself.
 - **Why a separate crate:** isolates a heavy provider cone — vendor SDKs and their authentication flows — from every non-LLM consumer's build. Model-provider session handling is a deliberately separate concern from `ironclaw_auth`'s product-facing credential flows and from `webui`'s host login.
 
-### `ironclaw_traces`
+### `ironclaw_trace_commons`
 
 - **Purpose:** the Trace Commons client — envelope schema, deterministic redaction, submission queue, credits, and device-key onboarding for contributing traces to the external service.
 - **Owns:**
@@ -307,7 +307,7 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
 
 The family root states, verbatim, for every crate that lives under it:
 
-- The family's role, and its boundary against substrate/, kernel/, events/, product/, and extensions/.
+- The family's role, and its boundary against substrates/, kernel/, events/, product/, and extensions/.
 - The allowed layer — substrates, with no exception — and the allowed dependency direction described above.
 - The two vendor-scoped charters (llm, auth) and the two sealed-mint responsibilities (outbound, triggers), named explicitly so a new crate cannot casually acquire either.
 - The persistence idiom: `ScopedFilesystem` is the floor; a hand-written SQL backend requires an ADR.

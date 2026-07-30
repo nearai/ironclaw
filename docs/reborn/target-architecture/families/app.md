@@ -1,22 +1,22 @@
 # `crates/app/` — assembly & enforcement
 
-**Layer(s):** `app` · **Crates:** 4 — `ironclaw_composition`, `ironclaw_cli` (binary `ironclaw`), `ironclaw_config`, `ironclaw_architecture` · **Security posture:** holds no standing authority beyond deployment-mode selection — never policy content — and fail-closed readiness gating. Its one deliberate privileged act is narrow and named: the binary is the only crate in the workspace permitted to name a concrete extension package, and it alone implements the token-minting port the assembly crate defines but does not satisfy.
+**Layer(s):** `app` · **Crates:** 4 — `ironclaw_composition`, `ironclaw_cli` (binary `ironclaw`), `ironclaw_config`, `ironclaw_architecture_tests` · **Security posture:** holds no standing authority beyond deployment-mode selection — never policy content — and fail-closed readiness gating. Its one deliberate privileged act is narrow and named: the binary is the only crate in the workspace permitted to name a concrete extension package, and it alone implements the token-minting port the assembly crate defines but does not satisfy.
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
 ```text
 crates/app/
-├── ironclaw_composition     the assembly root: selection & wiring
-├── ironclaw_cli             the binary `ironclaw` & its binding tables
-├── ironclaw_config          boot contract & config.toml schema
-└── ironclaw_architecture    mechanical enforcement tests
+├── ironclaw_composition          the assembly root: selection & wiring
+├── ironclaw_cli                  the binary `ironclaw` & its binding tables
+├── ironclaw_config               boot contract & config.toml schema
+└── ironclaw_architecture_tests   mechanical enforcement tests
 
 tools/                       stress harness & excluded helpers
 ```
 
 ## Role
 
-`app/` is the assembly root, the shipped artifact, the boot-configuration leaf, and the enforcement suite — four crates whose only shared trait is that nothing else in the workspace may depend on any of them. `ironclaw_composition` wires every owning crate from every other family into a running deployment; `ironclaw_cli` produces the binary named `ironclaw`, the thing an operator actually runs, and the only place a concrete extension package is named; `ironclaw_config` is the boot-time configuration schema the rest of this family reads; `ironclaw_architecture` is the enforcement suite that fails the build whenever a crate's dependency graph or public surface drifts from the declared model.
+`app/` is the assembly root, the shipped artifact, the boot-configuration leaf, and the enforcement suite — four crates whose only shared trait is that nothing else in the workspace may depend on any of them. `ironclaw_composition` wires every owning crate from every other family into a running deployment; `ironclaw_cli` produces the binary named `ironclaw`, the thing an operator actually runs, and the only place a concrete extension package is named; `ironclaw_config` is the boot-time configuration schema the rest of this family reads; `ironclaw_architecture_tests` is the enforcement suite that fails the build whenever a crate's dependency graph or public surface drifts from the declared model.
 
 This is deliberately the one family whose crates are permitted to see the entire workspace. Every other family document in this series names a bounded, explicit set of crates it may depend on; the assembly root's own dependency set is simply everything, because its job is to construct every other family's owners, not to own a domain of its own. Seeing everything is not license to become anything: the family's charter is wiring, never behavior, and the boundary section below exists to keep that distinction sharp.
 
@@ -27,7 +27,7 @@ Composition selects a deployment's shape through a small set of closed choices �
 Against every other family, the same asymmetry holds: they are bounded, `app` is not — its dependency reach is the whole workspace, an exception no other family shares. But seeing everything is not owning everything, and the family's charter is exactly the discipline of never crossing that line:
 
 - against `contracts/`: contracts define neutral vocabulary; `app` defines nothing neutral — it selects and constructs concrete implementations of vocabulary owned elsewhere.
-- against `substrate/` and `domains/`: those families own mechanism and record grammar; `app` never owns a record shape of its own.
+- against `substrates/` and `domains/`: those families own mechanism and record grammar; `app` never owns a record shape of its own.
 - against `kernel/`: kernel makes authority decisions; `app` selects *which* policy applies but never authors policy *content* — deployment-mode and profile selection are data the assembly root picks a point on, never a computation of what a policy permits.
 - against `lanes/` and `loop/`: those own execution mechanics; `app` only registers which implementation a deployment uses.
 - against `extensions/`: the registry, host, and management crates own extension lifecycle; the assembly root's only extension-shaped privilege is a binding table of opaque adapter handles, and even that table is built entirely in the binary, never in the assembly crate itself.
@@ -45,7 +45,7 @@ Against every other family, the same asymmetry holds: they are bounded, `app` is
 
 ## Dependency direction
 
-Composition sees everything; nothing depends on `app`. Every crate in every other family may be constructed by the assembly root, and none of them may import it back — the assembly root sits at the top of the dependency ladder by design, and no lower crate may reach up into it. Internally, the family's own edges are asymmetric: the assembly crate depends on essentially every owning crate in the workspace in order to construct them; the binary depends on the assembly crate, the boot-configuration crate, and — uniquely within this family — the concrete extension-package and product-surface crates it links directly, because it alone is permitted to. `ironclaw_config` has zero workspace dependencies: it is a pure leaf, consumed only by the assembly crate and the binary, and depending on nothing beyond its own schema and validation logic — a property the family enforces as an invariant rather than a coincidence, and one that holds regardless of which family a crate that needs a boot-time value sits in: any such value reaches that crate as construction input from the assembly root, never as a direct dependency on `ironclaw_config` itself. `ironclaw_architecture` depends at build time on nothing in the workspace beyond a small, explicitly dev-only vocabulary import; its enforcement mechanism inspects the workspace's declared structure and source text rather than linking the crates it polices, so a crate can fail its own boundary check without the checker itself becoming part of the thing being checked.
+Composition sees everything; nothing depends on `app`. Every crate in every other family may be constructed by the assembly root, and none of them may import it back — the assembly root sits at the top of the dependency ladder by design, and no lower crate may reach up into it. Internally, the family's own edges are asymmetric: the assembly crate depends on essentially every owning crate in the workspace in order to construct them; the binary depends on the assembly crate, the boot-configuration crate, and — uniquely within this family — the concrete extension-package and product-surface crates it links directly, because it alone is permitted to. `ironclaw_config` has zero workspace dependencies: it is a pure leaf, consumed only by the assembly crate and the binary, and depending on nothing beyond its own schema and validation logic — a property the family enforces as an invariant rather than a coincidence, and one that holds regardless of which family a crate that needs a boot-time value sits in: any such value reaches that crate as construction input from the assembly root, never as a direct dependency on `ironclaw_config` itself. `ironclaw_architecture_tests` depends at build time on nothing in the workspace beyond a small, explicitly dev-only vocabulary import; its enforcement mechanism inspects the workspace's declared structure and source text rather than linking the crates it polices, so a crate can fail its own boundary check without the checker itself becoming part of the thing being checked.
 
 ## Security & authority
 
@@ -92,7 +92,7 @@ The enforcement suite is the mechanism, not a participant, in every claim this d
 - **Security & authority role:** inline-secret rejection at parse time — a fail-closed check that a raw secret value typed directly into the configuration file is refused rather than silently accepted, the one place this crate makes anything resembling a security decision.
 - **Why a separate crate:** the boot contract with a machine-enforced no-dependency rule — a guarantee only meaningful as a separately compiled, separately reviewed unit.
 
-### `ironclaw_architecture`
+### `ironclaw_architecture_tests`
 
 - **Purpose:** the workspace's architecture-contract test suite — the mechanism that fails the build whenever a crate's dependency graph or public surface drifts from the declared layer and family model.
 - **Owns:** every architecture-contract test in the workspace, including the layer ladder itself and the boundary rules every other family's document describes; family-and-layer consistency checks; contract-purity allowlists for the neutral vocabulary tier; a rule pinning where trusted-evidence constructors may be called from; a persistence-idiom rule bounding which crates may speak a database driver directly; a rule against reaching into another crate's assets by a relative path; and conformance suites for every family with more than one backend or provider implementation.

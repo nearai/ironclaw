@@ -45,7 +45,7 @@ kernel issues them.
 
 ## Boundaries — what makes this family distinct
 
-- **vs `substrate/`** — substrate (filesystem, secrets, network, safety) is mechanism:
+- **vs `substrates/`** — substrate (filesystem, secrets, network, safety) is mechanism:
   backend-generic, policy-agnostic machinery. Kernel crates decide **whether** and **how** a
   substrate is touched, then call it; a substrate never decides authority.
 - **vs `domains/`** — domains own record grammar for a durable thing; the kernel owns decisions
@@ -273,7 +273,7 @@ depends back.
 - **Owns:** a row-native journal recording process identity, lineage, and status;
   `ProcessSupervisor`, which claims, leases, heartbeats, and recovers registered work,
   containing panics and driving orderly shutdown; process kinds registered by the crate that
-  owns that kind of work — `ironclaw_runner` registers the agent-turn kind, `ironclaw_host_runtime`
+  owns that kind of work — `ironclaw_turn_runner` registers the agent-turn kind, `ironclaw_host_runtime`
   registers the capability-invocation kind; child-process relationships recorded as edges in the
   same journal rather than a side table; checkpoint payloads stored as journal rows; process
   input treated as immutable once accepted.
