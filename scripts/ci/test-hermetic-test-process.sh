@@ -193,7 +193,7 @@ for workflow_contract in \
 do
   workflow="${workflow_contract%%:*}"
   needle="${workflow_contract#*:}"
-  if ! rg -Fq "${needle}" "${repo_root}/${workflow}"; then
+  if ! grep -Fq "${needle}" "${repo_root}/${workflow}"; then
     echo "CI/local hermetic-suite parity lost: ${workflow} lacks '${needle}'" >&2
     exit 1
   fi
@@ -208,7 +208,7 @@ for stage_call in \
   "reborn-e2e-rust.sh" \
   "run_python_e2e"
 do
-  if ! rg -Fq "${stage_call}" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  if ! grep -Fq "${stage_call}" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
     echo "canonical complete suite lost required stage: ${stage_call}" >&2
     exit 1
   fi

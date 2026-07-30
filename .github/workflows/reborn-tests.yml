@@ -818,12 +818,7 @@ jobs:
         run: corepack enable pnpm
 
       - name: Run Reborn WebUI frontend tests
-        run: |
-          (
-            cd crates/ironclaw_webui/frontend
-            pnpm install --frozen-lockfile
-          )
-          scripts/ci/run-hermetic-deterministic-suite.sh frontend
+        run: scripts/ci/run-hermetic-deterministic-suite.sh frontend
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures

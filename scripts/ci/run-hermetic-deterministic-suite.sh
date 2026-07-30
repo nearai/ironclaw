@@ -8,6 +8,15 @@ if [[ "$#" -gt 0 ]]; then
   shift
 fi
 
+frontend_corepack_home=""
+
+cleanup() {
+  if [[ -n "${frontend_corepack_home}" && -d "${frontend_corepack_home}" ]]; then
+    rm -rf -- "${frontend_corepack_home}"
+  fi
+}
+trap cleanup EXIT
+
 run() {
   "${hermetic}" -- "$@"
 }
@@ -112,6 +121,37 @@ run_python_e2e() {
   run pytest tests/e2e/scenarios/test_reborn_blackbox_smoke.py -v --timeout=120
 }
 
+prepare_frontend_dependencies() {
+  local package_manager
+  package_manager="$(
+    jq -r '.packageManager' \
+      "${repo_root}/crates/ironclaw_webui/frontend/package.json"
+  )"
+  if [[ "${package_manager}" != pnpm@* ]]; then
+    echo "frontend packageManager must pin pnpm: ${package_manager}" >&2
+    return 2
+  fi
+
+  frontend_corepack_home="$(
+    mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ironclaw-corepack.XXXXXX"
+  )"
+  COREPACK_HOME="${frontend_corepack_home}" \
+    corepack install --global "${package_manager}"
+  (
+    cd "${repo_root}/crates/ironclaw_webui/frontend"
+    COREPACK_HOME="${frontend_corepack_home}" \
+      corepack pnpm install --frozen-lockfile
+  )
+}
+
+run_frontend_tests() {
+  # Run from the package directory so Corepack honors its pinned packageManager
+  # version and its isolated setup cache without registry access in the guard.
+  COREPACK_HOME="${frontend_corepack_home}" \
+    run bash -c 'cd "$1" && exec corepack pnpm test' \
+      _ "${repo_root}/crates/ironclaw_webui/frontend"
+}
+
 case "${stage}" in
   self-test)
     "${repo_root}/scripts/ci/test-hermetic-test-process.sh"
@@ -145,7 +185,8 @@ case "${stage}" in
     run "${repo_root}/scripts/reborn-e2e-rust.sh" "${1:-all}"
     ;;
   frontend)
-    run pnpm --dir crates/ironclaw_webui/frontend test
+    prepare_frontend_dependencies
+    run_frontend_tests
     ;;
   python-e2e)
     run_python_e2e
@@ -163,7 +204,8 @@ case "${stage}" in
     run cargo test -p ironclaw_reborn_integration_tests \
       --test reborn_qa_recorded_behavior -- --nocapture
     run "${repo_root}/scripts/reborn-e2e-rust.sh" all
-    run pnpm --dir crates/ironclaw_webui/frontend test
+    prepare_frontend_dependencies
+    run_frontend_tests
     run cargo build -p ironclaw --bin ironclaw
     run_python_e2e
     ;;
