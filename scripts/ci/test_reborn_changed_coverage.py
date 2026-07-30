@@ -69,6 +69,19 @@ class ChangedCoverageTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["changed_product_files"], [])
 
+    def test_src_test_modules_are_not_counted_as_changed_product_code(self):
+        paths = [
+            "crates/ironclaw_example/src/tests.rs",
+            "crates/ironclaw_example/src/projection/tests/contract.rs",
+        ]
+
+        for path in paths:
+            with self.subTest(path=path):
+                report = evaluate(_diff(path, 1, 2), "", 90.0)
+
+                self.assertTrue(report["passed"])
+                self.assertEqual(report["changed_product_files"], [])
+
     def test_owned_exemption_removes_file_from_changed_code_gate(self):
         path = "crates/ironclaw_example/src/generated.rs"
 

@@ -625,6 +625,21 @@ mod tests {
         static_assertions::assert_not_impl_any!(ProductSurfaceStreamResponse: Clone);
     }
 
+    #[test]
+    fn product_stream_continuation_debug_and_identity_are_stable() {
+        let (_sender, receiver) = mpsc::channel(1);
+        let subscription = ProductSurfaceEventSubscription::new(receiver);
+        let (_other_sender, other_receiver) = mpsc::channel(1);
+        let other_subscription = ProductSurfaceEventSubscription::new(other_receiver);
+
+        assert_eq!(subscription, subscription);
+        assert_ne!(subscription, other_subscription);
+        assert_eq!(
+            format!("{subscription:?}"),
+            "ProductSurfaceEventSubscription { .. }"
+        );
+    }
+
     fn caller() -> ProductSurfaceCaller {
         ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),

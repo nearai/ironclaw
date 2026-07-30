@@ -1,7 +1,7 @@
 use super::*;
 use ironclaw_host_api::RuntimeKind;
 use ironclaw_turns::{
-    CapabilityActivityId, TurnId,
+    CapabilityActivityId, LoopCompletionKind, LoopExitId, TurnId,
     run_profile::{
         InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
         LoopHostMilestoneSink, LoopSafeSummary,
@@ -285,7 +285,7 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
 }
 
 #[tokio::test]
-async fn fresh_product_event_stream_preserves_each_model_text_phase() {
+async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_run() {
     let fixture = live_projection_fixture("webui-text-phases");
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
@@ -319,6 +319,13 @@ async fn fresh_product_event_stream_preserves_each_model_text_phase() {
         },
         LoopHostMilestoneKind::ModelTextDelta {
             safe_text: "Here is the final answer.".to_string(),
+        },
+        LoopHostMilestoneKind::Completed {
+            completion_kind: LoopCompletionKind::FinalReply,
+            exit_id: LoopExitId::new("exit:webui-text-phases").unwrap(),
+        },
+        LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "Unexpected trailing text.".to_string(),
         },
     ] {
         fixture
@@ -368,8 +375,12 @@ async fn fresh_product_event_stream_preserves_each_model_text_phase() {
                 format!("text:{run_id}:2"),
                 "Here is the final answer.".to_string()
             ),
+            (
+                format!("text:{run_id}"),
+                "Unexpected trailing text.".to_string()
+            ),
         ],
-        "a later model call must not overwrite an earlier assistant utterance from the same run"
+        "model phases must remain distinct and terminal milestones must clear phase state"
     );
 }
 

@@ -1304,22 +1304,9 @@ fn sse_error_event(error: ProductSurfaceError) -> Event {
 }
 
 fn sse_keep_alive_event() -> Event {
-    match Event::default()
+    Event::default()
         .event(WebChatV2Event::KeepAlive.event_name())
-        .json_data(WebChatV2Event::KeepAlive)
-    {
-        Ok(event) => event,
-        Err(error) => {
-            tracing::debug!(
-                target = "ironclaw_webui_v2::sse",
-                error = %error,
-                "failed to serialize SSE keep-alive payload",
-            );
-            Event::default()
-                .event("keep_alive")
-                .data(r#"{"type":"keep_alive"}"#)
-        }
-    }
+        .data(r#"{"type":"keep_alive"}"#)
 }
 
 fn build_sse_stream(
