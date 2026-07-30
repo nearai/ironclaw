@@ -385,7 +385,8 @@ impl GroupCapability {
         match self {
             Self::HostRuntime(harness) => harness
                 .reborn_services_for_test()
-                .map(|runtime| runtime.reply_attachment_intent_port_for_test())
+                .and_then(|runtime| runtime.outbound_delivery_stores_for_test())
+                .map(|(_, _, _, reply_attachment_intents)| reply_attachment_intents)
                 .unwrap_or_else(fresh_store),
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 fresh_store()

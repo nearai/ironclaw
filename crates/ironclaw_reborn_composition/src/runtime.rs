@@ -506,6 +506,12 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct OutboundTestStores {
+    state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    reply_attachment_intents: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+}
+
 /// Started, running Reborn agent runtime.
 ///
 /// `RebornRuntime` is the single user-facing handle returned by
@@ -557,9 +563,7 @@ pub struct RebornRuntime {
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) reply_attachment_intents: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+    pub(crate) outbound_state: OutboundTestStores,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     #[cfg(any(test, feature = "test-support"))]
@@ -957,17 +961,6 @@ impl RebornRuntime {
         Some(Arc::clone(&self.outbound_preferences))
     }
 
-    /// Test-only handle for the exact reply-attachment intent port production
-    /// gives both the built-in attachment capability and the planned runtime
-    /// finalizer (`build_reborn_runtime` below). Integration harnesses use this
-    /// to preserve that shared-store identity while driving the real tool path.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn reply_attachment_intent_port_for_test(
-        &self,
-    ) -> Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort> {
-        Arc::clone(&self.reply_attachment_intents)
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::type_complexity)]
     pub fn outbound_delivery_stores_for_test(
@@ -976,11 +969,13 @@ impl RebornRuntime {
         Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+        Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
     )> {
         Some((
-            Arc::clone(&self.outbound_state),
+            Arc::clone(&self.outbound_state.state),
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
+            Arc::clone(&self.outbound_state.reply_attachment_intents),
         ))
     }
 
@@ -1046,7 +1041,7 @@ impl RebornRuntime {
             inbound_attachments,
             project_filesystem,
             delivery_coordinator: self.delivery_coordinator.clone(),
-            outbound_state: Arc::clone(&self.outbound_state),
+            outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             identity_lookup: Arc::clone(&self.channel_identity_store)
@@ -4049,9 +4044,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
-        outbound_state: services.outbound_state.clone(),
-        #[cfg(any(test, feature = "test-support"))]
-        reply_attachment_intents: services.reply_attachment_intents.clone(),
+        outbound_state: OutboundTestStores {
+            state: services.outbound_state.clone(),
+            reply_attachment_intents: services.reply_attachment_intents.clone(),
+        },
         #[cfg(any(test, feature = "test-support"))]
         triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]

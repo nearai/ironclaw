@@ -395,11 +395,11 @@ On a harness built from a `live_approvals` group:
 `crates/ironclaw_reborn_composition/src/runtime.rs` and
 `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 
-- `reply_attachment_intent_port_for_test()` — the exact composition-owned
-  reply-intent store shared by the built-in reply-attachment capability and
-  planned-runtime transcript finalizer. Group harnesses must wire this same
-  handle; a separate store makes successful tool intents disappear at
-  finalization.
+- `outbound_delivery_stores_for_test()` — the exact composition-owned outbound
+  stores, including the reply-intent store shared by the built-in
+  reply-attachment capability and planned-runtime transcript finalizer. Group
+  harnesses must wire this same handle; a separate store makes successful tool
+  intents disappear at finalization.
 - `standalone_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
 - `standalone_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
