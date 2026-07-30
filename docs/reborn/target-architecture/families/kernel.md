@@ -155,7 +155,7 @@ depends back.
 - **Never depends on:** `ironclaw_approvals`, `ironclaw_capabilities`, `ironclaw_processes`,
   `ironclaw_resources`, or anything above the kernel — approval resolution depends on this
   crate, never the reverse.
-- **Security & authority role:** the default-deny gate; the sole owner of the lease state every
+- **Security & authority role:** the default-deny gate; the sole owner of the lease state every Approvals' resolver is the sanctioned lease minter — a charter held by the stage's forbidden-edge rules, since the issuing port itself is public; this crate stores, matches, and expires leases.
   fingerprinted approval rides on.
 - **Why a separate crate:** authorization is a distinct, independently testable decision from
   consent resolution — matching a static grant and resolving a one-off human decision are
@@ -296,7 +296,7 @@ depends back.
   work.
 - **Pipeline stage:** admission, and the exit-claim boundary where a loop's reported outcome is
   validated before it becomes durable truth.
-- **Owns:** a coordinator enforcing one active run per thread and request idempotency; exit
+- **Owns:** a coordinator enforcing one active run per thread and request idempotency — the durable, kernel-side guarantee beneath the product surface's fast-path dedup ledger; exit
   validation, which treats a loop's reported completion, failure, or block as a claim, never as
   truth, until it is checked using host-minted evidence. Turn and run state are not a second
   durable store: they are a typed projection over the process journal that `ironclaw_processes`

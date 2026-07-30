@@ -31,7 +31,7 @@ crates/events/
 
 ## Dependency direction
 
-`ironclaw_event_log` depends on the neutral authority vocabulary crate only — it is the leaf of the family. `ironclaw_event_store` depends on `ironclaw_event_log` and the storage-fabric crate. `ironclaw_event_projections` depends on `ironclaw_event_log` and the neutral authority vocabulary crate, and nothing else. `ironclaw_event_streams` depends on `ironclaw_event_projections`, the neutral authority vocabulary crate (including its turn vocabulary), and the outbound-delivery domain crate for exactly one read-only method. Nothing outside this family depends into it except through `ironclaw_event_log`'s and `ironclaw_event_projections`' public traits and DTOs, and the family never depends on the kernel, loop, extension, or product families.
+`ironclaw_event_log` depends on the neutral authority vocabulary crate only — it is the leaf of the family. `ironclaw_event_store` depends on `ironclaw_event_log` and the storage-fabric crate. `ironclaw_event_projections` depends on `ironclaw_event_log` and the neutral authority vocabulary crate, and nothing else. `ironclaw_event_streams` depends on `ironclaw_event_projections`, the neutral authority vocabulary crate (including its turn vocabulary), and the outbound-delivery domain crate for exactly one read-only method. Nothing outside this family depends into it except through `ironclaw_event_log`'s and `ironclaw_event_projections`' public traits and DTOs — with one assembly-tier exception: the composition root consumes `ironclaw_event_store`'s backend-selection factory to construct the durable logs it hands everyone else. The family never depends on the kernel, loop, extension, or product families.
 
 ## Security & authority
 

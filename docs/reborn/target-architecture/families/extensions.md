@@ -126,7 +126,7 @@ Every installable extension's manifest, prompts, schemas, code, and any built-ar
 
 - **Purpose:** the bundled memory provider — the filesystem-native implementation of the provider-neutral memory contract, shipped and installed by default so memory is always available.
 - **Owns:** the package manifest declaring its `[memory]` provider surface; the `MemoryService` implementation and the backend abstraction it is built from; filesystem and in-memory repositories; full-text indexing and search; the prompt-write-safety enforcement engine that implements the vocabulary the neutral contract defines; wiring for the contract's shared conformance suite.
-- **Never contains:** the neutral `MemoryService` vocabulary itself — that stays in `domains/`; a second backend; virtual-path or mount authority, which stays in the filesystem substrate.
+- **Never contains:** the neutral `MemoryService` vocabulary itself — that stays in `domains/`; a second production backend (the in-memory repository is test support, never a deployment target); virtual-path or mount authority, which stays in the filesystem substrate.
 - **Public surface:** an implementation of `ironclaw_memory::MemoryService`, bound only by the binary; no additional public ports.
 - **Depends on:** `ironclaw_memory`, `ironclaw_filesystem`, `ironclaw_safety`, `ironclaw_host_api`, `extension_contracts`.
 - **Never depends on:** the mem0 package; any HTTP client; `ironclaw_extension_host`, `ironclaw_extension_manager`, or any kernel or product crate.

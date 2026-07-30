@@ -6,7 +6,6 @@
 
 ```text
 crates/lanes/
-├── wit/                       component-model interface definitions
 ├── ironclaw_wasm              WASM component lane
 ├── ironclaw_wasm_limiter      shared wasmtime resource limiter
 ├── ironclaw_mcp               MCP lane over host-mediated HTTP
@@ -76,7 +75,7 @@ Lanes are where an authorized invocation turns into a lane call, and a lane call
 
 - **Purpose:** the sandboxed-process execution lane — a typed plan contract for what an OS-process invocation is allowed to do, and a container-backed execution backend that runs a validated plan behind the kernel's process-transport seam.
 - **Owns:** the plan contract itself — a typed, validated description of an install phase and a credentialed-run phase, each with its own scoped mounts, network policy, and credential bindings, so a caller can never smuggle raw container flags, raw host paths, or raw secret material through plan input; the container-backed transport that executes a validated plan, including per-tenant container identity, a per-tenant certificate authority for egress interception whose root key never leaves memory and is never returned to a caller, a credential-firewall obligation-staging point that lets an invocation consume only the credential it was already entitled to, and the network/secret brokering that keeps a container's egress path host-mediated.
-- **Never contains:** ambient credentials of any kind — every credential reaches a container only through the staged, one-shot obligation seam; direct process spawning outside the transport seam — every command this lane runs is a validated plan executed through the container backend, never a raw host-process invocation; the transport *port* itself, which is kernel vocabulary this lane implements rather than owns.
+- **Never contains:** ambient credentials of any kind — every credential reaches a container only through the staged, one-shot obligation seam; direct process spawning outside the transport seam — every command this lane runs is a validated plan executed through the container backend, never a raw host-process invocation; the transport *port* itself, which is contracts vocabulary (`host_api`) this lane implements and the kernel consumes — never owns.
 - **Public surface:** the plan and validated-plan types (`SandboxProcessPlan`/`ValidatedSandboxProcessPlan`, with typed install-plan, command-plan, mount, network-plan, and credential-binding sub-vocabulary); the container-backed implementation of the `SandboxCommandTransport` port — contracts vocabulary this lane implements and the kernel consumes.
 - **Depends on:** the neutral authority vocabulary crate; the neutral extension-surface vocabulary crate, where a plan carries manifest-declared command metadata.
 - **Never depends on:** the extension registry crate; any crate above the runtime tier.

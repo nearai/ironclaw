@@ -54,7 +54,7 @@ Domains crates depend only on `substrates/`, `events/`, and `contracts/` — nev
 
 | May depend on | Never depends on |
 |---|---|
-| `substrates/` — filesystem for every crate; secrets and network only where a crate's charter needs them (auth) · `events/` — chiefly event_projections · `contracts/` — host_api, common, prompt_envelope | `kernel/` in full — capabilities, host_runtime, authorization, approvals, resources, trust, turns, processes · `loop/` · `extensions/` · `product/` · `app/` |
+| `substrates/` — filesystem for every crate; secrets and network only where a crate's charter needs them (auth) · `events/` — chiefly event_projections · `contracts/` — host_api, common, prompt_envelope · plus the three chartered same-family edges only: conversations→triggers, attachments→extractors, trace_commons→llm | `kernel/` in full — capabilities, host_runtime, authorization, approvals, resources, trust, turns, processes · `loop/` · `extensions/` · `product/` · `app/` |
 
 HTTP and vendor SDKs are permitted only inside `ironclaw_llm`, `ironclaw_trace_commons`, and `ironclaw_auth`'s engine — the family's three named vendor and external-service cones. No other domains crate reaches HTTP directly.
 

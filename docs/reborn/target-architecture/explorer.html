@@ -1,3 +1,6 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IronClaw — Target Architecture Explorer</title>
 <style>
   :root {
@@ -355,7 +358,7 @@ const DATA = {"composition": {"kind": "Product", "role": "The assembly root: dep
 
 /* ════════════════════════════ ENGINE (do not edit to use) ════════════════════════════ */
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const KIND_CLASS = {Kernel:"kind-kernel",Substrate:"kind-substrate",Interface:"kind-interface",Product:"kind-product",Lane:"kind-lane",Capability:"kind-capability"};
 
 $("brandMk").textContent = META.brandInitials;
@@ -401,7 +404,7 @@ function hl(src){
         code = line.slice(0, i); comment = line.slice(i); break;
       }
     }
-    let out = esc(code).replace(/("[^"]*")|(^\s*\[+[^\]]+\]+)|\b(pub|struct|trait|impl|fn|enum|mod|async|let|use|type|const|dyn|for|in|match|return|where|self|Self)\b|\b([A-Z][A-Za-z0-9_]*)\b/g,
+    let out = esc(code).replace(/(&quot;.*?&quot;)|(^\s*\[+[^\]]+\]+)|\b(pub|struct|trait|impl|fn|enum|mod|async|let|use|type|const|dyn|for|in|match|return|where|self|Self)\b|\b([A-Z][A-Za-z0-9_]*)\b/g,
       (m0,s,h,k,t) => s ? `<span class="hs">${s}</span>` : h ? `<span class="hh">${h}</span>` : k ? `<span class="hk">${k}</span>` : `<span class="ht">${t}</span>`);
     if (comment) out += `<span class="hc">${esc(comment)}</span>`;
     return out;
@@ -599,8 +602,23 @@ function openFamModal(name){
   wireGoto();
   $("modalOv").hidden = false; document.body.style.overflow = "hidden";
   document.querySelector(".modal").scrollTop = 0; $("modalOv").scrollTop = 0;
+  if (!modalOpener) modalOpener = document.activeElement;
+  $("mClose").focus();
 }
-function closeModal(){ $("modalOv").hidden = true; document.body.style.overflow = ""; }
+let modalOpener = null;
+function closeModal(){
+  $("modalOv").hidden = true; document.body.style.overflow = "";
+  if (modalOpener && modalOpener.focus) modalOpener.focus();
+  modalOpener = null;
+}
+document.addEventListener("keydown", e => {
+  if (e.key !== "Tab" || $("modalOv").hidden) return;
+  const f = Array.from($("modalOv").querySelectorAll("button, a[href]")).filter(x => x.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+});
 $("mClose").addEventListener("click", closeModal);
 $("modalOv").addEventListener("click", e => { if (e.target === $("modalOv")) closeModal(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("modalOv").hidden) closeModal(); });
@@ -612,7 +630,6 @@ document.querySelectorAll("[data-fam]").forEach(el => el.addEventListener("click
 
 /* ── Dependency graph (data: target-dep-graph.json, ids mapped to node ids above) ── */
 const DEPS = {"host_api": {"deps": [], "in": 41, "out": 0}, "common": {"deps": [], "in": 16, "out": 0}, "prompt_envelope": {"deps": [], "in": 3, "out": 0}, "loop_contracts": {"deps": ["common", "host_api", "prompt_envelope"], "in": 4, "out": 3}, "extension_contracts": {"deps": ["common", "host_api"], "in": 15, "out": 2}, "product_contracts": {"deps": ["common", "extension_contracts", "host_api"], "in": 6, "out": 3}, "filesystem": {"deps": ["host_api", "observability", "safety"], "in": 16, "out": 3}, "secrets": {"deps": ["filesystem", "host_api"], "in": 2, "out": 2}, "network": {"deps": ["host_api"], "in": 1, "out": 1}, "safety": {"deps": [], "in": 9, "out": 0}, "observability": {"deps": [], "in": 2, "out": 0}, "event_log": {"deps": ["host_api"], "in": 5, "out": 1}, "event_store": {"deps": ["common", "event_log", "filesystem", "host_api"], "in": 1, "out": 4}, "event_projections": {"deps": ["event_log", "host_api"], "in": 4, "out": 2}, "event_streams": {"deps": ["event_projections", "host_api", "outbound"], "in": 0, "out": 3}, "threads": {"deps": ["common", "filesystem", "host_api", "safety"], "in": 4, "out": 4}, "conversations": {"deps": ["filesystem", "host_api", "safety", "triggers"], "in": 2, "out": 4}, "triggers": {"deps": ["common", "filesystem", "host_api"], "in": 2, "out": 3}, "memory": {"deps": ["host_api", "prompt_envelope"], "in": 6, "out": 2}, "skills": {"deps": ["filesystem", "host_api"], "in": 2, "out": 2}, "auth": {"deps": ["common", "event_log", "filesystem", "host_api", "secrets"], "in": 3, "out": 5}, "attachments": {"deps": ["common", "extractors", "filesystem", "host_api"], "in": 1, "out": 4}, "extractors": {"deps": ["common"], "in": 2, "out": 1}, "identity": {"deps": ["filesystem", "host_api"], "in": 0, "out": 2}, "llm": {"deps": ["common", "safety"], "in": 3, "out": 2}, "outbound": {"deps": ["event_projections", "filesystem", "host_api"], "in": 3, "out": 3}, "trust": {"deps": ["host_api"], "in": 4, "out": 1}, "authorization": {"deps": ["host_api", "trust"], "in": 4, "out": 2}, "approvals": {"deps": ["authorization", "host_api"], "in": 3, "out": 2}, "resources": {"deps": ["host_api"], "in": 5, "out": 1}, "runtime_policy": {"deps": ["host_api"], "in": 2, "out": 1}, "capabilities": {"deps": ["approvals", "authorization", "host_api", "resources", "runtime_policy", "trust"], "in": 4, "out": 6}, "processes": {"deps": ["host_api", "resources"], "in": 3, "out": 2}, "turns": {"deps": ["host_api", "processes"], "in": 6, "out": 2}, "host_runtime": {"deps": ["approvals", "authorization", "capabilities", "event_log", "event_projections", "filesystem", "host_api", "mcp", "memory", "network", "processes", "resources", "runtime_policy", "safety", "sandbox", "secrets", "trust", "turns", "wasm"], "in": 3, "out": 19}, "wasm": {"deps": ["extension_contracts", "host_api", "wasm_limiter"], "in": 1, "out": 3}, "wasm_limiter": {"deps": [], "in": 2, "out": 0}, "mcp": {"deps": ["extension_contracts", "host_api"], "in": 1, "out": 2}, "sandbox": {"deps": ["extension_contracts", "host_api"], "in": 1, "out": 2}, "agent_loop": {"deps": ["common", "host_api", "loop_contracts"], "in": 1, "out": 3}, "loop_host": {"deps": ["capabilities", "common", "host_api", "host_runtime", "loop_contracts", "memory", "resources", "safety", "skills", "threads", "turns"], "in": 2, "out": 11}, "hooks": {"deps": ["common", "event_log", "host_api", "loop_contracts", "prompt_envelope", "wasm_limiter"], "in": 1, "out": 6}, "extension_registry": {"deps": ["extension_contracts", "filesystem", "host_api"], "in": 3, "out": 3}, "extension_host": {"deps": ["auth", "authorization", "capabilities", "conversations", "extension_contracts", "extension_registry", "loop_host", "outbound", "processes", "product_contracts", "resources", "threads", "trust", "turns"], "in": 2, "out": 14}, "extension_manager": {"deps": ["extension_contracts", "extension_host", "extension_registry", "product_contracts"], "in": 1, "out": 4}, "pkg_slack": {"deps": ["extension_contracts"], "in": 1, "out": 1}, "pkg_telegram": {"deps": ["extension_contracts"], "in": 1, "out": 1}, "pkg_memory_native": {"deps": ["extension_contracts", "filesystem", "host_api", "memory", "safety"], "in": 1, "out": 5}, "pkg_mem0": {"deps": ["extension_contracts", "host_api", "memory"], "in": 1, "out": 3}, "assistant": {"deps": ["approvals", "common", "conversations", "event_projections", "extension_contracts", "host_api", "outbound", "product_contracts", "threads", "turns"], "in": 2, "out": 10}, "operator": {"deps": ["host_ingress", "llm", "product_contracts"], "in": 2, "out": 3}, "openai_compat": {"deps": ["attachments", "extension_contracts", "filesystem", "product_contracts"], "in": 1, "out": 4}, "webui": {"deps": ["auth", "extension_contracts", "host_ingress", "openai_compat", "product_contracts"], "in": 1, "out": 5}, "host_ingress": {"deps": ["host_api"], "in": 2, "out": 1}, "composition": {"deps": ["assistant", "capabilities", "config", "event_store", "extension_host", "extension_manager", "extension_registry", "filesystem", "host_runtime", "operator", "turn_runner", "turns"], "in": 1, "out": 27, "more": true}, "cli": {"deps": ["assistant", "composition", "config", "operator", "extension_support", "pkg_mem0", "pkg_memory_native", "pkg_slack", "pkg_telegram", "webui"], "in": 0, "out": 25, "more": true}, "config": {"deps": [], "in": 2, "out": 0}, "trace_commons": {"deps": ["common", "host_api", "llm", "safety"], "in": 1, "out": 4}, "turn_runner": {"deps": ["agent_loop", "common", "hooks", "host_api", "host_runtime", "llm", "loop_contracts", "loop_host", "memory", "threads", "turns"], "in": 1, "out": 11}, "architecture_tests": {"deps": [], "in": 0, "out": 0}, "extension_support": {"deps": ["auth", "extension_contracts", "extractors", "filesystem", "memory", "observability", "safety", "skills", "trace_commons", "triggers"], "in": 1, "out": 10}};
-const INVERSIONS = [["host_api","capabilities"],["processes","runner"],["processes","host_runtime"],["loop_contracts","loop_host"],["loop_contracts","runner"],["loop_contracts","hooks"],["skills","extension_manager"],["skills","composition"],["extension_contracts","pkg_slack"],["extension_contracts","pkg_telegram"],["extension_contracts","pkg_first_party"],["product_contracts","assistant"],["product_contracts","operator"],["product_contracts","extension_host"],["product_contracts","extension_manager"],["product_contracts","composition"],["composition","cli"],["memory","pkg_memory_native"],["memory","pkg_mem0"],["auth","extension_host"]];
 
 
 
