@@ -413,6 +413,27 @@ test("rejected custom MCP admission returns the server message to the registrati
   );
 });
 
+test("custom MCP registration transport errors return to the registration modal", () => {
+  const harness = installMutationHarness(null);
+  const modalErrors = [];
+
+  harness.registerConfig.onError(
+    new Error("network unavailable"),
+    {
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onRegistrationError: (message) => modalErrors.push(message),
+    },
+  );
+
+  assert.deepEqual(modalErrors, ["network unavailable"]);
+  assert.deepEqual(
+    harness.refetches,
+    [],
+    "a transport failure must not pretend the registry changed",
+  );
+});
+
 test("install refreshes the authoritative projection before opening setup", async () => {
   const packageRef = { kind: "extension", id: "notion" };
   const authoritativeExtension = {
