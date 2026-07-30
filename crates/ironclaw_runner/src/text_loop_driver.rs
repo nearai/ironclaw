@@ -85,6 +85,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -177,7 +178,6 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         stage,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
-        diagnostic_ref = ?error.diagnostic_ref,
         safe_summary = %error.safe_summary,
         "loop host port returned sanitized error"
     );
@@ -203,11 +203,11 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         | AgentLoopHostErrorKind::ScopeMismatch => AgentLoopDriverError::InvalidRequest {
             reason: format!("{stage}: {}", error.kind.as_str()),
         },
-        AgentLoopHostErrorKind::Unavailable | AgentLoopHostErrorKind::Cancelled => {
-            AgentLoopDriverError::Unavailable {
-                reason: format!("{stage}: {}", error.kind.as_str()),
-            }
-        }
+        AgentLoopHostErrorKind::RateLimited
+        | AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::Cancelled => AgentLoopDriverError::Unavailable {
+            reason: format!("{stage}: {}", error.kind.as_str()),
+        },
         AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
             detail: error.detail.clone(),

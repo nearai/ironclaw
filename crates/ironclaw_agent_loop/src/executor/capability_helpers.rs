@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityRecoveryHint, DispatchInputIssueCode, FailureKind,
+    CapabilityId, CapabilityRecoveryHint, DispatchInputIssueCode, FailureKind, ModelDiagnostic,
     SameCallRetryConstraint,
 };
 use ironclaw_turns::{
@@ -372,7 +372,7 @@ pub(super) fn model_visible_capability_failure_observation(
     failure: &CapabilityFailure,
 ) -> ModelVisibleToolObservation {
     match &failure.detail {
-        Some(CapabilityFailureDetail::InvalidInput { issues }) => {
+        CapabilityFailureDetail::InvalidInput { issues } => {
             invalid_input_observation(bounded_input_issues(issues))
         }
         detail => {
@@ -386,15 +386,18 @@ pub(super) fn model_visible_capability_failure_observation(
             // sniffing content — a heuristic that needs a new revision every
             // time someone rewords a remediation string.
             let (diagnostic, trust) = match detail {
-                Some(CapabilityFailureDetail::Diagnostic { text }) => (
+                CapabilityFailureDetail::Diagnostic { text } => (
                     Some(bounded_diagnostic_detail(text)),
                     ObservationTrust::UntrustedToolOutput,
                 ),
-                Some(CapabilityFailureDetail::HostRemediation { text }) => (
+                CapabilityFailureDetail::HostRemediation { text } => (
                     Some(bounded_diagnostic_detail(text.as_str())),
                     ObservationTrust::HostAuthored,
                 ),
-                _ => (None, ObservationTrust::UntrustedToolOutput),
+                _ => (
+                    Some(ModelDiagnostic::unavailable().into_inner()),
+                    ObservationTrust::UntrustedToolOutput,
+                ),
             };
             ModelVisibleToolObservation {
                 schema_version:
@@ -911,9 +914,9 @@ mod tests {
         let failure = CapabilityFailure {
             error_kind: FailureKind::MissingRuntime,
             safe_summary: "capability invocation failed".to_string(),
-            detail: Some(CapabilityFailureDetail::Diagnostic {
+            detail: CapabilityFailureDetail::Diagnostic {
                 text: path.to_string(),
-            }),
+            },
         };
 
         let observation = model_visible_capability_failure_observation(&failure);
@@ -929,20 +932,6 @@ mod tests {
             Some(path),
             "the raw path-bearing cause must reach the model-visible observation"
         );
-    }
-
-    #[test]
-    fn generic_failure_observation_without_diagnostic_has_no_detail() {
-        let failure = CapabilityFailure {
-            error_kind: FailureKind::Backend,
-            safe_summary: "capability invocation failed".to_string(),
-            detail: None,
-        };
-        let observation = model_visible_capability_failure_observation(&failure);
-        let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
-            panic!("expected a generic failure detail");
-        };
-        assert_eq!(detail.as_deref(), None);
     }
 
     #[test]

@@ -304,16 +304,19 @@ async def test_workspace_tree_keyboard_navigation_and_accessibility(
     breadcrumb = page.get_by_role("navigation", name="workspace")
     await breadcrumb.get_by_role("button", name="Home", exact=True).click()
     await expect(guide).to_be_visible()
-    report = tree.get_by_role("treeitem", name="report.pdf", exact=True)
-    await expect(report).to_be_visible()
     report_row = page.locator(
         SEL_V2["workspace_directory_entry_for"].format(
             path="workspace/report.pdf"
         )
     )
     await report_row.click()
+    report = tree.get_by_role("treeitem", name="report.pdf", exact=True)
+    await expect(report).to_be_visible()
     await expect(report).to_have_attribute("aria-selected", "true")
     await expect(report).to_have_attribute("tabindex", "0")
+    assert await tree.locator('[role="treeitem"][tabindex="0"]').count() == 1
+    await expect(guide).to_be_visible()
+    await expect(guide).to_have_attribute("aria-selected", "false")
     await expect(guide).to_have_attribute("tabindex", "-1")
 
     # Directory-load errors are live alerts, so they are announced without a

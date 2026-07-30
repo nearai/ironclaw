@@ -1,9 +1,10 @@
+// arch-exempt: large_file, backend parity contracts stay in one shared behavioral suite, plan #5274
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{
     Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
     IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
-    SeqNo,
+    SeqNo, SortDirection,
 };
 use ironclaw_host_api::VirtualPath;
 #[tokio::test]
@@ -254,7 +255,7 @@ async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_varian
 
     let locked_db =
         std::sync::Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(locked_db);
+    let filesystem = LibSqlRootFilesystem::new(locked_db).expect("filesystem runtime");
     let err = filesystem.run_migrations().await.unwrap_err();
     assert!(
         matches!(err, FilesystemError::BackendInfrastructure { .. }),
@@ -824,6 +825,258 @@ async fn libsql_vector_index_round_trips_and_ranks_by_cosine() {
         Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
     );
 }
+#[tokio::test]
+async fn libsql_ordered_query_uses_composite_index_and_keyset_cursor() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/threads/index").unwrap();
+    let activity = IndexKey::new("activity").unwrap();
+    let thread_id = IndexKey::new("thread_id").unwrap();
+    filesystem
+        .ensure_index(
+            &prefix,
+            &IndexSpec::new(
+                IndexName::new("thread_activity").unwrap(),
+                vec![activity.clone(), thread_id.clone()],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+    let kind = RecordKind::new("thread_index").unwrap();
+    for (id, rank) in [("b", "001"), ("a", "001"), ("c", "002")] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(activity.clone(), IndexValue::Text(rank.into()))
+            .with_indexed(thread_id.clone(), IndexValue::Text(id.into()));
+        filesystem
+            .put(
+                &VirtualPath::new(format!("/threads/index/{id}")).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    let first = filesystem
+        .query_ordered(
+            &prefix,
+            &Filter::All,
+            &ironclaw_filesystem::OrderedPage::new(
+                IndexName::new("thread_activity").unwrap(),
+                activity.clone(),
+                thread_id.clone(),
+                SortDirection::Ascending,
+                2,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|row| row.entry.indexed[&thread_id].clone())
+            .collect::<Vec<_>>(),
+        vec![IndexValue::Text("a".into()), IndexValue::Text("b".into())]
+    );
+    let second = filesystem
+        .query_ordered(
+            &prefix,
+            &Filter::All,
+            &ironclaw_filesystem::OrderedPage::new(
+                IndexName::new("thread_activity").unwrap(),
+                activity.clone(),
+                thread_id.clone(),
+                SortDirection::Ascending,
+                2,
+            )
+            .after(ironclaw_filesystem::OrderedQueryCursor {
+                value: IndexValue::Text("001".into()),
+                tie_breaker: IndexValue::Text("b".into()),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0].entry.indexed[&thread_id],
+        IndexValue::Text("c".into())
+    );
+
+    let descending = filesystem
+        .query_ordered(
+            &prefix,
+            &Filter::All,
+            &ironclaw_filesystem::OrderedPage::new(
+                IndexName::new("thread_activity").unwrap(),
+                activity,
+                thread_id.clone(),
+                SortDirection::Descending,
+                2,
+            )
+            .after(ironclaw_filesystem::OrderedQueryCursor {
+                value: IndexValue::Text("001".into()),
+                tie_breaker: IndexValue::Text("b".into()),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(descending.len(), 1);
+    assert_eq!(
+        descending[0].entry.indexed[&thread_id],
+        IndexValue::Text("a".into())
+    );
+}
+
+#[tokio::test]
+async fn libsql_root_ordered_query_includes_normal_descendants() {
+    let filesystem = libsql_root().await;
+    // `VirtualPath` intentionally does not expose the bare virtual root, so use
+    // a declared top-level root to exercise the same descendant-pattern edge.
+    let root = VirtualPath::new("/engine").unwrap();
+    let rank = IndexKey::new("rank").unwrap();
+    let item_id = IndexKey::new("item_id").unwrap();
+    filesystem
+        .ensure_index(
+            &root,
+            &IndexSpec::new(
+                IndexName::new("root_items").unwrap(),
+                vec![rank.clone(), item_id.clone()],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+    filesystem
+        .put(
+            &VirtualPath::new("/engine/root-query/item-a").unwrap(),
+            Entry::record(
+                RecordKind::new("root_item").unwrap(),
+                &serde_json::json!({}),
+            )
+            .unwrap()
+            .with_indexed(rank.clone(), IndexValue::Text("001".into()))
+            .with_indexed(item_id.clone(), IndexValue::Text("item-a".into())),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let rows = filesystem
+        .query_ordered(
+            &root,
+            &Filter::All,
+            &ironclaw_filesystem::OrderedPage::new(
+                IndexName::new("root_items").unwrap(),
+                rank,
+                item_id,
+                SortDirection::Ascending,
+                10,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path.as_str(), "/engine/root-query/item-a");
+}
+
+#[tokio::test]
+async fn libsql_scopes_ordered_index_names_by_prefix() {
+    let filesystem = libsql_root().await;
+    filesystem
+        .ensure_index(
+            &VirtualPath::new("/engine/prefix-a").unwrap(),
+            &IndexSpec::new(
+                IndexName::new("shared_name").unwrap(),
+                vec![
+                    IndexKey::new("rank_a").unwrap(),
+                    IndexKey::new("id_a").unwrap(),
+                ],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+    filesystem
+        .ensure_index(
+            &VirtualPath::new("/engine/prefix-b").unwrap(),
+            &IndexSpec::new(
+                IndexName::new("shared_name").unwrap(),
+                vec![
+                    IndexKey::new("rank_b").unwrap(),
+                    IndexKey::new("id_b").unwrap(),
+                ],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .expect("same index name with a different prefix is independent");
+}
+
+#[tokio::test]
+async fn libsql_ordered_index_declaration_never_backfills_existing_rows() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/processes/materialized/process").unwrap();
+    let status = IndexKey::new("status").unwrap();
+    let process_id = IndexKey::new("process_id").unwrap();
+    let kind = RecordKind::new("process").unwrap();
+    let old = Entry::record(kind.clone(), &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(status.clone(), IndexValue::Text("queued".into()))
+        .with_indexed(process_id.clone(), IndexValue::Text("old".into()));
+    filesystem
+        .put(
+            &VirtualPath::new("/processes/materialized/process/old").unwrap(),
+            old,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let spec = IndexSpec::new(
+        IndexName::new("process_queue_declaration_contract").unwrap(),
+        vec![status.clone(), process_id.clone()],
+        IndexKind::Exact,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    let page = ironclaw_filesystem::OrderedPage::new(
+        spec.name.clone(),
+        status.clone(),
+        process_id.clone(),
+        SortDirection::Ascending,
+        10,
+    );
+    assert!(
+        filesystem
+            .query_ordered(&prefix, &Filter::All, &page)
+            .await
+            .unwrap()
+            .is_empty(),
+        "declaration must not hide a request-time table scan as automatic backfill"
+    );
+
+    let new = Entry::record(kind, &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(status, IndexValue::Text("queued".into()))
+        .with_indexed(process_id.clone(), IndexValue::Text("new".into()));
+    filesystem
+        .put(
+            &VirtualPath::new("/processes/materialized/process/new").unwrap(),
+            new,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+    let rows = filesystem
+        .query_ordered(&prefix, &Filter::All, &page)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].entry.indexed[&process_id],
+        IndexValue::Text("new".into())
+    );
+}
+
 #[tokio::test]
 async fn libsql_query_filters_on_indexed_projection() {
     let filesystem = libsql_root().await;
@@ -1428,7 +1681,8 @@ async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem =
+        std::sync::Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
 
     let mut tasks = Vec::new();
@@ -1459,7 +1713,8 @@ async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem =
+        std::sync::Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let parent = VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put").unwrap();
     filesystem.create_dir_all(&parent).await.unwrap();
@@ -1493,7 +1748,7 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     TestLibSqlRootFilesystem {
         filesystem,
@@ -2148,6 +2403,38 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_concurrent_ordered_index_declaration_is_idempotent() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let fs = std::sync::Arc::new(fs);
+        let prefix = std::sync::Arc::new(VirtualPath::new(prefix).unwrap());
+        let spec = std::sync::Arc::new(IndexSpec::new(
+            IndexName::new("concurrent_ordered_projection_v1").unwrap(),
+            vec![
+                IndexKey::new("scope").unwrap(),
+                IndexKey::new("sequence").unwrap(),
+            ],
+            IndexKind::Exact,
+        ));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let fs = std::sync::Arc::clone(&fs);
+            let prefix = std::sync::Arc::clone(&prefix);
+            let spec = std::sync::Arc::clone(&spec);
+            let barrier = std::sync::Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                fs.ensure_index(prefix.as_ref(), spec.as_ref()).await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn postgres_query_filters_on_indexed_projection() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
@@ -2190,6 +2477,213 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_ordered_query_uses_keyset_cursor() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let activity = IndexKey::new("activity").unwrap();
+        let thread_id = IndexKey::new("thread_id").unwrap();
+        fs.ensure_index(
+            &prefix_path,
+            &IndexSpec::new(
+                IndexName::new("thread_activity").unwrap(),
+                vec![activity.clone(), thread_id.clone()],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+        let kind = RecordKind::new("thread_index").unwrap();
+        for (id, rank) in [("b", "001"), ("a", "001"), ("c", "002")] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(activity.clone(), IndexValue::Text(rank.into()))
+                .with_indexed(thread_id.clone(), IndexValue::Text(id.into()));
+            fs.put(&vpath(&prefix, id), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let rows = fs
+            .query_ordered(
+                &prefix_path,
+                &Filter::All,
+                &ironclaw_filesystem::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    activity,
+                    thread_id.clone(),
+                    SortDirection::Ascending,
+                    2,
+                )
+                .after(ironclaw_filesystem::OrderedQueryCursor {
+                    value: IndexValue::Text("001".into()),
+                    tie_breaker: IndexValue::Text("b".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].entry.indexed[&thread_id],
+            IndexValue::Text("c".into())
+        );
+
+        let descending = fs
+            .query_ordered(
+                &prefix_path,
+                &Filter::All,
+                &ironclaw_filesystem::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    IndexKey::new("activity").unwrap(),
+                    thread_id.clone(),
+                    SortDirection::Descending,
+                    2,
+                )
+                .after(ironclaw_filesystem::OrderedQueryCursor {
+                    value: IndexValue::Text("001".into()),
+                    tie_breaker: IndexValue::Text("b".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(descending.len(), 1);
+        assert_eq!(
+            descending[0].entry.indexed[&thread_id],
+            IndexValue::Text("a".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_ordered_index_projects_rows_under_long_prefixes() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let unique = prefix.rsplit('_').next().unwrap();
+        let index_name = IndexName::new(format!("long_prefix_projection_{unique}")).unwrap();
+        let status = IndexKey::new("status").unwrap();
+        let process_id = IndexKey::new("process_id").unwrap();
+        let tenant_prefix = VirtualPath::new(format!(
+            "{prefix}/tenants/tenant/agents/agent/projects/project/users/user/turns/materialized/process"
+        ))
+        .unwrap();
+        fs.ensure_index(
+            &tenant_prefix,
+            &IndexSpec::new(
+                index_name.clone(),
+                vec![status.clone(), process_id.clone()],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let row_path = VirtualPath::new(format!("{}/run-1", tenant_prefix.as_str())).unwrap();
+        let row = Entry::record(RecordKind::new("process").unwrap(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(status.clone(), IndexValue::Text("queued".into()))
+            .with_indexed(process_id.clone(), IndexValue::Text("run-1".into()));
+        fs.put(&row_path, row, CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let rows = fs
+            .query_ordered(
+                &tenant_prefix,
+                &Filter::All,
+                &ironclaw_filesystem::OrderedPage::new(
+                    index_name,
+                    status,
+                    process_id,
+                    SortDirection::Ascending,
+                    10,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, row_path);
+    }
+
+    #[tokio::test]
+    async fn postgres_scopes_ordered_index_names_by_prefix() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        for (suffix, rank, id) in [
+            ("prefix-a", "rank_a", "id_a"),
+            ("prefix-b", "rank_b", "id_b"),
+        ] {
+            fs.ensure_index(
+                &VirtualPath::new(format!("{prefix}/{suffix}")).unwrap(),
+                &IndexSpec::new(
+                    IndexName::new("shared_name").unwrap(),
+                    vec![IndexKey::new(rank).unwrap(), IndexKey::new(id).unwrap()],
+                    IndexKind::Exact,
+                ),
+            )
+            .await
+            .expect("same index name with a different prefix is independent");
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_ordered_index_declaration_never_backfills_existing_rows() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let status = IndexKey::new("status").unwrap();
+        let process_id = IndexKey::new("process_id").unwrap();
+        let kind = RecordKind::new("process").unwrap();
+        let old = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(status.clone(), IndexValue::Text("queued".into()))
+            .with_indexed(process_id.clone(), IndexValue::Text("old".into()));
+        fs.put(&vpath(&prefix, "old"), old, CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let unique = prefix.rsplit('_').next().unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new(format!("no_backfill_{unique}")).unwrap(),
+            vec![status.clone(), process_id.clone()],
+            IndexKind::Exact,
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        let page = ironclaw_filesystem::OrderedPage::new(
+            spec.name.clone(),
+            status.clone(),
+            process_id.clone(),
+            SortDirection::Ascending,
+            10,
+        );
+        assert!(
+            fs.query_ordered(&prefix_path, &Filter::All, &page)
+                .await
+                .unwrap()
+                .is_empty(),
+            "declaration must not hide a request-time table scan as automatic backfill"
+        );
+
+        let new = Entry::record(kind, &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(status, IndexValue::Text("queued".into()))
+            .with_indexed(process_id.clone(), IndexValue::Text("new".into()));
+        fs.put(&vpath(&prefix, "new"), new, CasExpectation::Absent)
+            .await
+            .unwrap();
+        let rows = fs
+            .query_ordered(&prefix_path, &Filter::All, &page)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].entry.indexed[&process_id],
+            IndexValue::Text("new".into())
+        );
     }
 
     #[tokio::test]
@@ -2710,3 +3204,4 @@ mod postgres_tests {
         assert!(fs.capabilities().has(Capability::Events));
     }
 }
+// arch-exempt: large_file, fallible libSQL runtime construction only adjusts existing contract setup, plan #6175

@@ -22,7 +22,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
-        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId, LoopRunContext,
+        AgentLoopHostErrorKind, LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId,
+        LoopRunContext,
     },
 };
 
@@ -315,14 +316,12 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             kind,
             safe_summary,
             reason_kind,
-            diagnostic_ref,
             detail,
         } => {
             tracing::warn!(
                 stage = ?stage,
                 kind = ?kind,
                 reason_kind = ?reason_kind,
-                diagnostic_ref = ?diagnostic_ref,
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
@@ -336,6 +335,15 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 // (ironclaw_agent_loop cannot depend on the hardened scrubber),
                 // so re-scrub through the full LeakDetector registry +
                 // injection fencing here, where the detail becomes visible.
+                let detail = detail
+                    .or_else(|| Some(safe_summary.as_str().to_string()))
+                    .map(ironclaw_loop_host::scrub_model_visible_detail);
+                return AgentLoopDriverError::Failed {
+                    reason_kind: category.to_string(),
+                    detail,
+                };
+            }
+            if let Some(category) = permanent_prompt_stage_failure_category(stage, kind) {
                 let detail = detail
                     .or_else(|| Some(safe_summary.as_str().to_string()))
                     .map(ironclaw_loop_host::scrub_model_visible_detail);
@@ -362,10 +370,34 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 detail: None,
             }
         }
+        AgentLoopExecutorError::RecoverySequenceExhausted => {
+            tracing::warn!("planned driver exhausted durable recovery event identity space");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
+                detail: None,
+            }
+        }
         AgentLoopExecutorError::Cancelled => AgentLoopDriverError::Failed {
             reason_kind: "interrupted_unexpectedly".to_string(),
             detail: None,
         },
+    }
+}
+
+fn permanent_prompt_stage_failure_category(
+    stage: HostStage,
+    kind: AgentLoopHostErrorKind,
+) -> Option<&'static str> {
+    if stage != HostStage::Prompt {
+        return None;
+    }
+
+    match kind {
+        AgentLoopHostErrorKind::PolicyDenied => Some(LoopFailureKind::PolicyDenied.as_str()),
+        AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::ScopeMismatch => Some("driver_invalid_request"),
+        _ => None,
     }
 }
 
@@ -408,13 +440,12 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
     match kind {
         LoopCheckpointKind::BeforeModel => Ok(CheckpointKind::BeforeModel),
         LoopCheckpointKind::BeforeBlock => Ok(CheckpointKind::BeforeBlock),
-        LoopCheckpointKind::BeforeSideEffect | LoopCheckpointKind::Final => {
-            tracing::warn!(
-                ?kind,
-                "planned driver cannot resume checkpoint kind without exact continuation semantics"
-            );
-            Err(())
-        }
+        // These boundaries are resumed only after the process layer has
+        // created a distinct replacement run. `BeforeSideEffect` therefore
+        // represents the user's explicit retry of the failed invocation, not
+        // an automatic in-run replay.
+        LoopCheckpointKind::BeforeSideEffect => Ok(CheckpointKind::BeforeSideEffect),
+        LoopCheckpointKind::Final => Ok(CheckpointKind::Final),
     }
 }
 
@@ -578,7 +609,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -600,7 +630,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -621,7 +650,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("safe summary wording is display-only")
                 .expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -641,7 +669,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some("HTTP 404 model not found".to_string()),
         });
 
@@ -667,7 +694,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some(format!("provider rejected token {secret} at /host/route")),
         });
 
@@ -699,7 +725,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -719,7 +744,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -729,6 +753,63 @@ mod tests {
                 reason: format!("Prompt: {CREDENTIAL_SUMMARY}")
             }
         );
+    }
+
+    #[test]
+    fn prompt_policy_denial_is_not_mapped_to_transient_unavailable() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::PolicyDenied,
+            safe_summary: LoopSafeSummary::new("explicit skill is ambiguous").expect("safe"),
+            reason_kind: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "policy_denied".to_string(),
+                detail: Some("explicit skill is ambiguous".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn permanent_prompt_kinds_remain_unavailable_at_other_non_model_stages() {
+        for kind in [
+            AgentLoopHostErrorKind::PolicyDenied,
+            AgentLoopHostErrorKind::InvalidInvocation,
+            AgentLoopHostErrorKind::Invalid,
+            AgentLoopHostErrorKind::ScopeMismatch,
+        ] {
+            for stage in [
+                HostStage::Capability,
+                HostStage::Transcript,
+                HostStage::Checkpoint,
+                HostStage::Input,
+            ] {
+                let mapped =
+                    map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                        stage,
+                        kind,
+                        safe_summary: LoopSafeSummary::new("host stage rejected the operation")
+                            .expect("safe"),
+                        reason_kind: None,
+                        detail: None,
+                    });
+
+                assert_eq!(
+                    mapped,
+                    AgentLoopDriverError::Unavailable {
+                        reason: format!(
+                            "{}: host stage rejected the operation",
+                            host_stage_name(stage)
+                        )
+                    },
+                    "{stage:?}/{kind:?} must preserve its existing unavailable mapping"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -935,17 +1016,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_unsupported_checkpoint_kind_returns_checkpoint_unavailable_exit() {
+    async fn resume_before_side_effect_continues_without_replaying_the_capability() {
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
         let context = run_context_for_driver(&driver);
         let checkpoint_id = TurnCheckpointId::new();
+        let mut restored_state = LoopExecutionState::initial_for_run(&context);
+        restored_state.last_checkpoint = Some(ironclaw_agent_loop::state::CheckpointMarker {
+            kind: CheckpointKind::BeforeSideEffect,
+            iteration_at_checkpoint: 0,
+        });
         let loaded = LoadedCheckpointPayload {
             kind: LoopCheckpointKind::BeforeSideEffect,
             schema_id: context.checkpoint_schema_id.clone(),
             schema_version: context.checkpoint_schema_version,
-            payload: RedactedCheckpointPayload::new(b"{}".to_vec())
-                .expect("valid checkpoint payload"),
+            payload: RedactedCheckpointPayload::new(
+                serde_json::to_vec(&restored_state).expect("serialize checkpoint state"),
+            )
+            .expect("valid checkpoint payload"),
         };
         let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
             .run_context(context.clone())
@@ -965,11 +1053,11 @@ mod tests {
             )
             .await;
 
-        assert_checkpoint_unavailable_exit(result);
+        result.expect("resume should continue after the durable side-effect boundary");
         assert_eq!(host.load_call_count(), 1);
         assert!(
-            host.call_log().is_empty(),
-            "unsupported checkpoint kinds must fail before executor host ports"
+            host.call_log().contains(&MockHostCall::StreamModel),
+            "resume must continue to the model without re-dispatching a capability"
         );
     }
 

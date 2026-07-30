@@ -6,7 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
-use crate::commands::{CommandResultView, declared_command_help_text, render_command_result_text};
+use crate::commands::{
+    CommandAudience, CommandResultView, declared_command_help_text, product_command_descriptors,
+    render_command_result_text,
+};
 use crate::{
     AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
@@ -197,7 +200,21 @@ impl RunDeliveryObserver {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.command_help_text = declared_command_help_text(commands);
+        // Filter to user-audience declared names so the static help text
+        // never advertises an admin-only command to a non-admin actor. This
+        // filter is unconditional (applies to every actor); the observer has
+        // no per-actor role to check at this seam — it only has the fixed
+        // enabled-command declaration.
+        let user_visible: Vec<String> = commands
+            .into_iter()
+            .filter(|name| {
+                product_command_descriptors().any(|descriptor| {
+                    descriptor.name == name.as_ref() && descriptor.audience == CommandAudience::User
+                })
+            })
+            .map(|name| name.as_ref().to_string())
+            .collect();
+        self.command_help_text = declared_command_help_text(user_visible);
         self
     }
 
@@ -897,6 +914,12 @@ impl RunDeliveryObserver {
             }
             ProductInboundAck::Rejected(rejection) => match rejection.kind {
                 ProductRejectionKind::InvalidRequest => self.command_help_text.clone(),
+                // Fixed host copy keyed by rejection kind only — the
+                // rejection's internal `reason` string is never echoed to
+                // the user.
+                ProductRejectionKind::AccessDenied => {
+                    "This command requires an admin account.".to_string()
+                }
                 ProductRejectionKind::PolicyDenied => {
                     "Commands can only be used in a direct conversation with Ironclaw.".to_string()
                 }

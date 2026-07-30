@@ -82,6 +82,22 @@ BUILD_TEST_TOOLS_SCRIPT = ROOT / "scripts" / "build-test-tools.sh"
 TEST_TOOL_NAMES = ("ascii-renderer", "hacker-news", "market-data")
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Forward final pytest outcomes to the optional Reborn artifact recorder."""
+    outcome = yield
+    report = outcome.get_result()
+    from reborn_webui_harness import (
+        _finalize_registered_artifact_bundles,
+        _mark_registered_artifact_bundles_failed,
+    )
+
+    if report.failed:
+        _mark_registered_artifact_bundles_failed(item.nodeid)
+    if report.when == "teardown":
+        _finalize_registered_artifact_bundles(item.nodeid)
+
+
 def _latest_mtime(path: Path) -> float:
     """Return the newest mtime under a file or directory."""
     if not path.exists():

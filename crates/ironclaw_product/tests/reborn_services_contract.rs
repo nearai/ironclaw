@@ -117,13 +117,14 @@ use ironclaw_product::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornTraceHoldAuthorizeProductRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
+    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -152,7 +153,7 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
@@ -2326,6 +2327,39 @@ async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
 }
 
 #[tokio::test]
+async fn trace_hold_authorize_capability_decodes_typed_product_input() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_host_api::ProductSurfaceInvokeRequest {
+            operation_id: TRACE_HOLD_AUTHORIZE_COMMAND
+                .capability_id()
+                .expect("trace hold capability id"),
+            input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
+                submission_id: "not-a-submission-id".to_string(),
+            })
+            .expect("trace hold input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("invalid submission id must fail validation");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.field.as_deref(), Some("submission_id"));
+    assert_eq!(
+        error.validation_code,
+        Some(ProductSurfaceValidationCode::InvalidId)
+    );
+}
+
+#[tokio::test]
 async fn duplicate_create_thread_replays_generated_thread_for_same_client_action() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -3937,7 +3971,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
 async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
-        in_memory_turn_state_store(),
+        in_memory_agent_turn_runtime(),
     )));
     let services = RebornServices::new(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;
@@ -13034,7 +13068,7 @@ fn service_source_avoids_forbidden_runtime_dependencies() {
         "ironclaw_capabilities",
         "ironclaw_dispatcher",
         "ironclaw_host_runtime",
-        "ironclaw_run_state",
+        "ironclaw_approvals",
         "ironclaw_storage",
         "RuntimeLane",
         "pub fn thread_service",
@@ -13065,7 +13099,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     // intentionally does NOT override the trait's default
     // `list_threads_for_scope` impl, so the service sees the
     // unimplemented-enumeration error path. The in-memory backend
-    // grew a real enumeration impl (local-dev needed working
+    // grew a real enumeration impl (standalone needed working
     // sidebar listing), so it can no longer stand in for a backend
     // without enumeration support.
     let services = RebornServices::new(

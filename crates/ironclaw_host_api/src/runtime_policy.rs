@@ -41,7 +41,7 @@
 //! a deployment-scoped policy preset chosen by the operator; the resolver
 //! turns it into [`EffectiveRuntimePolicy`] which then constrains the
 //! filesystem/process/network/secret backends offered to every invocation.
-//! Trust and runtime policy compose: a `LocalDev` + `Sandbox` invocation is
+//! Trust and runtime policy compose: a `LocalHost` + `Sandbox` invocation is
 //! still bounded by both.
 //!
 //! ## Wire format
@@ -117,7 +117,7 @@ impl std::str::FromStr for DeploymentMode {
 /// Naming hints for variants:
 ///
 /// - `Safe` variants are cautious defaults that prefer ask-on-write/process.
-/// - `Dev` variants allow common developer effects without prompting.
+/// - workspace/host variants allow common coding effects without prompting.
 /// - `Yolo` variants intentionally reduce approvals **inside their authority
 ///   boundary**; they are never a path to broader authority. `LocalYolo`
 ///   stays on the local machine, `HostedYoloTenantScoped` stays inside the
@@ -136,9 +136,10 @@ pub enum RuntimeProfile {
     /// Cautious local coding mode: selected workspace read, ask-on-write,
     /// ask-on-shell.
     LocalSafe,
-    /// Default local coding-agent mode: selected workspace read/write, local
-    /// shell, ask only on dangerous actions (rm -rf, push, sudo, etc.).
-    LocalDev,
+    /// Host-mediated coding mode: selected workspace read/write, local shell,
+    /// ask only on dangerous actions (rm -rf, push, sudo, etc.).
+    #[serde(rename = "local_dev")]
+    LocalHost,
     /// Trusted-laptop mode: minimal approvals on the local machine. Requires
     /// explicit selection + visible disclosure. Audit/timeouts/output caps
     /// stay on.
@@ -189,7 +190,7 @@ impl RuntimeProfile {
         match self {
             Self::SecureDefault => "secure_default",
             Self::LocalSafe => "local_safe",
-            Self::LocalDev => "local_dev",
+            Self::LocalHost => "local_dev",
             Self::LocalYolo => "local_yolo",
             Self::HostedSafe => "hosted_safe",
             Self::HostedDev => "hosted_dev",
@@ -211,7 +212,7 @@ impl RuntimeProfile {
     /// rather than silently default to `false`.
     pub const fn is_local(&self) -> bool {
         match self {
-            Self::LocalSafe | Self::LocalDev | Self::LocalYolo => true,
+            Self::LocalSafe | Self::LocalHost | Self::LocalYolo => true,
             Self::SecureDefault
             | Self::HostedSafe
             | Self::HostedDev
@@ -232,7 +233,7 @@ impl RuntimeProfile {
             Self::HostedSafe | Self::HostedDev | Self::HostedYoloTenantScoped => true,
             Self::SecureDefault
             | Self::LocalSafe
-            | Self::LocalDev
+            | Self::LocalHost
             | Self::LocalYolo
             | Self::EnterpriseSafe
             | Self::EnterpriseDev
@@ -250,7 +251,7 @@ impl RuntimeProfile {
             Self::EnterpriseSafe | Self::EnterpriseDev | Self::EnterpriseYoloDedicated => true,
             Self::SecureDefault
             | Self::LocalSafe
-            | Self::LocalDev
+            | Self::LocalHost
             | Self::LocalYolo
             | Self::HostedSafe
             | Self::HostedDev
@@ -273,7 +274,7 @@ impl RuntimeProfile {
             Self::LocalYolo | Self::HostedYoloTenantScoped | Self::EnterpriseYoloDedicated => true,
             Self::SecureDefault
             | Self::LocalSafe
-            | Self::LocalDev
+            | Self::LocalHost
             | Self::HostedSafe
             | Self::HostedDev
             | Self::EnterpriseSafe
@@ -294,7 +295,7 @@ impl RuntimeProfile {
             Self::LocalYolo | Self::HostedYoloTenantScoped => true,
             Self::SecureDefault
             | Self::LocalSafe
-            | Self::LocalDev
+            | Self::LocalHost
             | Self::HostedSafe
             | Self::HostedDev
             | Self::EnterpriseSafe
@@ -319,7 +320,7 @@ impl std::str::FromStr for RuntimeProfile {
         match value {
             "secure_default" => Ok(Self::SecureDefault),
             "local_safe" => Ok(Self::LocalSafe),
-            "local_dev" => Ok(Self::LocalDev),
+            "local_dev" => Ok(Self::LocalHost),
             "local_yolo" => Ok(Self::LocalYolo),
             "hosted_safe" => Ok(Self::HostedSafe),
             "hosted_dev" => Ok(Self::HostedDev),
@@ -636,7 +637,7 @@ impl EffectiveRuntimePolicy {
     /// the resolver returns `ResolveError::IncompatibleDeployment`
     /// (fail-closed) for cross-family requests rather than narrowing them,
     /// so `was_reduced()` only flags ceiling-driven within-family
-    /// narrowing (e.g. `LocalYolo` → `LocalDev` under an `AskDestructive`
+    /// narrowing (e.g. `LocalYolo` → `LocalHost` under an `AskDestructive`
     /// org ceiling). Audit log surfaces should highlight this case.
     pub fn was_reduced(&self) -> bool {
         self.requested_profile != self.resolved_profile
@@ -660,7 +661,7 @@ mod tests {
         for profile in [
             RuntimeProfile::SecureDefault,
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::LocalYolo,
             RuntimeProfile::HostedSafe,
             RuntimeProfile::HostedDev,
@@ -694,7 +695,7 @@ mod tests {
         for profile in [
             RuntimeProfile::SecureDefault,
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::LocalYolo,
             RuntimeProfile::HostedSafe,
             RuntimeProfile::HostedDev,
@@ -717,7 +718,7 @@ mod tests {
         for profile in [
             RuntimeProfile::SecureDefault,
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::LocalYolo,
             RuntimeProfile::HostedSafe,
             RuntimeProfile::HostedDev,
@@ -751,7 +752,7 @@ mod tests {
         let non_yolo = [
             RuntimeProfile::SecureDefault,
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::HostedSafe,
             RuntimeProfile::HostedDev,
             RuntimeProfile::EnterpriseSafe,
@@ -776,7 +777,7 @@ mod tests {
         let gated = [
             RuntimeProfile::SecureDefault,
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::HostedSafe,
             RuntimeProfile::HostedDev,
             RuntimeProfile::EnterpriseSafe,
@@ -803,8 +804,8 @@ mod tests {
     fn effective_runtime_policy_round_trips_through_serde() {
         let policy = EffectiveRuntimePolicy {
             deployment: DeploymentMode::LocalSingleUser,
-            requested_profile: RuntimeProfile::LocalDev,
-            resolved_profile: RuntimeProfile::LocalDev,
+            requested_profile: RuntimeProfile::LocalHost,
+            resolved_profile: RuntimeProfile::LocalHost,
             filesystem_backend: FilesystemBackendKind::HostWorkspace,
             process_backend: ProcessBackendKind::LocalHost,
             network_mode: NetworkMode::DirectLogged,
@@ -822,7 +823,7 @@ mod tests {
     fn effective_runtime_policy_was_reduced_flips_when_resolver_narrows() {
         let policy = EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
-            requested_profile: RuntimeProfile::LocalDev,
+            requested_profile: RuntimeProfile::LocalHost,
             resolved_profile: RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::TenantSandbox,

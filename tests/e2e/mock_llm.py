@@ -807,6 +807,13 @@ TOOL_CALL_PATTERNS = [
             "content": f"approved {m.group('label')}\n",
         },
     ),
+    # Reborn WebUI v2 auth-gate smoke (#4633): installation parks on GitHub's
+    # required manual-token credential, then resumes through product auth.
+    (
+        re.compile(r"reborn install github for auth gate", re.IGNORECASE),
+        "builtin__extension_install",
+        lambda _: {"extension_id": "github"},
+    ),
     (
         re.compile(
             r"reborn create automation rename target (?P<label>[a-z0-9_-]+)",

@@ -40,7 +40,7 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(
                 true,
             )?),
         )

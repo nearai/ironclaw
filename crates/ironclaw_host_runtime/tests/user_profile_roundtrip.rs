@@ -70,11 +70,11 @@ impl RuntimeHttpEgress for NoopRuntimeHttpEgress {
 
 // ── Shared test helpers ──
 
-fn local_dev_policy() -> EffectiveRuntimePolicy {
+fn local_host_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -256,7 +256,7 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
     }))
     .with_runtime_http_egress(Arc::new(NoopRuntimeHttpEgress))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }

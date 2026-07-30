@@ -124,6 +124,10 @@ impl TurnCheckpointId {
         Self(Uuid::new_v4())
     }
 
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -143,6 +147,14 @@ impl TurnLeaseToken {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for TurnLeaseToken {
@@ -158,6 +170,14 @@ pub struct TurnRunnerId(Uuid);
 impl TurnRunnerId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
     }
 }
 
@@ -254,7 +274,6 @@ loop_ref!(LoopExitId, "loop_exit_id", "exit:");
 loop_ref!(LoopMessageRef, "loop_message_ref", "msg:");
 loop_ref!(LoopResultRef, "loop_result_ref", "result:");
 loop_ref!(LoopGateRef, "loop_gate_ref", "gate:");
-loop_ref!(LoopDiagnosticRef, "loop_diagnostic_ref", "diag:");
 
 impl PartialEq<LoopGateRef> for TurnGateRef {
     fn eq(&self, other: &LoopGateRef) -> bool {

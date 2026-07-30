@@ -56,7 +56,7 @@ pub(crate) fn default_capability_io_pair() -> (
     (capability_io.clone(), capability_io)
 }
 
-pub(crate) fn local_dev_host_runtime_with_http_egress(
+pub(crate) fn standalone_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,
     process_port: Option<Arc<dyn RuntimeProcessPort>>,
@@ -64,7 +64,7 @@ pub(crate) fn local_dev_host_runtime_with_http_egress(
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
     registry.insert(native_memory_first_party_package()?)?;
-    local_dev_host_runtime_with_registry_and_runtime_http_egress(
+    standalone_host_runtime_with_registry_and_runtime_http_egress(
         storage_root,
         registry,
         egress,
@@ -81,7 +81,7 @@ pub(crate) fn host_runtime_storage_roots()
     Ok((root, storage_root, workspace_root))
 }
 
-pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
+pub(crate) fn standalone_host_runtime_with_registry_and_runtime_http_egress(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     egress: Arc<RecordingRuntimeHttpEgress>,
@@ -102,7 +102,7 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     }
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -137,7 +137,7 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
 /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`,
 /// which wraps this runtime with `TriggerActiveRunLookupHostRuntime` so only
 /// `builtin.trigger_list` dispatch routes here.
-pub(crate) fn local_dev_trigger_only_host_runtime(
+pub(crate) fn standalone_trigger_only_host_runtime(
     storage_root: PathBuf,
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
@@ -146,7 +146,7 @@ pub(crate) fn local_dev_trigger_only_host_runtime(
     registry.insert(builtin_first_party_package()?)?;
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -166,7 +166,7 @@ pub(crate) fn local_dev_trigger_only_host_runtime(
 
 /// Test-only `TriggerCreateHook`: this runtime never dispatches
 /// `builtin.trigger_create` (only `builtin.trigger_list` is ever routed to
-/// it — see `local_dev_trigger_only_host_runtime`'s doc), so the hook body is
+/// it — see `standalone_trigger_only_host_runtime`'s doc), so the hook body is
 /// never exercised. Required only to satisfy
 /// `builtin_first_party_handlers_with_trigger_create_hook`'s signature.
 #[derive(Debug)]
@@ -184,7 +184,7 @@ impl TriggerCreateHook for NoopTestTriggerCreateHook {
 
 /// #5886 harness-wiring seam: routes ONLY `builtin.trigger_list` dispatch to
 /// a second, small `HostRuntime` built with a REAL `TriggerActiveRunLookup`
-/// (see [`local_dev_trigger_only_host_runtime`]), while every other
+/// (see [`standalone_trigger_only_host_runtime`]), while every other
 /// capability keeps going through `inner` (the harness's normal runtime,
 /// whose baked-in lookup is scoped to a turn-state store the group's real
 /// runs never write to — `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`
@@ -289,7 +289,7 @@ impl HostRuntime for TriggerActiveRunLookupHostRuntime {
     }
 }
 
-pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
+pub(crate) fn standalone_host_runtime_with_registry_and_egress(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
@@ -298,21 +298,24 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
     // dispatches); `Err(AuthRequired)` raises a `BlockedAuth` gate at dispatch.
     credential_account_result: Result<SecretHandle, CredentialStageError>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let filesystem = local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?;
+    let filesystem =
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::github_assets())?;
+    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
+    let process_runtime: Arc<dyn ironclaw_processes::ProcessRuntimePort> = Arc::new(
+        ironclaw_processes::ProcessJournalStore::new(Arc::clone(&scoped_filesystem)),
+    );
     let services = HostRuntimeServices::new(
         Arc::new(registry),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GithubHarnessAuthorizer::new()?),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     // The typed auth-gate deny/resume paths (#6520) durably terminalize the
     // parked invocation through the run-state store; without it the decline
     // fails closed as HostUnavailable and kills the run.
-    .with_filesystem_run_state(ironclaw_reborn_composition::wrap_scoped(Arc::clone(
-        &filesystem,
-    )))
+    .with_process_journal_invocation_state(process_runtime, scoped_filesystem)
     .with_secret_store(Arc::new(StaticSecretStore::new(
         SecretHandle::new("github_manual_access")?,
         SecretMaterial::from("ghp_fake_fixture_token"),
@@ -333,7 +336,7 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
-pub(crate) fn local_dev_host_runtime_with_live_http_egress(
+pub(crate) fn standalone_host_runtime_with_live_http_egress(
     storage_root: PathBuf,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
@@ -349,7 +352,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
 
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -374,11 +377,11 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
 /// `PolicyNetworkHttpEgress` (network-policy enforcement + DNS/private-IP
 /// checks) over `HostHttpEgressService` (leak scan) — with only the
 /// wire-level transport swapped for `RecordingNetworkHttpTransport`. Mirrors
-/// [`local_dev_host_runtime_with_live_http_egress`] exactly, but the
+/// [`standalone_host_runtime_with_live_http_egress`] exactly, but the
 /// transport records instead of making a real network call, and DNS
 /// resolution is faked via `StaticNetworkResolver` so the pipeline stays
 /// hermetic.
-pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
+pub(crate) fn standalone_host_runtime_with_real_egress_pipeline(
     storage_root: PathBuf,
     network_transport: RecordingNetworkHttpTransport,
     process_port: Option<Arc<dyn RuntimeProcessPort>>,
@@ -388,7 +391,7 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
 
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -417,9 +420,9 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
-pub(crate) fn local_dev_root_filesystem(
+pub(crate) fn standalone_root_filesystem(
     storage_root: PathBuf,
-    mounts: LocalDevRootMounts,
+    mounts: StandaloneRootMounts,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
     let mut local = DiskFilesystem::new();
     local.mount_local(
@@ -442,7 +445,7 @@ pub(crate) fn local_dev_root_filesystem(
     let local = Arc::new(local);
     let mut root = CompositeRootFilesystem::new();
     root.mount(
-        local_dev_mount_descriptor(
+        standalone_mount_descriptor(
             "/projects",
             "local-dev-projects",
             BackendKind::DiskFilesystem,
@@ -455,7 +458,7 @@ pub(crate) fn local_dev_root_filesystem(
     )?;
     if mounts.github_assets {
         root.mount(
-            local_dev_mount_descriptor(
+            standalone_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
                 BackendKind::DiskFilesystem,
@@ -469,7 +472,7 @@ pub(crate) fn local_dev_root_filesystem(
     }
     if mounts.web_access_assets {
         root.mount(
-            local_dev_mount_descriptor(
+            standalone_mount_descriptor(
                 "/system/extensions/web-access",
                 "local-dev-web-access-assets",
                 BackendKind::DiskFilesystem,
@@ -484,7 +487,7 @@ pub(crate) fn local_dev_root_filesystem(
     if mounts.memory {
         let memory = Arc::new(InMemoryBackend::new());
         root.mount(
-            local_dev_mount_descriptor(
+            standalone_mount_descriptor(
                 "/memory",
                 "local-dev-memory",
                 BackendKind::MemoryDocuments,
@@ -502,7 +505,7 @@ pub(crate) fn local_dev_root_filesystem(
     // production `/tenants` mount in composition.
     let tenant_state = Arc::new(InMemoryBackend::new());
     root.mount(
-        local_dev_mount_descriptor(
+        standalone_mount_descriptor(
             "/tenants",
             "local-dev-harness-tenant-state",
             BackendKind::MemoryDocuments,
@@ -517,13 +520,13 @@ pub(crate) fn local_dev_root_filesystem(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct LocalDevRootMounts {
+pub(crate) struct StandaloneRootMounts {
     github_assets: bool,
     web_access_assets: bool,
     memory: bool,
 }
 
-impl LocalDevRootMounts {
+impl StandaloneRootMounts {
     pub(crate) fn core_builtins() -> Self {
         Self {
             github_assets: false,
@@ -549,7 +552,7 @@ impl LocalDevRootMounts {
     }
 }
 
-pub(crate) fn local_dev_mount_descriptor(
+pub(crate) fn standalone_mount_descriptor(
     virtual_root: &str,
     backend_id: &str,
     backend_kind: BackendKind,
@@ -596,7 +599,7 @@ pub(crate) fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
                 HostTrustAssignment::first_party(),
                 // Mirror the production native-memory ceiling
                 // (`builtin_first_party_trust_policy` in factory.rs and the
-                // local-dev provider trust in runtime/local_dev.rs): the v3
+                // local-dev provider trust in runtime/standalone.rs): the v3
                 // memory tools carry `DispatchCapability` like every other
                 // first-party model tool (echo/http/shell/…), so the ceiling
                 // must include it or every memory dispatch is `PolicyDenied`.
@@ -684,11 +687,11 @@ pub(crate) fn bundled_extension_provider_trust()
 -> HarnessResult<Vec<(ExtensionId, Vec<EffectKind>)>> {
     BUNDLED_EXTENSION_IDS
         .iter()
-        .map(|id| Ok((ExtensionId::new(*id)?, local_dev_all_effects())))
+        .map(|id| Ok((ExtensionId::new(*id)?, standalone_all_effects())))
         .collect()
 }
 
-pub(crate) fn local_dev_all_effects() -> Vec<EffectKind> {
+pub(crate) fn standalone_all_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,

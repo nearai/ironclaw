@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_approvals::*;
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
@@ -12,8 +13,8 @@ use ironclaw_capabilities::{
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
+use ironclaw_processes::*;
 use ironclaw_resources::*;
-use ironclaw_run_state::*;
 use serde_json::{Value, json};
 
 mod support;
@@ -23,10 +24,10 @@ use support::*;
 async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() {
     let (registry, dispatcher, governor, events, adapter) =
         runtime_dispatcher_stack(json!({"via":"runtime-dispatcher"}));
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
     let authorizer = GrantAuthorizer::new();
-    let host =
-        capability_host(registry.as_ref(), &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(registry.as_ref(), &dispatcher, &authorizer)
+        .with_invocation_state(&run_state);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -55,7 +56,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Completed
+        ProcessInvocationStatus::Completed
     );
     assert_eq!(
         governor.reserved_for(&ResourceAccount::tenant(recorded.scope.tenant_id.clone())),
@@ -81,11 +82,11 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
 async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
     let (registry, dispatcher, _governor, events, adapter) =
         runtime_dispatcher_stack(json!({"approved":true}));
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -109,7 +110,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     ));
     assert_eq!(adapter.request_count(), 0);
     let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(blocked.status, RunStatus::BlockedApproval);
+    assert_eq!(blocked.status, ProcessInvocationStatus::BlockedApproval);
     let approval_id = blocked.approval_request_id.unwrap();
     let lease = approve_dispatch(&approval_requests, &leases, &scope, approval_id, None)
         .await
@@ -117,7 +118,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let result = resume_host
@@ -144,7 +145,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Completed
+        ProcessInvocationStatus::Completed
     );
     assert_eq!(
         leases.get(&scope, lease.grant.id).await.unwrap().status,
@@ -172,7 +173,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     assert!(matches!(
         second_err,
         CapabilityInvocationError::ResumeNotBlocked {
-            status: RunStatus::Completed,
+            status: ProcessInvocationStatus::Completed,
             ..
         }
     ));
@@ -183,11 +184,11 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_or_lease_claim() {
     let (registry, dispatcher, _governor, _events, adapter) =
         runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -218,7 +219,7 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
 
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
@@ -234,8 +235,8 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
 
     assert!(matches!(
         err,
-        CapabilityInvocationError::RunState(error)
-            if matches!(*error, RunStateError::UnknownInvocation { .. })
+        CapabilityInvocationError::InvocationState(error)
+            if matches!(*error, ProcessInvocationError::UnknownInvocation { .. })
     ));
     assert_eq!(adapter.request_count(), 0);
     assert!(
@@ -252,7 +253,7 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
     // contract test. This integration fixture shares one non-per-user in-memory
     // mount, so it can't reproduce that mount-level partition here — but the
     // guarantee this test owns (a wrong-scope resume dispatches nothing and
-    // claims nothing) is asserted directly: `RunStateError::UnknownInvocation`
+    // claims nothing) is asserted directly: `ProcessInvocationError::UnknownInvocation`
     // above, zero adapter requests, and the original lease still `Active`
     // (unclaimed) below.
     assert_eq!(
@@ -260,18 +261,21 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
         CapabilityLeaseStatus::Active
     );
     let original_run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(original_run.status, RunStatus::BlockedApproval);
+    assert_eq!(
+        original_run.status,
+        ProcessInvocationStatus::BlockedApproval
+    );
 }
 
 #[tokio::test]
 async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
     let (registry, dispatcher, _governor, _events, adapter) =
         runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -307,7 +311,7 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
 
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
@@ -325,7 +329,7 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
         CapabilityLeaseStatus::Active
     );
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ApprovalLeaseMissing"));
 }
 
@@ -446,7 +450,7 @@ fn runtime_dispatcher_stack(
 }
 
 async fn approve_dispatch(
-    approval_requests: &ironclaw_run_state::ApprovalRequestStore<
+    approval_requests: &ironclaw_approvals::ApprovalRequestStore<
         ironclaw_filesystem::InMemoryBackend,
     >,
     leases: &CapabilityLeaseStore<InMemoryBackend>,

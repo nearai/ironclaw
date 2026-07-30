@@ -39,8 +39,8 @@ pub const MEMORY_DISABLED_BINDING_SENTINEL: &str = "memory.disabled";
 /// maps one to the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryDeploymentProfile {
-    LocalDev,
-    LocalDevYolo,
+    Standalone,
+    StandaloneUnrestricted,
     HostedSingleTenant,
     Production,
     MigrationDryRun,
@@ -50,8 +50,8 @@ impl MemoryDeploymentProfile {
     /// Kebab-case wire name, matching `RebornProfile::as_str`.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LocalDev => "local-dev",
-            Self::LocalDevYolo => "local-dev-yolo",
+            Self::Standalone => "local-dev",
+            Self::StandaloneUnrestricted => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
@@ -61,8 +61,8 @@ impl MemoryDeploymentProfile {
     /// Parse from the kebab-case wire name. Returns `None` for unknown names.
     pub fn from_wire(name: &str) -> Option<Self> {
         match name {
-            "local-dev" => Some(Self::LocalDev),
-            "local-dev-yolo" => Some(Self::LocalDevYolo),
+            "local-dev" => Some(Self::Standalone),
+            "local-dev-yolo" => Some(Self::StandaloneUnrestricted),
             "hosted-single-tenant" => Some(Self::HostedSingleTenant),
             "production" => Some(Self::Production),
             "migration-dry-run" => Some(Self::MigrationDryRun),
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn unconfigured_resolves_to_native() {
         let policy = MemoryBindingPolicy::resolve(MemoryBindingInput::native_default(
-            MemoryDeploymentProfile::LocalDev,
+            MemoryDeploymentProfile::Standalone,
         ))
         .unwrap();
         assert_eq!(policy.binding(), &MemoryProviderBinding::Native);
@@ -324,7 +324,7 @@ mod tests {
     fn disabled_allowed_outside_production() {
         let policy = MemoryBindingPolicy::resolve(MemoryBindingInput {
             provider: Some(MEMORY_DISABLED_BINDING_SENTINEL.to_string()),
-            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::Standalone)
         })
         .unwrap();
         assert_eq!(policy.binding(), &MemoryProviderBinding::Disabled);
@@ -347,7 +347,7 @@ mod tests {
     fn third_party_allowed_outside_production_without_override() {
         let policy = MemoryBindingPolicy::resolve(MemoryBindingInput {
             provider: Some(MEM0.to_string()),
-            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::Standalone)
         })
         .unwrap();
         assert!(matches!(
@@ -410,7 +410,7 @@ mod tests {
     fn native_unavailable_is_an_error() {
         let err = MemoryBindingPolicy::resolve(MemoryBindingInput {
             native_available: false,
-            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::Standalone)
         })
         .unwrap_err();
         assert!(matches!(err, MemoryBindingError::NativeUnavailable));
@@ -420,7 +420,7 @@ mod tests {
     fn invalid_extension_id_is_rejected() {
         let err = MemoryBindingPolicy::resolve(MemoryBindingInput {
             provider: Some("Not A Valid Id".to_string()),
-            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::Standalone)
         })
         .unwrap_err();
         assert!(matches!(err, MemoryBindingError::InvalidExtensionId { .. }));

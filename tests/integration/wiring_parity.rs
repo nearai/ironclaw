@@ -45,7 +45,7 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 // ---------------------------------------------------------------------------
 
 /// Hand-derived from `crates/ironclaw_reborn_composition/src/runtime.rs`
-/// lines 3365-3459 (`build_reborn_runtime`, `LocalDev`/`LocalDevYolo`
+/// lines 3365-3459 (`build_reborn_runtime`, `Standalone`/`StandaloneUnrestricted`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
 /// against this range 2026-07-04.) The smoke build below at least proves the
@@ -62,7 +62,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
         model_route_resolver: false,    // :3406 hardcoded None
         cancellation_factory: false,    // :3407 hardcoded None
-        skill_context_source: true,     // :2917-2929 local_dev_filesystem_skill_context_source
+        skill_context_source: true,     // :2917-2929 standalone_filesystem_skill_context_source
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: false,      // hardcoded None
@@ -99,7 +99,7 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
     (
         "skill_context_source",
         "harness: None outside skill_activation_tools() groups (recorder.rs:56-63); \
-         production: always Some via local_dev_filesystem_skill_context_source (runtime.rs:2917-2929)",
+         production: always Some via standalone_filesystem_skill_context_source (runtime.rs:2917-2929)",
     ),
     (
         "attachment_read_port",
@@ -223,18 +223,18 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 }
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
-/// referenced `LocalDev` literal still exists and the profile still builds.
+/// referenced `Standalone` literal still exists and the profile still builds.
 /// Mirrors `crates/ironclaw_reborn_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
 /// introspecting this built `RebornRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted
 /// gap noted in the module doc).
 #[tokio::test]
-async fn local_dev_profile_still_builds() {
+async fn standalone_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
-    let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
+    let policy = ironclaw_reborn_composition::standalone_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )

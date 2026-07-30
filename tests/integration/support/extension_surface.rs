@@ -208,6 +208,9 @@ pub fn bundled_extension_manifest_capability_ids()
             &ironclaw_host_runtime::default_host_port_catalog()?,
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry()?,
+            // The manifest's own id (needed for the root) is only known
+            // after parsing; this helper only reads capability ids anyway.
+            None,
         )?;
         let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
         // The manifest's OWN `id` (not the asset directory name) must match

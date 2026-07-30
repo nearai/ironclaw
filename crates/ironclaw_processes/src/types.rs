@@ -156,8 +156,6 @@ pub enum ProcessError {
         original: Box<ProcessError>,
         cleanup: ResourceError,
     },
-    #[error("process result store is not configured")]
-    ProcessResultStoreUnavailable,
     #[error("process result is unavailable for {process_id}")]
     ProcessResultUnavailable { process_id: ProcessId },
     #[error("invalid stored process record: {reason}")]
@@ -251,6 +249,15 @@ pub trait ProcessManager: Send + Sync {
 }
 
 #[async_trait]
+pub trait ProcessSubmissionLifecycle: Send + Sync {
+    async fn before_submit(&self, start: &ProcessStart) -> Result<(), ProcessError>;
+
+    async fn submit_failed(&self, start: &ProcessStart) -> Result<(), ProcessError>;
+
+    async fn submitted(&self, record: &ProcessRecord) -> Result<(), ProcessError>;
+}
+
+#[async_trait]
 pub trait ProcessResultStorePort: Send + Sync {
     /// Stores successful process output separately from the lifecycle record.
     async fn complete(
@@ -295,47 +302,6 @@ pub trait ProcessResultStorePort: Send + Sync {
     }
 }
 
-#[async_trait]
-pub trait ProcessStorePort: Send + Sync {
-    /// Persists a running process record without storing raw input.
-    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
-
-    /// Transitions a scoped running process to completed.
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Transitions a scoped running process to failed with a classified error kind.
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        error_kind: String,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Marks a scoped process killed and must not reveal cross-tenant process existence.
-    async fn kill(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Loads scoped process lifecycle metadata; wrong-scope lookups must look unknown.
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<Option<ProcessRecord>, ProcessError>;
-
-    /// Lists process lifecycle records visible to the exact resource-owner scope only.
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ProcessRecord>, ProcessError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ProcessKey {
     tenant_id: TenantId,
@@ -359,21 +325,6 @@ impl ProcessKey {
             process_id,
         }
     }
-}
-
-pub(crate) fn ensure_status_transition(
-    process_id: ProcessId,
-    from: ProcessStatus,
-    to: ProcessStatus,
-) -> Result<(), ProcessError> {
-    if from != ProcessStatus::Running {
-        return Err(ProcessError::InvalidTransition {
-            process_id,
-            from,
-            to,
-        });
-    }
-    Ok(())
 }
 
 pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {

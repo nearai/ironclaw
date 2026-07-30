@@ -50,7 +50,9 @@ use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 
-use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_root_filesystem};
+use super::harness::{
+    RecordingRuntimeHttpEgress, StandaloneRootMounts, standalone_root_filesystem,
+};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -68,18 +70,17 @@ pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
 pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> {
     // Parse through the single record entry point (the bundled assets are
     // manifest v3 documents since the first-party rewrite).
+    let root = VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
         None,
         &default_host_api_contract_registry()?,
+        Some(root.clone()),
     )?;
     let manifest = ExtensionManifest::try_from(record.manifest().clone())?;
-    Ok(ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?,
-    )?)
+    Ok(ExtensionPackage::from_manifest(manifest, root)?)
 }
 
 /// Filesystem location of the real production `web-access` extension assets
@@ -125,11 +126,11 @@ pub(super) fn exa_mcp_test_network_policy() -> NetworkPolicy {
     }
 }
 
-/// Variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// Variant of `standalone_host_runtime_with_registry_and_runtime_http_egress`
 /// (`harness.rs`) that wires the `web-access` package registry plus the real
 /// production `FirstPartyCapabilityRegistry` registration for both
 /// capability ids, instead of the built-in first-party handler set.
-pub(super) fn local_dev_host_runtime_with_web_access(
+pub(super) fn standalone_host_runtime_with_web_access(
     storage_root: PathBuf,
     package_registry: ExtensionRegistry,
     http_egress: Arc<RecordingRuntimeHttpEgress>,
@@ -139,7 +140,7 @@ pub(super) fn local_dev_host_runtime_with_web_access(
 
     let services = HostRuntimeServices::new(
         Arc::new(package_registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::web_access_assets())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::web_access_assets())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),

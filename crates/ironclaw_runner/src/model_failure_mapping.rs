@@ -111,6 +111,7 @@ mod tests {
             | K::ContentFiltered
             | K::BudgetExceeded
             | K::BudgetApprovalRequired
+            | K::RateLimited
             | K::Unavailable
             | K::Cancelled
             | K::CheckpointRejected
@@ -131,6 +132,7 @@ mod tests {
             K::BudgetExceeded,
             K::BudgetApprovalRequired,
             K::BudgetAccountingFailed,
+            K::RateLimited,
             K::Unavailable,
             K::Cancelled,
             K::CheckpointRejected,

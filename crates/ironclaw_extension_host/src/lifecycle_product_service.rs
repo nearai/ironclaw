@@ -582,7 +582,7 @@ fn lifecycle_resource_scope(
             // Commands have no surface context of their own. Their verified
             // auth claim is the authority-bearing source for the caller, and
             // a host-minted tenant claim is the corresponding tenant scope.
-            // Claims without a tenant remain valid for local-dev commands,
+            // Claims without a tenant remain valid for standalone commands,
             // which use the local default scope just like the local command
             // service.
             let caller = lifecycle_caller(context)?;
@@ -877,7 +877,7 @@ mod tests {
     #[tokio::test]
     async fn default_skill_management_port_isolates_user_skill_roots_by_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage_root = dir.path().join("local-dev");
+        let storage_root = dir.path().join("standalone");
         std::fs::create_dir_all(storage_root.join("system/skills/system-helper"))
             .expect("system skill dir");
         std::fs::write(
@@ -1053,7 +1053,7 @@ mod tests {
         ExtensionHostLifecycleProductService,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage_root = dir.path().join("local-dev");
+        let storage_root = dir.path().join("standalone");
         std::fs::create_dir_all(&storage_root).expect("storage root");
 
         let mut filesystem = DiskFilesystem::new();

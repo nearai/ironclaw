@@ -441,11 +441,19 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
 }
 
 #[tokio::test]
-async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
+async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
     use ironclaw_host_api::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
     let store = Arc::new(RehydratedInstallationRecordStore::default());
+    let reserved_capability_ids: std::collections::BTreeSet<_> = [
+        "ironclaw.tool_search",
+        "ironclaw.tool_describe",
+        "ironclaw.tool_call",
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).unwrap())
+    .collect();
     let deps = ExtensionHostDeps {
         store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
         loader: Arc::new(FakeLoader {
@@ -455,32 +463,37 @@ async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
         }),
         drain: Arc::new(RecordingDrain::default()),
         egress: Arc::new(FakeEgressFactory),
-        reserved_capability_ids: [CapabilityId::new("acme.ping").unwrap()]
-            .into_iter()
-            .collect(),
+        reserved_capability_ids: reserved_capability_ids.clone(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
-    host.install(record("acme", tool_and_channel_manifest()))
-        .await
-        .unwrap();
 
-    let err = host.activate("acme").await.unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            LifecycleError::Conflict(
-                ironclaw_extension_host::SnapshotConflict::ReservedCapability { capability_id, .. }
-            ) if capability_id == "acme.ping"
-        ),
-        "expected reserved-capability conflict, got {err:?}"
-    );
-    // Nothing published; the record recorded the terminal Failed state.
-    assert!(host.snapshot().await.extension("acme").is_none());
-    let stored = store.get("acme").await.unwrap().unwrap();
-    assert_eq!(stored.state, InstallationState::Failed);
-    assert!(stored.last_error.is_some());
+    for capability_id in reserved_capability_ids {
+        let extension_id = capability_id.as_str().replace('.', "-");
+        let mut manifest = tool_and_channel_manifest();
+        manifest.tools[0].id = capability_id.clone();
+        host.install(record(&extension_id, manifest)).await.unwrap();
+
+        let err = host.activate(&extension_id).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                LifecycleError::Conflict(
+                    ironclaw_extension_host::SnapshotConflict::ReservedCapability {
+                        capability_id: conflicting_id,
+                        ..
+                    }
+                ) if conflicting_id == capability_id.as_str()
+            ),
+            "expected reserved-capability conflict for {capability_id}, got {err:?}"
+        );
+        // Nothing published; the record recorded the terminal Failed state.
+        assert!(host.snapshot().await.extension(&extension_id).is_none());
+        let stored = store.get(&extension_id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstallationState::Failed);
+        assert!(stored.last_error.is_some());
+    }
 
     // The redacted reason is exposed to the product projection via
     // `installation_errors()` — the single source both the `Failed` projection
@@ -488,13 +501,21 @@ async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
     let errors = host.installation_errors().await.unwrap();
     assert_eq!(
         errors.len(),
-        1,
-        "one failed extension has a recorded reason"
+        3,
+        "every failed bridge collision has a recorded reason"
     );
-    assert!(
-        errors.get("acme").is_some_and(|reason| !reason.is_empty()),
-        "the failed activation reason is keyed by extension id"
-    );
+    for extension_id in [
+        "ironclaw-tool_search",
+        "ironclaw-tool_describe",
+        "ironclaw-tool_call",
+    ] {
+        assert!(
+            errors
+                .get(extension_id)
+                .is_some_and(|reason| !reason.is_empty()),
+            "the failed activation reason is keyed by extension id"
+        );
+    }
 }
 
 fn sample_scope() -> ironclaw_host_api::ResourceScope {

@@ -56,7 +56,7 @@ fn admin_for_home(reborn_home: &std::path::Path) -> RebornProviderAdmin {
         None,
     )
     .expect("valid reborn home");
-    RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::LocalDev))
+    RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::Standalone))
 }
 
 #[test]

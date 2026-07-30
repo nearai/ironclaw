@@ -181,6 +181,10 @@ impl SwappableLlmProvider {
 
 #[async_trait]
 impl LlmProvider for SwappableLlmProvider {
+    fn provider_id(&self) -> String {
+        self.current().provider_id()
+    }
+
     fn model_name(&self) -> &str {
         read(&self.state).model_name
     }
@@ -228,6 +232,15 @@ impl LlmProvider for SwappableLlmProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.current().effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.current()
+            .fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {

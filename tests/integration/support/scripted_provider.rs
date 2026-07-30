@@ -27,6 +27,7 @@ use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, Tr
 /// Model name surfaced by the scripted provider. Non-empty and not "default" so
 /// the Reborn model gateway's model-override resolution accepts it.
 pub const SCRIPTED_MODEL_NAME: &str = "scripted/integration-test";
+pub const SCRIPTED_FALLBACK_MODEL_NAME: &str = "scripted/integration-fallback";
 
 /// Build a `TraceLlm` that replays the given scripted replies in order.
 pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>) -> TraceLlm {
@@ -147,6 +148,122 @@ impl Default for ParkingModelGate {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// ---------------------------------------------------------------------------
+// Ordered provider fallback (vendor seam) — whole-turn recovery coverage.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct FallbackProviderCallRecords {
+    primary_calls: usize,
+    fallback_calls: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct FallbackProviderCallProbe(Arc<Mutex<FallbackProviderCallRecords>>);
+
+impl FallbackProviderCallProbe {
+    fn record_primary(&self) {
+        lock(&self.0).primary_calls += 1;
+    }
+
+    fn record_fallback(&self) {
+        lock(&self.0).fallback_calls += 1;
+    }
+
+    pub fn primary_calls(&self) -> usize {
+        lock(&self.0).primary_calls
+    }
+
+    pub fn fallback_calls(&self) -> usize {
+        lock(&self.0).fallback_calls
+    }
+}
+
+pub struct UnavailablePrimaryLlm {
+    calls: FallbackProviderCallProbe,
+}
+
+pub struct SuccessfulFallbackLlm {
+    inner: Arc<TraceLlm>,
+    calls: FallbackProviderCallProbe,
+}
+
+pub fn scripted_fallback_vendor_pair(
+    fallback: Arc<TraceLlm>,
+) -> (
+    UnavailablePrimaryLlm,
+    SuccessfulFallbackLlm,
+    FallbackProviderCallProbe,
+) {
+    let calls = FallbackProviderCallProbe::default();
+    (
+        UnavailablePrimaryLlm {
+            calls: calls.clone(),
+        },
+        SuccessfulFallbackLlm {
+            inner: fallback,
+            calls: calls.clone(),
+        },
+        calls,
+    )
+}
+
+fn scripted_primary_unavailable() -> LlmError {
+    LlmError::BadGateway {
+        provider: "scripted_primary".to_string(),
+        status: 503,
+        retry_after: None,
+    }
+}
+
+#[async_trait]
+impl LlmProvider for UnavailablePrimaryLlm {
+    fn model_name(&self) -> &str {
+        SCRIPTED_MODEL_NAME
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record_primary();
+        Err(scripted_primary_unavailable())
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record_primary();
+        Err(scripted_primary_unavailable())
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SuccessfulFallbackLlm {
+    fn model_name(&self) -> &str {
+        SCRIPTED_FALLBACK_MODEL_NAME
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record_fallback();
+        self.inner.complete(request).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record_fallback();
+        self.inner.complete_with_tools(request).await
+    }
 }
 
 /// A raw `LlmProvider` that parks the first model call until the test releases it, then

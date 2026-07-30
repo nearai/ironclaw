@@ -60,6 +60,7 @@ pub enum CircuitState {
 /// Internal mutable state.
 struct BreakerState {
     state: CircuitState,
+    generation: u64,
     consecutive_failures: u32,
     opened_at: Option<Instant>,
     half_open_successes: u32,
@@ -69,10 +70,38 @@ impl BreakerState {
     fn new() -> Self {
         Self {
             state: CircuitState::Closed,
+            generation: 0,
             consecutive_failures: 0,
             opened_at: None,
             half_open_successes: 0,
         }
+    }
+
+    fn transition_to(&mut self, state: CircuitState) {
+        if self.state != state {
+            self.state = state;
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+}
+
+/// Identifies the state-machine epoch in which a request was admitted.
+#[derive(Debug, Clone, Copy)]
+struct AdmissionToken {
+    state: CircuitState,
+    generation: u64,
+}
+
+impl AdmissionToken {
+    fn new(state: &BreakerState) -> Self {
+        Self {
+            state: state.state,
+            generation: state.generation,
+        }
+    }
+
+    fn is_current(self, state: &BreakerState) -> bool {
+        self.state == state.state && self.generation == state.generation
     }
 }
 
@@ -108,20 +137,20 @@ impl CircuitBreakerProvider {
     }
 
     /// Pre-flight: is a call allowed right now?
-    async fn check_allowed(&self) -> Result<(), LlmError> {
+    async fn check_allowed(&self) -> Result<AdmissionToken, LlmError> {
         let mut state = self.state.lock().await;
         match state.state {
-            CircuitState::Closed | CircuitState::HalfOpen => Ok(()),
+            CircuitState::Closed | CircuitState::HalfOpen => Ok(AdmissionToken::new(&state)),
             CircuitState::Open => {
                 if let Some(opened_at) = state.opened_at {
                     if opened_at.elapsed() >= self.config.recovery_timeout {
-                        state.state = CircuitState::HalfOpen;
+                        state.transition_to(CircuitState::HalfOpen);
                         state.half_open_successes = 0;
                         tracing::info!(
                             provider = self.inner.model_name(),
                             "Circuit breaker: Open -> HalfOpen, allowing probe"
                         );
-                        Ok(())
+                        Ok(AdmissionToken::new(&state))
                     } else {
                         let remaining = self
                             .config
@@ -140,16 +169,28 @@ impl CircuitBreakerProvider {
                     }
                 } else {
                     // opened_at should always be Some when Open; recover gracefully
-                    state.state = CircuitState::Closed;
-                    Ok(())
+                    state.transition_to(CircuitState::Closed);
+                    Ok(AdmissionToken::new(&state))
                 }
             }
         }
     }
 
     /// Record a successful call.
-    async fn record_success(&self) {
+    async fn record_success(&self, admission: AdmissionToken) {
         let mut state = self.state.lock().await;
+        if !admission.is_current(&state) {
+            tracing::debug!(
+                provider = self.inner.model_name(),
+                admitted_state = ?admission.state,
+                admitted_generation = admission.generation,
+                current_state = ?state.state,
+                current_generation = state.generation,
+                "Circuit breaker: ignoring success from a stale admission"
+            );
+            return;
+        }
+
         match state.state {
             CircuitState::Closed => {
                 state.consecutive_failures = 0;
@@ -157,7 +198,7 @@ impl CircuitBreakerProvider {
             CircuitState::HalfOpen => {
                 state.half_open_successes += 1;
                 if state.half_open_successes >= self.config.half_open_successes_needed {
-                    state.state = CircuitState::Closed;
+                    state.transition_to(CircuitState::Closed);
                     state.consecutive_failures = 0;
                     state.opened_at = None;
                     tracing::info!(
@@ -166,33 +207,34 @@ impl CircuitBreakerProvider {
                     );
                 }
             }
-            CircuitState::Open => {
-                debug_assert!(
-                    false,
-                    "BUG: record_success() called while circuit breaker is Open — \
-                     check_allowed() was bypassed for provider {}",
-                    self.inner.model_name()
-                );
-                // Shouldn't get here (check_allowed blocks Open), but recover
-                state.state = CircuitState::Closed;
-                state.consecutive_failures = 0;
-                state.opened_at = None;
-            }
+            CircuitState::Open => {}
         }
     }
 
     /// Record a failed call; only transient errors count toward the threshold.
-    async fn record_failure(&self, err: &LlmError) {
+    async fn record_failure(&self, admission: AdmissionToken, err: &LlmError) {
         if !is_transient(err) {
             return;
         }
 
         let mut state = self.state.lock().await;
+        if !admission.is_current(&state) {
+            tracing::debug!(
+                provider = self.inner.model_name(),
+                admitted_state = ?admission.state,
+                admitted_generation = admission.generation,
+                current_state = ?state.state,
+                current_generation = state.generation,
+                "Circuit breaker: ignoring failure from a stale admission"
+            );
+            return;
+        }
+
         match state.state {
             CircuitState::Closed => {
                 state.consecutive_failures += 1;
                 if state.consecutive_failures >= self.config.failure_threshold {
-                    state.state = CircuitState::Open;
+                    state.transition_to(CircuitState::Open);
                     state.opened_at = Some(Instant::now());
                     tracing::warn!(
                         provider = self.inner.model_name(),
@@ -202,7 +244,7 @@ impl CircuitBreakerProvider {
                 }
             }
             CircuitState::HalfOpen => {
-                state.state = CircuitState::Open;
+                state.transition_to(CircuitState::Open);
                 state.opened_at = Some(Instant::now());
                 state.half_open_successes = 0;
                 tracing::warn!(
@@ -224,7 +266,8 @@ impl CircuitBreakerProvider {
 /// auth infrastructure trouble.
 ///
 /// Excludes client errors that are the caller's problem, not backend trouble:
-/// `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+/// `InvalidRequest`, `AuthFailed`, `ContextLengthExceeded`,
+/// `ModelNotAvailable`, `QuotaExceeded`, `Json`.
 ///
 /// See also `retry::is_retryable()` which answers a different question:
 /// "could retrying this exact request succeed?"
@@ -245,6 +288,10 @@ fn is_transient(err: &LlmError) -> bool {
 
 #[async_trait]
 impl LlmProvider for CircuitBreakerProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -262,14 +309,14 @@ impl LlmProvider for CircuitBreakerProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        self.check_allowed().await?;
+        let admission = self.check_allowed().await?;
         match self.inner.complete(request).await {
             Ok(resp) => {
-                self.record_success().await;
+                self.record_success(admission).await;
                 Ok(resp)
             }
             Err(err) => {
-                self.record_failure(&err).await;
+                self.record_failure(admission, &err).await;
                 Err(err)
             }
         }
@@ -279,14 +326,14 @@ impl LlmProvider for CircuitBreakerProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.check_allowed().await?;
+        let admission = self.check_allowed().await?;
         match self.inner.complete_with_tools(request).await {
             Ok(resp) => {
-                self.record_success().await;
+                self.record_success(admission).await;
                 Ok(resp)
             }
             Err(err) => {
-                self.record_failure(&err).await;
+                self.record_failure(admission, &err).await;
                 Err(err)
             }
         }
@@ -304,6 +351,14 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.effective_model_name(requested_model)
     }
 
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.inner.active_model_name()
     }
@@ -319,9 +374,12 @@ impl LlmProvider for CircuitBreakerProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     use crate::testing::StubLlm;
+    use tokio::sync::{Notify, mpsc};
 
     fn make_request() -> CompletionRequest {
         CompletionRequest::new(vec![crate::ChatMessage::user("hello")])
@@ -657,6 +715,212 @@ mod tests {
         let result = cb.complete(make_request()).await;
         assert!(result.is_ok());
         assert_eq!(cb.circuit_state().await, CircuitState::Closed);
+    }
+
+    struct ConcurrentOutcomeProvider {
+        call_index: AtomicUsize,
+        started: mpsc::UnboundedSender<usize>,
+        release_failure: Notify,
+        release_success: Notify,
+        release_probe: Notify,
+    }
+
+    const CONCURRENT_TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+    async fn next_started_call(started: &mut mpsc::UnboundedReceiver<usize>) -> Option<usize> {
+        tokio::time::timeout(CONCURRENT_TEST_TIMEOUT, started.recv())
+            .await
+            .expect("provider call must start before the test timeout")
+    }
+
+    async fn finish_call(
+        call: tokio::task::JoinHandle<Result<CompletionResponse, LlmError>>,
+    ) -> Result<CompletionResponse, LlmError> {
+        tokio::time::timeout(CONCURRENT_TEST_TIMEOUT, call)
+            .await
+            .expect("provider call must finish before the test timeout")
+            .expect("provider call task must not panic")
+    }
+
+    #[async_trait]
+    impl LlmProvider for ConcurrentOutcomeProvider {
+        fn model_name(&self) -> &str {
+            "concurrent-outcomes"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let call_index = self.call_index.fetch_add(1, Ordering::SeqCst);
+            let _ = self.started.send(call_index);
+            match call_index {
+                0 => {
+                    self.release_failure.notified().await;
+                    Err(LlmError::RequestFailed {
+                        provider: self.model_name().to_string(),
+                        reason: "controlled failure".to_string(),
+                    })
+                }
+                1 => {
+                    self.release_success.notified().await;
+                    Ok(CompletionResponse {
+                        content: "controlled success".to_string(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        finish_reason: crate::FinishReason::Stop,
+                        reasoning: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    })
+                }
+                2 => {
+                    self.release_probe.notified().await;
+                    Ok(CompletionResponse {
+                        content: "recovery probe success".to_string(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        finish_reason: crate::FinishReason::Stop,
+                        reasoning: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    })
+                }
+                other => panic!("unexpected concurrent test call {other}"),
+            }
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("concurrent circuit-breaker regression uses complete()");
+        }
+    }
+
+    #[tokio::test]
+    async fn late_success_does_not_close_breaker_opened_by_concurrent_failure() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(ConcurrentOutcomeProvider {
+            call_index: AtomicUsize::new(0),
+            started: started_tx,
+            release_failure: Notify::new(),
+            release_success: Notify::new(),
+            release_probe: Notify::new(),
+        });
+        let cb = Arc::new(CircuitBreakerProvider::new(
+            Arc::clone(&inner) as Arc<dyn LlmProvider>,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: Duration::from_secs(60),
+                half_open_successes_needed: 1,
+            },
+        ));
+
+        let first = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(next_started_call(&mut started_rx).await, Some(0));
+
+        let second = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(next_started_call(&mut started_rx).await, Some(1));
+
+        inner.release_failure.notify_one();
+        assert!(finish_call(first).await.is_err());
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+
+        inner.release_success.notify_one();
+        assert!(finish_call(second).await.is_ok());
+        assert_eq!(
+            cb.circuit_state().await,
+            CircuitState::Open,
+            "a success admitted before the failure must not erase the open state"
+        );
+
+        let blocked = cb
+            .complete(make_request())
+            .await
+            .expect_err("a caller must be rejected while the breaker is Open");
+        assert!(
+            matches!(
+                blocked,
+                LlmError::RequestFailed { ref reason, .. }
+                    if reason.contains("Circuit breaker open")
+            ),
+            "caller should receive the typed circuit-breaker error, got {blocked:?}"
+        );
+        assert_eq!(
+            inner.call_index.load(Ordering::SeqCst),
+            2,
+            "an Open breaker must reject the caller without invoking the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_closed_success_does_not_count_as_half_open_recovery() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(ConcurrentOutcomeProvider {
+            call_index: AtomicUsize::new(0),
+            started: started_tx,
+            release_failure: Notify::new(),
+            release_success: Notify::new(),
+            release_probe: Notify::new(),
+        });
+        let cb = Arc::new(CircuitBreakerProvider::new(
+            Arc::clone(&inner) as Arc<dyn LlmProvider>,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: Duration::ZERO,
+                half_open_successes_needed: 1,
+            },
+        ));
+
+        let failure = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(next_started_call(&mut started_rx).await, Some(0));
+
+        let stale_success = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(next_started_call(&mut started_rx).await, Some(1));
+
+        inner.release_failure.notify_one();
+        assert!(finish_call(failure).await.is_err());
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+
+        let recovery_probe = {
+            let cb = Arc::clone(&cb);
+            tokio::spawn(async move { cb.complete(make_request()).await })
+        };
+        assert_eq!(next_started_call(&mut started_rx).await, Some(2));
+        assert_eq!(cb.circuit_state().await, CircuitState::HalfOpen);
+
+        inner.release_success.notify_one();
+        assert!(finish_call(stale_success).await.is_ok());
+        assert_eq!(
+            cb.circuit_state().await,
+            CircuitState::HalfOpen,
+            "only the admitted recovery probe may close the circuit"
+        );
+
+        inner.release_probe.notify_one();
+        assert!(finish_call(recovery_probe).await.is_ok());
+        assert_eq!(
+            cb.circuit_state().await,
+            CircuitState::Closed,
+            "the admitted recovery probe should restore caller access"
+        );
     }
 
     #[tokio::test]
