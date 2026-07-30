@@ -22,6 +22,7 @@ run_probe() {
     GOOGLE_APPLICATION_CREDENTIALS="/developer/credential.json" \
     LLM_BACKEND="ambient-provider" \
     REBORN_TOOL_DISCLOSURE="Bridged" \
+    PLAYWRIGHT_BROWSERS_PATH="${probe_dir}/playwright-browsers" \
     IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
     "${runner}" -- bash -c '
       set -euo pipefail
@@ -63,6 +64,10 @@ run_probe() {
       [[ "${TZ}" == "UTC" ]]
       [[ "${LANG}" == "C.UTF-8" ]]
       [[ "${LC_ALL}" == "C.UTF-8" ]]
+      if [[ "${PLAYWRIGHT_BROWSERS_PATH:-}" != */playwright-browsers ]]; then
+        echo "explicit Playwright browser toolchain path was not preserved" >&2
+        exit 35
+      fi
       if [[ "${PYTHONHASHSEED:-}" != "0" ]]; then
         echo "deterministic Python hash seed is not injected" >&2
         exit 34
@@ -137,6 +142,36 @@ set -e
 if [[ "${udp_status}" -eq 0 || "${udp_output}" != *"non-loopback network attempt"* ]]; then
   echo "unexpected non-loopback UDP attempt was not reported" >&2
   printf '%s\n' "${udp_output}" >&2
+  exit 1
+fi
+
+# UDP connect() only selects a route and sends no packet, so browser and PAC
+# source-address inspection remains usable. A subsequent connected send is
+# still external I/O and must fail loudly.
+if [[ "$(uname -s)" == "Linux" ]]; then
+  "${runner}" -- "${network_probe}" 192.0.2.1 udp-connect-only
+else
+  # The macOS process sandbox may reject even a route-only association. That is
+  # safe; unlike the interposer it cannot distinguish association from I/O.
+  set +e
+  "${runner}" -- "${network_probe}" 192.0.2.1 udp-connect-only >/dev/null 2>&1
+  route_probe_status=$?
+  set -e
+  if [[ "${route_probe_status}" -ne 0 && "${route_probe_status}" -ne 90 ]]; then
+    echo "unexpected macOS UDP route-probe result: ${route_probe_status}" >&2
+    exit 1
+  fi
+fi
+set +e
+connected_udp_output="$(
+  IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
+    "${runner}" -- "${network_probe}" 192.0.2.1 udp-connected 2>&1
+)"
+connected_udp_status=$?
+set -e
+if [[ "${connected_udp_status}" -eq 0 || "${connected_udp_output}" != *"non-loopback network attempt"* ]]; then
+  echo "unexpected connected non-loopback UDP send was not reported" >&2
+  printf '%s\n' "${connected_udp_output}" >&2
   exit 1
 fi
 

@@ -19,7 +19,10 @@ compile-only jobs.
 Install the CI-pinned toolchains first. In particular, build the Emulate
 revision pinned in `.github/workflows/reborn-e2e.yml`, set
 `IRONCLAW_EMULATE_CLI` to its built CLI, and install the E2E Python package and
-Chromium. Package installation is a build-tooling precondition. The canonical
+Chromium with `PLAYWRIGHT_BROWSERS_PATH` set to a dedicated temporary tooling
+directory. Keep that variable set when invoking the suite; CI caches, installs,
+and reads Chromium through the same explicit path instead of the isolated test
+home. Package installation is a build-tooling precondition. The canonical
 script performs `cargo fetch --locked` and installs the frontend's checked-in
 `packageManager` into an isolated temporary Corepack cache before entering a
 guarded Cargo stage. Cargo is then forced offline, and WebUI build scripts reuse
@@ -37,7 +40,11 @@ Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. That boundar
 - denies non-loopback IP connections while permitting Unix sockets and
   deliberate IPv4/IPv6 localhost fakes. The syscall interposer records denied
   attempts on Linux and ordinary macOS binaries; macOS additionally uses the
-  process sandbox so SIP-protected launchers remain fail-closed.
+  process sandbox so SIP-protected launchers remain fail-closed. On Linux,
+  route-only UDP association is permitted because it sends no packet; explicit
+  and connected UDP sends remain blocked. This lets Chromium inspect a
+  route/source address without weakening the egress boundary. The coarser macOS
+  process sandbox may reject the harmless association as well.
 
 Rust wall-clock and random behavior is not overridden through process-global
 environment variables. Time-sensitive domain tests use their owning typed

@@ -15,10 +15,15 @@
 
 #if !defined(__APPLE__)
 typedef int (*connect_fn)(int, const struct sockaddr *, socklen_t);
+typedef ssize_t (*send_fn)(int, const void *, size_t, int);
 typedef ssize_t (*sendmsg_fn)(int, const struct msghdr *, int);
 typedef ssize_t (*sendto_fn)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
 static connect_fn real_connect(void) {
     return (connect_fn)dlsym(RTLD_NEXT, "connect");
+}
+
+static send_fn real_send(void) {
+    return (send_fn)dlsym(RTLD_NEXT, "send");
 }
 
 static sendmsg_fn real_sendmsg(void) {
@@ -44,6 +49,34 @@ static int is_loopback(const struct sockaddr *address) {
     }
     /* Unix sockets and non-IP kernel transports are local by definition. */
     return 1;
+}
+
+static int socket_is_datagram(int socket_fd) {
+    int socket_type = 0;
+    socklen_t length = sizeof(socket_type);
+    int saved_errno = errno;
+    int status = getsockopt(socket_fd, SOL_SOCKET, SO_TYPE, &socket_type, &length);
+    errno = saved_errno;
+    return status == 0 && socket_type == SOCK_DGRAM;
+}
+
+static const struct sockaddr *non_loopback_destination(
+    int socket_fd,
+    const struct sockaddr *address,
+    struct sockaddr_storage *peer
+) {
+    if (address != NULL) {
+        return is_loopback(address) ? NULL : address;
+    }
+
+    socklen_t length = sizeof(*peer);
+    int saved_errno = errno;
+    int status = getpeername(socket_fd, (struct sockaddr *)peer, &length);
+    errno = saved_errno;
+    if (status == 0 && !is_loopback((const struct sockaddr *)peer)) {
+        return (const struct sockaddr *)peer;
+    }
+    return NULL;
 }
 
 static void write_violation(int fd, const char *message, size_t length) {
@@ -105,7 +138,11 @@ static int guarded_connect(
     const struct sockaddr *address,
     socklen_t address_length
 ) {
-    if (!is_loopback(address)) {
+    /*
+     * UDP connect() sends no packet; Chromium uses it to inspect route/source
+     * selection. Actual connected UDP writes are rejected by the send guards.
+     */
+    if (!is_loopback(address) && !socket_is_datagram(socket_fd)) {
         record_violation(address);
         errno = EPERM;
         return -1;
@@ -122,11 +159,40 @@ static int guarded_connect(
 #endif
 }
 
+static ssize_t guarded_send(
+    int socket_fd,
+    const void *buffer,
+    size_t length,
+    int flags
+) {
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked =
+        non_loopback_destination(socket_fd, NULL, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
+        errno = EPERM;
+        return -1;
+    }
+#if defined(__APPLE__)
+    return (ssize_t)syscall(SYS_sendto, socket_fd, buffer, length, flags, NULL, 0);
+#else
+    send_fn function = real_send();
+    if (function == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(socket_fd, buffer, length, flags);
+#endif
+}
+
 static ssize_t guarded_sendmsg(int socket_fd, const struct msghdr *message, int flags) {
     const struct sockaddr *address =
         message == NULL ? NULL : (const struct sockaddr *)message->msg_name;
-    if (!is_loopback(address)) {
-        record_violation(address);
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked =
+        non_loopback_destination(socket_fd, address, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
         errno = EPERM;
         return -1;
     }
@@ -150,8 +216,11 @@ static ssize_t guarded_sendto(
     const struct sockaddr *address,
     socklen_t address_length
 ) {
-    if (!is_loopback(address)) {
-        record_violation(address);
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked =
+        non_loopback_destination(socket_fd, address, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
         errno = EPERM;
         return -1;
     }
@@ -186,11 +255,16 @@ static ssize_t guarded_sendto(
     }
 
 DYLD_INTERPOSE(guarded_connect, connect);
+DYLD_INTERPOSE(guarded_send, send);
 DYLD_INTERPOSE(guarded_sendmsg, sendmsg);
 DYLD_INTERPOSE(guarded_sendto, sendto);
 #else
 int connect(int socket_fd, const struct sockaddr *address, socklen_t address_length) {
     return guarded_connect(socket_fd, address, address_length);
+}
+
+ssize_t send(int socket_fd, const void *buffer, size_t length, int flags) {
+    return guarded_send(socket_fd, buffer, length, flags);
 }
 
 ssize_t sendmsg(int socket_fd, const struct msghdr *message, int flags) {

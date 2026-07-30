@@ -12,7 +12,11 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    int use_udp = argc == 3 && strcmp(argv[2], "udp") == 0;
+    const char *mode = argc == 3 ? argv[2] : "tcp";
+    int use_udp =
+        strcmp(mode, "udp") == 0
+        || strcmp(mode, "udp-connected") == 0
+        || strcmp(mode, "udp-connect-only") == 0;
     int fd = socket(AF_INET, use_udp ? SOCK_DGRAM : SOCK_STREAM, 0);
     if (fd < 0) {
         return 3;
@@ -31,7 +35,7 @@ int main(int argc, char **argv) {
         return 4;
     }
     int network_status;
-    if (use_udp) {
+    if (strcmp(mode, "udp") == 0) {
         const char byte = 'x';
         network_status = (int)sendto(
             fd,
@@ -43,6 +47,10 @@ int main(int argc, char **argv) {
         );
     } else {
         network_status = connect(fd, (const struct sockaddr *)&address, sizeof(address));
+        if (network_status == 0 && strcmp(mode, "udp-connected") == 0) {
+            const char byte = 'x';
+            network_status = (int)send(fd, &byte, sizeof(byte), 0);
+        }
     }
     if (network_status < 0 && errno == EPERM) {
         fprintf(
