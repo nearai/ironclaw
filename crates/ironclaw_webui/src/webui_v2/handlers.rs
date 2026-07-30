@@ -1107,9 +1107,8 @@ pub async fn get_attachment(
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
-/// SSE polling cadence for `stream_events`. The service only exposes a
-/// drain-style read; once the backlog is flushed the handler waits this
-/// long before checking for newly arrived events.
+/// SSE polling cadence for product surfaces that expose only the legacy
+/// drain-style read. Subscription-capable surfaces bypass this fallback.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Upper bound for idle `stream_events` polling. A browser tab with no
@@ -1359,7 +1358,8 @@ fn build_sse_stream(
                     );
                     return;
                 }
-                Ok(Ok(response)) => {
+                Ok(Ok(mut response)) => {
+                    let subscription = response.subscription.take();
                     let events = match decode_product_outbound_events(response.events) {
                         Ok(events) => events,
                         Err(error) => {
@@ -1376,11 +1376,47 @@ fn build_sse_stream(
                             yield Ok(event);
                         }
                     }
+                    if let Some(subscription) = subscription {
+                        loop {
+                            let remaining =
+                                SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                            if remaining.is_zero() {
+                                return;
+                            }
+                            let next = tokio::select! {
+                                biased;
+                                _ = slot_guard.cancelled() => return,
+                                result = tokio::time::timeout(
+                                    remaining,
+                                    subscription.next(),
+                                ) => result,
+                            };
+                            let response = match next {
+                                Ok(Some(Ok(response))) => response,
+                                Ok(Some(Err(error))) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                                Ok(None) | Err(_) => return,
+                            };
+                            let events = match decode_product_outbound_events(response.events) {
+                                Ok(events) => events,
+                                Err(error) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                            };
+                            for envelope in events {
+                                if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+                    }
                     if had_events {
-                        // The production projection service waits on its live
-                        // subscription when no new item is replayable. Re-enter
-                        // it immediately after delivering a batch so assistant
-                        // text deltas are not delayed by the idle poll cadence.
+                        // Drain-only compatibility surfaces may have another
+                        // buffered batch ready. Re-enter immediately after
+                        // delivery before applying the idle poll cadence.
                         idle_polls = 0;
                         continue;
                     }

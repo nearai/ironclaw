@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::{
     ActivityId, AdapterInstallationId, AgentId, CapabilityId, ChannelInboundClassification,
@@ -176,6 +177,51 @@ pub struct ProductSurfaceStreamResponse {
     pub events: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// Optional continuation of this same logical stream.
+    ///
+    /// This handle is process-local transport state and is intentionally
+    /// omitted from the serialized response shape.
+    #[serde(skip)]
+    pub subscription: Option<ProductSurfaceEventSubscription>,
+}
+
+/// One continuous, caller-scoped product event subscription.
+///
+/// HTTP transports keep this receiver alive for the lifetime of the client
+/// connection. This avoids the event-loss window created by repeatedly
+/// tearing down and recreating one-event subscriptions.
+#[derive(Clone)]
+pub struct ProductSurfaceEventSubscription {
+    receiver:
+        Arc<AsyncMutex<mpsc::Receiver<Result<ProductSurfaceStreamResponse, ProductSurfaceError>>>>,
+}
+
+impl ProductSurfaceEventSubscription {
+    pub fn new(
+        receiver: mpsc::Receiver<Result<ProductSurfaceStreamResponse, ProductSurfaceError>>,
+    ) -> Self {
+        Self {
+            receiver: Arc::new(AsyncMutex::new(receiver)),
+        }
+    }
+
+    pub async fn next(&self) -> Option<Result<ProductSurfaceStreamResponse, ProductSurfaceError>> {
+        self.receiver.lock().await.recv().await
+    }
+}
+
+impl std::fmt::Debug for ProductSurfaceEventSubscription {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProductSurfaceEventSubscription")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ProductSurfaceEventSubscription {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.receiver, &other.receiver)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

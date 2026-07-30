@@ -1689,3 +1689,26 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         "provider id must not appear in Debug output; got: {debug_with_requirement}"
     );
 }
+
+#[test]
+fn product_stream_continuation_is_process_local_not_wire_state() {
+    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let response = ProductSurfaceStreamResponse {
+        events: vec![json!({"kind": "projection_update"})],
+        next_cursor: Some("cursor-1".to_string()),
+        subscription: Some(ProductSurfaceEventSubscription::new(receiver)),
+    };
+
+    let encoded = serde_json::to_value(response).expect("stream response serializes");
+    assert_eq!(
+        encoded,
+        json!({
+            "events": [{"kind": "projection_update"}],
+            "next_cursor": "cursor-1"
+        }),
+        "the in-process continuation handle must never cross the wire"
+    );
+    let decoded: ProductSurfaceStreamResponse =
+        serde_json::from_value(encoded).expect("wire response deserializes");
+    assert!(decoded.subscription.is_none());
+}

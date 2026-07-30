@@ -49,7 +49,7 @@ use ironclaw_turns::{
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
 
@@ -549,6 +549,7 @@ const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+const PRODUCT_STREAM_ACCESS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(1);
 
 fn command_result_field(label: &str, value: impl Into<String>) -> CommandResultField {
     CommandResultField {
@@ -4368,10 +4369,10 @@ where
     ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let actor = caller.actor();
-        // Ownership probe: the SSE handler calls stream_events once per poll,
-        // so the cheap read_thread probe is used rather than loading the full
-        // transcript. Without it a caller sharing (tenant, agent, project)
-        // could read another user's projection feed by guessing thread_id.
+        // Ownership probe: use the cheap read_thread probe rather than loading
+        // the full transcript. Without it a caller sharing (tenant, agent,
+        // project) could read another user's projection feed by guessing
+        // thread_id.
         // The automation fallback allows the owner of an automation to stream
         // events for a trigger-fired thread (which is stored under the trigger
         // creator). The returned scope may contain an explicit owner for
@@ -4405,26 +4406,10 @@ where
             scope: access.scope,
             after_cursor: request.after_cursor,
         };
-        // The runtime projection stream's subscription path waits until it has
-        // a real outbound payload. Its one-shot drain can return an empty batch
-        // after consuming only the replay cursor, which makes SSE fall back to
-        // its idle poll sleep while live text accumulates in the replay window.
-        let events = if event_stream.supports_subscription() {
-            let mut subscription = event_stream
-                .subscribe(subscription_request)
-                .await
-                .map_err(map_projection_error)?;
-            match subscription.next().await {
-                Some(Ok(event)) => vec![event],
-                Some(Err(error)) => return Err(map_projection_error(error)),
-                None => Vec::new(),
-            }
-        } else {
-            event_stream
-                .drain(subscription_request)
-                .await
-                .map_err(map_projection_error)?
-        };
+        let events = event_stream
+            .drain(subscription_request)
+            .await
+            .map_err(map_projection_error)?;
         Ok(RebornStreamEventsResponse { events })
     }
 
@@ -4870,46 +4855,189 @@ where
         ironclaw_host_api::ProductSurfaceStreamResponse,
         ironclaw_host_api::ProductSurfaceError,
     > {
-        let thread_id = request.stream_id.ok_or_else(|| {
-            ironclaw_host_api::ProductSurfaceError::from_status(
-                ironclaw_host_api::ProductSurfaceErrorCode::InvalidRequest,
-                400,
-                false,
-            )
-        })?;
-        let after_cursor = match request.after_cursor {
-            Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
-                ironclaw_host_api::ProductSurfaceError::from_status(
-                    ironclaw_host_api::ProductSurfaceErrorCode::InvalidRequest,
-                    400,
-                    false,
-                )
-            })?),
-            None => None,
-        };
-        let response = RebornServices::stream_events(
-            self,
-            caller,
-            RebornStreamEventsRequest {
-                thread_id,
-                after_cursor,
-            },
+        let request = decode_product_surface_stream_request(request)?;
+        if self
+            .event_stream
+            .as_ref()
+            .is_some_and(|event_stream| event_stream.supports_subscription())
+        {
+            let subscription =
+                open_product_surface_event_subscription(self, caller, request).await?;
+            return match subscription.next().await {
+                Some(Ok(mut response)) => {
+                    response.subscription = Some(subscription);
+                    Ok(response)
+                }
+                Some(Err(error)) => Err(error),
+                None => Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+                    events: Vec::new(),
+                    next_cursor: None,
+                    subscription: None,
+                }),
+            };
+        }
+        let response = RebornServices::stream_events(self, caller, request).await?;
+        encode_product_surface_stream_response(response)
+    }
+}
+
+async fn open_product_surface_event_subscription<I, V>(
+    services: &RebornServices<I, V>,
+    caller: ProductSurfaceCaller,
+    request: RebornStreamEventsRequest,
+) -> Result<ironclaw_host_api::ProductSurfaceEventSubscription, ProductSurfaceError>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+    let actor = caller.actor();
+    let access = services
+        .resolve_thread_access_for_caller(
+            caller.clone(),
+            caller.turn_scope(thread_id.clone()),
+            &actor,
         )
         .await?;
-        let events = response
-            .events
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                tracing::error!(%error, "failed to encode product surface stream response");
-                ironclaw_host_api::ProductSurfaceError::internal()
-            })?;
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-        })
+    let Some(event_stream) = &services.event_stream else {
+        return Err(ProductSurfaceError::from_status_kind(
+            ProductSurfaceErrorCode::Unavailable,
+            ProductSurfaceErrorKind::ReplayUnavailable,
+            503,
+            false,
+        ));
+    };
+    if !event_stream.supports_subscription() {
+        return Err(ProductSurfaceError::service_unavailable(false));
     }
+
+    let subscribed_actor = access.run_actor.clone();
+    let subscribed_scope = access.scope.clone();
+    let mut subscription = event_stream
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: access.run_actor,
+            scope: access.scope,
+            after_cursor: request.after_cursor,
+        })
+        .await
+        .map_err(map_projection_error)?;
+    // A single-slot handoff applies backpressure without creating another
+    // burst queue. The underlying projection subscription remains alive
+    // continuously, so live milestones cannot fall between resubscriptions.
+    let (sender, receiver) = mpsc::channel(1);
+    let (access_error_sender, mut access_error_receiver) = mpsc::channel(1);
+    let services = services.clone();
+    let access_caller = caller.clone();
+    let access_thread_id = thread_id.clone();
+    let access_actor = actor.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(PRODUCT_STREAM_ACCESS_REVALIDATION_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The subscription-open probe is the initial validation. The first
+        // periodic probe should run one interval later, not immediately.
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = access_error_sender.closed() => return,
+                _ = interval.tick() => {}
+            }
+            let revalidated = services
+                .resolve_thread_access_for_caller(
+                    access_caller.clone(),
+                    access_caller.turn_scope(access_thread_id.clone()),
+                    &access_actor,
+                )
+                .await;
+            let error = match revalidated {
+                Ok(access)
+                    if access.run_actor == subscribed_actor && access.scope == subscribed_scope =>
+                {
+                    continue;
+                }
+                Ok(_) => ProductSurfaceError::not_found(),
+                Err(error) => error,
+            };
+            let _ = access_error_sender.send(error).await;
+            return;
+        }
+    });
+    tokio::spawn(async move {
+        loop {
+            // Reserve the one output slot before reading another source
+            // event. A slow browser therefore backpressures this bridge
+            // instead of accumulating another burst queue.
+            let permit = tokio::select! {
+                _ = sender.closed() => return,
+                permit = sender.reserve() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+            };
+            let item = tokio::select! {
+                biased;
+                _ = sender.closed() => return,
+                error = access_error_receiver.recv() => {
+                    permit.send(Err(error.unwrap_or_else(ProductSurfaceError::internal)));
+                    return;
+                }
+                item = subscription.next() => item,
+            };
+            let Some(item) = item else {
+                return;
+            };
+            let response = match item {
+                Ok(event) => encode_product_surface_stream_response(RebornStreamEventsResponse {
+                    events: vec![event],
+                }),
+                Err(error) => Err(map_projection_error(error)),
+            };
+            let stop = response.is_err();
+            permit.send(response);
+            if stop {
+                return;
+            }
+        }
+    });
+    Ok(ironclaw_host_api::ProductSurfaceEventSubscription::new(
+        receiver,
+    ))
+}
+
+fn decode_product_surface_stream_request(
+    request: ironclaw_host_api::ProductSurfaceStreamRequest,
+) -> Result<RebornStreamEventsRequest, ProductSurfaceError> {
+    let thread_id = request.stream_id.ok_or_else(|| {
+        ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+    })?;
+    let after_cursor = match request.after_cursor {
+        Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        })?),
+        None => None,
+    };
+    Ok(RebornStreamEventsRequest {
+        thread_id,
+        after_cursor,
+    })
+}
+
+fn encode_product_surface_stream_response(
+    response: RebornStreamEventsResponse,
+) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+    let events = response
+        .events
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            tracing::error!(%error, "failed to encode product surface stream response");
+            ProductSurfaceError::internal()
+        })?;
+    Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+        events,
+        next_cursor: None,
+        subscription: None,
+    })
 }
 
 impl<I, V> RebornServices<I, V>

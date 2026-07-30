@@ -152,6 +152,13 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   frame immediately after admission. Browser connection state uses that frame
   as proof that the projection tail is ready instead of waiting for a model
   delta or the periodic transport keep-alive.
+- Subscription-capable product surfaces keep one projection subscription alive
+  for the entire SSE connection. Do not rebuild a one-event subscription after
+  each frame: model/tool milestones emitted between teardown and resubscribe
+  are not guaranteed to remain in the compacted live state. The product bridge
+  revalidates thread visibility on an independent bounded cadence so storage
+  I/O never gates individual text frames; drain/poll remains only for
+  compatibility surfaces without subscriptions.
 - Live assistant text is cumulative within one model call and keyed by both
   turn run and model-call phase. A later model call therefore starts a new
   assistant item instead of replacing an earlier utterance from the same run.
@@ -171,9 +178,9 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   compacted current live state; it does not persist process-local live cursors
   across SPA navigation.
 - Every stream is closed after a max lifetime (5 min) and every `socket.send` /
-  drain await is `timeout`-bounded, so a back-pressuring client or a stalled
-  facade cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released
-  on disconnect / expiry / error. Regressions locked by
+  subscription/drain await is `timeout`-bounded, so a back-pressuring client or
+  a stalled facade cannot pin a slot past the budget. Slots are RAII
+  (`SseSlot`), released on disconnect / expiry / error. Regressions locked by
   `stream_events_ws_shares_capacity_with_sse_streams` and
   `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
 - `capability_activity` / `capability_display_preview` frames carry only

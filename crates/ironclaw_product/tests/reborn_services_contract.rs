@@ -35,7 +35,7 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{
     CapabilitySurfaceKind, InstallationState, LifecyclePublicState, ProductSurface,
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceInvokeRequest, ProductSurfaceValidationCode,
+    ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest, ProductSurfaceValidationCode,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -1764,6 +1764,52 @@ impl ProjectionStream for SubscribingProjectionStream {
             .send(Ok(self.event.clone()))
             .await
             .expect("test subscription receiver remains open");
+        Ok(ProjectionStreamSubscription::new(receiver))
+    }
+}
+
+struct ControlledSubscribingProjectionStream {
+    receiver: Mutex<Option<mpsc::Receiver<Result<ProductOutboundEnvelope, ProductAdapterError>>>>,
+}
+
+impl ControlledSubscribingProjectionStream {
+    fn new() -> (
+        Self,
+        mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(2);
+        (
+            Self {
+                receiver: Mutex::new(Some(receiver)),
+            },
+            sender,
+        )
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for ControlledSubscribingProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
+    async fn subscribe(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
+        let receiver = self
+            .receiver
+            .lock()
+            .expect("lock")
+            .take()
+            .expect("controlled stream subscribes once");
         Ok(ProjectionStreamSubscription::new(receiver))
     }
 }
@@ -3706,7 +3752,7 @@ async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated
 }
 
 #[tokio::test]
-async fn stream_events_waits_on_supported_subscription_instead_of_polling_drain() {
+async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
     let web_caller = caller();
     let expected = keep_alive_outbound("cursor-live");
     let event_stream = Arc::new(SubscribingProjectionStream::new(expected.clone()));
@@ -3717,7 +3763,33 @@ async fn stream_events_waits_on_supported_subscription_instead_of_polling_drain(
     .with_event_stream(event_stream.clone());
     create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
 
-    let response = services
+    let mut response = ProductSurface::stream_events(
+        &services,
+        web_caller.clone(),
+        ProductSurfaceStreamRequest {
+            stream_id: Some("thread-alpha".to_string()),
+            after_cursor: None,
+        },
+    )
+    .await
+    .expect("subscription opens");
+    let subscription = response
+        .subscription
+        .take()
+        .expect("stream response carries its live continuation");
+
+    assert_eq!(
+        response.events,
+        vec![serde_json::to_value(expected).expect("outbound event encodes")]
+    );
+    assert_eq!(event_stream.subscription_count(), 1);
+    assert_eq!(
+        event_stream.drain_count(),
+        0,
+        "a supported live subscription must not fall back to an empty poll"
+    );
+    drop(subscription);
+    let drained = services
         .stream_events(
             web_caller,
             RebornStreamEventsRequest {
@@ -3726,15 +3798,67 @@ async fn stream_events_waits_on_supported_subscription_instead_of_polling_drain(
             },
         )
         .await
-        .expect("subscription event is returned");
+        .expect("one-shot compatibility path drains");
 
-    assert_eq!(response.events, vec![expected]);
+    assert!(drained.events.is_empty());
     assert_eq!(event_stream.subscription_count(), 1);
     assert_eq!(
         event_stream.drain_count(),
-        0,
-        "a supported live subscription must not fall back to an empty poll"
+        1,
+        "the compatibility method retains its one-shot drain contract"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn product_surface_subscription_revalidates_visibility_without_blocking_events() {
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-subscription-revalidation",
+    )
+    .await;
+    let automation_service = Arc::new(RevocableAutomationService::new(
+        trigger_thread_id.clone(),
+        &caller,
+    ));
+    let (event_stream, sender) = ControlledSubscribingProjectionStream::new();
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_service(automation_service.clone())
+        .with_event_stream(Arc::new(event_stream));
+
+    sender
+        .send(Ok(keep_alive_outbound("cursor-before-revocation")))
+        .await
+        .expect("subscription receiver remains open");
+    let mut response = ProductSurface::stream_events(
+        &services,
+        caller,
+        ProductSurfaceStreamRequest {
+            stream_id: Some(trigger_thread_id.to_string()),
+            after_cursor: None,
+        },
+    )
+    .await
+    .expect("visible automation thread subscribes");
+    assert_eq!(response.events.len(), 1, "first event is authorized");
+    let subscription = response
+        .subscription
+        .take()
+        .expect("stream response carries its live continuation");
+
+    tokio::task::yield_now().await;
+    automation_service.revoke();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let error = subscription
+        .next()
+        .await
+        .expect("revocation is surfaced")
+        .expect_err("revoked visibility must stop the subscription");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
 }
 
 #[tokio::test]
