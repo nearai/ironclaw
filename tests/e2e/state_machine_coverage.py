@@ -18,9 +18,13 @@ from journey_types import (
     ObservableAssertion,
     PytestEvidence,
 )
-from provider_fault_cases import PROVIDER_FAULT_CASES, ProviderFaultOutcome
+from provider_fault_cases import (
+    PROVIDER_FAULT_CASES,
+    ProviderFaultCase,
+    ProviderFaultOutcome,
+)
 from provider_operation_cases import PROVIDER_OPERATION_CASES
-from provider_operation_types import OutcomeClass
+from provider_operation_types import OutcomeClass, ProviderOperationCase
 
 
 class AuthState(StrEnum):
@@ -60,7 +64,6 @@ class LifecycleState(StrEnum):
     BLOCKED_AUTH = "blocked_auth"
     BLOCKED_APPROVAL = "blocked_approval"
     COMPLETED = "completed"
-    DENIED = "denied"
     CANCELLED = "cancelled"
     FAILED = "failed"
 
@@ -102,7 +105,12 @@ class StateMachineCoverageCase:
     evidence: Evidence
 
 
-def _cargo(source: str, test: str, target: str, manifest: str | None = None):
+def _cargo(
+    source: str,
+    test: str,
+    target: str,
+    manifest: str | None = None,
+) -> CargoEvidence:
     return CargoEvidence(
         source=source,
         test=test,
@@ -111,12 +119,12 @@ def _cargo(source: str, test: str, target: str, manifest: str | None = None):
     )
 
 
-def _operation(case_id: str):
+def _operation(case_id: str) -> ProviderOperationCase:
     """Select a typed provider operation; fail at import if it disappears."""
     return next(case for case in PROVIDER_OPERATION_CASES if case.case_id == case_id)
 
 
-def _fault(case_id: str):
+def _fault(case_id: str) -> ProviderFaultCase:
     """Select a typed provider fault; fail at import if it disappears."""
     return next(case for case in PROVIDER_FAULT_CASES if case.case_id == case_id)
 
@@ -180,6 +188,11 @@ def _provider_case(
     operation_class: OperationClass,
 ) -> StateMachineCoverageCase:
     operation = _operation(case_id)
+    invariants = (
+        ()
+        if operation_class is OperationClass.READ
+        else (StateMachineInvariant.AT_MOST_ONCE_EFFECT,)
+    )
     return StateMachineCoverageCase(
         case_id=f"provider_{case_id}",
         ingress=JourneyIngress.WEBUI,
@@ -190,7 +203,7 @@ def _provider_case(
         lifecycle_state=LifecycleState.COMPLETED,
         delivery_target=JourneyDeliveryTarget.WEBUI,
         sequences=(),
-        invariants=(StateMachineInvariant.AT_MOST_ONCE_EFFECT,),
+        invariants=invariants,
         evidence=_PROVIDER_PYTEST,
     )
 
@@ -274,13 +287,13 @@ STATE_MACHINE_COVERAGE_CASES = (
         evidence=_GENERATED_GATE_EVIDENCE,
     ),
     StateMachineCoverageCase(
-        case_id="approval_denial_is_terminal",
+        case_id="approval_denial_completes_without_effect",
         ingress=JourneyIngress.WEBUI,
         auth_state=AuthState.AUTHENTICATED,
         policy_state=PolicyState.DENIED,
         operation_class=OperationClass.IDEMPOTENT_WRITE,
         provider_outcome="unchanged",
-        lifecycle_state=LifecycleState.DENIED,
+        lifecycle_state=LifecycleState.COMPLETED,
         delivery_target=JourneyDeliveryTarget.WEBUI,
         sequences=(SequenceClass.DUPLICATE,),
         invariants=(
@@ -418,7 +431,7 @@ REQUIRED_EQUIVALENCE_PAIRS = frozenset(
             "lifecycle_state",
             "blocked_approval",
         ),
-        ("policy_state", "denied", "lifecycle_state", "denied"),
+        ("policy_state", "denied", "lifecycle_state", "completed"),
         ("delivery_target", "webui", "lifecycle_state", "completed"),
     }
 )

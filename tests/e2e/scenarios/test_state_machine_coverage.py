@@ -63,6 +63,41 @@ def test_journey_projection_derives_lifecycle_claims_from_declared_assertions():
     assert trigger.invariants == (StateMachineInvariant.AT_MOST_ONCE_EFFECT,)
 
 
+def test_provider_effect_invariants_follow_operation_class():
+    reads = tuple(
+        case
+        for case in STATE_MACHINE_COVERAGE_CASES
+        if case.case_id
+        in {"provider_github_get_issue", "provider_google_sheets_read_values_empty"}
+    )
+    assert reads
+    assert all(
+        StateMachineInvariant.AT_MOST_ONCE_EFFECT not in case.invariants
+        for case in reads
+    )
+
+    writes = tuple(
+        case
+        for case in STATE_MACHINE_COVERAGE_CASES
+        if case.case_id
+        in {"provider_github_update_issue", "provider_github_create_issue"}
+    )
+    assert writes
+    assert all(
+        StateMachineInvariant.AT_MOST_ONCE_EFFECT in case.invariants for case in writes
+    )
+
+
+def test_approval_denial_uses_the_lifecycle_its_evidence_observes():
+    denial = next(
+        case
+        for case in STATE_MACHINE_COVERAGE_CASES
+        if case.case_id == "approval_denial_completes_without_effect"
+    )
+    assert denial.policy_state.value == "denied"
+    assert denial.lifecycle_state.value == "completed"
+
+
 def test_journey_projection_rejects_a_missing_supported_ingress():
     """Sabotage the generated journey projection, not a hand-built fixture."""
     sabotaged = tuple(

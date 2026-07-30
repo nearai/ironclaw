@@ -230,6 +230,13 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
     // Asserting `is_terminal()` here would be tautological: `wait_for_terminal`
     // only returns on a terminal status.
     observed.record(final_state.status, sequence, sequence.len());
+    if sequence == [GateAction::Deny] {
+        assert_eq!(
+            final_state.status,
+            TurnStatus::Completed,
+            "a denied capability outcome is model-visible; the conversation should complete"
+        );
+    }
     h.assert_no_orphan_runs_or_reservations(&[run_id])
         .await
         .unwrap_or_else(|err| {
