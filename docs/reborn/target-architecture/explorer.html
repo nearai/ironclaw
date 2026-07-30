@@ -60,11 +60,8 @@
   .tag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .tag.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent)}
   .tag .nb{font-size:.58rem;letter-spacing:.08em;color:var(--sub);border:1px solid var(--sub);border-radius:4px;padding:0 4px;font-weight:700}
-  .tgroup{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;border:1px dashed var(--line-strong);border-radius:9px;padding:8px 12px;margin-top:2px}
-  .tg-label{font-family:var(--mono);font-size:.74rem;font-weight:700;color:var(--sub)}
-  .tg-tags{display:flex;flex-wrap:wrap;gap:6px;flex:1}
-  .tg-hint{font-family:var(--mono);font-size:.62rem;color:var(--ink-faint);white-space:nowrap}
-  .tag.data{border-style:dashed;color:var(--ink-soft)}
+  .tgrow{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:4px}
+  .tg-label{font-family:var(--mono);font-size:.76rem;color:var(--ink-faint);margin-right:4px;user-select:none}
   .karrow{align-self:center;color:var(--accent-line);font-family:var(--mono);font-size:.72rem;user-select:none}
   .fam.k{margin:0 -22px;padding-left:19px;padding-right:22px;border-left:3px solid var(--accent);background:linear-gradient(90deg,color-mix(in srgb,var(--accent-soft) 45%,transparent),transparent 72%)}
   .fam.k .fam-hd h3{color:var(--accent)}
@@ -324,7 +321,7 @@ $("diagram").innerHTML =
     };
     const plain = L.nodes.filter(n => !n.pkg).map(tagOf).join("");
     const pkgs = L.nodes.filter(n => n.pkg).map(tagOf).join("");
-    const group = pkgs ? `<div class="tgroup"><span class="tg-label">packages/</span><div class="tg-tags">${pkgs}</div><span class="tg-hint">one dir per extension · dashed = data-only</span></div>` : "";
+    const group = pkgs ? `<div class="tgrow"><span class="tg-label">└ packages/</span>${pkgs}</div>` : "";
     const flag = L.variant === "untrusted" ? `<span class="uflag">untrusted</span>` : "";
     const name = esc(L.name).replace(/\/$/, '<span>/</span>');
     return `<div class="fam"><div class="fam-hd"><h3>${name}${flag}</h3><p>${esc(L.role || "")}</p></div><div class="fam-tags">${plain}${group}</div></div>`;
