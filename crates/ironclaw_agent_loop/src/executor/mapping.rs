@@ -268,7 +268,7 @@ pub(super) fn transcript_host_error(error: AgentLoopHostError) -> AgentLoopExecu
                 "transcript host error summary rejected; using fallback"
             );
             (
-                LoopSafeSummary::model_gateway_failed(),
+                LoopSafeSummary::assistant_transcript_write_failed(),
                 Some(sanitize_model_visible_text(raw_summary)),
             )
         }
@@ -673,6 +673,28 @@ mod tests {
                 reason_kind: None,
                 detail: Some("expected tenant scope".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn invalid_transcript_stage_summary_uses_transcript_specific_fallback() {
+        let mapped = transcript_host_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "invalid\0summary",
+        ));
+
+        let AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage,
+            safe_summary,
+            ..
+        } = mapped
+        else {
+            panic!("transcript host error must retain diagnostic structure");
+        };
+        assert_eq!(stage, HostStage::Transcript);
+        assert_eq!(
+            safe_summary,
+            LoopSafeSummary::assistant_transcript_write_failed()
         );
     }
 }
