@@ -1,4 +1,5 @@
 //! Slack Events API payload normalization.
+// arch-exempt: large_file, split into Events-API vs slash-form parsing vs shared normalization modules, plan #6894
 //!
 //! Inputs are raw Slack webhook event bytes. Event callbacks become
 //! [`ParsedProductInbound`] values; URL-verification payloads are exposed for

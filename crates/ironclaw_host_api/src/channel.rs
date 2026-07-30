@@ -412,8 +412,9 @@ pub struct ChannelPresentation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_chars: Option<u32>,
     /// Optional per-command display prefix a channel adapter renders before
-    /// each declared command name in user-visible help text (e.g. a Slack
-    /// dispatcher's `"/ironclaw "` + `model` -> `/ironclaw model`). `None`
+    /// each declared command name in user-visible help text (e.g. a channel
+    /// whose native command namespace requires an app-scoped dispatcher
+    /// prefix: `"/ironclaw "` + `model` -> `/ironclaw model`). `None`
     /// renders the bare `/{name}` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,

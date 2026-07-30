@@ -142,7 +142,8 @@ where
 /// Same rendering as [`declared_command_help_text`], but renders each name
 /// as `{prefix}{name}` instead of the bare `/{name}` form when `prefix` is
 /// set — the manifest-declared `[channel.presentation].command_prefix` a
-/// channel adapter (e.g. Slack's native `/ironclaw` dispatcher) uses to
+/// channel adapter whose native command namespace requires an app-scoped
+/// dispatcher prefix (e.g. a `/ironclaw` slash dispatcher) uses to
 /// namespace its commands. `prefix` is rendered exactly as declared,
 /// including any trailing separator (a manifest `command_prefix` of
 /// `"/ironclaw "` plus `model` yields `/ironclaw model`).

@@ -197,8 +197,8 @@ impl RunDeliveryObserver {
     }
 
     /// `prefix` is the channel's manifest-declared
-    /// `[channel.presentation].command_prefix` (e.g. Slack's `"/ironclaw "`);
-    /// `None` renders the bare `/{name}` form.
+    /// `[channel.presentation].command_prefix` (e.g. an app-scoped
+    /// dispatcher's `"/ironclaw "`); `None` renders the bare `/{name}` form.
     pub fn with_enabled_commands<I, S>(mut self, commands: I, prefix: Option<&str>) -> Self
     where
         I: IntoIterator<Item = S>,
