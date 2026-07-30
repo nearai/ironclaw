@@ -25,8 +25,12 @@ prepare_rust_dependencies() {
   # Dependency acquisition is setup, not test behavior. Fetch once before the
   # hermetic process switches Cargo into offline mode. Rust builds can invoke
   # the WebUI build script, so prepare its pinned package manager too.
-  cargo fetch --locked
+  prepare_command_dependencies
   prepare_frontend_dependencies
+}
+
+prepare_command_dependencies() {
+  cargo fetch --locked
 }
 
 run_root_partitions() {
@@ -198,6 +202,9 @@ case "${stage}" in
   python-e2e)
     run_python_e2e
     ;;
+  prepare-command)
+    prepare_command_dependencies
+    ;;
   all)
     "${repo_root}/scripts/ci/test-hermetic-test-process.sh"
     prepare_rust_dependencies
@@ -220,12 +227,19 @@ case "${stage}" in
       echo "command stage requires a command" >&2
       exit 2
     fi
-    prepare_rust_dependencies
+    case "${IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE:-0}" in
+      0) prepare_rust_dependencies ;;
+      1) ;;
+      *)
+        echo "IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE must be 0 or 1" >&2
+        exit 2
+        ;;
+    esac
     run "$@"
     ;;
   *)
     echo "unknown hermetic deterministic-suite stage: ${stage}" >&2
-    echo "expected: all, self-test, crates, root, groups, integration, qa, rust-e2e, frontend, python-e2e, command" >&2
+    echo "expected: all, self-test, crates, root, groups, integration, qa, rust-e2e, frontend, python-e2e, prepare-command, command" >&2
     exit 2
     ;;
 esac

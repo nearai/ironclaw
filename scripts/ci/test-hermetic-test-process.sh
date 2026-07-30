@@ -101,6 +101,19 @@ if [[ "${parallel_root_count}" != "4" ]]; then
   exit 1
 fi
 
+no_prepare_bin="${probe_dir}/no-prepare-bin"
+mkdir -p "${no_prepare_bin}"
+cat > "${no_prepare_bin}/cargo" <<'SH'
+#!/usr/bin/env bash
+echo "command stage unexpectedly repeated dependency preparation" >&2
+exit 97
+SH
+chmod +x "${no_prepare_bin}/cargo"
+PATH="${no_prepare_bin}:${PATH}" \
+  IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
+  "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh" \
+  command bash -c 'test -n "${IRONCLAW_HERMETIC_ROOT:-}"'
+
 set +e
 network_output="$(
   IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
@@ -205,16 +218,22 @@ sys.path.insert(0, sys.argv[1])
 from hermetic_process import forward_hermetic_process_env
 
 source = {
+    "IRONCLAW_HERMETIC_NETWORK_GUARD_LIBRARY": "/tmp/guard.so",
     "IRONCLAW_HERMETIC_NETWORK_VIOLATIONS": "/tmp/violations",
-    "LD_PRELOAD": "/tmp/guard.so",
+    "LD_PRELOAD": "/tmp/existing.so",
+    "DYLD_INSERT_LIBRARIES": "/tmp/existing.dylib",
     "ANTHROPIC_API_KEY": "must-not-forward",
 }
 child = {}
 forward_hermetic_process_env(child, source)
-assert child == {
-    "IRONCLAW_HERMETIC_NETWORK_VIOLATIONS": "/tmp/violations",
-    "LD_PRELOAD": "/tmp/guard.so",
-}
+assert child["IRONCLAW_HERMETIC_NETWORK_VIOLATIONS"] == "/tmp/violations"
+if sys.platform == "darwin":
+    assert child["DYLD_INSERT_LIBRARIES"] == "/tmp/guard.so:/tmp/existing.dylib"
+    assert child["LD_PRELOAD"] == "/tmp/existing.so"
+    assert child["DYLD_FORCE_FLAT_NAMESPACE"] == "1"
+elif sys.platform.startswith("linux"):
+    assert child["LD_PRELOAD"] == "/tmp/guard.so:/tmp/existing.so"
+    assert child["DYLD_INSERT_LIBRARIES"] == "/tmp/existing.dylib"
 PY
 
 set +e
@@ -242,7 +261,10 @@ fi
 for workflow_contract in \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh groups" \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh command" \
+  ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh prepare-command" \
+  ".github/workflows/reborn-tests.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1" \
   ".github/workflows/reborn-e2e.yml:scripts/ci/run-hermetic-deterministic-suite.sh" \
+  ".github/workflows/reborn-e2e.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE" \
   ".github/workflows/code_style.yml:scripts/ci/test-hermetic-test-process.sh"
 do
   workflow="${workflow_contract%%:*}"
@@ -254,6 +276,7 @@ do
 done
 
 for stage_call in \
+  "prepare_command_dependencies" \
   "run_crate_tests" \
   "run_root_partitions" \
   "run_integration_tier" \

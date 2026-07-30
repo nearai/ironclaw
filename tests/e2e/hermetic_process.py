@@ -30,7 +30,18 @@ def forward_hermetic_process_env(
     if guard_library is None:
         return
     if sys.platform == "darwin":
-        env.setdefault("DYLD_INSERT_LIBRARIES", guard_library)
+        _prepend_preload(env, "DYLD_INSERT_LIBRARIES", guard_library)
         env.setdefault("DYLD_FORCE_FLAT_NAMESPACE", "1")
     elif sys.platform.startswith("linux"):
-        env.setdefault("LD_PRELOAD", guard_library)
+        _prepend_preload(env, "LD_PRELOAD", guard_library)
+
+
+def _prepend_preload(
+    env: MutableMapping[str, str],
+    key: str,
+    guard_library: str,
+) -> None:
+    libraries = [value for value in env.get(key, "").split(":") if value]
+    if guard_library not in libraries:
+        libraries.insert(0, guard_library)
+    env[key] = ":".join(libraries)

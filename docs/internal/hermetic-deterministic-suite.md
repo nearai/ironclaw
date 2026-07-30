@@ -60,6 +60,16 @@ scripts/ci/run-hermetic-deterministic-suite.sh rust-e2e substrates
 scripts/ci/run-hermetic-deterministic-suite.sh command cargo test -p ironclaw_network
 ```
 
+`command` prepares locked Rust and WebUI dependencies by default for a
+standalone local invocation. CI loops that already installed any required
+WebUI dependencies prepare Cargo once, then skip repeated setup:
+
+```bash
+scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
+export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
+scripts/ci/run-hermetic-deterministic-suite.sh command cargo test -p ironclaw_network
+```
+
 The guard is mutation-tested by:
 
 ```bash
