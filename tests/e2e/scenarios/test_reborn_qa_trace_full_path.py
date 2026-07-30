@@ -8,6 +8,7 @@ the recorded model's final wording.
 
 import asyncio
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse
@@ -164,22 +165,73 @@ async def reborn_qa_emulate_provider_server(
 ):
     """Reset mutated providers while reusing the built binary and Reborn."""
     services = {str(world) for world in journey_case.mutable_provider_worlds}
-    reset_services = services - {"slack"}
     try:
         yield reborn_qa_emulate_runtime
     finally:
+        await _cleanup_provider_journey_world(
+            reborn_qa_emulate_runtime,
+            resettable_emulate_provider_world,
+            journey_case,
+            services,
+        )
+
+
+async def _cleanup_provider_journey_world(
+    runtime,
+    resettable_provider_world,
+    journey_case,
+    services: set[str],
+) -> None:
+    reset_services = services - {"slack"}
+    try:
         if "slack" in services:
             compiled = _compile_journey_case(
                 journey_case,
-                reborn_qa_emulate_runtime["slack_state"],
+                runtime["slack_state"],
             )
             await cleanup_slack_provider_mutations(
-                reborn_qa_emulate_runtime["emulate_slack_url"],
-                reborn_qa_emulate_runtime["slack_state"],
+                runtime["emulate_slack_url"],
+                runtime["slack_state"],
                 recorded_provider_calls(compiled.trace, PROVIDER_TOOL_NAMES),
             )
+    finally:
         if reset_services:
-            await resettable_emulate_provider_world.reset(reset_services)
+            await resettable_provider_world.reset(reset_services)
+
+
+async def test_provider_journey_cleanup_resets_world_when_trace_compile_fails(
+    monkeypatch,
+):
+    class RecordingResettableWorld:
+        def __init__(self):
+            self.calls = []
+
+        async def reset(self, services):
+            self.calls.append(services)
+
+    resettable_world = RecordingResettableWorld()
+
+    def fail_compile(*_args, **_kwargs):
+        raise AssertionError("synthetic compile failure")
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_compile_journey_case",
+        fail_compile,
+    )
+
+    with pytest.raises(AssertionError, match="synthetic compile failure"):
+        await _cleanup_provider_journey_world(
+            {
+                "emulate_slack_url": "http://slack.invalid",
+                "slack_state": {},
+            },
+            resettable_world,
+            object(),
+            {"google", "slack"},
+        )
+
+    assert resettable_world.calls == [{"google"}]
 
 
 @pytest.fixture

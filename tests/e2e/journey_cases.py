@@ -14,6 +14,7 @@ from journey_types import (
     JourneyDeliveryTarget,
     JourneyExecution,
     JourneyIngress,
+    LiveEvidence,
     ObservableAssertion,
     ProductJourneyCase,
     ProviderJourneyCase,
@@ -204,6 +205,12 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                     case_id, ProviderJourneyReplayFacts()
                 ),
                 repeat_after_reset=case_id in _REPEAT_AFTER_RESET,
+                live_evidence=LiveEvidence(
+                    workflow=".github/workflows/live-canary.yml",
+                    job="reborn-webui-v2-live-qa",
+                    case_id=case_id,
+                    artifact="results.json",
+                ),
             )
         )
     assert consumed_replay_facts == set(_PROVIDER_REPLAY_FACTS), (
@@ -306,6 +313,10 @@ PRODUCT_JOURNEY_CASES = (
         evidence=PytestEvidence(
             source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
             test="test_reborn_v2_text_turn_persists",
+        ),
+        browser_evidence=PytestEvidence(
+            source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+            test="test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages",
         ),
     ),
     ProductJourneyCase(

@@ -2,12 +2,14 @@ name: Live Canary
 run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
-  # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
-  # Legacy canary lanes remain available through workflow_dispatch for
-  # manual diagnosis, but do not run on cron.
+  # Frequent scheduled runs cover Reborn WebUI v2 live QA. A weekly provider
+  # matrix supplies broader live drift evidence without putting credentialed
+  # providers on the three-hour cadence.
   schedule:
-    # Every 3 hours. Only reborn-webui-v2-live-qa has a matching guard.
+    # Every 3 hours. Only reborn-webui-v2-live-qa has this matching guard.
     - cron: "0 */3 * * *"
+    # Weekly. Only provider-matrix has this matching guard.
+    - cron: "30 5 * * 1"
   workflow_dispatch:
     inputs:
       lane:
@@ -620,7 +622,7 @@ jobs:
     if: >
       always() &&
       (
-        github.event_name == 'schedule' ||
+        (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
         (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
       ) &&
       (inputs.target_ref == '' || needs.approve-reborn-webui-v2-pr-live-qa.result == 'success')
@@ -856,7 +858,7 @@ jobs:
       always() &&
       needs.prepare-reborn-webui-v2-live-qa.result == 'success' &&
       (
-        github.event_name == 'schedule' ||
+        (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
         (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
       )
     runs-on: ubuntu-latest
@@ -1351,7 +1353,8 @@ jobs:
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')
+      (github.event_name == 'schedule' && github.event.schedule == '30 5 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:

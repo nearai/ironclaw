@@ -55,6 +55,11 @@ GOOGLE_CUMULATIVE_SCOPES = tuple(
 )
 
 
+def require_single_google_account(accounts: list[dict], response_text: str) -> dict:
+    assert len(accounts) == 1, response_text
+    return accounts[0]
+
+
 async def seed_google_account(base_url: str, extension_id: str) -> None:
     expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
@@ -105,15 +110,13 @@ async def seed_google_account(base_url: str, extension_id: str) -> None:
         )
         listed.raise_for_status()
         accounts = listed.json()["accounts"]
-        if not accounts:
-            return
-        assert len(accounts) == 1, listed.text
+        account = require_single_google_account(accounts, listed.text)
         selected = await client.post(
             f"{base_url}/api/reborn/product-auth/accounts/select",
             json={
                 "provider": "google",
                 "requester_extension": extension_id,
-                "account_id": accounts[0]["id"],
+                "account_id": account["id"],
                 "invocation_id": invocation_id,
             },
             timeout=30,

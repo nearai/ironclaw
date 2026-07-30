@@ -30,12 +30,14 @@ from journey_cases import (
 from journey_types import (
     CargoEvidence,
     JourneyCase,
+    ProductJourneyCase,
     ProviderJourneyCase,
     ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
+from provider_journey_google import require_single_google_account
 from provider_journey_trace import (
     MISSING_SLACK_CHANNEL_ID,
     compile_provider_journey_trace,
@@ -199,7 +201,19 @@ def _case_name_branches(source_path: Path) -> list[int]:
                 offenders.add(selector.lineno)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            arguments = node.args
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "parametrize"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "mark"
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "pytest"
+            ):
+                continue
+            arguments = (
+                *node.args,
+                *(keyword.value for keyword in node.keywords),
+            )
         elif isinstance(node, ast.Subscript):
             arguments = (node.slice,)
         else:
@@ -266,6 +280,7 @@ def test_provider_replay_facts_must_name_collected_case(monkeypatch):
             "            return 'special'\n"
         ),
         ("def run(case_id):\n    return timeout_for(case_id)\n"),
+        ("def run(case_id):\n    return timeout_for(case_id=case_id)\n"),
         (
             "SPECIAL = object()\n"
             "def run(journey_case):\n"
@@ -277,6 +292,11 @@ def test_case_name_branch_detector_fails_loudly(tmp_path, bad_runner):
     source = tmp_path / "bad_runner.py"
     source.write_text(bad_runner, encoding="utf-8")
     assert _case_name_branches(source)
+
+
+def test_google_account_seed_rejects_an_empty_account_list():
+    with pytest.raises(AssertionError, match="no selectable Google account"):
+        require_single_google_account([], "no selectable Google account")
 
 
 @pytest.mark.parametrize(
@@ -810,6 +830,8 @@ def test_every_journey_has_complete_typed_executable_evidence():
             _assert_python_evidence(case, case.evidence)
         else:
             _assert_rust_evidence(case, case.evidence)
+        if isinstance(case, ProductJourneyCase) and case.browser_evidence is not None:
+            _assert_python_evidence(case, case.browser_evidence)
 
 
 def test_every_supported_ingress_and_delivery_target_has_journey_evidence():

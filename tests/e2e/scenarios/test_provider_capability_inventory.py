@@ -262,31 +262,119 @@ def _module_functions(
     }
 
 
-def _executed_nodes(
+def _module_statement_bindings(statement: ast.stmt) -> set[str]:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return {
+            alias.asname or alias.name.split(".", 1)[0]
+            for alias in statement.names
+        }
+    return {
+        node.id
+        for node in _scope_nodes(statement)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+
+
+def _provider_helper_import_binding(
+    source: str,
+    assertion_source: str,
+    symbol: str,
+) -> tuple[str, str | None]:
+    """Resolve the caller binding for one provider-owned assertion helper."""
+    expected_module = Path(assertion_source).stem
+    tree = ast.parse(source)
+    bindings: list[tuple[str, str | None, ast.stmt]] = []
+    for statement in tree.body:
+        if isinstance(statement, ast.ImportFrom) and statement.module == expected_module:
+            bindings.extend(
+                (alias.asname or alias.name, None, statement)
+                for alias in statement.names
+                if alias.name == symbol
+            )
+        elif isinstance(statement, ast.Import):
+            bindings.extend(
+                (alias.asname or alias.name, symbol, statement)
+                for alias in statement.names
+                if alias.name == expected_module
+            )
+    assert len(bindings) == 1, (
+        f"journey evidence assertion helper {symbol!r} must be imported exactly "
+        f"once from declared provider module {expected_module!r}"
+    )
+    bound_name, attribute, import_statement = bindings[0]
+    shadowing = [
+        type(statement).__name__
+        for statement in tree.body
+        if statement is not import_statement
+        and bound_name in _module_statement_bindings(statement)
+    ]
+    assert not shadowing, (
+        f"journey evidence assertion helper binding {bound_name!r} is shadowed "
+        f"in the journey module by {shadowing}"
+    )
+    return bound_name, attribute
+
+
+def _executed_functions(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
-):
-    """This function's scope, plus the module-level helpers it awaits.
-
-    A test may delegate its body to a shared helper so a second scenario can
-    reuse the same replay. The readback still runs, so refusing to follow that
-    one hop would reject real evidence. Only *awaited* module-level calls are
-    followed, and only one level deep: an un-awaited coroutine never executes,
-    and following arbitrary depth would let a call buried behind several hops
-    of indirection vouch for a readback nobody can see at the call site.
-    """
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The caller plus its directly awaited module-level delegates."""
     nodes = list(_scope_nodes(function, top=True))
     awaited = {id(node.value) for node in nodes if isinstance(node, ast.Await)}
-    for node in list(nodes):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and id(node) in awaited
-            and (delegate := module_functions.get(node.func.id)) is not None
-            and delegate is not function
-        ):
-            nodes.extend(_scope_nodes(delegate, top=True))
-    return nodes
+    delegates = [
+        delegate
+        for node in nodes
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and id(node) in awaited
+        and (delegate := module_functions.get(node.func.id)) is not None
+        and delegate is not function
+    ]
+    return [function, *delegates]
+
+
+def _function_binds_name(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+) -> bool:
+    argument_names = {
+        argument.arg
+        for argument in (
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        )
+    }
+    if function.args.vararg is not None:
+        argument_names.add(function.args.vararg.arg)
+    if function.args.kwarg is not None:
+        argument_names.add(function.args.kwarg.arg)
+    if name in argument_names:
+        return True
+
+    def binds_in_scope(node: ast.AST) -> bool:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                if child.name == name:
+                    return True
+                continue
+            if (
+                isinstance(child, ast.Name)
+                and isinstance(child.ctx, ast.Store)
+                and child.id == name
+            ):
+                return True
+            if binds_in_scope(child):
+                return True
+        return False
+
+    return binds_in_scope(function)
 
 
 def _assert_python_symbol_called(
@@ -296,19 +384,53 @@ def _assert_python_symbol_called(
     source_label: str,
     module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
     | None = None,
+    binding: tuple[str, str | None] | None = None,
 ) -> None:
     # Defaults to following nothing, so an omitted argument makes the check
     # stricter rather than quietly accepting indirection it never inspected.
     symbol = helper.name
-    nodes = _executed_nodes(function, module_functions or {})
+    functions = _executed_functions(function, module_functions or {})
+    nodes = [
+        node
+        for executed in functions
+        for node in _scope_nodes(executed, top=True)
+    ]
+    if binding is not None:
+        bound_name, attribute = binding
+        shadowing = [
+            executed.name
+            for executed in functions
+            if _function_binds_name(executed, bound_name)
+        ]
+        assert not shadowing, (
+            f"journey evidence assertion helper binding {bound_name!r} is "
+            f"shadowed in executed functions {shadowing}"
+        )
+
+        def matches_binding(call: ast.Call) -> bool:
+            if attribute is None:
+                return isinstance(call.func, ast.Name) and call.func.id == bound_name
+            return (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == attribute
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == bound_name
+            )
+
+    else:
+
+        def matches_binding(call: ast.Call) -> bool:
+            return (
+                isinstance(call.func, ast.Name) and call.func.id == symbol
+            ) or (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == symbol
+            )
+
     calls = [
         node
         for node in nodes
-        if isinstance(node, ast.Call)
-        and (
-            (isinstance(node.func, ast.Name) and node.func.id == symbol)
-            or (isinstance(node.func, ast.Attribute) and node.func.attr == symbol)
-        )
+        if isinstance(node, ast.Call) and matches_binding(node)
     ]
     assert calls, (
         f"journey evidence assertion helper {symbol!r} is never called by "
@@ -361,6 +483,11 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
         evidence["assertion_source"],
         "journey evidence assertion helper",
     )
+    binding = _provider_helper_import_binding(
+        source,
+        evidence["assertion_source"],
+        helper.name,
+    )
     # Declaring the helper is not enough: deleting the call from the test would
     # leave both symbols and the recorded tool names intact, and the write
     # would still be credited. Bind the evidence to an actual invocation.
@@ -370,6 +497,7 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
         evidence["test"],
         evidence["source"],
         _module_functions(source),
+        binding,
     )
 
 
@@ -404,6 +532,25 @@ def test_journey_evidence_rejects_a_vanished_symbol(
     with pytest.raises(AssertionError, match=rf"{missing_symbol}.* is missing"):
         _python_function(
             remaining_source, missing_symbol, "synthetic.py", "journey evidence"
+        )
+
+
+def test_journey_evidence_rejects_a_same_named_local_stub():
+    source = (
+        "from provider_journey_google import assert_google_provider_outcome\n"
+        "\n"
+        "async def assert_google_provider_outcome(url, calls):\n"
+        "    return None\n"
+        "\n"
+        "async def test_journey(url, calls):\n"
+        "    await assert_google_provider_outcome(url, calls)\n"
+    )
+
+    with pytest.raises(AssertionError, match="binding .* is shadowed"):
+        _provider_helper_import_binding(
+            source,
+            "tests/e2e/provider_journey_google.py",
+            "assert_google_provider_outcome",
         )
 
 

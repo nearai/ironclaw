@@ -165,6 +165,36 @@ class GreenRunExplanationTests(unittest.TestCase):
         cases_by_name = {case["case"]: case for case in payload["cases"]}
         self.assertEqual(cases_by_name["failed_case"]["success_reasons"], [])
 
+    def test_recovered_retry_is_reported_as_flake_not_ordinary_green(self):
+        result = ProbeResult(
+            provider="test",
+            mode="live:flaky_case",
+            success=True,
+            latency_ms=1,
+            details={
+                "case": "flaky_case",
+                "flake": True,
+                "retry_outcome": "flake",
+                "attempts": 2,
+                "attempt_history": [
+                    {"attempt": 1, "success": False, "details": {"error": "red"}},
+                    {"attempt": 2, "success": True, "details": {}},
+                ],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = write_green_run_explanation(Path(tmpdir), [result])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["successful_cases"], 1)
+        self.assertEqual(payload["flaky_cases"], 1)
+        self.assertTrue(payload["cases"][0]["flake"])
+        self.assertIn(
+            "1 recovered only after retry and is classified as a flake",
+            payload["why_things_were_green"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
