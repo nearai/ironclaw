@@ -8,6 +8,14 @@
 //! see or execute an admin-only command through the browser just because the
 //! channel-side admission gate does not apply here.
 
+use ironclaw_host_api::{InstallationState, LifecyclePublicState};
+
+use crate::{
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecycleProductAction,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    LifecycleSkillSummary,
+};
+
 use super::*;
 
 impl<I, V> RebornServices<I, V>
@@ -91,8 +99,13 @@ where
     /// behavior), though the sanitized cause is logged server-side at debug
     /// level before it's mapped away. An Admin-audience command is rejected
     /// with a fixed `AccessDenied` message before its handler ever runs when
-    /// the caller is not a command admin. The Lifecycle family stays
-    /// listing-only (non-executable) here even for admins, per the PR-2 spec.
+    /// the caller is not a command admin — this is the ONLY gate on the
+    /// Lifecycle family: once an admin clears it, `ProductCommand::Lifecycle`
+    /// executes through `lifecycle_service.execute(..)` (the same call the
+    /// `product.lifecycle.command` capability op and the channel command door
+    /// use) and its response is shaped into a `CommandResultView`.
+    /// `ProductCommand::Unknown` keeps the fixed role-filtered help-text
+    /// rejection — an unrecognized token is never executable.
     ///
     /// `is_admin` is resolved once, here, and reused by every branch below
     /// that needs the caller's admin standing — never re-queried per branch.
@@ -181,16 +194,50 @@ where
                     rejection: None,
                 })
             }
-            // Lifecycle stays non-executable from the WebUI composer in this
-            // PR — listing-only, even for an admin caller that just cleared
-            // the audience gate above.
-            ProductCommand::Lifecycle { .. } | ProductCommand::Unknown { .. } => {
-                Ok(Self::invalid_request_response(
-                    command_name,
-                    Self::caller_command_help_text(is_admin),
-                ))
+            // The audience gate above already fenced this to an admin caller
+            // (Lifecycle is `CommandAudience::Admin`). Run the same lifecycle
+            // execution the channel command door and the
+            // `product.lifecycle.command` capability op use, then shape the
+            // result into a `CommandResultView` for the generic renderer.
+            ProductCommand::Lifecycle { action } => {
+                let result = self
+                    .execute_product_lifecycle_command(caller, action)
+                    .await?;
+                Ok(RebornExecuteProductCommandResponse {
+                    command: command_name,
+                    result: Some(result),
+                    rejection: None,
+                })
             }
+            // An unrecognized command name is never executable, admin or
+            // not — it keeps the fixed role-filtered help-text rejection.
+            ProductCommand::Unknown { .. } => Ok(Self::invalid_request_response(
+                command_name,
+                Self::caller_command_help_text(is_admin),
+            )),
         }
+    }
+
+    /// Execute one Lifecycle action and shape its `LifecycleProductResponse`
+    /// into the channel-neutral `CommandResultView` the generic renderer
+    /// displays. `lifecycle_service.execute` already returns the sanitized
+    /// `ProductSurfaceError` boundary taxonomy, so its error propagates
+    /// through `?` unchanged — no backend string or internal detail is
+    /// mapped or added here.
+    async fn execute_product_lifecycle_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        action: LifecycleProductAction,
+    ) -> Result<CommandResultView, ProductSurfaceError> {
+        let title = lifecycle_command_title(&action);
+        let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: caller.tenant_id,
+            user_id: caller.user_id,
+            agent_id: caller.agent_id,
+            project_id: caller.project_id,
+        });
+        let response = self.lifecycle_service.execute(context, action).await?;
+        Ok(lifecycle_command_view(title, &response))
     }
 
     fn invalid_request_response(
@@ -206,4 +253,281 @@ where
             }),
         }
     }
+}
+
+/// The result-view title for one Lifecycle action: the same `title` the
+/// palette's "Available commands" help text and `product.commands.list` use
+/// for this command name (one source of truth — see
+/// `product_command_descriptors`), so the header a caller sees on execution
+/// matches the header they saw when listing. Falls back to the bare command
+/// name on the (unreachable in practice) case that the registry has no entry
+/// for this action's command name — never panics on a lookup miss.
+fn lifecycle_command_title(action: &LifecycleProductAction) -> String {
+    product_command_descriptors()
+        .find(|descriptor| descriptor.name == action.command_name())
+        .map(|descriptor| descriptor.title.to_string())
+        .unwrap_or_else(|| action.command_name().to_string())
+}
+
+/// Shape one Lifecycle action's `LifecycleProductResponse` into a
+/// `CommandResultView`, dispatched on the response's own `payload` shape
+/// (not the requested `action`) so a payload/action mismatch from a
+/// non-conforming `LifecycleProductService` degrades to the generic
+/// confirmation view instead of panicking.
+///
+/// Two action families render differently, per the PR-2 spec:
+/// - List/search (`extension_list`, `extension_search`, `skill_search`)
+///   render as a `Count` field plus one readable row per result in `lines` —
+///   never a JSON dump of the payload.
+/// - Mutations (`install`/`remove`/`activate`/`configure`/`auth`, and the
+///   skill equivalents) render a confirmation: which package, whether the
+///   mutation itself succeeded, and the resulting public lifecycle state.
+///
+/// Every variant reports [`LifecyclePublicState`], never the raw internal
+/// [`InstallationState`] checkpoint — `ironclaw_host_api::state` documents
+/// that a product surface must not expose those checkpoints directly.
+fn lifecycle_command_view(title: String, response: &LifecycleProductResponse) -> CommandResultView {
+    match &response.payload {
+        Some(LifecycleProductPayload::ExtensionSearch { extensions, count }) => {
+            lifecycle_rows_view(
+                title,
+                *count,
+                extensions
+                    .iter()
+                    .map(|entry| extension_row(&entry.summary, entry.installation_phase))
+                    .collect(),
+                "No extensions matched.",
+            )
+        }
+        Some(LifecycleProductPayload::ExtensionList { extensions, count }) => lifecycle_rows_view(
+            title,
+            *count,
+            extensions
+                .iter()
+                .map(|entry| extension_row(&entry.summary, Some(entry.phase)))
+                .collect(),
+            "No extensions installed yet.",
+        ),
+        Some(LifecycleProductPayload::SkillSearch {
+            skills,
+            count,
+            limit,
+            truncated,
+        }) => {
+            let mut view = lifecycle_rows_view(
+                title,
+                *count,
+                skills.iter().map(skill_row).collect(),
+                "No skills matched.",
+            );
+            if *truncated {
+                view.lines.push(format!(
+                    "Showing the first {limit} results; refine the search to see more."
+                ));
+            }
+            view
+        }
+        Some(LifecycleProductPayload::ExtensionInstall {
+            installed,
+            visible_capability_ids,
+            next_step,
+        }) => {
+            let mut fields = package_ref_fields(response);
+            fields.push(command_result_field("Installed", yes_no(*installed)));
+            let mut lines = capability_lines(visible_capability_ids);
+            if !next_step.is_empty() {
+                lines.push(next_step.clone());
+            }
+            lifecycle_confirmation_view(title, response, fields, lines)
+        }
+        Some(LifecycleProductPayload::ExtensionActivate {
+            activated,
+            visible_capability_ids,
+            connection_required,
+        }) => {
+            let mut fields = package_ref_fields(response);
+            fields.push(command_result_field("Activated", yes_no(*activated)));
+            let mut lines = capability_lines(visible_capability_ids);
+            if let Some(requirement) = connection_required {
+                lines.push(format!(
+                    "{}: {}",
+                    requirement.display_name, requirement.instructions
+                ));
+            }
+            lifecycle_confirmation_view(title, response, fields, lines)
+        }
+        Some(LifecycleProductPayload::ExtensionRemove { removed }) => {
+            let mut fields = package_ref_fields(response);
+            fields.push(command_result_field("Removed", yes_no(*removed)));
+            lifecycle_confirmation_view(title, response, fields, Vec::new())
+        }
+        Some(LifecycleProductPayload::SkillInstall { installed, name }) => {
+            let fields = vec![
+                command_result_field("Skill", name.as_str()),
+                command_result_field("Installed", yes_no(*installed)),
+            ];
+            lifecycle_confirmation_view(title, response, fields, Vec::new())
+        }
+        Some(LifecycleProductPayload::SkillRemove { removed, name }) => {
+            let fields = vec![
+                command_result_field("Skill", name.as_str()),
+                command_result_field("Removed", yes_no(*removed)),
+            ];
+            lifecycle_confirmation_view(title, response, fields, Vec::new())
+        }
+        // `extension_auth` / `extension_configure` carry no dedicated payload
+        // variant — the envelope (`package_ref` + `phase` + `blockers` +
+        // `message`) is the whole story. Any service answering with a bare
+        // `LifecycleProductResponse::projection(..)` (the
+        // `UnsupportedLifecycleProductService` default, or a
+        // partially-implemented backend) also lands here — never panics on
+        // an unexpected shape.
+        None => {
+            let fields = package_ref_fields(response);
+            lifecycle_confirmation_view(title, response, fields, Vec::new())
+        }
+    }
+}
+
+/// List/search shaping shared by `extension_search`, `extension_list`, and
+/// `skill_search`: a `Count` field plus one row per line, or a single
+/// human-readable line when there are no rows (never an empty `lines: []`,
+/// which would render as a bare title with no explanation).
+fn lifecycle_rows_view(
+    title: String,
+    count: usize,
+    rows: Vec<String>,
+    empty_message: &'static str,
+) -> CommandResultView {
+    let lines = if rows.is_empty() {
+        vec![empty_message.to_string()]
+    } else {
+        rows
+    };
+    CommandResultView {
+        title,
+        fields: vec![command_result_field("Count", count.to_string())],
+        lines,
+    }
+}
+
+/// Mutation-confirmation shaping shared by every non-list Lifecycle action:
+/// appends the resulting public `State`, then the service-authored
+/// `message` (when present) and a plain-language line per readiness
+/// blocker — never the blocker's internal `ref_id` diagnostic string.
+fn lifecycle_confirmation_view(
+    title: String,
+    response: &LifecycleProductResponse,
+    mut fields: Vec<CommandResultField>,
+    mut lines: Vec<String>,
+) -> CommandResultView {
+    fields.push(command_result_field(
+        "State",
+        LifecyclePublicState::from_host_checkpoint(response.phase).as_str(),
+    ));
+    let mut all_lines = match response.message.as_deref() {
+        Some(message) if !message.is_empty() => vec![message.to_string()],
+        _ => Vec::new(),
+    };
+    all_lines.append(&mut lines);
+    all_lines.extend(response.blockers.iter().map(blocker_line));
+    CommandResultView {
+        title,
+        fields,
+        lines: all_lines,
+    }
+}
+
+/// The package-identity field for a mutation response, when the service
+/// echoed one back (`extension_install`/`activate`/`remove`/`auth`/
+/// `configure` always target one `LifecyclePackageRef`; the skill actions
+/// carry their identity in the payload's own `name` field instead, so this
+/// contributes nothing for those and callers add a `"Skill"` field
+/// themselves).
+fn package_ref_fields(response: &LifecycleProductResponse) -> Vec<CommandResultField> {
+    response
+        .package_ref
+        .as_ref()
+        .map(|package_ref| {
+            vec![command_result_field(
+                package_kind_label(package_ref.kind),
+                package_ref.id.as_str(),
+            )]
+        })
+        .unwrap_or_default()
+}
+
+fn package_kind_label(kind: LifecyclePackageKind) -> &'static str {
+    match kind {
+        LifecyclePackageKind::Extension => "Extension",
+        LifecyclePackageKind::Skill => "Skill",
+        LifecyclePackageKind::Mcp => "MCP",
+        LifecyclePackageKind::Wasm => "Wasm",
+    }
+}
+
+/// A short, plain-language line per readiness blocker. Deliberately omits
+/// the blocker's `ref_id` — that is an internal diagnostic/correlation
+/// string (e.g. `"extension_lifecycle_store_unwired"`), not user-facing
+/// copy, matching this crate's rule against leaking backend detail into a
+/// product-surface response.
+fn blocker_line(blocker: &LifecycleReadinessBlocker) -> String {
+    match blocker {
+        LifecycleReadinessBlocker::Setup { .. } => {
+            "Needs additional setup before it can activate.".to_string()
+        }
+        LifecycleReadinessBlocker::Auth { .. } => {
+            "Needs the extension's account connected.".to_string()
+        }
+        LifecycleReadinessBlocker::Pairing { .. } => {
+            "Needs channel pairing to finish connecting.".to_string()
+        }
+        LifecycleReadinessBlocker::Approval { .. } => {
+            "Needs approval before it can activate.".to_string()
+        }
+        LifecycleReadinessBlocker::Policy { .. } => "Blocked by policy.".to_string(),
+        LifecycleReadinessBlocker::Credential { .. } => {
+            "Needs a credential configured.".to_string()
+        }
+        LifecycleReadinessBlocker::Runtime { .. } => "Not supported by this runtime.".to_string(),
+    }
+}
+
+fn capability_lines(visible_capability_ids: &[String]) -> Vec<String> {
+    if visible_capability_ids.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("Tools: {}", visible_capability_ids.join(", "))]
+    }
+}
+
+/// One readable row for an extension search/list result: id, name, version,
+/// and (when the caller supplied a checkpoint) its public lifecycle state —
+/// collapsed through [`LifecyclePublicState::from_host_checkpoint`], never
+/// the raw [`InstallationState`] variant name.
+fn extension_row(summary: &LifecycleExtensionSummary, phase: Option<InstallationState>) -> String {
+    let state = phase
+        .map(LifecyclePublicState::from_host_checkpoint)
+        .map(|state| format!(" [{}]", state.as_str()))
+        .unwrap_or_default();
+    format!(
+        "- {} — {} (v{}){state}",
+        summary.package_ref.id.as_str(),
+        summary.name,
+        summary.version
+    )
+}
+
+/// One readable row for a skill search result.
+fn skill_row(skill: &LifecycleSkillSummary) -> String {
+    format!(
+        "- {} (v{}) — {}",
+        skill.name.as_str(),
+        skill.version,
+        skill.description
+    )
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }

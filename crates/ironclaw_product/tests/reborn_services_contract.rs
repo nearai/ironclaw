@@ -15232,10 +15232,14 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
 // The WebUI door must enforce the same `required_audience`/`CommandAudience`
 // policy the channel command door enforces: a non-admin caller sees and can
 // execute only User-audience commands, an env-bearer operator or an active
-// admin directory record is treated as admin, and the lifecycle family stays
-// listing-only (non-executable) in this PR even for admins. Drives the new
-// facade methods through the generic `ProductSurface::invoke` conduit — the
-// same idiom `status_command_reports_idle_for_a_bound_conversation_without_messages`
+// admin directory record is treated as admin, and — now that the lifecycle
+// execution wiring has landed — an admin caller's Lifecycle command actually
+// runs through `services.lifecycle_service.execute(..)` (the same call the
+// `product.lifecycle.command` capability op and the channel command door
+// use) and its result renders as a `CommandResultView`, never a raw
+// rejection. Drives the new facade methods through the generic
+// `ProductSurface::invoke` conduit — the same idiom
+// `status_command_reports_idle_for_a_bound_conversation_without_messages`
 // uses for `PRODUCT_STATUS_COMMAND_OPERATION_ID` — reusing the
 // `FakeAdminUsers`/`admin_record` harness from the admin-authorization cluster
 // above and the `SetupRecordingLlmConfigService` recording fake from the LLM
@@ -15252,6 +15256,19 @@ fn command_palette_services(
     )
     .with_admin_user_service(Arc::new(admin_users))
     .with_llm_config_service(llm_config)
+}
+
+/// `command_palette_services` plus a wired `LifecycleProductService` fake —
+/// for the Lifecycle-family execute/render tests below, which need to prove
+/// either that the service was called with the right action (admin) or that
+/// it was never called at all (non-admin).
+fn command_palette_services_with_lifecycle(
+    admin_users: FakeAdminUsers,
+    llm_config: Arc<SetupRecordingLlmConfigService>,
+    lifecycle_service: Arc<dyn LifecycleProductService>,
+) -> RebornServices {
+    command_palette_services(admin_users, llm_config)
+        .with_lifecycle_product_service(lifecycle_service)
 }
 
 async fn list_product_commands_via_invoke(
@@ -15635,28 +15652,34 @@ async fn execute_status_on_foreign_thread_is_indistinguishable_from_unknown() {
     );
 }
 
-// FINDING 1 (Task 3 re-review): the Lifecycle family must stay listing-only
-// (non-executable) from the WebUI composer even for an admin caller —
-// per-PR-2 spec, `product_commands.rs`'s match-arm ordering is the ONLY thing
-// enforcing this. A future refactor that routes `ProductCommand::Lifecycle`
-// to `self.lifecycle_service.execute(...)` instead of the fixed InvalidRequest
-// rejection would silently hand the browser command palette live
-// extension-install/remove execution. `extension_list` takes no arguments, so
-// this exercises the simplest Lifecycle command with no confounding parse
-// error. The default `UnsupportedLifecycleProductService` (never wired here)
-// would produce a materially different response shape (an `Ok` projection
-// carrying `InstallationState::Unsupported`, not this rejection) if the arm
-// were ever mis-routed to call it — so `result.is_none()` +
-// `rejection.kind == InvalidRequest` genuinely fences the arm.
+// Companion to the retired "stays listing-only" pin (PR-2 scope): an admin
+// caller's Lifecycle command now actually executes through
+// `services.lifecycle_service.execute(..)` — the same call the
+// `product.lifecycle.command` capability op and the channel command door
+// use — and its `LifecycleProductResponse` renders as a `CommandResultView`
+// (title + fields + lines) rather than a rejection or a raw JSON blob.
+// `extension_list` exercises the list-family shaping: a `Count` field plus
+// one readable row per installed extension (id, name, version, and its
+// public `LifecyclePublicState`, never the raw internal `InstallationState`
+// checkpoint — see `ironclaw_host_api::state`'s "must never expose those
+// checkpoints" contract).
 #[tokio::test]
-async fn admin_execute_lifecycle_command_stays_listing_only() {
-    let services = command_palette_services(
+async fn admin_execute_lifecycle_command_executes_and_renders_installed_extensions() {
+    let lifecycle_service = Arc::new(ListingLifecycleService {
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary("github", Vec::new(), None),
+            phase: InstallationState::Active,
+            install_scope: None,
+        },
+    });
+    let services = command_palette_services_with_lifecycle(
         FakeAdminUsers::with([admin_record(
             "user-alpha",
             AdminUserRole::Admin,
             AdminUserStatus::Active,
         )]),
         Arc::new(SetupRecordingLlmConfigService::default()),
+        lifecycle_service,
     );
 
     let response = execute_product_command_via_invoke(
@@ -15666,16 +15689,129 @@ async fn admin_execute_lifecycle_command_stays_listing_only() {
         "/extension_list",
     )
     .await
-    .expect("lifecycle listing-only is a rejection, not a transport error");
+    .expect("an executed lifecycle command settles rather than transport-erroring");
 
     assert!(
-        response.result.is_none(),
-        "admin must not receive an executed lifecycle result: {response:?}"
+        response.rejection.is_none(),
+        "admin must not be rejected: {response:?}"
     );
+    let view = response
+        .result
+        .expect("admin must receive an executed lifecycle result view");
+    assert_eq!(view.title, "List extensions");
+    assert!(
+        view.fields
+            .iter()
+            .any(|field| field.label == "Count" && field.value == "1"),
+        "{view:?}"
+    );
+    assert!(
+        view.lines
+            .iter()
+            .any(|line| line.contains("github") && line.contains("[active]")),
+        "list rows must be readable text, not a JSON blob: {view:?}"
+    );
+}
+
+// A member caller must never reach the lifecycle service at all: the
+// audience gate (Lifecycle is `CommandAudience::Admin`) has to reject before
+// `execute_product_lifecycle_command` is ever called. `RecordingLifecycleService`
+// panics on any action other than `ExtensionActivate`, so a routing bug that
+// let a member's `/extension_list` through would fail loudly here even
+// before the explicit `actions()` assertion runs.
+#[tokio::test]
+async fn member_execute_lifecycle_command_is_denied_before_any_lifecycle_service_call() {
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
+    let services = command_palette_services_with_lifecycle(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+        lifecycle_service.clone(),
+    );
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/extension_list",
+    )
+    .await
+    .expect("access-denied is a rejection, not a transport error");
+
+    assert!(response.result.is_none());
     let rejection = response
         .rejection
-        .expect("lifecycle commands must be rejected as non-executable here");
-    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+        .expect("member lifecycle execution must be rejected");
+    assert_eq!(rejection.kind, ProductRejectionKind::AccessDenied);
+    assert_eq!(rejection.message, "This command requires an admin account.");
+    assert!(
+        lifecycle_service.actions().is_empty(),
+        "the admin gate must reject before the lifecycle service is ever invoked"
+    );
+}
+
+// Mutation family: `/extension_activate` must confirm what happened (which
+// extension, whether the activate call itself succeeded, and the resulting
+// public lifecycle state), not just echo a bare rejection or the raw
+// response struct.
+#[tokio::test]
+async fn admin_execute_extension_activate_confirms_the_mutation() {
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
+    let services = command_palette_services_with_lifecycle(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Admin,
+            AdminUserStatus::Active,
+        )]),
+        Arc::new(SetupRecordingLlmConfigService::default()),
+        lifecycle_service.clone(),
+    );
+
+    let response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/extension_activate github",
+    )
+    .await
+    .expect("an executed lifecycle mutation settles rather than transport-erroring");
+
+    assert!(response.rejection.is_none(), "{response:?}");
+    let view = response
+        .result
+        .expect("admin must receive a mutation confirmation view");
+    assert_eq!(view.title, "Activate extension");
+    assert!(
+        view.fields
+            .iter()
+            .any(|field| field.label == "Extension" && field.value == "github"),
+        "{view:?}"
+    );
+    assert!(
+        view.fields
+            .iter()
+            .any(|field| field.label == "Activated" && field.value == "yes"),
+        "{view:?}"
+    );
+    assert!(
+        view.fields
+            .iter()
+            .any(|field| field.label == "State" && field.value == "active"),
+        "{view:?}"
+    );
+    assert!(
+        view.lines.iter().any(|line| line == "activated"),
+        "the service-authored confirmation message must reach the view: {view:?}"
+    );
+    assert_eq!(
+        lifecycle_service.actions(),
+        vec![LifecycleProductAction::ExtensionActivate {
+            package_ref: lifecycle_package_ref("github")
+        }]
+    );
 }
 
 // PR-2 review fix wave, item 6: an admin caller executing a Lifecycle
@@ -15683,10 +15819,14 @@ async fn admin_execute_lifecycle_command_stays_listing_only() {
 // once at the audience gate (Lifecycle requires Admin audience, so the
 // `required_audience(&command) == Admin && !is_admin` short-circuit actually
 // evaluates `caller_is_command_admin`) and again while building the
-// listing-only help response in the Lifecycle/Unknown arm. `is_admin` must
-// now be resolved once at the top of `execute_product_command` and reused,
-// so the SAME request reads the directory exactly once — not zero (it must
-// still run at least once; this is not a cache), not two.
+// (then listing-only) response in the Lifecycle/Unknown arm. `is_admin` must
+// be resolved once at the top of `execute_product_command` and reused, so the
+// SAME request reads the directory exactly once — not zero (it must still
+// run at least once; this is not a cache), not two. This still holds now
+// that the Lifecycle arm actually executes: no lifecycle service is wired
+// here (the default `UnsupportedLifecycleProductService` answers), so the
+// command settles as an executed-but-unsupported result rather than a
+// rejection — the directory-read count is the load-bearing assertion.
 #[tokio::test]
 async fn admin_execute_lifecycle_command_reads_admin_directory_exactly_once() {
     let admin_users = Arc::new(FakeAdminUsers::with([admin_record(
@@ -15708,9 +15848,13 @@ async fn admin_execute_lifecycle_command_reads_admin_directory_exactly_once() {
         "/extension_list",
     )
     .await
-    .expect("lifecycle listing-only is a rejection, not a transport error");
+    .expect("an executed lifecycle command settles rather than transport-erroring");
 
-    assert!(response.result.is_none());
+    assert!(
+        response.rejection.is_none(),
+        "the unwired default lifecycle service still executes (as unsupported), not a rejection: {response:?}"
+    );
+    assert!(response.result.is_some());
     assert_eq!(
         admin_users.get_user_calls(),
         1,
