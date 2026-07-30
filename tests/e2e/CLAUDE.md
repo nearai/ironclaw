@@ -83,17 +83,14 @@ final page screenshots, a screenshot-only Playwright trace (DOM snapshots and
 source capture are disabled), and 960×540 video. The nightly workflow uploads
 these diagnostics only when its shard fails.
 
-Browser artifacts have a 256 MiB per-shard default soft budget. Override it
-with a positive byte count in `IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Context
-bundles remain protected while their test outcome is pending. Once pytest
-reports the final outcome, the harness removes the oldest successful bundles
-first; if the newest successful bundle alone exceeds the remaining budget, its
-largest files are removed until it fits. Failed-test bundles remain protected
-until the workflow uploads them, so a shard with failures can temporarily
-exceed the soft budget rather than delete the traces needed to diagnose those
-failures. Server logs remain outside this browser budget so startup and process
-failures retain textual evidence even when successful browser bundles are
-pruned; nightly servers run at warn-level logging to limit that volume.
+The complete uploaded artifact tree has a 256 MiB per-shard hard budget.
+Override it with a positive byte count in
+`IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Server stdout and stderr streams retain
+bounded tails while the process is running. Browser context bundles remain
+protected while their test outcome is pending, and failed bundles are pruned
+after successful bundles. If protected bundles alone exceed the hard limit,
+their largest files are removed last so the complete upload tree still fits.
+Nightly servers also run at warn-level logging to limit volume.
 
 ## Test Scenarios
 
