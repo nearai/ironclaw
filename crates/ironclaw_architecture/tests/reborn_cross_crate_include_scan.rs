@@ -39,6 +39,13 @@
 //! commented-out include is therefore a (harmless, warn-mode) false positive;
 //! this file skips itself for that reason, since its own fixtures are made of
 //! include-shaped strings.
+//!
+//! Not to be confused with `scripts/ci/check-include-str-paths.sh`, which is
+//! already enforcing and asks a different question: does every `include_str!`
+//! target *exist* and is it inside each Dockerfile's build context (the #5603
+//! outage class)? A path can satisfy that and still be a boundary violation
+//! here — `providers.json` exists and is COPYd, and is still a reach outside
+//! `ironclaw_llm`. The two are complementary; neither subsumes the other.
 
 // Only `workspace_root` is reachable from this binary; the type-def scanners in
 // the shared module belong to the sibling ratchet binaries.
@@ -398,16 +405,22 @@ fn reborn_cross_crate_include_paths_are_inventoried() {
 // (CHECKLIST WS10: every new scanner lands with positive + negative fixtures).
 // ---------------------------------------------------------------------------
 
+/// Fixture paths are deliberately real, resolvable targets even though nothing
+/// here is compiled: `scripts/ci/check-include-str-paths.sh` scans every `.rs`
+/// file under `crates/` for a literal `include_str!` call and requires its
+/// target to exist on disk (its own, complementary rule — that scanner checks
+/// *existence and Docker build-context coverage*, this one checks *crate-root
+/// containment*). Fictional fixture paths would read to it as real breakage.
 #[test]
 fn reborn_include_literal_extraction_self_test() {
     let source = r#"
-        const A: &str = include_str!("../prompts/one.md");
+        const A: &str = include_str!("../CLAUDE.md");
         const B: &[u8] = include_bytes!(
-            "../../ironclaw_other/assets/two.toml"
+            "../../ironclaw_common/Cargo.toml"
         );
         macro_rules! schema {
             ($path:literal) => {
-                include_bytes!(concat!("../../assets/github/schemas/", $path))
+                include_bytes!(concat!("../../ironclaw_common/src/", $path))
             };
         }
         const D: &str = include_str!(concat!(env!("OUT_DIR"), "/generated.rs"));
@@ -420,9 +433,9 @@ fn reborn_include_literal_extraction_self_test() {
     assert_eq!(
         literals,
         vec![
-            "../prompts/one.md".to_string(),
-            "../../ironclaw_other/assets/two.toml".to_string(),
-            "../../assets/github/schemas/".to_string(),
+            "../CLAUDE.md".to_string(),
+            "../../ironclaw_common/Cargo.toml".to_string(),
+            "../../ironclaw_common/src/".to_string(),
         ],
         "the scanner must read single-line, rustfmt-split, and concat!-prefixed includes, and \
          must skip the env!-prefixed form rather than guess at it"
