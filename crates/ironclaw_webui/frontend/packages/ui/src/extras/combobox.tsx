@@ -22,7 +22,7 @@
 import React, { type ReactNode } from "react";
 import { cn } from "../primitives/cn";
 import { Icon } from "../primitives/icon";
-import { OVERLAY_SURFACE_CLASSES } from "./overlay";
+import { OVERLAY_SURFACE_CLASSES } from "../primitives/overlay";
 
 export type ComboboxOption = {
   value: string;

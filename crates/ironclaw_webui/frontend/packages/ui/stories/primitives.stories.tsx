@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Icon, ICON_NAMES } from "../src/primitives/icon";
 import { Spinner } from "../src/primitives/spinner";
 import { Skeleton } from "../src/primitives/skeleton";
+import { StatusDot } from "../src/primitives/status-dot";
 
 const meta: Meta = { title: "Primitives/Overview" };
 export default meta;
@@ -41,6 +42,26 @@ export const SkeletonStory: StoryObj = {
       <Skeleton className="h-8" />
       <Skeleton className="h-16" />
       <Skeleton className="h-[120px]" />
+    </div>
+  ),
+};
+
+export const StatusDotStory: StoryObj = {
+  name: "StatusDot",
+  render: () => (
+    <div className="grid gap-3 text-sm text-[var(--v2-text)]">
+      <div className="flex items-center gap-2">
+        <StatusDot tone="success" pulse /> Connected
+      </div>
+      <div className="flex items-center gap-2">
+        <StatusDot tone="warning" size="md" /> Degraded
+      </div>
+      <div className="flex items-center gap-2">
+        <StatusDot tone="danger" /> Offline
+      </div>
+      <div className="flex items-center gap-2 text-[var(--v2-accent-text)]">
+        <StatusDot /> Inherits current color
+      </div>
     </div>
   ),
 };

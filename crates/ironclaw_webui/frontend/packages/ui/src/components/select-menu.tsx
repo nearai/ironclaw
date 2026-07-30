@@ -1,6 +1,7 @@
 import React from "react";
 import { cn } from "../primitives/cn";
 import { Icon } from "../primitives/icon";
+import { OVERLAY_SURFACE_BASE_CLASSES } from "../primitives/overlay";
 
 type OpenSelectMenuEntry = {
   rootRef: React.RefObject<HTMLDivElement | null>;
@@ -369,11 +370,8 @@ export function SelectMenu({
           id={listboxId}
           role="listbox"
           className={cn(
-            "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
-            "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",
-            "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_92%,var(--v2-surface))] p-1",
-            "shadow-[0_30px_72px_-18px_rgba(0,0,0,0.86),0_10px_24px_-18px_rgba(0,0,0,0.68)]",
-            "ring-1 ring-[color-mix(in_srgb,var(--v2-text-strong)_8%,transparent)]",
+            "absolute top-[calc(100%+0.35rem)] z-30 min-w-full",
+            OVERLAY_SURFACE_BASE_CLASSES,
             alignClasses[effectiveAlign],
             menuClassName
           )}

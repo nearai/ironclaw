@@ -8,18 +8,25 @@
  * prefers-reduced-motion.
  *
  * Props
- *   className  extra classes (e.g. sizing / color); defaults to h-4 w-4.
+ *   className  extra classes; REPLACES the default h-4 w-4 sizing when set
+ *              (cn is concat-only, so callers restyle by replacement).
+ *   label      accessible name; pass a translated string from the app.
  */
 import { cn } from "./cn";
 
-export function Spinner({ className = "" } = {}) {
+type SpinnerProps = {
+  className?: string;
+  label?: string;
+};
+
+export function Spinner({ className = "", label = "Loading" }: SpinnerProps) {
   return (
     <svg
       className={cn("v2-spin shrink-0", className || "h-4 w-4")}
       viewBox="0 0 24 24"
       fill="none"
       role="status"
-      aria-label="Loading"
+      aria-label={label}
     >
       <circle
         cx="12"

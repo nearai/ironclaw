@@ -1,20 +1,24 @@
 /**
- * Shared overlay surface + menu item classes for the extras kit.
+ * Shared overlay surface + menu item classes.
  *
- * Internal module (not exported from the extras barrel). Mirrors the popover
- * styling established by the core SelectMenu so every floating surface in the
- * package looks identical: same border/backdrop color-mix, same shadow, same
- * item highlight treatment. Radix-driven items key their hover/focus state off
- * data-[highlighted]; plain listboxes pass explicit active classes instead.
+ * Internal module (not exported from either barrel). One source of truth for
+ * the floating-panel look used by the core SelectMenu and every extras
+ * surface (menus, popovers, hover cards, comboboxes): same border/backdrop
+ * color-mix, same shadow, same item highlight treatment. Radix-driven items
+ * key their hover/focus state off data-[highlighted]; plain listboxes pass
+ * explicit active classes instead.
  */
 
-/** Floating panel: menus, popovers, hover cards, comboboxes. */
-export const OVERLAY_SURFACE_CLASSES =
-  "z-50 overflow-hidden rounded-[10px] " +
+/** Panel chrome without stacking context — callers own position + z-index. */
+export const OVERLAY_SURFACE_BASE_CLASSES =
+  "overflow-hidden rounded-[10px] " +
   "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))] " +
   "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_92%,var(--v2-surface))] p-1 " +
   "shadow-[0_30px_72px_-18px_rgba(0,0,0,0.86),0_10px_24px_-18px_rgba(0,0,0,0.68)] " +
   "ring-1 ring-[color-mix(in_srgb,var(--v2-text-strong)_8%,transparent)]";
+
+/** Floating panel: menus, popovers, hover cards, comboboxes. */
+export const OVERLAY_SURFACE_CLASSES = "z-50 " + OVERLAY_SURFACE_BASE_CLASSES;
 
 /** Interactive row inside a Radix menu (data-highlighted driven). */
 export const MENU_ITEM_CLASSES =

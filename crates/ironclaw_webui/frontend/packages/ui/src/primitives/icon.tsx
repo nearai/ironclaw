@@ -1,3 +1,4 @@
+import type { ComponentPropsWithoutRef } from "react";
 
 const paths = {
   attach: (<><path
@@ -47,6 +48,10 @@ const paths = {
   folder: (<><path
     d="M3.5 7h6.2l1.9 2h8.9v9.2a2.3 2.3 0 0 1-2.3 2.3H5.8a2.3 2.3 0 0 1-2.3-2.3V7Z"
   /></>),
+
+  globe: (<><path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Z" /><path
+      d="M3.8 12h16.4"
+    /><path d="M12 3.5c2.3 2.2 3.5 5.2 3.5 8.5s-1.2 6.3-3.5 8.5c-2.3-2.2-3.5-5.2-3.5-8.5s1.2-6.3 3.5-8.5Z" /></>),
 
   layers: (<><path d="m12 3.7 8.5 4.2-8.5 4.4-8.5-4.4L12 3.7Z" /><path
       d="m5.2 11.2 6.8 3.5 6.8-3.5"
@@ -136,13 +141,13 @@ export type IconName = keyof typeof paths;
 /** Every registered icon name — used by the Storybook gallery. */
 export const ICON_NAMES = Object.keys(paths) as IconName[];
 
-type IconProps = {
+export type IconProps = {
   name: IconName;
   className?: string;
   strokeWidth?: number | string;
-};
+} & Omit<ComponentPropsWithoutRef<"svg">, "name" | "strokeWidth">;
 
-export function Icon({ name, className = "", strokeWidth = 1.7 }: IconProps) {
+export function Icon({ name, className = "", strokeWidth = 1.7, ...rest }: IconProps) {
   return (
     <svg
       aria-hidden="true"
@@ -153,6 +158,7 @@ export function Icon({ name, className = "", strokeWidth = 1.7 }: IconProps) {
       strokeWidth={String(strokeWidth)}
       strokeLinecap="round"
       strokeLinejoin="round"
+      {...rest}
     >
       {paths[name] || paths.spark}
     </svg>

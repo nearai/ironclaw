@@ -30,7 +30,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@ironclaw/ui/extras";
 | Disclosure | Accordion, Collapsible |
 | Layout | AspectRatio, Separator, ScrollArea, Resizable (react-resizable-panels) |
 | Identity | Avatar |
-| Forms | Checkbox, RadioGroup, Switch, Slider, InputOTP, Combobox, DatePicker + Calendar |
+| Forms | Checkbox, RadioGroup, Slider, InputOTP, Combobox, DatePicker + Calendar (Switch graduated to core `components/`) |
 | Menus | DropdownMenu, ContextMenu, Menubar, NavigationMenu |
 | Overlays | Popover, HoverCard, Tooltip, Drawer/Sheet, Command (+ CommandDialog) |
 | Feedback | Progress, Toast + Toaster |

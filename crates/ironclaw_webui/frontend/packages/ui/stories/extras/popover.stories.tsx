@@ -2,7 +2,8 @@ import React from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Popover, PopoverContent, PopoverTrigger } from "../../src/extras/popover";
 import { Button } from "../../src/components/button";
-import { FormField, Input } from "../../src/components/input";
+import { Input } from "../../src/components/input";
+import { FormField } from "../../src/composites/form-field";
 
 const meta: Meta = { title: "Extras/Popover" };
 export default meta;

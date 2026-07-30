@@ -1,9 +1,9 @@
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { Switch } from "../../src/extras/switch";
-import { Label } from "../../src/components/input";
+import { Switch } from "../src/components/switch";
+import { Label } from "../src/components/input";
 
-const meta: Meta = { title: "Extras/Switch" };
+const meta: Meta = { title: "Components/Switch" };
 export default meta;
 
 type Story = StoryObj;

@@ -11,9 +11,8 @@
  *   Textarea    — <textarea> wrapper (auto-grows via rows prop)
  *   Select      — <select> wrapper with custom arrow
  *   Label       — <label> with consistent typography
- *   FormField   — Label + Input/children + optional error/hint
  */
-import type { ComponentPropsWithoutRef, ReactNode } from "react";
+import type { ComponentPropsWithoutRef } from "react";
 import { cn } from "../primitives/cn";
 
 /* ─── Shared base ─────────────────────────────────────────────────── */
@@ -152,43 +151,5 @@ export function Label({ children, className = "", required = false, ...rest }: L
   );
 }
 
-/* ─── FormField ───────────────────────────────────────────────────── */
-/**
- * Composes Label + input element + optional hint/error message.
- *
- * Usage:
- *   <${FormField} label="First name" error=${errors.firstName?.message}>
- *     <${Input} ...${register("firstName")} />
- *   <//>
- */
-type FormFieldProps = {
-  label?: ReactNode;
-  children?: ReactNode;
-  error?: ReactNode;
-  hint?: ReactNode;
-  required?: boolean;
-  className?: string;
-  htmlFor?: string;
-};
-
-export function FormField({
-  label,
-  children,
-  error = "",
-  hint = "",
-  required = false,
-  className = "",
-  htmlFor = "",
-}: FormFieldProps) {
-  return (
-    <div className={cn("flex flex-col gap-2", className)}>
-      {label &&
-        (<Label htmlFor={htmlFor} required={required}>{label}</Label>) }
-      {children}
-      {error &&
-        (<p className="text-xs text-[var(--v2-danger-text)]" role="alert">{error}</p>)}
-      {!error && hint &&
-        (<p className="text-xs text-[var(--v2-text-faint)]">{hint}</p>)}
-    </div>
-  );
-}
+/* FormField (Label + control + hint/error) lives in composites/form-field —
+   it assembles components, which places it a layer above these controls. */

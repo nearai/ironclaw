@@ -133,7 +133,8 @@ export {
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export { Separator } from "./separator";
 export { Slider } from "./slider";
-export { Switch } from "./switch";
+/* Switch was promoted into core components (components/switch) once the
+   settings surfaces adopted it — the README's promotion path in action. */
 export {
   DataTable,
   Table,

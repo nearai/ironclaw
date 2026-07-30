@@ -23,7 +23,7 @@ import * as NavigationMenuPrimitive from "@radix-ui/react-navigation-menu";
 import type { ComponentProps } from "react";
 import { cn } from "../primitives/cn";
 import { Icon } from "../primitives/icon";
-import { OVERLAY_SURFACE_CLASSES } from "./overlay";
+import { OVERLAY_SURFACE_CLASSES } from "../primitives/overlay";
 
 export const NavigationMenuItem = NavigationMenuPrimitive.Item;
 

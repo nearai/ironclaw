@@ -12,6 +12,7 @@ function setupModalContext(uiText = { close: "common.close", cancel: "common.can
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     cn: (...classes) => classes.filter(Boolean).join(" "),
     Icon() {},
+    IconButton: (props) => ({ type: "IconButton", props, values: [props["aria-label"]] }),
     useUiText: () => uiText,
     document: { body: { style: {} } },
     window: {

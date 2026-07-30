@@ -1,5 +1,5 @@
 /**
- * Card / Panel
+ * Card
  *
  * Replaces the old .v2-panel CSS class with a proper React component.
  * All styling is via Tailwind arbitrary values backed by CSS variables so
@@ -19,7 +19,7 @@
  *   <CardFooter>   — bottom section, optional top divider
  *   <CardLabel>    — mono-caps eyebrow label
  */
-import type { ElementType, ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
 /* ─── Variant ─────────────────────────────────────────────────────── */
@@ -64,8 +64,7 @@ type CardProps = {
   radius?: keyof typeof RADII;
   padding?: keyof typeof PADDINGS;
   as?: ElementType;
-  [key: string]: unknown;
-};
+} & Omit<ComponentPropsWithoutRef<"div">, "className" | "children">;
 
 export function Card({
   children,
@@ -85,18 +84,12 @@ export function Card({
         PADDINGS[padding] ?? "",
         className
       )}
-      {...rest}
+      {...(rest as Record<string, unknown>)}
     >
       {children}
     </Element>
   );
 }
-
-/**
- * Alias kept for backwards-compat with existing imports.
- * Prefer <Card> in new code.
- */
-export const Panel = Card;
 
 /* ─── CardHeader ──────────────────────────────────────────────────── */
 

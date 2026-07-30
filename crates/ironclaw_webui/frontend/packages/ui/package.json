@@ -4,6 +4,7 @@
   "private": true,
   "description": "IronClaw WebUI design system: tokens, primitives, components, and composites. Consumed as TypeScript source by the SPA so changes hot-reload instantly.",
   "type": "module",
+  "sideEffects": ["*.css"],
   "exports": {
     ".": "./src/index.ts",
     "./extras": "./src/extras/index.ts",

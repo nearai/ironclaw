@@ -1,29 +1,71 @@
 /**
  * SectionHeader / SubLabel
  *
- * Page-level headings shared by list/detail views.
+ * The standard "eyebrow + title + description (+ actions)" arrangement that
+ * heads list pages and panels. Promoted from the hand-rolled headers the
+ * pages repeated (automations/jobs/routines list heads, detail panels,
+ * settings sections) with the token-based eyebrow treatment.
+ *
+ * Props
+ *   eyebrow      mono-caps kicker above the title
+ *   title        heading text
+ *   titleAs      heading tag, default "h2"
+ *   description  muted paragraph under the title
+ *   actions      right-aligned controls (filters, refresh, CTAs);
+ *                stacks under the text block on small screens
+ *   className    layout additions
+ *
+ * Not boxed — compose inside a Card/Panel when the section needs chrome.
  */
-import type { ReactNode } from "react";
+import type { ElementType, ReactNode } from "react";
 import { cn } from "../primitives/cn";
-import { Card } from "../components/card";
 
-/**
- * SectionHeader — top heading card (hidden on mobile, visible md+):
- *   h1 text-[1.9rem] md:text-[2.2rem] font-medium tracking-[-0.04em]
- */
-export function SectionHeader({ title, subtitle }: { title?: ReactNode; subtitle?: ReactNode }) {
+type SectionHeaderProps = {
+  eyebrow?: ReactNode;
+  title?: ReactNode;
+  titleAs?: ElementType;
+  description?: ReactNode;
+  actions?: ReactNode;
+  className?: string;
+};
+
+export function SectionHeader({
+  eyebrow,
+  title,
+  titleAs: TitleTag = "h2",
+  description,
+  actions,
+  className = "",
+}: SectionHeaderProps) {
   return (
-    <Card padding="lg" className="hidden md:block">
-      <h1
-        className="text-[1.9rem] font-medium tracking-[-0.04em] text-[var(--v2-text-strong)] md:text-[2.2rem]"
-      >
-        {title}
-      </h1>
-      {subtitle &&
-      (<p className="mt-1 text-[15px] text-[var(--v2-text-muted)]">
-        {subtitle}
-      </p>)}
-    </Card>
+    <div
+      className={cn(
+        "flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between",
+        className
+      )}
+    >
+      <div className="min-w-0">
+        {eyebrow &&
+          (<div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-[var(--v2-accent-text)]">
+            {eyebrow}
+          </div>)}
+        {title &&
+          (<TitleTag
+            className={cn(
+              "text-2xl font-semibold tracking-tight text-[var(--v2-text-strong)]",
+              eyebrow ? "mt-2" : ""
+            )}
+          >
+            {title}
+          </TitleTag>)}
+        {description &&
+          (<p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--v2-text-muted)]">
+            {description}
+          </p>)}
+      </div>
+      {actions &&
+        (<div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>)}
+    </div>
   );
 }
 

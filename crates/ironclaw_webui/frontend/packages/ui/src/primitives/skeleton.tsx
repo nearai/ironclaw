@@ -10,12 +10,15 @@
  *   className  sizing / layout classes (e.g. "h-8", "h-[460px]")
  *   ...rest    forwarded to the div (data-testid, …)
  */
+import type { ComponentPropsWithoutRef } from "react";
 import { cn } from "./cn";
 
 const SKELETON_BG =
   "bg-[linear-gradient(90deg,var(--v2-surface-muted),color-mix(in_srgb,var(--v2-surface-muted)_64%,var(--v2-accent-soft)),var(--v2-surface-muted))]";
 
-export function Skeleton({ className = "", ...rest }) {
+type SkeletonProps = ComponentPropsWithoutRef<"div">;
+
+export function Skeleton({ className = "", ...rest }: SkeletonProps) {
   return (
     <div
       aria-hidden="true"

@@ -1,11 +1,12 @@
 /**
- * Badge / StatusPill
+ * Badge
  *
  * A small labelled chip with a coloured dot.  All styling is via Tailwind
  * arbitrary values — no app.css classes.
  *
  * Props
- *   tone     "success" | "warning" | "danger" | "muted" | "signal" | "info"
+ *   tone     "success" | "warning" | "danger" | "info" | "accent" | "muted"
+ *            (aliases: "positive"/"signal" → success, "copper" → warning)
  *   label    string
  *   dot      boolean (default true)
  *   size     "sm" (default) | "md"
@@ -15,18 +16,22 @@ import type { ReactNode } from "react";
 import { cn } from "../primitives/cn";
 
 /* ── Tone maps ────────────────────────────────────────────────────────── */
+// Canonical tones: success / warning / danger / info / accent / muted.
+// `positive`/`signal` (→ success) and `copper` (→ warning) are legacy
+// vocabulary from the pre-token app palette, kept as accepted aliases so
+// presenter-produced tone strings keep working.
+
+const SUCCESS_CLASSES =
+  "border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] text-[var(--v2-positive-text)]";
+const WARNING_CLASSES =
+  "border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]";
 
 const toneClasses = {
-  success:
-    "border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] text-[var(--v2-positive-text)]",
-  positive:
-    "border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] text-[var(--v2-positive-text)]",
-  signal:
-    "border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] text-[var(--v2-positive-text)]",
-  warning:
-    "border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]",
-  copper:
-    "border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]",
+  success: SUCCESS_CLASSES,
+  positive: SUCCESS_CLASSES,
+  signal: SUCCESS_CLASSES,
+  warning: WARNING_CLASSES,
+  copper: WARNING_CLASSES,
   danger:
     "border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]",
   info:
@@ -79,9 +84,3 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
     </span>
   );
 }
-
-/**
- * Alias kept for backwards-compat with existing imports.
- * Prefer <Badge> in new code.
- */
-export const StatusPill = Badge;

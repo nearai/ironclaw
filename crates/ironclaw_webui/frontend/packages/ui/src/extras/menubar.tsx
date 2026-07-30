@@ -25,7 +25,7 @@ import {
   MENU_SEPARATOR_CLASSES,
   MENU_SHORTCUT_CLASSES,
   OVERLAY_SURFACE_CLASSES,
-} from "./overlay";
+} from "../primitives/overlay";
 
 export const MenubarMenu = MenubarPrimitive.Menu;
 export const MenubarGroup = MenubarPrimitive.Group;

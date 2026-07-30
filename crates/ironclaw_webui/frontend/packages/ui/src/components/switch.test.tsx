@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import React from "react";
-import { click, renderIntoDocument } from "./test-helpers";
+import { click, renderIntoDocument } from "../extras/test-helpers";
 import { Switch } from "./switch";
 
 test("Switch toggles aria-checked on click", () => {

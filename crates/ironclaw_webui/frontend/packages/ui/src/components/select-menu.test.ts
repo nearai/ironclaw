@@ -197,6 +197,7 @@ function createHarness() {
     html,
     cn,
     Icon,
+    OVERLAY_SURFACE_BASE_CLASSES: "overlay-surface",
   };
   const exports = runVmModuleForTest(
     "./select-menu.tsx",
@@ -277,9 +278,11 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   assert.match(listboxProps["aria-controls"], /^v2-select-menu-\d+-listbox$/);
   assert.match(listboxProps["aria-activedescendant"], /^v2-select-menu-\d+-option-0$/);
   assert.equal(valuesAfter(rendered, "aria-label=").length, 1);
+  // The listbox panel draws the shared overlay surface (primitives/overlay),
+  // stubbed as "overlay-surface" in this harness.
   assert.ok(
     collectScalars(rendered).some(
-      (value) => typeof value === "string" && value.includes("v2-canvas-strong")
+      (value) => typeof value === "string" && value.includes("overlay-surface")
     )
   );
   // Option 0 is both selected and keyboard-active: it gets the stepped-up

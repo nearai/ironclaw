@@ -25,7 +25,7 @@ import {
   MENU_SEPARATOR_CLASSES,
   MENU_SHORTCUT_CLASSES,
   OVERLAY_SURFACE_CLASSES,
-} from "./overlay";
+} from "../primitives/overlay";
 
 export const DropdownMenu = DropdownMenuPrimitive.Root;
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;

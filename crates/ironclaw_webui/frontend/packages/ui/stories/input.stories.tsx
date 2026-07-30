@@ -1,6 +1,7 @@
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { FormField, Input, Label, Select, Textarea } from "../src/components/input";
+import { Input, Label, Select, Textarea } from "../src/components/input";
+import { FormField } from "../src/composites/form-field";
 
 const meta: Meta<typeof Input> = {
   title: "Components/Input",

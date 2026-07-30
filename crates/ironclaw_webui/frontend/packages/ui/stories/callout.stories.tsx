@@ -7,7 +7,7 @@ const meta: Meta<typeof Callout> = {
   component: Callout,
   args: { children: "Workspace refreshed." },
   argTypes: {
-    tone: { control: "select", options: ["info", "success", "danger"] },
+    tone: { control: "select", options: ["info", "success", "warning", "danger"] },
   },
 };
 export default meta;
@@ -20,6 +20,7 @@ export const Tones: Story = {
     <div className="grid w-[28rem] gap-3">
       <Callout tone="info">Something informational happened.</Callout>
       <Callout tone="success">Saved successfully.</Callout>
+      <Callout tone="warning">Scheduler is off — automations will not run.</Callout>
       <Callout tone="danger" role="alert">Failed to reach the gateway.</Callout>
     </div>
   ),
@@ -29,6 +30,26 @@ export const Dismissible: Story = {
     <div className="w-[28rem]">
       <Callout tone="success" onDismiss={() => {}} dismissLabel="Dismiss">
         Automation created.
+      </Callout>
+    </div>
+  ),
+};
+export const TitledWithActions: Story = {
+  render: () => (
+    <div className="w-[32rem]">
+      <Callout
+        tone="warning"
+        title="Restart required"
+        actions={
+          <button
+            type="button"
+            className="rounded-[8px] border border-current px-2.5 py-1 text-xs font-semibold"
+          >
+            Restart now
+          </button>
+        }
+      >
+        Networking changes take effect after the gateway restarts.
       </Callout>
     </div>
   ),

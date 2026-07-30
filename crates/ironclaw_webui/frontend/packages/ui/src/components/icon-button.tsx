@@ -6,8 +6,9 @@
  * `grid h-8 w-8 place-items-center rounded-[8px] …` pattern.
  *
  * Props
- *   variant   "ghost" (default) — muted glyph, surface hover
- *             "plain"           — layout only; caller supplies colors
+ *   variant   "ghost" (default)  — muted glyph, surface hover
+ *             "outline"          — bordered surface chip (dialog dismiss)
+ *             "plain"            — layout only; caller supplies colors
  *   active    boolean — accent-tinted active/selected state
  *   as        "button" (default) | "a" | Link-like component
  *   className extra classes (e.g. "relative", custom colors for "plain")
@@ -28,6 +29,12 @@ const BASE =
 const VARIANTS = {
   ghost:
     "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] " +
+    "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
+  /* Bordered surface chip — the dismiss button style shared by Modal and
+     Drawer headers. */
+  outline:
+    "border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] " +
+    "hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] " +
     "active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]",
   plain: "",
 };

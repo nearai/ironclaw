@@ -21,6 +21,7 @@ import React, { type ReactNode } from "react";
 import { useUiText } from "../theme/ui-text";
 import { cn } from "../primitives/cn";
 import { Icon } from "../primitives/icon";
+import { IconButton } from "./icon-button";
 
 /* ─── Size ────────────────────────────────────────────────────────── */
 
@@ -138,19 +139,13 @@ export function ModalHeader({ children, onClose, className = "", closeLabel }: M
       </h2>
       {onClose &&
         (
-          <button
-            type="button"
+          <IconButton
+            variant="outline"
             onClick={onClose}
             aria-label={effectiveCloseLabel}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px]
-              border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]
-              text-[var(--v2-text-muted)] transition-colors
-              hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]
-              active:bg-[color-mix(in_srgb,var(--v2-text-strong)_10%,var(--v2-surface-muted))]
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-focus-ring)]"
           >
             <Icon name="close" className="h-4 w-4" />
-          </button>
+          </IconButton>
         )}
     </div>
   );

@@ -14,7 +14,7 @@
 import * as HoverCardPrimitive from "@radix-ui/react-hover-card";
 import type { ComponentProps } from "react";
 import { cn } from "../primitives/cn";
-import { OVERLAY_SURFACE_CLASSES } from "./overlay";
+import { OVERLAY_SURFACE_CLASSES } from "../primitives/overlay";
 
 export const HoverCard = HoverCardPrimitive.Root;
 export const HoverCardTrigger = HoverCardPrimitive.Trigger;

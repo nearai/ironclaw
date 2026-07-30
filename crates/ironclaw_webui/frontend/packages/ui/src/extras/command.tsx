@@ -27,7 +27,7 @@
 import React, { type ReactNode } from "react";
 import { cn } from "../primitives/cn";
 import { Icon } from "../primitives/icon";
-import { MENU_SHORTCUT_CLASSES, OVERLAY_SURFACE_CLASSES } from "./overlay";
+import { MENU_SHORTCUT_CLASSES, OVERLAY_SURFACE_CLASSES } from "../primitives/overlay";
 
 /* ── Registry plumbing ─────────────────────────────────────────────── */
 
