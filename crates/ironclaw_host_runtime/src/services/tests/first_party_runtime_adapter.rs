@@ -11,6 +11,63 @@ use serde_json::json;
 use super::*;
 
 #[tokio::test]
+async fn reply_attachment_builtin_is_discoverable_but_default_handler_fails_closed() {
+    let capability_id = ironclaw_host_api::CapabilityId::new(
+        crate::first_party_tools::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    )
+    .expect("reply attachment capability id");
+    let package =
+        crate::first_party_tools::builtin_first_party_package().expect("built-in package");
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id == capability_id),
+        "reply attachment capability must be model-discoverable"
+    );
+
+    let registry = crate::first_party_tools::builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))
+    .expect("built-in handlers");
+    let handler = registry
+        .get(&capability_id)
+        .expect("fail-closed reply attachment handler");
+    let filesystem = Arc::new(InMemoryBackend::new());
+    let target =
+        ironclaw_host_api::VirtualPath::new("/projects/reply-attachment/report.txt").unwrap();
+    filesystem
+        .put(
+            &target,
+            ironclaw_filesystem::Entry::bytes(b"report".to_vec()),
+            ironclaw_filesystem::CasExpectation::Absent,
+        )
+        .await
+        .expect("seed workspace file");
+    let mounts = ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
+        ironclaw_host_api::MountAlias::new("/workspace").unwrap(),
+        ironclaw_host_api::VirtualPath::new("/projects/reply-attachment").unwrap(),
+        ironclaw_host_api::MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let mut request = crate::FirstPartyCapabilityRequest::request_for_test(
+        capability_id,
+        sample_scope(),
+        json!({"path": "/workspace/report.txt"}),
+        None,
+    );
+    request.run_id = Some(RunId::new());
+    request.mounts = Some(mounts);
+    request.services.filesystem = filesystem;
+
+    let error = handler
+        .dispatch(request)
+        .await
+        .expect_err("default reply attachment port must fail closed");
+    assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
+}
+
+#[tokio::test]
 async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_scope() {
     let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
     let recorded = Arc::new(Mutex::new(None));

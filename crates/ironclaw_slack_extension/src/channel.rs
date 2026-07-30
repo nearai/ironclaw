@@ -58,6 +58,14 @@ impl ChannelAdapter for SlackChannelAdapter {
         }
     }
 
+    async fn fetch_attachment(
+        &self,
+        attachment: &ironclaw_host_api::product_adapter::ChannelAttachmentRef,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<ironclaw_host_api::InboundAttachment, ChannelError> {
+        crate::attachment_transfer::fetch_attachment(attachment, egress).await
+    }
+
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
@@ -105,11 +113,20 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::File(_) => {
-                    parts.push(PartDeliveryOutcome::Permanent {
-                        reason: "slack file delivery is not enabled for this adapter".to_string(),
-                    });
-                    break 'parts;
+                OutboundPart::File(file) => {
+                    let outcome = crate::attachment_transfer::send_file(
+                        egress,
+                        &credential,
+                        &channel,
+                        thread_ts.as_deref(),
+                        file,
+                    )
+                    .await;
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
                 }
                 OutboundPart::AuthPrompt {
                     view,
@@ -369,7 +386,7 @@ async fn delete_slack_message(
     )
 }
 
-fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryOutcome {
+pub(crate) fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryOutcome {
     match error {
         RestrictedEgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
             reason: error.to_string(),
@@ -388,7 +405,10 @@ fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryO
     }
 }
 
-fn part_outcome_for_kind(kind: SlackDeliveryFailureKind, reason: String) -> PartDeliveryOutcome {
+pub(crate) fn part_outcome_for_kind(
+    kind: SlackDeliveryFailureKind,
+    reason: String,
+) -> PartDeliveryOutcome {
     match kind {
         SlackDeliveryFailureKind::Retryable => PartDeliveryOutcome::Retryable { reason },
         SlackDeliveryFailureKind::Unauthorized => PartDeliveryOutcome::Unauthorized { reason },
@@ -574,9 +594,13 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use ironclaw_host_api::product_adapter::{OutboundPart, PartDeliveryOutcome};
+    use ironclaw_host_api::product_adapter::{
+        ChannelAttachmentRef, OutboundPart, PartDeliveryOutcome, ProductAttachmentDescriptor,
+        ProductAttachmentKind,
+    };
     use ironclaw_host_api::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+        ScopedPath, WorkspaceFile,
     };
 
     struct ScriptedEgress {
@@ -641,6 +665,385 @@ mod tests {
 
     fn body_json(request: &RestrictedEgressRequest) -> serde_json::Value {
         serde_json::from_slice(request.body.as_deref().unwrap_or_default()).expect("json body")
+    }
+
+    fn attachment() -> ChannelAttachmentRef {
+        ChannelAttachmentRef {
+            descriptor: ProductAttachmentDescriptor::new(
+                "F123",
+                "text/plain",
+                Some("notes.txt".to_string()),
+                Some(5),
+                ProductAttachmentKind::Document,
+            )
+            .expect("descriptor"),
+            vendor_ref: "F123".to_string(),
+        }
+    }
+
+    fn workspace_file() -> WorkspaceFile {
+        WorkspaceFile {
+            path: ScopedPath::new("/workspace/report.txt").expect("path"),
+            filename: Some("report.txt".to_string()),
+            mime_type: "text/plain".to_string(),
+            bytes: b"hello".to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_attachment_is_resolved_then_downloaded_through_restricted_egress() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(
+                r#"{"ok":true,"file":{"id":"F123","name":"notes.txt","mimetype":"text/plain","size":5,"url_private_download":"https://files.slack.com/files-pri/T-F/download/notes.txt"}}"#,
+            ),
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: b"hello".to_vec(),
+            }),
+        ]);
+
+        let fetched = SlackChannelAdapter
+            .fetch_attachment(&attachment(), &egress)
+            .await
+            .expect("attachment fetch succeeds");
+
+        assert_eq!(fetched.id, "F123");
+        assert_eq!(fetched.filename.as_deref(), Some("notes.txt"));
+        assert_eq!(fetched.mime_type, "text/plain");
+        assert_eq!(fetched.bytes, b"hello");
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, NetworkMethod::Get);
+        assert_eq!(
+            requests[0].url,
+            "https://slack.com/api/files.info?file=F123"
+        );
+        assert_eq!(requests[1].method, NetworkMethod::Get);
+        assert_eq!(
+            requests[1].url,
+            "https://files.slack.com/files-pri/T-F/download/notes.txt"
+        );
+        assert_eq!(
+            requests[1].credential.as_ref().map(SecretHandle::as_str),
+            Some("slack_bot_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_attachment_rejects_auth_metadata_url_and_size_failures() {
+        let cases = vec![
+            (
+                ScriptedEgress::ok(r#"{"ok":false,"error":"missing_scope"}"#),
+                false,
+            ),
+            (
+                ScriptedEgress::ok(
+                    r#"{"ok":true,"file":{"id":"F123","mimetype":"application/pdf","size":5,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
+                ),
+                false,
+            ),
+            (
+                ScriptedEgress::ok(
+                    r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","size":6,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
+                ),
+                false,
+            ),
+            (
+                ScriptedEgress::ok(
+                    r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","size":5,"url_private":"https://evil.example/files-pri/T-F/x?token=secret"}}"#,
+                ),
+                false,
+            ),
+            (
+                Err(RestrictedEgressError::Transport {
+                    reason: "timeout".to_string(),
+                }),
+                true,
+            ),
+        ];
+
+        for (response, expected_retryable) in cases {
+            let egress = ScriptedEgress::new(vec![response]);
+            let error = SlackChannelAdapter
+                .fetch_attachment(&attachment(), &egress)
+                .await
+                .expect_err("unsafe or unavailable attachment must fail");
+            assert!(matches!(
+                error,
+                ChannelError::AttachmentTransfer { retryable, .. }
+                    if retryable == expected_retryable
+            ));
+            assert!(
+                !error.to_string().contains("evil.example")
+                    && !error.to_string().contains("secret"),
+                "transient provider URLs must not leak through errors"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_attachment_enforces_actual_body_and_response_caps() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(
+                r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","size":5,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
+            ),
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: b"four".to_vec(),
+            }),
+        ]);
+        let error = SlackChannelAdapter
+            .fetch_attachment(&attachment(), &egress)
+            .await
+            .expect_err("truncated body must fail");
+        assert!(matches!(
+            error,
+            ChannelError::AttachmentTransfer {
+                retryable: true,
+                ..
+            }
+        ));
+
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(
+                r#"{"ok":true,"file":{"id":"F123","mimetype":"text/plain","size":5,"url_private":"https://files.slack.com/files-pri/T-F/x"}}"#,
+            ),
+            Err(RestrictedEgressError::ResponseTooLarge),
+        ]);
+        let error = SlackChannelAdapter
+            .fetch_attachment(&attachment(), &egress)
+            .await
+            .expect_err("host response cap must fail");
+        assert!(matches!(
+            error,
+            ChannelError::AttachmentTransfer {
+                retryable: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn outbound_attachment_uses_external_upload_and_verifies_the_destination() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(
+                r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
+            ),
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: b"OK - 5".to_vec(),
+            }),
+            ScriptedEgress::ok(r#"{"ok":true,"files":[{"id":"FNEW","title":"report.txt"}]}"#),
+            ScriptedEgress::ok(
+                r#"{"ok":true,"file":{"id":"FNEW","name":"report.txt","mimetype":"text/plain","size":5,"ims":["D123"],"shares":{"private":{"D123":[{"ts":"1710000001.000001","thread_ts":"1710000000.000100"}]}}}}"#,
+            ),
+        ]);
+
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(vec![OutboundPart::File(workspace_file())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(
+            report.parts.as_slice(),
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(file_id)
+            }] if file_id == "FNEW"
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method, NetworkMethod::Get);
+        assert_eq!(
+            requests[0].url,
+            "https://slack.com/api/files.getUploadURLExternal?filename=report.txt&length=5"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.ends_with("/api/files.upload")),
+            "the retired files.upload endpoint must never be used"
+        );
+        assert_eq!(requests[1].url, "https://files.slack.com/upload/v1/ticket");
+        assert_eq!(requests[1].body.as_deref(), Some(b"hello".as_slice()));
+        assert!(requests[1].credential.is_none());
+        assert_eq!(
+            requests[1].headers,
+            vec![("content-type".to_string(), "text/plain".to_string())]
+        );
+        let completion = body_json(&requests[2]);
+        assert_eq!(completion["channel_id"], "D123");
+        assert_eq!(completion["thread_ts"], "1710000000.000100");
+        assert_eq!(completion["files"][0]["id"], "FNEW");
+        assert_eq!(completion["files"][0]["title"], "report.txt");
+        assert_eq!(
+            requests[3].url,
+            "https://slack.com/api/files.info?file=FNEW"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_attachment_fails_closed_at_each_external_upload_stage() {
+        let cases = vec![
+            (
+                vec![ScriptedEgress::ok(
+                    r#"{"ok":true,"upload_url":"https://evil.example/upload/v1/secret","file_id":"FNEW"}"#,
+                )],
+                1,
+                "invalid upload URL",
+            ),
+            (
+                vec![
+                    ScriptedEgress::ok(
+                        r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
+                    ),
+                    Ok(RestrictedEgressResponse {
+                        status: 503,
+                        body: Vec::new(),
+                    }),
+                ],
+                2,
+                "status 503",
+            ),
+            (
+                vec![
+                    ScriptedEgress::ok(
+                        r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
+                    ),
+                    Ok(RestrictedEgressResponse {
+                        status: 200,
+                        body: b"OK - 5".to_vec(),
+                    }),
+                    ScriptedEgress::ok(r#"{"ok":false,"error":"missing_scope"}"#),
+                ],
+                3,
+                "missing_scope",
+            ),
+            (
+                vec![
+                    ScriptedEgress::ok(
+                        r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
+                    ),
+                    Ok(RestrictedEgressResponse {
+                        status: 200,
+                        body: b"OK - 5".to_vec(),
+                    }),
+                    ScriptedEgress::ok(
+                        r#"{"ok":true,"files":[{"id":"FNEW","title":"report.txt"}]}"#,
+                    ),
+                    ScriptedEgress::ok(
+                        r#"{"ok":true,"file":{"id":"FOTHER","name":"report.txt","size":5,"ims":["D123"]}}"#,
+                    ),
+                ],
+                4,
+                "read-back",
+            ),
+        ];
+
+        for (responses, expected_requests, expected_reason) in cases {
+            let egress = ScriptedEgress::new(responses);
+            let report = SlackChannelAdapter
+                .deliver(
+                    envelope(vec![OutboundPart::File(workspace_file())], None),
+                    &egress,
+                )
+                .await
+                .expect("deliver reports provider failure");
+            assert_eq!(egress.requests().len(), expected_requests);
+            assert!(matches!(
+                report.parts.as_slice(),
+                [PartDeliveryOutcome::Permanent { reason }
+                    | PartDeliveryOutcome::Retryable { reason }
+                    | PartDeliveryOutcome::Unauthorized { reason }]
+                    if reason.contains(expected_reason)
+            ));
+            assert!(
+                report
+                    .parts
+                    .iter()
+                    .all(|outcome| !format!("{outcome:?}").contains("evil.example")),
+                "upload URLs must not leak through outcomes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_attachments_preserve_file_order_including_zero_byte_files() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(
+                r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/one","file_id":"FONE"}"#,
+            ),
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: b"OK - 5".to_vec(),
+            }),
+            ScriptedEgress::ok(r#"{"ok":true,"files":[{"id":"FONE"}]}"#),
+            ScriptedEgress::ok(
+                r#"{"ok":true,"file":{"id":"FONE","name":"report.txt","size":5,"ims":["D123"],"shares":{"private":{"D123":[{"thread_ts":"1710000000.000100"}]}}}}"#,
+            ),
+            ScriptedEgress::ok(
+                r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/two","file_id":"FZERO"}"#,
+            ),
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: b"OK - 0".to_vec(),
+            }),
+            ScriptedEgress::ok(r#"{"ok":true,"files":[{"id":"FZERO"}]}"#),
+            ScriptedEgress::ok(
+                r#"{"ok":true,"file":{"id":"FZERO","name":"empty.bin","size":0,"ims":["D123"],"shares":{"private":{"D123":[{"thread_ts":"1710000000.000100"}]}}}}"#,
+            ),
+        ]);
+        let empty = WorkspaceFile {
+            path: ScopedPath::new("/workspace/empty.bin").expect("path"),
+            filename: Some("empty.bin".to_string()),
+            mime_type: "application/octet-stream".to_string(),
+            bytes: Vec::new(),
+        };
+
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![
+                        OutboundPart::File(workspace_file()),
+                        OutboundPart::File(empty),
+                    ],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(
+            report.parts.as_slice(),
+            [
+                PartDeliveryOutcome::Sent {
+                    vendor_message_ref: Some(first)
+                },
+                PartDeliveryOutcome::Sent {
+                    vendor_message_ref: Some(second)
+                }
+            ] if first == "FONE" && second == "FZERO"
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 8);
+        assert!(requests[0].url.contains("filename=report.txt&length=5"));
+        assert!(requests[4].url.contains("filename=empty.bin&length=0"));
+        assert_eq!(requests[5].body.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn manifest_declares_exact_bounded_slack_file_egress() {
+        const MANIFEST: &str =
+            include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+        assert!(MANIFEST.contains("host = \"files.slack.com\""));
+        assert!(MANIFEST.contains("path_prefixes = [\"/files-pri/\"]"));
+        assert!(MANIFEST.contains("path_prefixes = [\"/upload/\"]"));
+        assert!(MANIFEST.contains("response_body_limit_bytes = 5242880"));
+        assert!(MANIFEST.contains("request_body_limit_bytes = 5242880"));
+        assert!(!MANIFEST.contains("/api/files.upload\""));
     }
 
     #[tokio::test]

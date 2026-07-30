@@ -20,7 +20,10 @@
 mod budgets;
 mod inbound;
 mod landing;
-mod workspace_refs;
+
+/// Canonical project-workspace mount alias used by attachment landing and
+/// scoped file reads.
+pub const WORKSPACE_ALIAS: &str = "/workspace";
 
 pub use budgets::{AttachmentBudgets, DEFAULT_ATTACHMENT_BUDGETS};
 pub use inbound::land_inbound_attachments;
@@ -28,4 +31,3 @@ pub use landing::{
     ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, DEFAULT_MAX_ATTACHMENT_BYTES,
     attachment_batch_scoped_path, attachment_scoped_path, land_attachment,
 };
-pub use workspace_refs::{WORKSPACE_ALIAS, extract_workspace_attachment_paths};

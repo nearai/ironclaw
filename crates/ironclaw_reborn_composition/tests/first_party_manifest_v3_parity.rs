@@ -426,6 +426,68 @@ fn slack_v3_still_declares_the_channel_surface() {
 }
 
 #[test]
+fn slack_v3_declares_only_bounded_file_transfer_egress() {
+    use ironclaw_host_api::NetworkMethod;
+
+    let v3 = parse(&live_asset("slack"));
+    let channel = v3
+        .resolved()
+        .channel
+        .as_ref()
+        .expect("slack manifest must declare its channel");
+    assert_eq!(channel.egress.len(), 4);
+
+    let api_post = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "slack.com" && target.methods == [NetworkMethod::Post])
+        .expect("Slack API POST target");
+    assert_eq!(
+        api_post.paths,
+        [
+            "/api/chat.postMessage",
+            "/api/chat.delete",
+            "/api/conversations.open",
+            "/api/files.completeUploadExternal",
+        ]
+    );
+    assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));
+
+    let api_get = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "slack.com" && target.methods == [NetworkMethod::Get])
+        .expect("Slack API GET target");
+    assert_eq!(
+        api_get.paths,
+        ["/api/files.info", "/api/files.getUploadURLExternal",]
+    );
+    assert_eq!(api_get.request_body_limit_bytes, Some(0));
+
+    let private_download = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "files.slack.com" && target.methods == [NetworkMethod::Get])
+        .expect("Slack private download target");
+    assert_eq!(private_download.path_prefixes, ["/files-pri/"]);
+    assert_eq!(
+        private_download.response_body_limit_bytes,
+        Some(5 * 1024 * 1024)
+    );
+
+    let external_upload = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "files.slack.com" && target.methods == [NetworkMethod::Post])
+        .expect("Slack external upload target");
+    assert_eq!(external_upload.path_prefixes, ["/upload/"]);
+    assert_eq!(
+        external_upload.request_body_limit_bytes,
+        Some(5 * 1024 * 1024)
+    );
+}
+
+#[test]
 fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
     let v3 = parse(&live_asset("telegram"));
     let channel = v3

@@ -167,9 +167,8 @@ ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
-# The ported channel-host e2e suite drives the generic assembly with slack
-# fixtures; dev-dependency linkage of concrete extension crates is the
-# sanctioned test exception (DEL-7).
+# Channel-host E2E suites drive Slack's existing concrete provider fixture.
+# Cross-provider parity belongs in the root integration-test package.
 ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"

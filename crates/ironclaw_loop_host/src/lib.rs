@@ -138,13 +138,16 @@ pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
+use ironclaw_host_api::RunId;
+use ironclaw_outbound::{OutboundError, ReplyAttachmentIntent, ReplyAttachmentIntentPort};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
-    AppendToolResultReferenceRequest, ContextMessage, FinalizedAssistantMessageByRunRequest,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
-    SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
+    FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    SessionThreadError, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
@@ -646,6 +649,7 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     // Only successful milestone publications are recorded here: if best-effort
     // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
@@ -665,6 +669,7 @@ where
             thread_scope,
             run_context,
             milestone_sink: None,
+            reply_attachment_intent_port: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -680,8 +685,17 @@ where
             thread_scope,
             run_context,
             milestone_sink: Some(milestone_sink),
+            reply_attachment_intent_port: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub fn with_reply_attachment_intent_port(
+        mut self,
+        port: Arc<dyn ReplyAttachmentIntentPort>,
+    ) -> Self {
+        self.reply_attachment_intent_port = Some(port);
+        self
     }
 }
 
@@ -741,14 +755,14 @@ where
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
-        let reply_content = request.reply.content;
+        let reply_content = self.finalized_reply_content(request.reply.content).await?;
         let finalized = match self
             .thread_service
             .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
                 turn_run_id: self.run_context.run_id.to_string(),
-                content: MessageContent::text(reply_content.clone()),
+                content: reply_content.clone(),
             })
             .await
         {
@@ -765,7 +779,7 @@ where
             }
         };
         if finalized.status != MessageStatus::Finalized
-            || finalized.content.as_deref() != Some(reply_content.as_str())
+            || persisted_message_content(&finalized).as_ref() != Some(&reply_content)
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -903,7 +917,7 @@ where
 
     async fn already_finalized_matching_reply_for_current_run(
         &self,
-        reply_content: &str,
+        reply_content: &MessageContent,
     ) -> Result<Option<ThreadMessageRecord>, AgentLoopHostError> {
         let Some(message) = self
             .thread_service
@@ -917,12 +931,61 @@ where
         else {
             return Ok(None);
         };
-        if message.content.as_deref() == Some(reply_content) {
+        if persisted_message_content(&message).as_ref() == Some(reply_content) {
             Ok(Some(message))
         } else {
             Ok(None)
         }
     }
+
+    async fn finalized_reply_content(
+        &self,
+        reply_text: String,
+    ) -> Result<MessageContent, AgentLoopHostError> {
+        let Some(port) = self.reply_attachment_intent_port.as_ref() else {
+            return Ok(MessageContent::text(reply_text));
+        };
+        let mut scope = self.thread_scope.to_resource_scope();
+        scope.thread_id = Some(self.run_context.thread_id.clone());
+        let run_id = RunId::from_uuid(self.run_context.run_id.as_uuid());
+        let intents = port
+            .seal(&scope, &run_id)
+            .await
+            .map_err(reply_attachment_seal_error)?;
+        Ok(MessageContent::with_attachments(
+            reply_text,
+            reply_attachment_refs(intents),
+        ))
+    }
+}
+
+fn reply_attachment_refs(intents: Vec<ReplyAttachmentIntent>) -> Vec<AttachmentRef> {
+    intents
+        .into_iter()
+        .enumerate()
+        .map(|(index, intent)| AttachmentRef {
+            id: format!("reply-attachment-{}", index + 1),
+            kind: AttachmentKind::from_mime_type(&intent.mime_type),
+            mime_type: intent.mime_type,
+            filename: Some(intent.filename),
+            size_bytes: Some(intent.size_bytes),
+            storage_key: Some(intent.path.to_string()),
+            extracted_text: None,
+        })
+        .collect()
+}
+
+fn persisted_message_content(message: &ThreadMessageRecord) -> Option<MessageContent> {
+    message.content.as_ref().map(|content| {
+        MessageContent::with_attachments(content.clone(), message.attachments.clone())
+    })
+}
+
+fn reply_attachment_seal_error(_error: OutboundError) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::TranscriptWriteFailed,
+        "reply attachment finalization failed",
+    )
 }
 
 /// Empty capability surface for the text-only loop-host MVP.

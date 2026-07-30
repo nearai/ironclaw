@@ -3,7 +3,6 @@ import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
-import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
@@ -288,11 +287,6 @@ function MessageBubbleImpl({
             </>
           )}
 
-          {role === CHAT_MESSAGE_ROLES.ASSISTANT &&
-          (<ProjectFileChips
-            threadId={threadId}
-            content={typeof content === "string" ? content : ""}
-          />)}
         </div>
       </div>
 

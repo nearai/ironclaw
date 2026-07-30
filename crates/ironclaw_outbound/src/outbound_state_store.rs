@@ -63,9 +63,7 @@ use ironclaw_turns::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::reply_attachment_intents::{
-    validate_reply_attachment_intent, validate_reply_attachment_intents,
-};
+use crate::reply_attachment_intents::validate_reply_attachment_intents;
 use crate::validation::{
     validate_advance_request, validate_communication_preference, validate_delivery_attempt,
     validate_delivery_identity, validate_delivery_status_request, validate_policy,
@@ -595,7 +593,7 @@ where
         run_id: &RunId,
         intent: ReplyAttachmentIntent,
     ) -> Result<(), OutboundError> {
-        validate_reply_attachment_intent(&intent)?;
+        intent.validate()?;
         let stable_scope = ReplyAttachmentIntentScope::from(scope);
         let path = reply_attachment_intent_path(&stable_scope, run_id)?;
         self.ensure_tenant_id_index(scope, &reply_attachment_intents_root()?)

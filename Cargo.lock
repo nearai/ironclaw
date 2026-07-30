@@ -3962,6 +3962,7 @@ dependencies = [
  "futures-util",
  "hex",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_authorization",
  "ironclaw_capabilities",
  "ironclaw_common",
@@ -4091,6 +4092,7 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_memory",
  "ironclaw_observability",
+ "ironclaw_outbound",
  "ironclaw_process_sandbox",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -4728,6 +4730,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_memory_native",
  "ironclaw_observability",
+ "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
@@ -4852,12 +4855,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_attachments",
  "ironclaw_host_api",
  "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "uuid",
 ]
 

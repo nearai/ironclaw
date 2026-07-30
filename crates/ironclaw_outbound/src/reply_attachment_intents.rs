@@ -23,6 +23,14 @@ pub struct ReplyAttachmentIntent {
     pub size_bytes: u64,
 }
 
+impl ReplyAttachmentIntent {
+    /// Validate that this metadata-only intent is safe and within the shared
+    /// per-file budget. Aggregate count/byte limits are enforced by the store.
+    pub fn validate(&self) -> Result<(), OutboundError> {
+        validate_reply_attachment_intent(self)
+    }
+}
+
 #[async_trait]
 pub trait ReplyAttachmentIntentPort: Send + Sync {
     async fn register(

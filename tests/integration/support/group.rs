@@ -1170,6 +1170,10 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            reply_attachment_intent_port: Some(Arc::new(
+                ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
+            )
+                as Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the
             // turn executor re-reads an auth block's `credential_requirements`

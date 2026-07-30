@@ -132,10 +132,11 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
-    builtin_first_party_package_for_process_backend,
+    builtin_first_party_package_for_process_backend, register_reply_attachment_first_party_handler,
 };
 use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
+use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
@@ -1026,6 +1027,7 @@ pub(crate) struct RebornRuntimeStores {
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
+    pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     /// Late-rebindable turn-run source the trigger active-run lookup reads
@@ -2738,14 +2740,15 @@ fn local_dev_scoped_filesystem(
 
 /// Unified bundle of outbound store handles returned by [`local_dev_outbound_store`].
 ///
-/// All four trait roles must be satisfied on construction.  Every role is an
+/// All five trait roles must be satisfied on construction. Every role is an
 /// `Arc` clone of a single `OutboundStateStore` — which implements all
-/// four outbound-store traits — so the WebUI delivery-defaults facade and the
+/// five outbound-store traits — so the WebUI delivery-defaults facade and the
 /// Slack delivery path share one backing tree.
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct OutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
+    pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
@@ -2797,9 +2800,9 @@ fn host_owned_outbound_delivery_target_registry()
 fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> OutboundStores {
     // One store instance over the composition-owned per-user scoped filesystem
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
-    // roles — preferences, state, delivered-gate routes, triggered-run delivery
-    // — are Arc-cloned from this single instance so the WebUI delivery-defaults
-    // facade and the Slack delivery path share the same backing tree.
+    // five outbound roles — preferences, state, reply-attachment intents, delivered-gate
+    // routes, triggered-run delivery — are Arc-cloned from this single instance
+    // so every presentation surface shares the same backing tree.
     #[allow(clippy::disallowed_methods)]
     let store: Arc<OutboundStateStore<CompositeRootFilesystem>> = Arc::new(
         OutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
@@ -2807,6 +2810,7 @@ fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> Outboun
     OutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        reply_attachment_intents: Arc::clone(&store) as Arc<dyn ReplyAttachmentIntentPort>,
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
@@ -4757,6 +4761,13 @@ async fn build_backend_production(
         trigger_active_run_lookup,
         process_backend,
     )?;
+    register_reply_attachment_first_party_handler(
+        &mut first_party_registry,
+        Arc::clone(&outbound_stores.reply_attachment_intents),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("reply attachment handler is invalid: {error}"),
+    })?;
     // Memory tools are registry-routed off the BOUND provider's manifest: the
     // handler serves whatever ids that package declares; no provider bound ⇒
     // nothing registered (the tools are absent from dispatch exactly as they
@@ -5610,6 +5621,7 @@ async fn build_backend_production(
         outbound_delivery_targets: Arc::clone(&outbound_delivery_targets),
         skill_auto_activate_learned: Arc::clone(&skill_auto_activate_learned),
         outbound_state: outbound_stores.outbound_state,
+        reply_attachment_intents: outbound_stores.reply_attachment_intents,
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(any(test, feature = "test-support"))]

@@ -69,7 +69,7 @@ pub trait SessionThreadService: Send + Sync {
                 scope: scope.clone(),
                 thread_id: thread_id.clone(),
                 turn_run_id: request.turn_run_id,
-                content: content.clone(),
+                content: crate::MessageContent::text(content.as_text()),
             })
             .await?;
         if message.status != crate::MessageStatus::Draft {

@@ -60,10 +60,11 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false,    // :3406 hardcoded None
-        cancellation_factory: false,    // :3407 hardcoded None
-        skill_context_source: true,     // :2917-2929 local_dev_filesystem_skill_context_source
+        model_route_resolver: false,        // :3406 hardcoded None
+        cancellation_factory: false,        // :3407 hardcoded None
+        skill_context_source: true,         // :2917-2929 local_dev_filesystem_skill_context_source
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        reply_attachment_intent_port: true, // shared production outbound-state store
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: false,      // hardcoded None
         memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
@@ -151,6 +152,9 @@ fn mask(
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
+        "reply_attachment_intent_port" => {
+            shape.reply_attachment_intent_port = from.reply_attachment_intent_port
+        }
         "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
         "memory_context_service" => shape.memory_context_service = from.memory_context_service,

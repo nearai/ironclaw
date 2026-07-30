@@ -874,7 +874,10 @@ async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempote
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized-append".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_finalized_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -892,6 +895,10 @@ async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempote
     assert_eq!(duplicate.kind, MessageKind::Assistant);
     assert_eq!(duplicate.status, MessageStatus::Finalized);
     assert_eq!(duplicate.content.as_deref(), Some("final answer"));
+    assert_eq!(
+        duplicate.attachments,
+        vec![sample_finalized_attachment_ref()]
+    );
 
     let finalized = service
         .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
@@ -903,6 +910,10 @@ async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempote
         .unwrap()
         .expect("finalized assistant message should be indexed by run");
     assert_eq!(finalized.message_id, first.message_id);
+    assert_eq!(
+        finalized.attachments,
+        vec![sample_finalized_attachment_ref()]
+    );
 
     let history = service
         .list_thread_history(ThreadHistoryRequest {
@@ -914,6 +925,10 @@ async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempote
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].message_id, first.message_id);
     assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[0].attachments,
+        vec![sample_finalized_attachment_ref()]
+    );
 }
 
 #[tokio::test]
@@ -947,7 +962,10 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized-existing-draft".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_finalized_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -955,6 +973,10 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final answer"));
+    assert_eq!(
+        finalized.attachments,
+        vec![sample_finalized_attachment_ref()]
+    );
 
     // The run index resolves to the same single message — finalizing in place
     // must not leave the run pointing at a stale or second record.
@@ -969,6 +991,7 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
         .expect("finalized assistant message should be indexed by run");
     assert_eq!(by_run.message_id, draft.message_id);
     assert_eq!(by_run.status, MessageStatus::Finalized);
+    assert_eq!(by_run.attachments, vec![sample_finalized_attachment_ref()]);
 
     // Finalize-by-turn-run finalizes the existing draft IN PLACE — it must
     // not materialize a second history row. Assert the caller-visible
@@ -984,6 +1007,10 @@ async fn filesystem_append_finalized_assistant_message_finalizes_existing_draft_
     assert_eq!(history.messages[0].message_id, draft.message_id);
     assert_eq!(history.messages[0].status, MessageStatus::Finalized);
     assert_eq!(history.messages[0].content.as_deref(), Some("final answer"));
+    assert_eq!(
+        history.messages[0].attachments,
+        vec![sample_finalized_attachment_ref()]
+    );
 }
 
 #[tokio::test]
@@ -3050,6 +3077,18 @@ fn scope(label: &str) -> ThreadScope {
         project_id: Some(ProjectId::new(format!("project-{label}")).unwrap()),
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
+    }
+}
+
+fn sample_finalized_attachment_ref() -> AttachmentRef {
+    AttachmentRef {
+        id: "reply-attachment-1".into(),
+        kind: AttachmentKind::Document,
+        mime_type: "text/csv".into(),
+        filename: Some("report.csv".into()),
+        size_bytes: Some(19),
+        storage_key: Some("/workspace/report.csv".into()),
+        extracted_text: None,
     }
 }
 

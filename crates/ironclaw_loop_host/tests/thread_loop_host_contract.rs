@@ -8,7 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_host_api::{
     AgentId, CapabilityId, DenyReason, DispatchInputIssueCode, MissionId, ProjectId,
-    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, TenantId, ThreadId, UserId,
+    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, RunId, ScopedPath, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -22,6 +23,9 @@ use ironclaw_loop_host::{
     SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, build_skill_run_snapshot,
     identity_message_ref,
+};
+use ironclaw_outbound::{
+    OutboundError, OutboundStateStore, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -2374,6 +2378,230 @@ async fn transcript_port_finalizes_assistant_reply_into_durable_thread_history()
 }
 
 #[tokio::test]
+async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/report.csv",
+        "report.csv",
+        "text/csv",
+        19,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/chart.png",
+        "chart.png",
+        "image/png",
+        23,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store.clone();
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "two files".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("two files"));
+    assert_eq!(assistant.attachments.len(), 2);
+    assert_eq!(
+        assistant
+            .attachments
+            .iter()
+            .map(|attachment| attachment.storage_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("/workspace/report.csv"), Some("/workspace/chart.png")]
+    );
+    assert_eq!(
+        assistant.attachments[0].filename.as_deref(),
+        Some("report.csv")
+    );
+    assert_eq!(assistant.attachments[0].mime_type, "text/csv");
+    assert_eq!(assistant.attachments[0].size_bytes, Some(19));
+    assert_eq!(assistant.attachments[0].kind, AttachmentKind::Document);
+    assert_eq!(assistant.attachments[1].kind, AttachmentKind::Image);
+    assert_ne!(assistant.attachments[0].id, assistant.attachments[1].id);
+
+    let error = store
+        .register(
+            &reply_attachment_scope(&fixture),
+            &reply_attachment_run_id(&fixture),
+            reply_attachment("/workspace/late.txt", "late.txt", "text/plain", 4),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OutboundError::ReplyAttachmentIntentsSealed));
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_port_with_no_intents_stays_text_only() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "plain reply".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("plain reply"));
+    assert!(assistant.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_seal_failure_prevents_transcript_write() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(Arc::new(FailingSealReplyAttachmentIntentPort));
+
+    let error = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "must not persist".to_string(),
+            },
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Assistant)
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_duplicate_retry_preserves_complete_content() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/result.json",
+        "result.json",
+        "application/json",
+        7,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+    let request = FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "retry reply".to_string(),
+        },
+    };
+
+    let first = adapter
+        .finalize_assistant_message(request.clone())
+        .await
+        .unwrap();
+    let second = adapter.finalize_assistant_message(request).await.unwrap();
+
+    assert_eq!(first, second);
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.attachments.len(), 1);
+    assert_eq!(
+        assistant.attachments[0].storage_key.as_deref(),
+        Some("/workspace/result.json")
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_retry_rejects_mismatched_refs() {
+    let fixture = ThreadFixture::new().await;
+    let plain_adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let request = FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "same text".to_string(),
+        },
+    };
+    plain_adapter
+        .finalize_assistant_message(request.clone())
+        .await
+        .unwrap();
+
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/different.txt",
+        "different.txt",
+        "text/plain",
+        9,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let attachment_adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    let error = attachment_adapter
+        .finalize_assistant_message(request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert!(
+        finalized_assistant_message(&fixture)
+            .await
+            .attachments
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
@@ -4466,6 +4694,85 @@ impl ThreadFixture {
             })
             .await
             .unwrap()
+    }
+}
+
+fn reply_attachment_scope(fixture: &ThreadFixture) -> ResourceScope {
+    let mut scope = fixture.thread_scope.to_resource_scope();
+    scope.thread_id = Some(fixture.thread_id.clone());
+    scope
+}
+
+fn reply_attachment_run_id(fixture: &ThreadFixture) -> RunId {
+    RunId::from_uuid(fixture.run_context.run_id.as_uuid())
+}
+
+fn reply_attachment(
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) -> ReplyAttachmentIntent {
+    ReplyAttachmentIntent {
+        path: ScopedPath::new(path).expect("reply attachment path"),
+        filename: filename.to_string(),
+        mime_type: mime_type.to_string(),
+        size_bytes,
+    }
+}
+
+async fn register_reply_attachment(
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    fixture: &ThreadFixture,
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) {
+    store
+        .register(
+            &reply_attachment_scope(fixture),
+            &reply_attachment_run_id(fixture),
+            reply_attachment(path, filename, mime_type, size_bytes),
+        )
+        .await
+        .expect("reply attachment registration");
+}
+
+async fn finalized_assistant_message(fixture: &ThreadFixture) -> ThreadMessageRecord {
+    fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .expect("thread history")
+        .messages
+        .into_iter()
+        .find(|message| message.kind == MessageKind::Assistant)
+        .expect("finalized assistant message")
+}
+
+struct FailingSealReplyAttachmentIntentPort;
+
+#[async_trait]
+impl ReplyAttachmentIntentPort for FailingSealReplyAttachmentIntentPort {
+    async fn register(
+        &self,
+        _scope: &ResourceScope,
+        _run_id: &RunId,
+        _intent: ReplyAttachmentIntent,
+    ) -> Result<(), OutboundError> {
+        Ok(())
+    }
+
+    async fn seal(
+        &self,
+        _scope: &ResourceScope,
+        _run_id: &RunId,
+    ) -> Result<Vec<ReplyAttachmentIntent>, OutboundError> {
+        Err(OutboundError::Backend)
     }
 }
 

@@ -40,8 +40,8 @@ use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
 };
 use ironclaw_threads::{
-    AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    MessageContent, SessionThreadService, ThreadScope,
+    AppendFinalizedAssistantMessageRequest, AttachmentKind, AttachmentRef, EnsureThreadRequest,
+    InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
@@ -603,6 +603,7 @@ struct Harness {
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
+    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -703,10 +704,20 @@ fn build_harness_with_settings(
         route_store,
         turns,
         threads,
+        project_files,
     }
 }
 
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
+    seed_final_message_with_attachments(threads, run_id, text, Vec::new()).await;
+}
+
+async fn seed_final_message_with_attachments(
+    threads: &InMemorySessionThreadService,
+    run_id: TurnRunId,
+    text: &str,
+    attachments: Vec<AttachmentRef>,
+) {
     let thread_scope = ThreadScope {
         tenant_id: tenant(),
         agent_id: agent(),
@@ -729,7 +740,7 @@ async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: Turn
             scope: thread_scope,
             thread_id: ThreadId::new("thread-a").expect("thread"),
             turn_run_id: run_id.to_string(),
-            content: MessageContent::text(text),
+            content: MessageContent::with_attachments(text, attachments),
         })
         .await
         .expect("finalized");
@@ -771,6 +782,55 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn observer_materializes_finalized_attachment_refs_for_delivery() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    harness
+        .project_files
+        .insert_file("/workspace/report.txt", "text/plain", b"hello");
+    seed_final_message_with_attachments(
+        &harness.threads,
+        run_id,
+        "report attached",
+        vec![AttachmentRef {
+            id: "reply-attachment-0".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "text/plain".to_string(),
+            filename: Some("renamed-report.txt".to_string()),
+            size_bytes: Some(5),
+            storage_key: Some("/workspace/report.txt".to_string()),
+            extracted_text: None,
+        }],
+    )
+    .await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-file-final"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert!(matches!(
+        envelopes[0].parts.as_slice(),
+        [OutboundPart::Text(text), OutboundPart::File(file)]
+            if text == "report attached"
+                && file.path.as_str() == "/workspace/report.txt"
+                && file.filename.as_deref() == Some("renamed-report.txt")
+                && file.mime_type == "text/plain"
+                && file.bytes == b"hello"
+    ));
 }
 
 #[tokio::test]
@@ -1752,10 +1812,19 @@ async fn triggered_final_reply_materializes_workspace_files_before_adapter_deliv
         br#"{"ok":true}"#,
     );
     let run_id = TurnRunId::new();
-    seed_final_message(
+    seed_final_message_with_attachments(
         &harness.threads,
         run_id,
         "trigger complete: /workspace/trigger.json",
+        vec![AttachmentRef {
+            id: "reply-attachment-0".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "application/json".to_string(),
+            filename: Some("trigger.json".to_string()),
+            size_bytes: Some(11),
+            storage_key: Some("/workspace/trigger.json".to_string()),
+            extracted_text: None,
+        }],
     )
     .await;
 

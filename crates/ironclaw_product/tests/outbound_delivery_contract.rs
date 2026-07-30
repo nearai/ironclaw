@@ -24,7 +24,7 @@ use ironclaw_product::{
     ProductOutboundTargetResolver, ProductSurfaceFailure, ProjectFilesystemReader, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsError, ProjectFsStat, VerifiedProductOutboundTargetMetadata,
 };
-use ironclaw_threads::ThreadScope;
+use ironclaw_threads::{AttachmentKind, AttachmentRef, ThreadScope};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
 #[derive(Default)]
@@ -641,6 +641,7 @@ fn coordinated_final_reply<'a>(
         parts: vec![ironclaw_product::OutboundPart::Text(
             "final reply".to_string(),
         )],
+        attachments: Vec::new(),
         thread_anchor: Some("thread-1".to_string()),
         require_direct_message_target: false,
         extension_id,
@@ -651,6 +652,7 @@ fn coordinated_final_reply<'a>(
 async fn coordinate_workspace_reply(
     project_filesystem: &dyn ProjectFilesystemReader,
     text: &str,
+    attachments: Vec<AttachmentRef>,
     reports: Vec<Result<DeliveryReport, ChannelError>>,
 ) -> (
     Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError>,
@@ -675,6 +677,7 @@ async fn coordinate_workspace_reply(
     let thread_scope = project_thread_scope();
     let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
     request.parts = vec![ironclaw_product::OutboundPart::Text(text.to_string())];
+    request.attachments = attachments;
     let result = coordinator
         .deliver(
             &policy,
@@ -685,6 +688,24 @@ async fn coordinate_workspace_reply(
         )
         .await;
     (result, adapter, store, scope)
+}
+
+fn workspace_attachment_ref(
+    id: &str,
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) -> AttachmentRef {
+    AttachmentRef {
+        id: id.to_string(),
+        kind: AttachmentKind::from_mime_type(mime_type),
+        mime_type: mime_type.to_string(),
+        filename: Some(filename.to_string()),
+        size_bytes: Some(size_bytes),
+        storage_key: Some(path.to_string()),
+        extracted_text: None,
+    }
 }
 
 #[tokio::test]
@@ -790,6 +811,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
         intent: DeliveryIntent::FinalReply,
         delivery: delivery_request(scope.clone()),
         parts: vec![ironclaw_product::OutboundPart::Text("dm only".to_string())],
+        attachments: Vec::new(),
         thread_anchor: Some("thread-1".to_string()),
         require_direct_message_target: true,
         extension_id: "vendorx",
@@ -976,6 +998,13 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
     let (outcome, adapter, store, scope) = coordinate_workspace_reply(
         &files,
         "report: /workspace/report.pdf",
+        vec![workspace_attachment_ref(
+            "report",
+            "/workspace/report.pdf",
+            "final-report.pdf",
+            "application/pdf",
+            3,
+        )],
         vec![Ok(DeliveryReport {
             parts: vec![sent("ts-text"), retryable_part()],
         })],
@@ -998,12 +1027,41 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
         &adapter.envelopes()[0].parts[1],
         ironclaw_product::OutboundPart::File(file)
             if file.path.as_str() == "/workspace/report.pdf"
+                && file.filename.as_deref() == Some("final-report.pdf")
+                && file.mime_type == "application/pdf"
     ));
     let attempts = store.list_delivery_attempts(scope).await.expect("attempts");
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Failed
     );
+}
+
+#[tokio::test]
+async fn coordinator_does_not_materialize_workspace_path_mentioned_only_in_prose() {
+    let files = ScriptedProjectFilesystem::default();
+    files.insert_file("/workspace/report.pdf", 3);
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(
+        &files,
+        "The report remains at /workspace/report.pdf.",
+        Vec::new(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-text")],
+        })],
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        Ok(CoordinatedDeliveryOutcome::Delivered { .. })
+    ));
+    assert_eq!(files.read_count(), 0);
+    assert_eq!(adapter.envelopes()[0].parts.len(), 1);
+    assert!(matches!(
+        &adapter.envelopes()[0].parts[0],
+        ironclaw_product::OutboundPart::Text(text)
+            if text.contains("/workspace/report.pdf")
+    ));
 }
 
 #[tokio::test]
@@ -1045,6 +1103,13 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
     let mut request = coordinated_final_reply(scope, "vendorx", &thread_scope);
     request.parts = vec![ironclaw_product::OutboundPart::Text(
         "report: /workspace/ordered.pdf".to_string(),
+    )];
+    request.attachments = vec![workspace_attachment_ref(
+        "ordered",
+        "/workspace/ordered.pdf",
+        "ordered.pdf",
+        "application/pdf",
+        7,
     )];
 
     let outcome = coordinator
@@ -1159,8 +1224,19 @@ async fn coordinator_fails_closed_when_workspace_file_is_missing_or_denied() {
     ] {
         let files = ScriptedProjectFilesystem::default();
         files.insert_error(path, expected.clone());
-        let (outcome, adapter, store, scope) =
-            coordinate_workspace_reply(&files, &format!("attachment: {path}"), Vec::new()).await;
+        let (outcome, adapter, store, scope) = coordinate_workspace_reply(
+            &files,
+            &format!("attachment: {path}"),
+            vec![workspace_attachment_ref(
+                "unavailable",
+                path,
+                "document.pdf",
+                "application/pdf",
+                4,
+            )],
+            Vec::new(),
+        )
+        .await;
 
         assert!(matches!(
             outcome,
@@ -1183,8 +1259,19 @@ async fn coordinator_fails_closed_when_workspace_file_is_missing_or_denied() {
 async fn coordinator_classifies_unavailable_workspace_reader_as_transport_unavailable() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_error("/workspace/report.pdf", ProjectFsError::Unavailable);
-    let (outcome, adapter, store, scope) =
-        coordinate_workspace_reply(&files, "attachment: /workspace/report.pdf", Vec::new()).await;
+    let (outcome, adapter, store, scope) = coordinate_workspace_reply(
+        &files,
+        "attachment: /workspace/report.pdf",
+        vec![workspace_attachment_ref(
+            "report",
+            "/workspace/report.pdf",
+            "report.pdf",
+            "application/pdf",
+            4,
+        )],
+        Vec::new(),
+    )
+    .await;
 
     assert!(matches!(
         outcome,
@@ -1206,12 +1293,20 @@ async fn coordinator_classifies_unavailable_workspace_reader_as_transport_unavai
 
 #[tokio::test]
 async fn coordinator_enforces_workspace_file_count_per_file_and_total_budgets() {
-    let too_many = (0..=DEFAULT_ATTACHMENT_BUDGETS.max_count)
-        .map(|index| format!("/workspace/file-{index}.txt"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let too_many_refs = (0..=DEFAULT_ATTACHMENT_BUDGETS.max_count)
+        .map(|index| {
+            workspace_attachment_ref(
+                &format!("file-{index}"),
+                &format!("/workspace/file-{index}.txt"),
+                &format!("file-{index}.txt"),
+                "text/plain",
+                1,
+            )
+        })
+        .collect::<Vec<_>>();
     let files = ScriptedProjectFilesystem::default();
-    let (outcome, adapter, _, _) = coordinate_workspace_reply(&files, &too_many, Vec::new()).await;
+    let (outcome, adapter, _, _) =
+        coordinate_workspace_reply(&files, "too many files", too_many_refs, Vec::new()).await;
     assert!(matches!(
         outcome,
         Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)
@@ -1224,8 +1319,19 @@ async fn coordinator_enforces_workspace_file_count_per_file_and_total_budgets() 
         "/workspace/oversize.bin",
         DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1,
     );
-    let (outcome, adapter, _, _) =
-        coordinate_workspace_reply(&files, "attachment: /workspace/oversize.bin", Vec::new()).await;
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(
+        &files,
+        "oversized attachment",
+        vec![workspace_attachment_ref(
+            "oversize",
+            "/workspace/oversize.bin",
+            "oversize.bin",
+            "application/octet-stream",
+            (DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1) as u64,
+        )],
+        Vec::new(),
+    )
+    .await;
     assert!(matches!(
         outcome,
         Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)
@@ -1248,7 +1354,30 @@ async fn coordinator_enforces_workspace_file_count_per_file_and_total_budgets() 
     }
     let (outcome, adapter, _, _) = coordinate_workspace_reply(
         &files,
-        "/workspace/one.bin /workspace/two.bin /workspace/three.bin",
+        "three files",
+        vec![
+            workspace_attachment_ref(
+                "one",
+                "/workspace/one.bin",
+                "one.bin",
+                "application/octet-stream",
+                each as u64,
+            ),
+            workspace_attachment_ref(
+                "two",
+                "/workspace/two.bin",
+                "two.bin",
+                "application/octet-stream",
+                each as u64,
+            ),
+            workspace_attachment_ref(
+                "three",
+                "/workspace/three.bin",
+                "three.bin",
+                "application/octet-stream",
+                each as u64,
+            ),
+        ],
         Vec::new(),
     )
     .await;
@@ -1264,8 +1393,19 @@ async fn coordinator_rejects_stat_and_read_path_mismatches() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_file("/workspace/report.pdf", 4);
     files.insert_stat_path("/workspace/report.pdf", "/workspace/other.pdf", 4);
-    let (outcome, adapter, _, _) =
-        coordinate_workspace_reply(&files, "/workspace/report.pdf", Vec::new()).await;
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(
+        &files,
+        "report",
+        vec![workspace_attachment_ref(
+            "report",
+            "/workspace/report.pdf",
+            "report.pdf",
+            "application/pdf",
+            4,
+        )],
+        Vec::new(),
+    )
+    .await;
     assert!(matches!(
         outcome,
         Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
@@ -1278,8 +1418,19 @@ async fn coordinator_rejects_stat_and_read_path_mismatches() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_file("/workspace/report.pdf", 4);
     files.insert_returned_file_path("/workspace/report.pdf", "/workspace/other.pdf");
-    let (outcome, adapter, _, _) =
-        coordinate_workspace_reply(&files, "/workspace/report.pdf", Vec::new()).await;
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(
+        &files,
+        "report",
+        vec![workspace_attachment_ref(
+            "report",
+            "/workspace/report.pdf",
+            "report.pdf",
+            "application/pdf",
+            4,
+        )],
+        Vec::new(),
+    )
+    .await;
     assert!(matches!(
         outcome,
         Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(

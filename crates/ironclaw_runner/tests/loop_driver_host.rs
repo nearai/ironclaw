@@ -2025,6 +2025,7 @@ async fn build_default_planned_runtime_wires_after_turn_memory_writer() {
 
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
@@ -3959,6 +3960,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
@@ -4138,6 +4140,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     // delivered through the pre-minted channel can complete the run in time.
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
@@ -4315,6 +4318,7 @@ async fn build_runtime_host_with_optional_hooks(
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone(),
@@ -4673,6 +4677,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
@@ -4893,6 +4898,7 @@ async fn product_live_parts_for_fixture(
     );
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,

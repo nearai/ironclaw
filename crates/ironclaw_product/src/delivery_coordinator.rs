@@ -29,15 +29,15 @@ use crate::{
     PartDeliveryOutcome,
 };
 use async_trait::async_trait;
-use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, extract_workspace_attachment_paths};
-use ironclaw_host_api::RestrictedEgress;
+use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
+use ironclaw_host_api::{RestrictedEgress, ScopedPath};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
     OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
-    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
-use ironclaw_threads::ThreadScope;
+use ironclaw_threads::{AttachmentRef, ThreadScope};
 use ironclaw_turns::{TurnRunId, TurnScope};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -159,6 +159,10 @@ pub struct CoordinatedDeliveryRequest<'a> {
     pub delivery: PrepareCommunicationDeliveryRequest,
     /// Channel-neutral content parts; the adapter owns rendering.
     pub parts: Vec<OutboundPart>,
+    /// Ordered durable references from the finalized assistant message.
+    /// Bytes are loaded only after policy authorization and immediately before
+    /// adapter dispatch.
+    pub attachments: Vec<AttachmentRef>,
     /// Optional vendor thread anchor (e.g. a thread timestamp).
     pub thread_anchor: Option<String>,
     /// AuthPrompt-style payloads must never land in shared conversations.
@@ -183,6 +187,7 @@ struct WorkspaceMaterialization<'a> {
     intent: DeliveryIntent,
     project_filesystem: &'a dyn ProjectFilesystemReader,
     thread_scope: &'a ThreadScope,
+    attachments: Vec<AttachmentRef>,
 }
 
 /// One notice-class delivery request (§5.4: `Working`, `Cleanup`,
@@ -248,6 +253,8 @@ pub enum CoordinatedDeliveryError {
     WorkspaceAttachmentRead(#[source] ProjectFsError),
     #[error("workspace attachments exceed the delivery budget")]
     WorkspaceAttachmentBudgetExceeded,
+    #[error("workspace attachment reference is invalid")]
+    WorkspaceAttachmentRefInvalid,
     #[error("caller-supplied materialized workspace attachments are not accepted")]
     PreMaterializedWorkspaceAttachment,
 }
@@ -430,6 +437,7 @@ impl DeliveryCoordinator {
                     intent: request.intent,
                     project_filesystem,
                     thread_scope: request.thread_scope,
+                    attachments: request.attachments,
                 },
             )
             .await;
@@ -796,31 +804,62 @@ async fn materialize_workspace_file_parts(
         intent,
         project_filesystem,
         thread_scope,
+        attachments,
     } = materialization;
     reject_caller_supplied_files(&parts)?;
     if !matches!(
         intent,
         DeliveryIntent::FinalReply | DeliveryIntent::TriggeredDelivery
     ) {
-        return Ok(parts);
+        return if attachments.is_empty() {
+            Ok(parts)
+        } else {
+            Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)
+        };
     }
 
-    let mut paths = Vec::new();
-    let mut seen = HashSet::new();
-    for part in &parts {
-        if let OutboundPart::Text(text) = part {
-            for path in extract_workspace_attachment_paths(text) {
-                if seen.insert(path.clone()) {
-                    paths.push(path);
-                }
-            }
-        }
-    }
-    if paths.is_empty() {
+    if attachments.is_empty() {
         return Ok(parts);
     }
-    if paths.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
+    if attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
         return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+    }
+
+    let mut refs = Vec::with_capacity(attachments.len());
+    let mut seen_ids = HashSet::with_capacity(attachments.len());
+    let mut seen_paths = HashSet::with_capacity(attachments.len());
+    for attachment in attachments {
+        if !seen_ids.insert(attachment.id.clone()) {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid);
+        }
+        let path = attachment
+            .storage_key
+            .as_deref()
+            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)
+            .and_then(|path| {
+                ScopedPath::new(path)
+                    .map_err(|_| CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)
+            })?;
+        if !seen_paths.insert(path.clone()) {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid);
+        }
+        let intent = ReplyAttachmentIntent {
+            path,
+            filename: attachment
+                .filename
+                .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)?,
+            mime_type: attachment.mime_type,
+            size_bytes: attachment
+                .size_bytes
+                .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid)?,
+        };
+        intent.validate().map_err(|error| match error {
+            ironclaw_outbound::OutboundError::ReplyAttachmentIntentLimitExceeded => {
+                CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded
+            }
+            _ => CoordinatedDeliveryError::WorkspaceAttachmentRefInvalid,
+        })?;
+        refs.push(intent);
     }
 
     // Preflight every file before reading any bytes. The production delivery
@@ -828,12 +867,12 @@ async fn materialize_workspace_file_parts(
     // pass avoids even bounded allocations when the declared set already
     // violates per-file or aggregate budgets.
     let mut declared_total_bytes = 0u64;
-    for path in &paths {
+    for attachment in &refs {
         let stat = project_filesystem
-            .stat(thread_scope, path)
+            .stat(thread_scope, attachment.path.as_str())
             .await
             .map_err(CoordinatedDeliveryError::WorkspaceAttachmentRead)?;
-        if stat.path != *path {
+        if stat.path != attachment.path.as_str() {
             return Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
                 ProjectFsError::Internal,
             ));
@@ -843,7 +882,9 @@ async fn materialize_workspace_file_parts(
                 ProjectFsError::NotAFile,
             ));
         }
-        if stat.size_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
+        if stat.size_bytes != attachment.size_bytes
+            || stat.size_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64
+        {
             return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
         }
         declared_total_bytes = declared_total_bytes
@@ -855,19 +896,21 @@ async fn materialize_workspace_file_parts(
     }
 
     let mut total_bytes = 0usize;
-    let mut files = Vec::with_capacity(paths.len());
-    for path in paths {
-        let file = project_filesystem
-            .read_file(thread_scope, &path)
+    let mut files = Vec::with_capacity(refs.len());
+    for attachment in refs {
+        let mut file = project_filesystem
+            .read_file(thread_scope, attachment.path.as_str())
             .await
             .map_err(CoordinatedDeliveryError::WorkspaceAttachmentRead)?;
-        if file.path.as_str() != path {
+        if file.path != attachment.path {
             return Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
                 ProjectFsError::Internal,
             ));
         }
         let file_bytes = file.bytes.len();
-        if file_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
+        if u64::try_from(file_bytes).ok() != Some(attachment.size_bytes)
+            || file_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes
+        {
             return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
         }
         total_bytes = total_bytes
@@ -876,6 +919,8 @@ async fn materialize_workspace_file_parts(
         if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
             return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
         }
+        file.filename = Some(attachment.filename);
+        file.mime_type = attachment.mime_type;
         files.push(OutboundPart::File(file));
     }
     parts.extend(files);

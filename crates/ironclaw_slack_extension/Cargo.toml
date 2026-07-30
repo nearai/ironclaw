@@ -16,11 +16,13 @@ layer = "products"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
+url = "2"
 
 [dev-dependencies]
 # Property testing for the ingress boundary (#6524 workstream 9).

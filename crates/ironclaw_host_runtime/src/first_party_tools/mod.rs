@@ -12,6 +12,7 @@ mod json;
 mod memory;
 mod model_visible_output;
 mod outbound_delivery;
+mod reply_attachment;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -62,6 +63,7 @@ pub use memory::{
     register_native_memory_tools,
 };
 pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
+pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
@@ -227,6 +229,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
                     outbound_delivery::manifest()?,
+                    reply_attachment::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
@@ -372,6 +375,15 @@ pub fn register_outbound_delivery_first_party_handler(
     outbound_delivery::insert_handler(registry, router)
 }
 
+/// Replace the fail-closed reply-attachment default with the durable,
+/// run-scoped intent store selected by composition.
+pub fn register_reply_attachment_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    intent_port: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+) -> Result<(), HostApiError> {
+    reply_attachment::insert_handler(registry, intent_port)
+}
+
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -470,6 +482,7 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         handler,
     );
     outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
+    reply_attachment::insert_unavailable_handler(&mut registry)?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }

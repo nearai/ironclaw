@@ -97,6 +97,37 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["routed"],
             "additionalProperties": false
         }),
+        "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Existing file path under /workspace to attach to the final reply."
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional safe download filename. Defaults to the workspace basename."
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "Optional MIME type override. Defaults from common filename extensions or application/octet-stream."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/attach_workspace_file_to_reply.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "attached": { "type": "boolean", "const": true },
+                "path": { "type": "string" },
+                "filename": { "type": "string" },
+                "mime_type": { "type": "string" },
+                "size_bytes": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["attached", "path", "filename", "mime_type", "size_bytes"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",

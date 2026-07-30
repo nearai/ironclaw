@@ -68,7 +68,7 @@ in the web interface. The agent may reply that it can't help.
 Back in your Slack app, confirm **Event Subscriptions** points at your instance:
 
 ```
-https://your-host/webhooks/slack/events
+https://your-host/webhooks/extensions/slack/events
 ```
 
 Slack sends a verification challenge to that URL, so IronClaw must already be running and
@@ -94,7 +94,7 @@ or self-signed endpoint.
 
 | Slack setting | URL |
 | --- | --- |
-| Event Subscriptions → Request URL | `https://your-host/webhooks/slack/events` |
+| Event Subscriptions → Request URL | `https://your-host/webhooks/extensions/slack/events` |
 | OAuth & Permissions → Redirect URL | `https://your-host/api/reborn/product-auth/oauth/slack_personal/callback` |
 
 The redirect URL is used for per-user ("personal") Slack authorization. Tell IronClaw the
@@ -162,6 +162,7 @@ your host. It sets the scopes, bot events, and redirect URL that the steps above
         "im:history",
         "im:write",
         "files:read",
+        "files:write",
         "groups:history",
         "mpim:history"
       ]
@@ -170,7 +171,7 @@ your host. It sets the scopes, bot events, and redirect URL that the steps above
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://example.com/webhooks/slack/events",
+      "request_url": "https://example.com/webhooks/extensions/slack/events",
       "bot_events": [
         "app_mention",
         "message.channels",
@@ -193,6 +194,11 @@ authorization — searching and posting as the person rather than as the bot. If
 want the bot to participate in channels, you can drop the `user` block and the redirect
 URL with it.
 </Note>
+
+`files:read` lets the bot resolve and download inbound file shares.
+`files:write` lets it return explicitly attached workspace files through
+Slack's external upload flow. IronClaw never uses the retired `files.upload`
+method.
 
 Slack validates the request URL when you save the manifest, so start IronClaw before
 creating the app.
@@ -234,7 +240,7 @@ ironclaw config list | grep slack
 <Accordion title="Slack can't verify the request URL">
 IronClaw has to be running and publicly reachable over HTTPS before you save the URL.
 Confirm the instance answers from outside your network, and that you used the exact
-`/webhooks/slack/events` path.
+`/webhooks/extensions/slack/events` path.
 </Accordion>
 
 <Accordion title="Slack rejects authorization with a redirect-URI mismatch">

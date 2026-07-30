@@ -29,6 +29,7 @@ use ironclaw_loop_host::{
     TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
     host_managed_loop_compaction_port_with_prompt_id,
 };
+use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
@@ -1021,6 +1022,7 @@ where
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
     /// `HookDispatcher`, wraps it in `Arc`, and then plumbs it through
@@ -1139,6 +1141,7 @@ where
             config,
             skill_context_source: None,
             attachment_read_port: None,
+            reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
             hook_security_audit_sink: None,
@@ -1231,6 +1234,14 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_reply_attachment_intent_port(
+        mut self,
+        port: Arc<dyn ReplyAttachmentIntentPort>,
+    ) -> Self {
+        self.reply_attachment_intent_port = Some(port);
         self
     }
 
@@ -1931,13 +1942,17 @@ where
                 Arc::clone(&self.loop_checkpoint_store),
                 Arc::clone(&self.milestone_sink),
             ));
-        let mut transcript: Arc<dyn LoopTranscriptPort> =
-            Arc::new(ThreadBackedLoopTranscriptPort::with_milestone_sink(
-                Arc::clone(&self.thread_service),
-                effective_scope.clone(),
-                run_context.clone(),
-                Arc::clone(&self.milestone_sink),
-            ));
+        let mut transcript_adapter = ThreadBackedLoopTranscriptPort::with_milestone_sink(
+            Arc::clone(&self.thread_service),
+            effective_scope.clone(),
+            run_context.clone(),
+            Arc::clone(&self.milestone_sink),
+        );
+        if let Some(port) = self.reply_attachment_intent_port.as_ref() {
+            transcript_adapter =
+                transcript_adapter.with_reply_attachment_intent_port(Arc::clone(port));
+        }
+        let mut transcript: Arc<dyn LoopTranscriptPort> = Arc::new(transcript_adapter);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
             model = Arc::new(HookedLoopModelPort::new(
                 Arc::clone(&model),

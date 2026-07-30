@@ -1396,6 +1396,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         turn_state,
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
