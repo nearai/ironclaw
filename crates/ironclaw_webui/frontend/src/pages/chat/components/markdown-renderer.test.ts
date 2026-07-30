@@ -218,8 +218,8 @@ test("streaming markdown delegates accumulated text without a fixed render inter
   );
   assert.match(
     rendererSource,
-    /html: renderMarkdown\(currentContent,\s*\{\s*workspaceFileLinks:\s*typeof onWorkspaceFileOpen === "function",?\s*\}\)/,
-    "completed replies must still pass through the sanitizer with explicit workspace-link scope",
+    /html: renderMarkdown\(currentContent,\s*\{\s*workspaceFileLinks:\s*currentWorkspaceFileLinksEnabled,?\s*\}\)/,
+    "completed replies must still pass through the sanitizer with the latest workspace-link scope",
   );
   assert.match(
     appCssSource,

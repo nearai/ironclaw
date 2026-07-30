@@ -141,6 +141,56 @@ test("workspace links delegate to the in-app file preview", async () => {
   }
 });
 
+test("workspace links re-render when preview capability becomes available", async () => {
+  renderMarkdownMock.mockReset();
+  renderMarkdownMock.mockImplementation((_, options) =>
+    options.workspaceFileLinks
+      ? '<p><a href="/workspace/report.csv" data-workspace-path="/workspace/report.csv">report.csv</a></p>'
+      : '<p><a href="/workspace/report.csv">report.csv</a></p>'
+  );
+  const onWorkspaceFileOpen = vi.fn();
+  const { MarkdownRenderer } = await import("./markdown-renderer");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => {
+      root.render(<MarkdownRenderer
+        content="[report.csv](/workspace/report.csv)"
+      />);
+    });
+    assert.equal(renderMarkdownMock.mock.calls.length, 1);
+    assert.equal(
+      container.querySelector("a")?.hasAttribute("data-workspace-path"),
+      false,
+    );
+
+    await act(async () => {
+      root.render(<MarkdownRenderer
+        content="[report.csv](/workspace/report.csv)"
+        onWorkspaceFileOpen={onWorkspaceFileOpen}
+      />);
+    });
+
+    assert.equal(renderMarkdownMock.mock.calls.length, 2);
+    assert.deepEqual(renderMarkdownMock.mock.calls[1], [
+      "[report.csv](/workspace/report.csv)",
+      { workspaceFileLinks: true },
+    ]);
+    const link = container.querySelector("a[data-workspace-path]");
+    assert.ok(link);
+    link.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+    }));
+    assert.deepEqual(onWorkspaceFileOpen.mock.calls, [["/workspace/report.csv"]]);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
 test("workspace links reject forged preview metadata", async () => {
   renderMarkdownMock.mockReset();
   renderMarkdownMock.mockImplementation(

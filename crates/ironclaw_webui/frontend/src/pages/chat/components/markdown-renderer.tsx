@@ -148,6 +148,11 @@ function MarkdownRendererImpl({
   const normalizedContent = typeof content === "string" ? content : "";
   const [rendered, setRendered] = React.useState(null);
   const latestContentRef = React.useRef(normalizedContent);
+  const workspaceFileLinksEnabled =
+    typeof onWorkspaceFileOpen === "function";
+  const latestWorkspaceFileLinksEnabledRef =
+    React.useRef(workspaceFileLinksEnabled);
+  latestWorkspaceFileLinksEnabledRef.current = workspaceFileLinksEnabled;
   const mountedRef = React.useRef(true);
   const renderInFlightRef = React.useRef(false);
   const markdownLoadFailedRef = React.useRef(false);
@@ -173,7 +178,8 @@ function MarkdownRendererImpl({
 
   const renderedHtml =
     normalizedContent && rendered &&
-    rendered.source === normalizedContent
+    rendered.source === normalizedContent &&
+    rendered.workspaceFileLinks === workspaceFileLinksEnabled
       ? rendered.html
       : null;
 
@@ -190,11 +196,13 @@ function MarkdownRendererImpl({
       .then(({ renderMarkdown }) => {
         const currentContent = latestContentRef.current;
         if (!mountedRef.current || !currentContent) return;
+        const currentWorkspaceFileLinksEnabled =
+          latestWorkspaceFileLinksEnabledRef.current;
         setRendered({
           source: currentContent,
+          workspaceFileLinks: currentWorkspaceFileLinksEnabled,
           html: renderMarkdown(currentContent, {
-            workspaceFileLinks:
-              typeof onWorkspaceFileOpen === "function",
+            workspaceFileLinks: currentWorkspaceFileLinksEnabled,
           }),
         });
       })
@@ -225,7 +233,7 @@ function MarkdownRendererImpl({
 
     if (streaming) return;
     requestRenderRef.current();
-  }, [normalizedContent, streaming]);
+  }, [normalizedContent, streaming, workspaceFileLinksEnabled]);
 
   React.useEffect(() => {
     if (streaming || renderedHtml === null) return undefined;
