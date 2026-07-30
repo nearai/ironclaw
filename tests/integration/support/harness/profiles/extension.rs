@@ -98,12 +98,22 @@ fn hosted_mcp_discovery_fixture_response(
                 "annotations": {"readOnlyHint": true}
             }]
         }),
-        "tools/call" if is_nearai => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": "REBORN_NEARAI_WEB_SEARCH_RESULT"
-            }]
-        }),
+        "tools/call" if is_nearai => {
+            let is_empty_query = body
+                .pointer("/params/arguments/query")
+                .and_then(serde_json::Value::as_str)
+                == Some("NEARAI_EMPTY_PROVIDER_RESULT");
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": if is_empty_query {
+                        "[]"
+                    } else {
+                        "REBORN_NEARAI_WEB_SEARCH_RESULT"
+                    }
+                }]
+            })
+        }
         _ => return None,
     };
     let response = serde_json::to_vec(&serde_json::json!({
