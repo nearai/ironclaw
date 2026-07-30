@@ -6,6 +6,7 @@ pub(crate) mod config;
 pub(crate) mod doctor;
 pub(crate) mod extension;
 pub(crate) mod hooks;
+pub(crate) mod ironhub;
 pub(crate) mod logs;
 pub(crate) mod models;
 pub(crate) mod onboard;
@@ -35,6 +36,9 @@ pub(crate) enum Command {
     Extension(extension::ExtensionCommand),
     /// Inspect configured Reborn hooks.
     Hooks(hooks::HooksCommand),
+    /// Search and install signed registry packages from IronHub.
+    #[command(name = "ironhub", visible_alias = "iron-hub")]
+    IronHub(ironhub::IronHubCommand),
     /// Inspect Reborn logs.
     Logs(logs::LogsCommand),
     /// Inspect Reborn model slots and route status.
@@ -76,6 +80,9 @@ impl Command {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Hooks(command) => command.execute(),
+            Self::IronHub(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Logs(command) => command.execute(),
             Self::Models(command) => command.execute(),
             Self::Onboard(command) => {

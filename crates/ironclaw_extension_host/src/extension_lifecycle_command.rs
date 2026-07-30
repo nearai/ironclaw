@@ -229,6 +229,8 @@ fn render_string_array(output: &mut String, items: &[String], label: &str) {
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
+        LifecycleExtensionSource::Installed => "installed",
+        LifecycleExtensionSource::Registry => "registry",
     }
 }
 

@@ -30,6 +30,10 @@ ironclaw extension remove github-mcp
 ironclaw hooks list                 # disabled — errors, see below
 ironclaw hooks list --json          # disabled — errors, see below
 ironclaw hooks list --verbose       # disabled — errors, see below
+ironclaw ironhub search github
+ironclaw ironhub list --kind tool
+ironclaw ironhub info github-tool
+ironclaw ironhub install github-tool --kind tool
 ironclaw logs                       # disabled — errors, see below
 ironclaw logs --json                # disabled — errors, see below
 ironclaw logs --verbose             # disabled — errors, see below
@@ -295,6 +299,32 @@ Expected fields include:
 - `payload.installed` or `payload.removed` for lifecycle mutations. Install
   establishes membership; host-owned readiness reconciliation derives
   `setup_needed` or `active`, so there is no separate public activation command.
+
+### `ironhub`
+
+Searches the signed IronHub catalog and installs catalog tools or skills through
+the current Reborn extension and skill managers:
+
+```bash
+cargo run -q -p ironclaw --bin ironclaw -- ironhub search github
+cargo run -q -p ironclaw --bin ironclaw -- ironhub list --kind skill
+cargo run -q -p ironclaw --bin ironclaw -- ironhub info github-tool --kind tool
+cargo run -q -p ironclaw --bin ironclaw -- ironhub install github-tool --kind tool
+```
+
+Catalog and artifact downloads use host-mediated HTTPS egress, bounded response
+sizes, a host allowlist, and private-network denial. The catalog envelope is
+verified with the pinned Ed25519 key before entries are parsed, and downloaded
+artifacts must match both the signed byte count and SHA-256 digest. Install
+automation can pin the inspected catalog state with `--expected-version` and
+`--expected-artifact-digest`.
+
+Unverified community content is rejected unless a CLI operator supplies
+`--acknowledge-unverified`; the model-facing install capability intentionally
+has no equivalent acknowledgement field. `--force` replaces an existing
+registry install through the normal lifecycle manager and restores the previous
+package or skill if the replacement fails. The command alias `iron-hub` is also
+accepted.
 
 ### `completion`
 

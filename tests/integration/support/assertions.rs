@@ -302,6 +302,23 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Inverse of [`assert_system_prompt_contains`]: assert no captured
+    /// model-visible `System`-role prompt contains `text`. Fails rather than
+    /// passing vacuously when no system prompts were captured.
+    pub async fn assert_system_prompt_excludes(&self, text: &str) -> HarnessResult<()> {
+        let prompts = self.captured_system_prompts();
+        if prompts.is_empty() {
+            return Err(format!(
+                "vacuous exclusion: no system prompts were captured; cannot prove {text:?} was omitted"
+            )
+            .into());
+        }
+        if prompts.iter().any(|prompt| prompt.contains(text)) {
+            return Err(format!("captured system prompt unexpectedly contained {text:?}").into());
+        }
+        Ok(())
+    }
+
     /// Assert that some model request this thread sent to the scripted provider
     /// contains `needle` anywhere in its serialized messages — the caller-tier
     /// proof that host-injected context (e.g. activated-skill instructions)

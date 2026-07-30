@@ -17,6 +17,7 @@ mod reborn_support;
 mod support;
 
 use reborn_support::group::RebornIntegrationGroup;
+use reborn_support::harness::profiles::extension::PROMPT_DENIAL_DESCRIPTION;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
@@ -64,4 +65,50 @@ async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
         .assert_reply_contains("audit denied")
         .await
         .expect("run recovered after the rejected call");
+}
+
+/// Regression for the Attio incident: the post-signature `RegistryInstalled`
+/// source makes catalog descriptions trusted prompt text, while a local
+/// package's unsafe description degrades only that prompt entry instead of
+/// denying the turn.
+#[tokio::test]
+async fn prompt_description_trust_is_enforced_at_the_real_turn_seam() {
+    let group = RebornIntegrationGroup::extension_prompt_description_trust_probe()
+        .await
+        .expect("prompt-description trust probe group builds");
+    let harness = group
+        .thread("conv-prompt-description-trust")
+        .script([RebornScriptedReply::text("prompt survived")])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn("continue after installing the extension")
+        .await
+        .expect("verified auth wording and one unsafe local description must not deny the turn");
+    harness
+        .assert_reply_contains("prompt survived")
+        .await
+        .expect("turn completes through persisted reply");
+    harness
+        .assert_model_tool_description_contains("verifiedprompt__invoke", PROMPT_DENIAL_DESCRIPTION)
+        .await
+        .expect("verified catalog description reaches the model intact, including Bearer");
+    harness
+        .assert_system_prompt_contains(PROMPT_DENIAL_DESCRIPTION)
+        .await
+        .expect("verified catalog description survives instruction-bundle validation");
+    harness
+        .assert_model_tools_contains("localprompt__healthy")
+        .await
+        .expect("safe sibling from the same local package remains advertised");
+    harness
+        .assert_system_prompt_contains("localprompt.healthy")
+        .await
+        .expect("safe local sibling remains in the validated prompt surface");
+    harness
+        .assert_system_prompt_excludes("localprompt.unsafe")
+        .await
+        .expect("only the unsafe untrusted prompt entry is omitted");
 }
