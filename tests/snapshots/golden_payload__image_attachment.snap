@@ -1,6 +1,5 @@
 ---
 source: tests/integration/support/golden.rs
-assertion_line: 98
 ---
 ===== inference call 0 =====
 {
