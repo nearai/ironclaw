@@ -430,7 +430,7 @@ export function ChatInput({
           setMenuSelection(next);
           return;
         }
-        if (e.key === "Enter" || e.key === "Tab") {
+        if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
           e.preventDefault();
           const boundedIndex = Math.max(
             0,
@@ -439,6 +439,9 @@ export function ChatInput({
           completeMenuCommand(openMenuCommands[boundedIndex]);
           return;
         }
+        // Shift+Enter/Shift+Tab fall through unhandled here — identical to
+        // the menu-closed case (native newline / focus-shift), not a
+        // completion and not a send.
         if (e.key === "Escape") {
           e.preventDefault();
           const next = commandMenuSelectionReducer(menuSelectionRef.current, {

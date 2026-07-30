@@ -822,3 +822,79 @@ test("ChatInput command-menu highlights the typed prefix in the row's name", () 
   assert.equal(extractText(modelRow).includes("mo"), true);
   assert.equal(extractText(modelRow).includes("del"), true);
 });
+
+test("ChatInput Shift+Enter and Shift+Tab fall through the open command menu", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+
+  // Shift+Enter must behave exactly like the menu-closed case: native
+  // newline insertion, not a command completion and not a send. `e.key` is
+  // "Enter" regardless of the shift modifier, so the menu's own Enter/Tab
+  // handling must explicitly check `!e.shiftKey`.
+  let shiftEnterPrevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: true,
+    preventDefault: () => {
+      shiftEnterPrevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(shiftEnterPrevented, false);
+  assert.equal(sendCalls, 0);
+  assert.deepEqual(setCalls.filter((call) => call.index === 0), []);
+
+  // Shift+Tab must also fall through (not complete), for consistency.
+  let shiftTabPrevented = false;
+  textareaProps.onKeyDown({
+    key: "Tab",
+    shiftKey: true,
+    preventDefault: () => {
+      shiftTabPrevented = true;
+    },
+  });
+
+  assert.equal(shiftTabPrevented, false);
+  assert.deepEqual(setCalls.filter((call) => call.index === 0), []);
+});
+
+test("ChatInput Shift+Enter inserts a newline when the command menu is closed", async () => {
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "plain text, no menu here",
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textareaProps = templateProps(findTextarea(tree));
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: true,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, false);
+  assert.equal(sendCalls, 0);
+});
