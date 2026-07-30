@@ -403,6 +403,9 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "logs_pagination": "[data-testid='logs-pagination']",
+    "logs_load_older": "[data-testid='logs-load-older']",
+    "logs_load_older_error": "[data-testid='logs-load-older-error']",
     "settings_search_placeholder": "Search settings...",
     "settings_import_file": 'input[type="file"][accept=".json,application/json"]',
     "settings_tool_row_for": (
