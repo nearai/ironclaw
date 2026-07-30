@@ -43,9 +43,14 @@ fixtures="${work}/fixtures"
 mkdir -p "${fixtures}"
 
 echo "▶ valid fixture"
-printf '%s\n' '{"schema_version": 1, "turns": []}' >"${fixtures}/valid.json"
+cat >"${fixtures}/valid.json" <<'JSON'
+{
+  "schema_version": 1,
+  "turns": []
+}
+JSON
 capture "${checker}" "${fixtures}"
-check_rc "a valid object fixture passes" 0
+check_rc "a valid multiline object fixture passes" 0
 
 echo "▶ malformed fixture sabotage"
 printf '%s\n' '{"schema_version": 1,' >"${fixtures}/malformed.json"

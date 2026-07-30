@@ -404,6 +404,15 @@ mod tests {
 
         assert!(crypto.decrypt(&ciphertext, &salt, &aad).is_ok());
 
+        let mut unbound_scope = scope.clone();
+        unbound_scope.mission_id = Some(MissionId::new("mission-b").unwrap());
+        unbound_scope.thread_id = Some(ThreadId::new("thread-b").unwrap());
+        let unbound_aad = credential_account_aad(&unbound_scope, &account_id);
+        assert!(
+            crypto.decrypt(&ciphertext, &salt, &unbound_aad).is_ok(),
+            "mission and thread are deliberately excluded from credential account AAD"
+        );
+
         let mut alternate_scopes = Vec::new();
         let mut other_tenant = scope.clone();
         other_tenant.tenant_id = TenantId::new("tenant-b").unwrap();

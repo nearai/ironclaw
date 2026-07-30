@@ -173,9 +173,11 @@ DA:2,0
 DA:3,1
 BRDA:2,0,0,0
 BRDA:2,0,1,1
+BRDA:3,0,0,-
+BRDA:3,0,1,-
 LF:3
 LH:2
-BRF:2
+BRF:4
 BRH:1
 end_of_record
 SF:/work/ironclaw/src/main.rs
@@ -192,9 +194,11 @@ DA:2,1
 DA:3,0
 BRDA:2,0,0,3
 BRDA:2,0,1,0
+BRDA:3,0,0,-
+BRDA:3,0,1,-
 LF:3
 LH:1
-BRF:2
+BRF:4
 BRH:1
 end_of_record
 SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
@@ -221,8 +225,12 @@ assert_contains "M1: BRDA counts are summed across lanes for the first arm" \
   "${m1_merged_body}" "BRDA:2,0,0,3"
 assert_contains "M1: BRDA counts are summed across lanes for the second arm" \
   "${m1_merged_body}" "BRDA:2,0,1,1"
+assert_contains "M1: never-executed BRDA '-' is normalized to zero" \
+  "${m1_merged_body}" "BRDA:3,0,0,0"
+assert_contains "M1: a second never-executed branch remains zero" \
+  "${m1_merged_body}" "BRDA:3,0,1,0"
 assert_contains "M1: BRF/BRH are recomputed from merged branch counts" \
-  "${m1_merged_body}" "$(printf 'BRF:2\nBRH:2')"
+  "${m1_merged_body}" "$(printf 'BRF:4\nBRH:2')"
 
 # M2: missing input -> non-zero exit, no output file written over a bad arg.
 capture "${merge_sh}" "${tmp_root}/m2_merged.lcov" "${fixtures_dir}/does_not_exist.lcov"

@@ -105,6 +105,51 @@ check_text "line denominator is reported" "Changed line coverage: 100.00% (3/3)"
 check_text "branch denominator is reported" "Changed branch coverage: 100.00% (2/2)"
 check_report_text "machine report preserves the branch denominator" '"instrumented_branches": 2'
 
+echo "▶ diff markers inside hunk content are parsed by their first byte"
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- a/crates/ironclaw_demo/src/lib.rs
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -1,1 +1,1 @@
+---removed_content
++++added_content
+DIFF
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+DA:1,1
+BRDA:1,0,0,1
+BRDA:1,0,1,1
+LF:1
+LH:1
+BRF:2
+BRH:2
+end_of_record
+EOF
+run_gate
+check_rc "added content beginning with ++ is counted and removed -- content is skipped" 0
+check_text "the marker-like added content contributes one line" "Changed line coverage: 100.00% (1/1)"
+
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- a/crates/ironclaw_demo/src/lib.rs
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ malformed @@
++pub fn malformed() {}
+DIFF
+run_gate
+check_rc "a malformed production hunk fails" 1
+check_text "malformed hunk failure names its header" "malformed diff hunk header"
+
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- /dev/null
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -0,0 +1,3 @@
++pub fn classify(value: bool) -> bool {
++    value
++}
+DIFF
+
 echo "▶ line and branch sabotage"
 write_lcov 0 1 1
 run_gate
@@ -129,6 +174,22 @@ EOF
 run_gate
 check_rc "LCOV without BRDA records fails" 1
 check_text "missing BRDA explains instrumentation failure" "branch instrumentation is missing"
+
+cat >"${work}/change.diff" <<'DIFF'
+DIFF
+run_gate
+check_rc "missing branch instrumentation also fails for an empty production diff" 1
+check_text "empty production diff cannot bypass BRDA validation" "branch instrumentation is missing"
+
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- /dev/null
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -0,0 +1,3 @@
++pub fn classify(value: bool) -> bool {
++    value
++}
+DIFF
 
 echo "▶ explicit reviewed exemptions are exact-line only"
 cat >"${work}/policy.toml" <<TOML
@@ -197,6 +258,36 @@ check_rc "a changed production file absent from LCOV fails" 1
 check_text "missing file is named" "changed production files are absent from coverage"
 check_report_text "machine report cannot turn a missing file into a pass" '"passed": false'
 
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+end_of_record
+SF:${case_root}/crates/ironclaw_other/src/lib.rs
+DA:1,1
+BRDA:1,0,0,1
+LF:1
+LH:1
+BRF:1
+BRH:1
+end_of_record
+EOF
+run_gate
+check_rc "an empty SF block for the changed file fails" 1
+check_text "empty SF block is reported as uninstrumented" "contain no DA records"
+
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+DA:99,1
+BRDA:99,0,0,1
+LF:1
+LH:1
+BRF:1
+BRH:1
+end_of_record
+EOF
+run_gate
+check_rc "a changed file with no measured changed lines fails" 1
+check_text "zero per-file denominator is actionable" "contributed no instrumented lines"
+
 echo "▶ test-only Rust changes do not dilute the production denominator"
 test_source="crates/ironclaw_demo/src/tests.rs"
 printf '%s\n' '#[test]' 'fn helper_test() {}' >"${case_root}/${test_source}"
@@ -228,6 +319,52 @@ run_gate
 check_rc "test modules are excluded mechanically" 0
 check_text "test-only result is explicit" "no Reborn production lines added"
 check_report_text "machine report records the empty production diff" '"changed_product_files": []'
+
+echo "▶ cfg(test) span detection ignores braces in comments and literals"
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- /dev/null
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -0,0 +1,11 @@
++#[cfg(test)]
++mod inline_tests {
++    // A comment brace must not end the module: }
++    const NORMAL: &str = "}";
++    const RAW: &str = r#"}"#;
++    const CHARACTER: char = '}';
++    fn helper() {}
++}
++pub fn production_after_test_module() -> bool {
++    true
++}
+DIFF
+printf '%s\n' \
+  '#[cfg(test)]' \
+  'mod inline_tests {' \
+  '    // A comment brace must not end the module: }' \
+  '    const NORMAL: &str = "}";' \
+  '    const RAW: &str = r#"}"#;' \
+  "    const CHARACTER: char = '}';" \
+  '    fn helper() {}' \
+  '}' \
+  'pub fn production_after_test_module() -> bool {' \
+  '    true' \
+  '}' >"${case_root}/${source_path}"
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+DA:9,1
+DA:10,1
+DA:11,1
+BRDA:10,0,0,1
+LF:3
+LH:3
+BRF:1
+BRH:1
+end_of_record
+EOF
+run_gate
+check_rc "literal and comment braces do not truncate cfg(test) exclusion" 0
+check_text "production after cfg(test) remains in the denominator" "Changed line coverage: 100.00% (3/3)"
 
 echo "▶ non-test cfg remains in the production denominator"
 cat >"${work}/change.diff" <<'DIFF'
@@ -276,20 +413,24 @@ printf '%s\n' \
   'pub fn stable_eight() -> bool { true }' \
   'pub fn stable_nine() -> bool { true }' \
   'pub fn stable_ten() -> bool { true }' >"${case_root}/${source_path}"
-git -C "${case_root}" init -q
-git -C "${case_root}" add "${source_path}"
-git -C "${case_root}" \
-  -c user.name=coverage-test -c user.email=coverage@example.invalid \
+fixture_git() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -c core.hooksPath=/dev/null -C "${case_root}" "$@"
+}
+fixture_git init -q --template=
+fixture_git add "${source_path}"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
   commit -qm baseline
-base_commit="$(git -C "${case_root}" rev-parse HEAD)"
-git -C "${case_root}" mv "${source_path}" "${renamed_path}"
+base_commit="$(fixture_git rev-parse HEAD)"
+fixture_git mv "${source_path}" "${renamed_path}"
 printf '%s\n' 'pub fn renamed_branch(value: bool) -> bool { value }' \
   >>"${case_root}/${renamed_path}"
-git -C "${case_root}" add "${renamed_path}"
-git -C "${case_root}" \
-  -c user.name=coverage-test -c user.email=coverage@example.invalid \
+fixture_git add "${renamed_path}"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
   commit -qm renamed
-head_commit="$(git -C "${case_root}" rev-parse HEAD)"
+head_commit="$(fixture_git rev-parse HEAD)"
 cat >"${work}/coverage.lcov" <<EOF
 SF:${case_root}/${renamed_path}
 DA:11,0

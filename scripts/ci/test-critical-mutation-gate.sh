@@ -86,7 +86,7 @@ mutant='crates/ironclaw_demo/src/lib.rs:1:1: replace Demo::authorize with ()'
 case "${STUB_MODE:-caught}" in
   caught) echo "${mutant}" >"${out}/mutants.out/caught.txt"; exit 0 ;;
   missed) echo "${mutant}" >"${out}/mutants.out/missed.txt"; exit 2 ;;
-  timeout) echo "${mutant}" >"${out}/mutants.out/timeout.txt"; exit 2 ;;
+  timeout) echo "${mutant}" >"${out}/mutants.out/timeout.txt"; exit 3 ;;
   unexpected)
     echo 'crates/ironclaw_demo/src/lib.rs:2:1: replace Demo::authorize_helper -> bool with false' \
       >"${out}/mutants.out/caught.txt"
@@ -156,7 +156,8 @@ check_rc "a named function with zero discovered mutants fails" 1
 check_text "zero discovery names the stale function" "produced zero mutants"
 capture nearby-list
 check_rc "a similarly named sibling does not satisfy discovery" 1
-check_text "substring discovery failure names the exact function" "authorize"
+check_text "substring discovery failure names the exact function" \
+  "named critical function produced zero mutants: ${source_path}::authorize"
 capture unexpected
 check_rc "a result outside the named-mutant allowlist fails" 1
 check_text "unexpected result reports an allowlist mismatch" "exact named-mutant allowlist"
@@ -203,6 +204,82 @@ TOML
 capture caught
 check_rc "stale watch path fails" 1
 check_text "stale watch path is actionable" "stale critical invariant watch path"
+
+cat >"${work}/manifest.toml" <<TOML
+[[invariant]]
+domain = "authorization"
+package = "ironclaw_demo"
+path = "${source_path}"
+function = "authorize"
+rationale = "Synthetic escaping watch path."
+watch_paths = ["crates/ironclaw_demo/../outside.rs"]
+TOML
+capture caught
+check_rc "a watch path containing dot-dot fails" 1
+check_text "escaping watch path is actionable" "watch path must stay inside"
+
+cat >"${work}/manifest.toml" <<TOML
+[[invariant]]
+domain = "authorization"
+package = "ironclaw_demo"
+path = "${source_path}"
+function = "authorize"
+rationale = "Synthetic out-of-package watch path."
+watch_paths = ["crates/ironclaw_other/tests/authorize.rs"]
+TOML
+capture caught
+check_rc "an out-of-package watch path fails" 1
+check_text "out-of-package watch path is actionable" "watch path must stay inside"
+
+cat >"${work}/manifest.toml" <<TOML
+[[invariant]]
+domain = "authorization"
+package = "ironclaw_demo"
+path = "${source_path}"
+function = "authorize"
+rationale = "First duplicate domain."
+
+[[invariant]]
+domain = "authorization"
+package = "ironclaw_demo"
+path = "${source_path}"
+function = "authorize_helper"
+rationale = "Second duplicate domain."
+TOML
+capture caught
+check_rc "duplicate invariant domains fail" 1
+check_text "duplicate domain is actionable" "duplicate critical invariant domain"
+
+cat >"${work}/manifest.toml" <<TOML
+[[invariant]]
+domain = "authorization"
+package = "ironclaw_demo"
+path = "${source_path}"
+function = "authorize"
+rationale = "First duplicate function."
+
+[[invariant]]
+domain = "authorization-secondary"
+package = "ironclaw_demo"
+path = "${source_path}"
+function = "authorize"
+rationale = "Second duplicate function."
+TOML
+capture caught
+check_rc "duplicate path and function entries fail" 1
+check_text "duplicate function is actionable" "duplicate critical function"
+
+cat >"${work}/manifest.toml" <<TOML
+[[invariant]]
+domain = "authorization"
+package = "Ironclaw Demo"
+path = "${source_path}"
+function = "authorize"
+rationale = "Synthetic invalid package."
+TOML
+capture caught
+check_rc "invalid package names fail" 1
+check_text "invalid package is actionable" "invalid package in invariant"
 
 echo "▶ guarding-test changes select mutation work"
 cat >"${work}/manifest.toml" <<TOML

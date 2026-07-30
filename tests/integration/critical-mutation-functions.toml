@@ -22,7 +22,10 @@ package = "ironclaw_approvals"
 path = "crates/ironclaw_approvals/src/lib.rs"
 function = "capability_for_action"
 rationale = "An approval lease must remain bound to the exact dispatch or spawn capability."
-watch_paths = ["crates/ironclaw_approvals/Cargo.toml"]
+watch_paths = [
+  "crates/ironclaw_approvals/Cargo.toml",
+  "crates/ironclaw_approvals/tests/approval_resolution_contract.rs",
+]
 
 [[invariant]]
 domain = "credential scope"
@@ -39,7 +42,10 @@ package = "ironclaw_authorization"
 path = "crates/ironclaw_authorization/src/lib.rs"
 function = "same_scope_owner"
 rationale = "Lease lookup and mutation must not cross tenant, user, agent, project, mission, or thread ownership."
-watch_paths = ["crates/ironclaw_authorization/Cargo.toml"]
+watch_paths = [
+  "crates/ironclaw_authorization/Cargo.toml",
+  "crates/ironclaw_authorization/tests/capability_lease_contract.rs",
+]
 
 [[invariant]]
 domain = "persistence CAS"
@@ -47,7 +53,10 @@ package = "ironclaw_filesystem"
 path = "crates/ironclaw_filesystem/src/cas.rs"
 function = "capabilities_support_cas"
 rationale = "Read-modify-write must fail closed unless the selected backend proves CAS support."
-watch_paths = ["crates/ironclaw_filesystem/Cargo.toml"]
+watch_paths = [
+  "crates/ironclaw_filesystem/Cargo.toml",
+  "crates/ironclaw_filesystem/src/cas/tests.rs",
+]
 
 [[invariant]]
 domain = "retry classification"
@@ -55,7 +64,11 @@ package = "ironclaw_llm"
 path = "crates/ironclaw_llm/src/retry.rs"
 function = "is_retryable"
 rationale = "Permanent, credential, and policy failures must not be blindly repeated."
-watch_paths = ["crates/ironclaw_llm/Cargo.toml"]
+watch_paths = [
+  "crates/ironclaw_llm/Cargo.toml",
+  "crates/ironclaw_llm/src/retry.rs",
+  "crates/ironclaw_llm/src/failover.rs",
+]
 
 [[invariant]]
 domain = "trigger scheduling"
@@ -63,7 +76,10 @@ package = "ironclaw_triggers"
 path = "crates/ironclaw_triggers/src/lib.rs"
 function = "next_cron_slot_after"
 rationale = "A recurring trigger must select a strictly later valid slot in its declared timezone."
-watch_paths = ["crates/ironclaw_triggers/Cargo.toml"]
+watch_paths = [
+  "crates/ironclaw_triggers/Cargo.toml",
+  "crates/ironclaw_triggers/src/tests.rs",
+]
 
 [[invariant]]
 domain = "idempotency"
@@ -103,4 +119,7 @@ package = "ironclaw_safety"
 path = "crates/ironclaw_safety/src/redaction.rs"
 function = "redact_exact_values"
 rationale = "Every exact secret representation selected by the safety boundary must be removed from output."
-watch_paths = ["crates/ironclaw_safety/Cargo.toml"]
+watch_paths = [
+  "crates/ironclaw_safety/Cargo.toml",
+  "crates/ironclaw_safety/src/redaction.rs",
+]

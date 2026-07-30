@@ -4357,8 +4357,9 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
         generic_outbound_target_deps(&harness, generic_dm_target_store()),
     );
 
+    let caller = operator_caller();
     let listed = registry
-        .list_outbound_delivery_targets(&operator_caller())
+        .list_outbound_delivery_targets(&caller)
         .await
         .expect("registered provider should be queryable");
     assert_eq!(
@@ -4366,6 +4367,18 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
         1,
         "registered provider should list one target"
     );
+    let registered = &listed[0];
+    assert_eq!(
+        registered.summary.target_id.as_str(),
+        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}")
+    );
+    assert_eq!(registered.summary.channel.as_str(), ADAPTER);
+    assert!(registered.owner.matches_scope(&caller));
+    let conversation = SlackPreferenceTargetCodec
+        .conversation_for_target(external_reply_target(registered))
+        .expect("registered target should retain its Slack destination");
+    assert_eq!(conversation.space_id(), Some(TEAM));
+    assert_eq!(conversation.conversation_id(), ROUTED_CHANNEL);
 }
 
 /// The generic provider lists the operator's routed shared channel (from

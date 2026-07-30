@@ -83,7 +83,15 @@ def main() -> int:
                         "--skip-functions because the gate consumes only line "
                         "and branch records"
                     )
-                if "llvm-cov report" not in line and "--ignore-rust-version" not in line:
+                test_position = line.find(" test ")
+                ignore_rust_version_position = line.find("--ignore-rust-version")
+                if (
+                    "llvm-cov report" not in line
+                    and (
+                        test_position < 0
+                        or ignore_rust_version_position < test_position
+                    )
+                ):
                     failures.append(
                         f"{path}:{line_number}: the pinned coverage compiler "
                         "must pass --ignore-rust-version after the test "

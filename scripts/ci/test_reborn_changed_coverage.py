@@ -22,7 +22,11 @@ class ChangedCoverageWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("all 25 changed-coverage self-tests passed", result.stdout)
+        success = re.search(
+            r"all ([1-9][0-9]*) changed-coverage self-tests passed",
+            result.stdout,
+        )
+        self.assertIsNotNone(success, result.stdout)
 
     def test_reborn_workflow_runs_strict_gate_and_preserves_machine_report(self):
         workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(

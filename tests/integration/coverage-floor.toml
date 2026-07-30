@@ -68,10 +68,10 @@ captured_from = "dd9b9d961dc302fc50ac4b08b137997c092eefb7"
 
 [[crate]]
 name = "ironclaw_runner"
-# LLVM 21 reports 14658 / 17133 = 85.55%; retain #6886's stronger covered-line
-# floor because the exercised numerator is comparable across source mappings.
+# LLVM 21 reports 14658 / 17133 = 85.55%; calibrate the absolute floor to
+# the same observed artifact rather than mixing source mappings.
 floor_percent = 85.55
-floor_covered_lines = 14669
+floor_covered_lines = 14658
 tolerance_percent = 0.5
 tolerance_lines = 20
 captured_total_lines = 17133

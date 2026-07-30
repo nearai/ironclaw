@@ -186,7 +186,10 @@ def parse_diff(text: str) -> dict[str, set[int]]:
     current: str | None = None
     new_line: int | None = None
     for raw in text.splitlines():
-        if raw.startswith("+++ b/"):
+        if raw.startswith("diff --git "):
+            current = None
+            new_line = None
+        elif new_line is None and raw.startswith("+++ b/"):
             candidate = raw[6:]
             current = candidate if PRODUCTION_PATH.fullmatch(candidate) else None
             if current is not None:
@@ -194,15 +197,20 @@ def parse_diff(text: str) -> dict[str, set[int]]:
             new_line = None
         elif raw.startswith("@@ "):
             match = HUNK.match(raw)
+            if current is not None and match is None:
+                raise GateError(f"malformed diff hunk header: {raw}")
             new_line = int(match.group(1)) if match and current is not None else None
         elif new_line is not None and current is not None:
-            if raw.startswith("+") and not raw.startswith("+++"):
+            marker = raw[:1]
+            if marker == "+":
                 added[current].add(new_line)
                 new_line += 1
-            elif raw.startswith("-") and not raw.startswith("---"):
+            elif marker == "-":
                 continue
-            else:
+            elif marker == " ":
                 new_line += 1
+            elif raw != r"\ No newline at end of file":
+                raise GateError(f"malformed diff hunk line: {raw}")
     return added
 
 
@@ -214,6 +222,94 @@ def test_only_path(path: str) -> bool:
     )
 
 
+def rust_brace_deltas(source: str) -> list[int]:
+    """Return structural Rust brace deltas per line.
+
+    Braces inside nested comments, quoted strings, raw strings, and character
+    literals are ignored. This is the small lexer needed by the coverage gate;
+    it deliberately does not attempt to parse Rust expressions or types.
+    """
+    deltas = [0] * (source.count("\n") + 1)
+    line = 0
+    index = 0
+    block_comment_depth = 0
+    length = len(source)
+    while index < length:
+        character = source[index]
+        following = source[index + 1] if index + 1 < length else ""
+        if character == "\n":
+            line += 1
+            index += 1
+            continue
+        if block_comment_depth:
+            if character == "/" and following == "*":
+                block_comment_depth += 1
+                index += 2
+            elif character == "*" and following == "/":
+                block_comment_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if character == "/" and following == "/":
+            newline = source.find("\n", index + 2)
+            index = length if newline < 0 else newline
+            continue
+        if character == "/" and following == "*":
+            block_comment_depth = 1
+            index += 2
+            continue
+
+        raw_match = None
+        if index == 0 or not (source[index - 1].isalnum() or source[index - 1] == "_"):
+            raw_match = re.match(r'(?:b|c)?r(#{0,255})"', source[index:])
+        if raw_match is not None:
+            terminator = '"' + raw_match.group(1)
+            content_start = index + raw_match.end()
+            content_end = source.find(terminator, content_start)
+            end = length if content_end < 0 else content_end + len(terminator)
+            line += source[index:end].count("\n")
+            index = end
+            continue
+        if character == '"':
+            index += 1
+            escaped = False
+            while index < length:
+                character = source[index]
+                if character == "\n":
+                    line += 1
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    index += 1
+                    break
+                index += 1
+            continue
+        if character == "'":
+            end = index + 1
+            escaped = False
+            while end < length and source[end] != "\n":
+                if escaped:
+                    escaped = False
+                elif source[end] == "\\":
+                    escaped = True
+                elif source[end] == "'":
+                    end += 1
+                    break
+                end += 1
+            if end <= length and end > index + 1 and source[end - 1 : end] == "'":
+                index = end
+                continue
+        if character == "{":
+            deltas[line] += 1
+        elif character == "}":
+            deltas[line] -= 1
+        index += 1
+    return deltas
+
+
 def cfg_test_only_lines(path: pathlib.Path) -> set[int]:
     """Best-effort Rust item span for exact ``#[cfg(test)]`` blocks.
 
@@ -221,10 +317,13 @@ def cfg_test_only_lines(path: pathlib.Path) -> set[int]:
     denominator. It intentionally fails conservative: if the following item
     has no braced body, only the attribute/item lines are excluded.
     """
-    lines = path.read_text(encoding="utf-8").splitlines()
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    brace_deltas = rust_brace_deltas(source)
     excluded: set[int] = set()
     pending_start: int | None = None
     depth = 0
+    saw_braced_body = False
     for index, line in enumerate(lines, start=1):
         stripped = line.strip()
         if pending_start is None and re.fullmatch(
@@ -232,13 +331,17 @@ def cfg_test_only_lines(path: pathlib.Path) -> set[int]:
         ):
             pending_start = index
             depth = 0
+            saw_braced_body = False
         if pending_start is None:
             continue
         excluded.add(index)
-        depth += line.count("{") - line.count("}")
-        if depth > 0:
+        delta = brace_deltas[index - 1]
+        if delta > 0:
+            saw_braced_body = True
+        depth += delta
+        if saw_braced_body and depth > 0:
             continue
-        if "{" in line:
+        if saw_braced_body:
             pending_start = None
         elif index > pending_start and stripped and not stripped.startswith("#["):
             pending_start = None
@@ -265,7 +368,9 @@ def git_diff(repo_root: pathlib.Path, base: str, head: str) -> str:
 
 
 def percent(hit: int, total: int) -> float:
-    return 100.0 if total == 0 else hit / total * 100
+    if total == 0:
+        raise GateError("changed coverage denominator is empty")
+    return hit / total * 100
 
 
 def write_json_report(path: pathlib.Path | None, report: dict[str, object]) -> None:
@@ -306,6 +411,10 @@ def main() -> int:
             for path, lines in parse_diff(diff_text).items()
             if not test_only_path(path)
         }
+        if not coverage.saw_branch_records:
+            raise GateError(
+                "merged lcov contains no BRDA records; branch instrumentation is missing"
+            )
         for path in list(changed):
             changed[path] -= cfg_test_only_lines(repo_root / path)
             if not changed[path]:
@@ -332,10 +441,6 @@ def main() -> int:
             )
             print("Changed coverage: no Reborn production lines added")
             return 0
-        if not coverage.saw_branch_records:
-            raise GateError(
-                "merged lcov contains no BRDA records; branch instrumentation is missing"
-            )
 
         exempt_lines = {
             (entry.path, line) for entry in exemptions for line in entry.lines
@@ -347,18 +452,25 @@ def main() -> int:
         uncovered_lines: list[str] = []
         uncovered_branches: list[str] = []
         uninstrumented_files: list[str] = []
+        empty_denominator_files: list[str] = []
         for path, added_lines in sorted(changed.items()):
             instrumented = coverage.lines.get(path)
-            if instrumented is None:
+            if not instrumented:
                 uninstrumented_files.append(path)
                 continue
-            for line in sorted(added_lines & set(instrumented)):
-                if (path, line) not in exempt_lines:
-                    line_total += 1
-                    if instrumented[line] > 0:
-                        line_hit += 1
-                    else:
-                        uncovered_lines.append(f"{path}:{line}")
+            candidate_lines = {
+                line for line in added_lines if (path, line) not in exempt_lines
+            }
+            measured_lines = candidate_lines & set(instrumented)
+            if candidate_lines and not measured_lines:
+                empty_denominator_files.append(path)
+                continue
+            for line in sorted(measured_lines):
+                line_total += 1
+                if instrumented[line] > 0:
+                    line_hit += 1
+                else:
+                    uncovered_lines.append(f"{path}:{line}")
             for (line, block, branch), hits in sorted(
                 coverage.branches.get(path, {}).items()
             ):
@@ -370,15 +482,27 @@ def main() -> int:
                 else:
                     uncovered_branches.append(f"{path}:{line} branch {block}/{branch}")
 
-        line_pct = percent(line_hit, line_total)
-        branch_pct = percent(branch_hit, branch_total)
+        if uninstrumented_files or empty_denominator_files:
+            line_pct = 0.0 if line_total == 0 else percent(line_hit, line_total)
+        elif line_total == 0:
+            # A reviewed exact-line exemption may intentionally remove every
+            # changed line. Unmeasured production changes are handled above.
+            line_pct = 100.0
+        else:
+            line_pct = percent(line_hit, line_total)
+        branch_pct = 100.0 if branch_total == 0 else percent(branch_hit, branch_total)
         print(f"Changed line coverage: {line_pct:.2f}% ({line_hit}/{line_total})")
         print(f"Changed branch coverage: {branch_pct:.2f}% ({branch_hit}/{branch_total})")
         failures: list[str] = []
         if uninstrumented_files:
             failures.append(
-                "changed production files are absent from coverage: "
+                "changed production files are absent from coverage or contain no DA records: "
                 + ", ".join(uninstrumented_files)
+            )
+        if empty_denominator_files:
+            failures.append(
+                "changed production files contributed no instrumented lines: "
+                + ", ".join(empty_denominator_files)
             )
         if line_pct < float(policy["line_percent"]):
             failures.append(

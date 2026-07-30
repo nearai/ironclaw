@@ -293,7 +293,9 @@ def main() -> int:
                     ],
                     repo_root,
                 )
-                if result.returncode not in (0, 2):
+                # 0 = all caught, 2 = survivors, and 3 = timeouts. The latter
+                # two are verdicts that must be read from mutants.out.
+                if result.returncode not in (0, 2, 3):
                     raise GateError(
                         f"cargo-mutants failed for {path} with status {result.returncode}: "
                         f"{result.stderr.strip() or result.stdout.strip()}"
