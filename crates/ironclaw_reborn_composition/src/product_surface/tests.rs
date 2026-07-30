@@ -163,25 +163,27 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             .expect("trust policy"),
     );
     let port = Arc::new(RebornLocalExtensionManagementPort::new(
-        Arc::new(DiskFilesystem::new()),
-        AvailableExtensionCatalog::from_packages(Vec::new()),
-        installation_store,
-        Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        ))),
-        ironclaw_extension_host::ActiveExtensionPublisher::new(
-            Arc::clone(&registry),
-            trust_policy,
-            Arc::new(ironclaw_trust::InvalidationBus::new()),
-        ),
-        None,
-        UserId::new("operator").expect("operator user id"),
-        ironclaw_extension_host::HostedMcpPreparationDependencies {
-            runtime_ports: None,
-            catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
-                ironclaw_safety::Sanitizer::new(),
-            )),
-            oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+        ironclaw_extension_host::ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::new(DiskFilesystem::new()),
+            catalog: AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store,
+            lifecycle_service: Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            active_extensions: ironclaw_extension_host::ActiveExtensionPublisher::new(
+                Arc::clone(&registry),
+                trust_policy,
+                Arc::new(ironclaw_trust::InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: UserId::new("operator").expect("operator user id"),
+            hosted_mcp_dependencies: ironclaw_extension_host::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
         },
     ));
 

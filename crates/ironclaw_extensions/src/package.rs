@@ -377,6 +377,19 @@ fn capability_descriptors_from_manifest(
         .collect()
 }
 
+fn invalid_package_root(root: &VirtualPath) -> ExtensionError {
+    ExtensionError::InvalidManifest {
+        reason: format!(
+            "extension package root {} must be /system/extensions/<extension>",
+            root.as_str()
+        ),
+    }
+}
+
+fn descriptor_schema_ref(capability: &CapabilityManifest) -> serde_json::Value {
+    serde_json::json!({ "$ref": capability.input_schema_ref.as_str() })
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::HostPortCatalog;
@@ -574,17 +587,4 @@ input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
             Err(ExtensionError::InvalidManifest { .. })
         ));
     }
-}
-
-fn invalid_package_root(root: &VirtualPath) -> ExtensionError {
-    ExtensionError::InvalidManifest {
-        reason: format!(
-            "extension package root {} must be /system/extensions/<extension>",
-            root.as_str()
-        ),
-    }
-}
-
-fn descriptor_schema_ref(capability: &CapabilityManifest) -> serde_json::Value {
-    serde_json::json!({ "$ref": capability.input_schema_ref.as_str() })
 }

@@ -13,9 +13,9 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, FailureKind, GrantConstraints, InvocationId, MountAlias, MountGrant,
-    MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
-    ResourceEstimate, ResourceScope, ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle,
-    TenantId, TrustClass, UserId, VirtualPath,
+    MountPermissions, NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate,
+    ResourceScope, ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle, TenantId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,

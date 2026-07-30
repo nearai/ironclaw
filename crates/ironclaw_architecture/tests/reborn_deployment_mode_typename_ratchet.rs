@@ -105,6 +105,12 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     // discovery egress) — same Bucket-3 domain-name class as its siblings.
     "HostedMcpDiscoveryNetworkScript",
     "HostedMcpEndpoint",
+    // Egress URL matcher (host/port/path/query) used only inside
+    // ironclaw_extension_host for hosted-MCP egress planning — distinct type
+    // from the host_api::HostedMcpEndpoint wire newtype above (renamed to
+    // avoid a same-name/different-concept collision, type-placement.md).
+    // Same Bucket-3 domain-name class as its siblings.
+    "HostedMcpEgressEndpoint",
     "HostedMcpPreparationDependencies",
     "HostedMcpPreparationService",
     "RegisterHostedMcpBody",

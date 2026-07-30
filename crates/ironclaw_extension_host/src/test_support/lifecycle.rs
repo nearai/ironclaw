@@ -267,25 +267,26 @@ async fn build_lifecycle_test_services_over_backing(
     )
     .await
     .expect("extension lifecycle restore");
-    let mut extension_management = ExtensionLifecycleManager::new(
-        Arc::clone(&extension_filesystem),
-        available_extensions,
-        Arc::clone(&installation_store),
-        lifecycle_service,
-        active_extensions,
-        Some(Arc::new(RebornProductAuthCredentialCleanup::new(
-            Arc::clone(&product_auth),
-        ))),
-        owner_user_id,
-        crate::HostedMcpPreparationDependencies {
-            runtime_ports,
-            catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
-                ironclaw_safety::Sanitizer::new(),
-            )),
-            oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
-        },
-    )
-    .with_removal_cleanup_registry(Arc::new(ExtensionRemovalCleanupRegistry::empty()));
+    let mut extension_management =
+        ExtensionLifecycleManager::new(crate::ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::clone(&extension_filesystem),
+            catalog: available_extensions,
+            installation_store: Arc::clone(&installation_store),
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: Some(Arc::new(RebornProductAuthCredentialCleanup::new(
+                Arc::clone(&product_auth),
+            ))),
+            tenant_operator_user_id: owner_user_id,
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        })
+        .with_removal_cleanup_registry(Arc::new(ExtensionRemovalCleanupRegistry::empty()));
     if google_oauth_configured {
         extension_management = extension_management.with_provider_instance_readiness(
             provider_instance_readiness_map([ProviderInstanceReadinessInput {

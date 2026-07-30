@@ -233,7 +233,9 @@ pub use nearai_mcp::{
     NearAiMcpEndpoint, durable_product_auth_storage_enabled, nearai_mcp_endpoint_from_base,
     nearai_mcp_endpoint_from_env,
 };
-pub use product_lifecycle::{ExtensionCredentialCleanup, ExtensionLifecycleManager};
+pub use product_lifecycle::{
+    ExtensionCredentialCleanup, ExtensionLifecycleManager, ExtensionLifecycleManagerDependencies,
+};
 pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };

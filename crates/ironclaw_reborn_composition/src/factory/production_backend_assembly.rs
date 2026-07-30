@@ -922,21 +922,26 @@ pub(super) async fn build_backend_production(
     > = Arc::new(std::sync::OnceLock::new());
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
-            extension_filesystem,
-            available_extensions,
-            extension_installation_store,
-            extension_lifecycle_service,
-            active_extensions,
-            Some(Arc::new(RebornProductAuthCredentialCleanup::new(Arc::clone(
-                &product_auth_dependencies,
-            ))) as Arc<dyn ExtensionCredentialCleanup>),
-            channel_egress_scope.user_id.clone(),
-            ironclaw_extension_host::HostedMcpPreparationDependencies {
-                runtime_ports: Some(product_auth_runtime_ports.clone()),
-                catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
-                    ironclaw_safety::Sanitizer::new(),
-                )),
-                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            ironclaw_extension_host::ExtensionLifecycleManagerDependencies {
+                filesystem: extension_filesystem,
+                catalog: available_extensions,
+                installation_store: extension_installation_store,
+                lifecycle_service: extension_lifecycle_service,
+                active_extensions,
+                credential_cleanup: Some(Arc::new(RebornProductAuthCredentialCleanup::new(
+                    Arc::clone(&product_auth_dependencies),
+                )) as Arc<dyn ExtensionCredentialCleanup>),
+                tenant_operator_user_id: channel_egress_scope.user_id.clone(),
+                hosted_mcp_dependencies:
+                    ironclaw_extension_host::HostedMcpPreparationDependencies {
+                        runtime_ports: Some(product_auth_runtime_ports.clone()),
+                        catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(
+                            Arc::new(ironclaw_safety::Sanitizer::new()),
+                        ),
+                        oauth_client_profiles: Arc::new(
+                            ironclaw_auth::EmptyOAuthClientProfileRegistry,
+                        ),
+                    },
             },
         )
         .with_account_setup_registry(account_setups.clone())
@@ -1014,8 +1019,6 @@ pub(super) async fn build_backend_production(
             channel_egress_scope.user_id.clone(),
         ),
     );
-    #[cfg(any(test, feature = "test-support"))]
-    let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
@@ -1220,8 +1223,6 @@ pub(super) async fn build_backend_production(
         channel_identity_store,
         channel_dm_target_store,
         channel_disconnect_slot,
-        #[cfg(any(test, feature = "test-support"))]
-        runtime_http_egress,
         host_runtime_http_egress,
         skill_mounts,
         memory_mounts,

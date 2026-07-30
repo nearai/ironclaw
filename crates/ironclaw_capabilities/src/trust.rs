@@ -110,7 +110,7 @@ fn trust_policy_input_for_package(
 mod tests {
     use super::*;
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath, sha256_digest_token};
+    use ironclaw_host_api::{HostPortCatalog, PackageSource, VirtualPath, sha256_digest_token};
 
     // Relocated from `ironclaw_host_runtime::production` alongside the trust
     // evaluation this crate now owns (§5.3.2/§9): the local-manifest trust

@@ -30,23 +30,18 @@ use crate::v2::{
 };
 
 /// Whether an extension package has a filesystem tree, and if so where.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackageRootBinding {
     /// Compatibility state for rows written before package roots were typed.
     /// A designated materialization boundary must resolve this before the
     /// manifest reaches a filesystem consumer.
+    #[default]
     FabricateOnLoad,
     /// A real package tree exists at this path.
     Materialized(VirtualPath),
     /// The package is remote-only and has no filesystem tree.
     Virtual,
-}
-
-impl Default for PackageRootBinding {
-    fn default() -> Self {
-        Self::FabricateOnLoad
-    }
 }
 
 /// A caller requested filesystem access for a package without a materialized
