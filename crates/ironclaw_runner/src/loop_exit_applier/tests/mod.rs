@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over CheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
+// arch-exempt: large_file, checkpoint evidence integration coverage, plan #6168
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
@@ -8,13 +8,13 @@ use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 use ironclaw_turns::{
-    CheckpointStateStorePort, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
+    AgentTurnRuntimePort, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
     LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
     LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
-    PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError,
-    TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    PutLoopCheckpointRequest, RedactedCheckpointPayload, TurnActor, TurnCheckpointId, TurnError,
+    TurnId, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
 };
 
 use super::{
@@ -27,8 +27,6 @@ use super::{
 mod support;
 
 use support::*;
-
-use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 #[tokio::test]
 async fn loop_exit_applier_rejects_driver_supplied_evidence_policy() {
@@ -116,6 +114,33 @@ async fn result_only_completion_uses_verified_result_refs_without_no_reply_permi
         .expect("applied");
 
     assert_eq!(state.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn completed_exit_persists_model_usage_in_process_projection_metadata() {
+    let usage = LoopModelUsage {
+        input_tokens: 144,
+        output_tokens: 21,
+        cache_read_input_tokens: 34,
+        cache_creation_input_tokens: 8,
+    };
+    let fixture = Fixture::new(InMemoryLoopExitEvidencePort::all_verified());
+    let exit = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::ResultOnly,
+        reply_message_refs: vec![],
+        result_refs: vec![LoopResultRef::new("result:usage").expect("valid")],
+        final_checkpoint_id: None,
+        model_usage: Some(usage),
+        exit_id: test_exit_id(),
+    });
+
+    let state = fixture
+        .applier
+        .apply(&fixture.claimed, exit)
+        .await
+        .expect("applied");
+
+    assert_eq!(state.model_usage, Some(usage));
 }
 
 #[tokio::test]
@@ -256,7 +281,7 @@ async fn thread_checkpoint_evidence_accepts_durable_cancel_requested_run() {
     let transition = Arc::new(RecordingTransitionPort::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(StaticTurnStateStore::new(observed_state)),
+        Arc::new(StaticAgentTurnRuntime::new(observed_state)),
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
     ));
@@ -282,7 +307,7 @@ async fn thread_checkpoint_evidence_accepts_durable_cancelled_run() {
     let transition = Arc::new(RecordingTransitionPort::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(StaticTurnStateStore::new(observed_state)),
+        Arc::new(StaticAgentTurnRuntime::new(observed_state)),
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
     ));
@@ -431,7 +456,7 @@ async fn thread_checkpoint_evidence_accepts_result_refs_with_durable_reply_ref()
     .await;
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         thread_scope,
@@ -522,7 +547,7 @@ async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
     );
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(StaticTurnStateStore::new(run_state)) as Arc<dyn TurnStateStore>,
+        Arc::new(StaticAgentTurnRuntime::new(run_state)) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         base_scope,
@@ -573,7 +598,7 @@ async fn thread_checkpoint_evidence_rejects_missing_result_ref_records() {
         .expect("thread");
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         thread_scope,
@@ -633,7 +658,7 @@ async fn thread_checkpoint_evidence_accepts_result_only_completion_with_durable_
     .await;
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         thread_scope,
@@ -698,7 +723,7 @@ async fn thread_checkpoint_evidence_rejects_tool_result_message_as_reply_ref() {
     .await;
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         thread_scope,
@@ -769,7 +794,7 @@ async fn thread_checkpoint_evidence_isolates_same_result_ref_across_runs() {
 
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         thread_scope,
@@ -891,7 +916,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
     assert!(ToolResultSafeSummary::new("raw tool input includes secret").is_err());
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         thread_scope,
@@ -1017,7 +1042,7 @@ async fn thread_checkpoint_evidence_rejects_stored_thread_scope_mismatch() {
         .expect("finalized");
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         Arc::new(PanicLoopCheckpointStore),
         empty_await_dependent_run_evidence(),
         stored_scope,
@@ -1156,7 +1181,7 @@ async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() 
         ));
     let evidence = ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(StaticTurnStateStore::new(claimed.state.clone())),
+        Arc::new(StaticAgentTurnRuntime::new(claimed.state.clone())),
         Arc::new(StaticLoopCheckpointStore::new(checkpoint)),
         await_evidence,
     );
@@ -1222,7 +1247,7 @@ async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_depe
         ));
     let evidence = ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(StaticTurnStateStore::new(claimed.state.clone())),
+        Arc::new(StaticAgentTurnRuntime::new(claimed.state.clone())),
         Arc::new(StaticLoopCheckpointStore::new(checkpoint)),
         await_evidence,
     );
@@ -1385,8 +1410,7 @@ async fn thread_checkpoint_evidence_fails_closed_for_failure_evidence() {
 #[tokio::test]
 async fn thread_checkpoint_evidence_verifies_failure_from_final_checkpoint_state() {
     let claimed = claimed_run();
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("failure-evidence"),
     );
@@ -1394,33 +1418,8 @@ async fn thread_checkpoint_evidence_verifies_failure_from_final_checkpoint_state
         .recent_failure_kinds
         .push(LoopFailureKind::ModelError);
     let payload = serde_json::to_vec(&loop_state).expect("state payload serializes");
-    let state_record = checkpoint_state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            claimed.state.scope.clone(),
-            claimed.state.turn_id,
-            claimed.state.run_id,
-            claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            claimed.resolved_run_profile.checkpoint_schema_version,
-            LoopCheckpointKind::Final,
-            payload,
-        ))
-        .await
-        .expect("checkpoint state");
-    let checkpoint = loop_checkpoint_store
-        .put_loop_checkpoint(PutLoopCheckpointRequest {
-            scope: claimed.state.scope.clone(),
-            turn_id: claimed.state.turn_id,
-            run_id: claimed.state.run_id,
-            state_ref: state_record.state_ref,
-            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
-            kind: LoopCheckpointKind::Final,
-            gate_ref: None,
-        })
-        .await
-        .expect("loop checkpoint");
-    let evidence = text_checkpoint_evidence(loop_checkpoint_store)
-        .with_checkpoint_state_store(checkpoint_state_store);
+    let checkpoint = put_final_checkpoint(loop_checkpoint_store.as_ref(), &claimed, payload).await;
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store);
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),
@@ -1470,8 +1469,7 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
         })
         .await
         .expect("thread");
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("failure-explanation-evidence"),
     );
@@ -1479,39 +1477,14 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
         .recent_failure_kinds
         .push(LoopFailureKind::ModelError);
     let payload = serde_json::to_vec(&loop_state).expect("state payload serializes");
-    let state_record = checkpoint_state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            claimed.state.scope.clone(),
-            claimed.state.turn_id,
-            claimed.state.run_id,
-            claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            claimed.resolved_run_profile.checkpoint_schema_version,
-            LoopCheckpointKind::Final,
-            payload,
-        ))
-        .await
-        .expect("checkpoint state");
-    let checkpoint = loop_checkpoint_store
-        .put_loop_checkpoint(PutLoopCheckpointRequest {
-            scope: claimed.state.scope.clone(),
-            turn_id: claimed.state.turn_id,
-            run_id: claimed.state.run_id,
-            state_ref: state_record.state_ref,
-            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
-            kind: LoopCheckpointKind::Final,
-            gate_ref: None,
-        })
-        .await
-        .expect("loop checkpoint");
+    let checkpoint = put_final_checkpoint(loop_checkpoint_store.as_ref(), &claimed, payload).await;
     let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         thread_service,
-        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
         loop_checkpoint_store,
         empty_await_dependent_run_evidence(),
         thread_scope,
-    )
-    .with_checkpoint_state_store(checkpoint_state_store);
+    );
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),
@@ -1538,9 +1511,10 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
 
 #[tokio::test]
 async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
-    let claimed = claimed_run();
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
+    let mut claimed = claimed_run();
+    let resumable_checkpoint_id = TurnCheckpointId::new();
+    claimed.state.checkpoint_id = Some(resumable_checkpoint_id);
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("applier-failure-evidence"),
     );
@@ -1548,33 +1522,8 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
         .recent_failure_kinds
         .push(LoopFailureKind::ModelError);
     let payload = serde_json::to_vec(&loop_state).expect("state payload serializes");
-    let state_record = checkpoint_state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            claimed.state.scope.clone(),
-            claimed.state.turn_id,
-            claimed.state.run_id,
-            claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            claimed.resolved_run_profile.checkpoint_schema_version,
-            LoopCheckpointKind::Final,
-            payload,
-        ))
-        .await
-        .expect("checkpoint state");
-    let checkpoint = loop_checkpoint_store
-        .put_loop_checkpoint(PutLoopCheckpointRequest {
-            scope: claimed.state.scope.clone(),
-            turn_id: claimed.state.turn_id,
-            run_id: claimed.state.run_id,
-            state_ref: state_record.state_ref,
-            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
-            kind: LoopCheckpointKind::Final,
-            gate_ref: None,
-        })
-        .await
-        .expect("loop checkpoint");
-    let evidence = text_checkpoint_evidence(loop_checkpoint_store)
-        .with_checkpoint_state_store(checkpoint_state_store);
+    let checkpoint = put_final_checkpoint(loop_checkpoint_store.as_ref(), &claimed, payload).await;
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store);
     let transition = Arc::new(RecordingTransitionPort::new());
     let applier = LoopExitApplier::new(transition.clone(), Arc::new(evidence));
     let exit = LoopExit::Failed(LoopFailed {
@@ -1590,14 +1539,18 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
 
     assert_eq!(state.status, TurnStatus::Failed);
     assert_eq!(state.failure.expect("failure").category(), "model_error");
+    assert_eq!(
+        state.checkpoint_id,
+        Some(resumable_checkpoint_id),
+        "the failed process must retain its resumable checkpoint rather than the Final evidence checkpoint"
+    );
     assert_eq!(transition.raw_failure_texts(), vec!["model_error"]);
 }
 
 #[tokio::test]
 async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects_cross_run_reuse() {
     let claimed = claimed_run();
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("applier-run-scoped-failure"),
     );
@@ -1605,23 +1558,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
         .recent_failure_kinds
         .push(LoopFailureKind::ModelError);
     let payload = serde_json::to_vec(&loop_state).expect("state payload serializes");
-    let state_record = checkpoint_state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            claimed.state.scope.clone(),
-            claimed.state.turn_id,
-            claimed.state.run_id,
-            claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            claimed.resolved_run_profile.checkpoint_schema_version,
-            LoopCheckpointKind::Final,
-            payload,
-        ))
-        .await
-        .expect("checkpoint state");
-    let token = state_record
-        .state_ref
-        .as_str()
-        .strip_prefix("checkpoint:")
-        .expect("store ref token");
+    let token = TurnRunId::new().to_string();
     let run_scoped_ref =
         LoopCheckpointStateRef::new(format!("checkpoint:{}:{token}", claimed.state.run_id))
             .expect("run-scoped checkpoint ref");
@@ -1631,6 +1568,8 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
             turn_id: claimed.state.turn_id,
             run_id: claimed.state.run_id,
             state_ref: run_scoped_ref,
+            payload: RedactedCheckpointPayload::new(payload.clone())
+                .expect("bounded checkpoint payload"),
             schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
             schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
             kind: LoopCheckpointKind::Final,
@@ -1648,6 +1587,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
             turn_id: claimed.state.turn_id,
             run_id: claimed.state.run_id,
             state_ref: foreign_scoped_ref,
+            payload: RedactedCheckpointPayload::new(payload).expect("bounded checkpoint payload"),
             schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
             schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
             kind: LoopCheckpointKind::Final,
@@ -1655,8 +1595,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
         })
         .await
         .expect("foreign loop checkpoint");
-    let evidence = text_checkpoint_evidence(loop_checkpoint_store.clone())
-        .with_checkpoint_state_store(checkpoint_state_store.clone());
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store.clone());
     let transition = Arc::new(RecordingTransitionPort::new());
     let applier = LoopExitApplier::new(transition.clone(), Arc::new(evidence));
     let accepted = applier
@@ -1677,8 +1616,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
     assert_eq!(accepted.status, TurnStatus::Failed);
     assert_eq!(accepted.failure.expect("failure").category(), "model_error");
 
-    let evidence = text_checkpoint_evidence(loop_checkpoint_store)
-        .with_checkpoint_state_store(checkpoint_state_store);
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store);
     let transition = Arc::new(RecordingTransitionPort::new());
     let applier = LoopExitApplier::new(transition.clone(), Arc::new(evidence));
     let rejected = applier
@@ -1706,8 +1644,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
 #[tokio::test]
 async fn thread_checkpoint_evidence_rejects_mismatched_failure_checkpoint_state() {
     let claimed = claimed_run();
-    let checkpoint_state_store = in_memory_checkpoint_state_store();
-    let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
+    let loop_checkpoint_store = Arc::new(in_memory_loop_checkpoint_store());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("failure-evidence-mismatch"),
     );
@@ -1715,33 +1652,8 @@ async fn thread_checkpoint_evidence_rejects_mismatched_failure_checkpoint_state(
         .recent_failure_kinds
         .push(LoopFailureKind::PolicyDenied);
     let payload = serde_json::to_vec(&loop_state).expect("state payload serializes");
-    let state_record = checkpoint_state_store
-        .put_checkpoint_state(PutCheckpointStateRequest::new(
-            claimed.state.scope.clone(),
-            claimed.state.turn_id,
-            claimed.state.run_id,
-            claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            claimed.resolved_run_profile.checkpoint_schema_version,
-            LoopCheckpointKind::Final,
-            payload,
-        ))
-        .await
-        .expect("checkpoint state");
-    let checkpoint = loop_checkpoint_store
-        .put_loop_checkpoint(PutLoopCheckpointRequest {
-            scope: claimed.state.scope.clone(),
-            turn_id: claimed.state.turn_id,
-            run_id: claimed.state.run_id,
-            state_ref: state_record.state_ref,
-            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
-            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
-            kind: LoopCheckpointKind::Final,
-            gate_ref: None,
-        })
-        .await
-        .expect("loop checkpoint");
-    let evidence = text_checkpoint_evidence(loop_checkpoint_store)
-        .with_checkpoint_state_store(checkpoint_state_store);
+    let checkpoint = put_final_checkpoint(loop_checkpoint_store.as_ref(), &claimed, payload).await;
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store);
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),

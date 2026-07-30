@@ -473,6 +473,11 @@ pub enum ModelErrorObservationClass {
     ContextOverflow,
     ContentFiltered,
     InvalidOutput,
+    Transient,
+    Unavailable,
+    Internal,
+    StaleRequest,
+    OutputTruncated,
 }
 
 /// Persistent state owned by `ReplyAdmissionStrategy`.

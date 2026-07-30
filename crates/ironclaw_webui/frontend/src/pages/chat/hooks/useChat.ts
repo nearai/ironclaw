@@ -452,6 +452,7 @@ export function useChat(threadId) {
     threadId,
     onEvent: handleEvent,
     enabled: Boolean(threadId),
+    activityExpected: isProcessing,
   });
 
   React.useEffect(() => {

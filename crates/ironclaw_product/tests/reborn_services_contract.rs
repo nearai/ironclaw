@@ -35,7 +35,7 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{
     CapabilitySurfaceKind, InstallationState, LifecyclePublicState, ProductSurface,
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceInvokeRequest, ProductSurfaceValidationCode,
+    ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest, ProductSurfaceValidationCode,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -120,14 +120,20 @@ use ironclaw_product::{
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
+    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+};
+use ironclaw_product::{
+    AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -138,10 +144,6 @@ use ironclaw_product::{
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
-};
-use ironclaw_product::{
-    ProductAdapterError, ProductOutboundEnvelope, ProductSurfaceRejectionKind, ProjectionCursor,
-    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -156,7 +158,7 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
@@ -169,7 +171,7 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing_test::traced_test;
 
 fn caller() -> ProductSurfaceCaller {
@@ -1718,6 +1720,119 @@ impl ProjectionStream for RecordingProjectionStream {
     }
 }
 
+struct SubscribingProjectionStream {
+    event: ProductOutboundEnvelope,
+    subscriptions: Mutex<Vec<ProjectionSubscriptionRequest>>,
+    drain_count: Mutex<usize>,
+}
+
+impl SubscribingProjectionStream {
+    fn new(event: ProductOutboundEnvelope) -> Self {
+        Self {
+            event,
+            subscriptions: Mutex::new(Vec::new()),
+            drain_count: Mutex::new(0),
+        }
+    }
+
+    fn subscription_count(&self) -> usize {
+        self.subscriptions.lock().expect("lock").len()
+    }
+
+    fn drain_count(&self) -> usize {
+        *self.drain_count.lock().expect("lock")
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for SubscribingProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        *self.drain_count.lock().expect("lock") += 1;
+        Ok(Vec::new())
+    }
+
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
+    async fn subscribe(
+        &self,
+        request: ProjectionSubscriptionRequest,
+    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
+        self.subscriptions.lock().expect("lock").push(request);
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(Ok(self.event.clone()))
+            .await
+            .expect("test subscription receiver remains open");
+        Ok(ProjectionStreamSubscription::new(receiver))
+    }
+}
+
+struct ControlledSubscribingProjectionStream {
+    receiver: Mutex<Option<mpsc::Receiver<Result<ProductOutboundEnvelope, ProductAdapterError>>>>,
+}
+
+impl ControlledSubscribingProjectionStream {
+    fn new() -> (
+        Self,
+        mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(2);
+        (
+            Self {
+                receiver: Mutex::new(Some(receiver)),
+            },
+            sender,
+        )
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for ControlledSubscribingProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
+    async fn subscribe(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
+        let receiver = self
+            .receiver
+            .lock()
+            .expect("lock")
+            .take()
+            .expect("controlled stream subscribes once");
+        Ok(ProjectionStreamSubscription::new(receiver))
+    }
+}
+
+fn keep_alive_outbound(cursor: &str) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new("webui_v2").expect("adapter id"),
+        AdapterInstallationId::new("install:alpha").expect("installation id"),
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
+            ExternalConversationRef::new(None, "conversation:test", None, None)
+                .expect("conversation ref"),
+            None,
+        ),
+        ProjectionCursor::new(cursor).expect("projection cursor"),
+        ProductOutboundPayload::KeepAlive,
+    )
+}
+
 /// Lighter-weight projection stream used by the timeline drain
 /// regressions: counts calls without retaining the request shape. Kept
 /// alongside `RecordingProjectionStream` because some sites only need
@@ -2336,14 +2451,33 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
+    let operation_id = TRACE_HOLD_AUTHORIZE_COMMAND
+        .capability_id()
+        .expect("trace hold capability id");
+
+    let response = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_host_api::ProductSurfaceInvokeRequest {
+            operation_id: operation_id.clone(),
+            input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
+                submission_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .expect("trace hold input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("unknown valid submission id is a no-op");
+    let decoded: RebornTraceHoldAuthorizeResponse =
+        serde_json::from_value(response.output).expect("trace hold response");
+    assert!(!decoded.authorized);
 
     let error = ProductSurface::invoke(
         &services,
         caller(),
         ironclaw_host_api::ProductSurfaceInvokeRequest {
-            operation_id: TRACE_HOLD_AUTHORIZE_COMMAND
-                .capability_id()
-                .expect("trace hold capability id"),
+            operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
             })
@@ -3641,6 +3775,156 @@ async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated
 }
 
 #[tokio::test]
+async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
+    let web_caller = caller();
+    let expected = keep_alive_outbound("cursor-live");
+    let event_stream = Arc::new(SubscribingProjectionStream::new(expected.clone()));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(event_stream.clone());
+    create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
+
+    let mut response = ProductSurface::stream_events(
+        &services,
+        web_caller.clone(),
+        ProductSurfaceStreamRequest {
+            stream_id: Some("thread-alpha".to_string()),
+            after_cursor: None,
+        },
+    )
+    .await
+    .expect("subscription opens");
+    let subscription = response
+        .subscription
+        .take()
+        .expect("stream response carries its live continuation");
+
+    assert_eq!(
+        response.events,
+        vec![serde_json::to_value(expected).expect("outbound event encodes")]
+    );
+    assert_eq!(event_stream.subscription_count(), 1);
+    assert_eq!(
+        event_stream.drain_count(),
+        0,
+        "a supported live subscription must not fall back to an empty poll"
+    );
+    drop(subscription);
+    let drained = services
+        .stream_events(
+            web_caller,
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("one-shot compatibility path drains");
+
+    assert!(drained.events.is_empty());
+    assert_eq!(event_stream.subscription_count(), 1);
+    assert_eq!(
+        event_stream.drain_count(),
+        1,
+        "the compatibility method retains its one-shot drain contract"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn product_surface_subscription_bounds_a_silent_first_event() {
+    let web_caller = caller();
+    let (event_stream, _sender) = ControlledSubscribingProjectionStream::new();
+    let services = Arc::new(
+        RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_event_stream(Arc::new(event_stream)),
+    );
+    create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
+
+    let task = tokio::spawn(async move {
+        ProductSurface::stream_events(
+            services.as_ref(),
+            web_caller,
+            ProductSurfaceStreamRequest {
+                stream_id: Some("thread-alpha".to_string()),
+                after_cursor: None,
+            },
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        task.is_finished(),
+        "a silent subscription must not suspend one-shot callers indefinitely"
+    );
+    let response = task
+        .await
+        .expect("stream task joins")
+        .expect("silent subscription returns an empty response");
+    assert!(response.events.is_empty());
+    assert!(response.subscription.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn product_surface_subscription_revalidates_visibility_without_blocking_events() {
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-subscription-revalidation",
+    )
+    .await;
+    let automation_service = Arc::new(RevocableAutomationService::new(
+        trigger_thread_id.clone(),
+        &caller,
+    ));
+    let (event_stream, sender) = ControlledSubscribingProjectionStream::new();
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_service(automation_service.clone())
+        .with_event_stream(Arc::new(event_stream));
+
+    sender
+        .send(Ok(keep_alive_outbound("cursor-before-revocation")))
+        .await
+        .expect("subscription receiver remains open");
+    let mut response = ProductSurface::stream_events(
+        &services,
+        caller,
+        ProductSurfaceStreamRequest {
+            stream_id: Some(trigger_thread_id.to_string()),
+            after_cursor: None,
+        },
+    )
+    .await
+    .expect("visible automation thread subscribes");
+    assert_eq!(response.events.len(), 1, "first event is authorized");
+    let subscription = response
+        .subscription
+        .take()
+        .expect("stream response carries its live continuation");
+
+    tokio::task::yield_now().await;
+    automation_service.revoke();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let error = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .expect("revalidation must terminate the subscription")
+        .expect("revocation is surfaced")
+        .expect_err("revoked visibility must stop the subscription");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+}
+
+#[tokio::test]
 async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
@@ -3975,7 +4259,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
 async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
-        in_memory_turn_state_store(),
+        in_memory_agent_turn_runtime(),
     )));
     let services = RebornServices::new(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;
@@ -13072,7 +13356,7 @@ fn service_source_avoids_forbidden_runtime_dependencies() {
         "ironclaw_capabilities",
         "ironclaw_dispatcher",
         "ironclaw_host_runtime",
-        "ironclaw_run_state",
+        "ironclaw_approvals",
         "ironclaw_storage",
         "RuntimeLane",
         "pub fn thread_service",
@@ -13103,7 +13387,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     // intentionally does NOT override the trait's default
     // `list_threads_for_scope` impl, so the service sees the
     // unimplemented-enumeration error path. The in-memory backend
-    // grew a real enumeration impl (local-dev needed working
+    // grew a real enumeration impl (standalone needed working
     // sidebar listing), so it can no longer stand in for a backend
     // without enumeration support.
     let services = RebornServices::new(

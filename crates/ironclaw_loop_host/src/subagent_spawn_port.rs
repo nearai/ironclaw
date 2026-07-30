@@ -14,15 +14,16 @@ use ironclaw_host_api::{
     CapabilityId, FailureKind, InvocationId, LoopRef, ProviderToolName, Resolution,
     ResolutionBatch, RuntimeKind, Suspension, ThreadId,
 };
+use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CapabilityActivityId, GateRef, IdempotencyKey,
-    LoopGateRef, LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    AcceptedMessageRef, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CapabilityActivityId,
+    GateRef, IdempotencyKey, LoopGateRef, LoopResultRef, ReplyTargetBindingRef, RunProfileRequest,
+    SanitizedCancelReason, SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
@@ -247,13 +248,14 @@ pub struct SubagentDefinition {
     pub requested_run_profile: RunProfileRequest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentGoalRecord {
     pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AwaitedChildSetRecord {
     pub gate_ref: GateRef,
     pub parent_run_context: LoopRunContext,
@@ -294,7 +296,7 @@ pub struct SubagentThreadMetadata {
     /// The spawning parent's `LoopRunContext`, cached verbatim at spawn time
     /// (`finish_spawn` already has it in hand — no new store fetch). Lets
     /// `ironclaw_runner`'s `reconstruct_edge` rebuild a lost/never-opened
-    /// await-edge with zero live `turn_state_store` lookups for the parent,
+    /// await-edge with zero live `agent_turn_runtime` lookups for the parent,
     /// avoiding the re-entrant deadlock of querying the store from inside
     /// the child's own commit-observer callback. New field on fresh threads
     /// only — the capability is deny-filtered in prod, so no old-thread
@@ -341,22 +343,6 @@ pub trait SubagentDefinitionResolver: Send + Sync {
     }
 }
 
-#[async_trait]
-pub trait SubagentSpawnGoalStore: Send + Sync {
-    async fn put_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        goal: SubagentGoalRecord,
-    ) -> Result<(), AgentLoopHostError>;
-
-    async fn delete_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<(), AgentLoopHostError>;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentSpawnLimits {
     pub max_depth: u32,
@@ -378,9 +364,8 @@ impl Default for SubagentSpawnLimits {
 pub struct SubagentSpawnDeps {
     pub coordinator: Arc<dyn TurnCoordinator>,
     pub child_runs: Arc<dyn TurnSpawnTreePort>,
-    pub turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+    pub agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     pub thread_service: Arc<dyn SessionThreadService>,
-    pub goal_store: Arc<dyn SubagentSpawnGoalStore>,
     pub await_edge_writer: Arc<dyn crate::AwaitEdgeWriter>,
     pub definition_resolver: Arc<dyn SubagentDefinitionResolver>,
     pub spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
@@ -408,7 +393,6 @@ struct SpawnContext {
 
 #[derive(Default)]
 struct SpawnCompensationState {
-    goal_written: Option<(TurnScope, TurnRunId)>,
     /// (child_scope, child_run_id) — the parent_run_id needed for
     /// `abandon_awaited_child` is the enclosing `run_context.run_id` at
     /// rollback time.
@@ -429,7 +413,7 @@ impl SpawnCompensationState {
             )) {
                 Ok(idempotency_key) => {
                     let _ = deps
-                        .turn_state_store
+                        .agent_turn_runtime
                         .request_cancel(CancelRunRequest {
                             scope: scope.clone(),
                             actor: actor.clone(),
@@ -455,9 +439,6 @@ impl SpawnCompensationState {
                 .abandon_awaited_child(child_scope, run_context.run_id, *child_run_id)
                 .await;
         }
-        if let Some((scope, run_id)) = self.goal_written.as_ref() {
-            let _ = deps.goal_store.delete_goal(scope, *run_id).await;
-        }
         if let Some((scope, tree_root)) = self.submitted_child_tree.as_ref() {
             // Idempotency key for the release-tree-descendants dedup guard
             // (§5.5 round-5/6): the just-submitted child's own run id, the
@@ -469,7 +450,7 @@ impl SpawnCompensationState {
                 .map(|(_, _, run_id)| *run_id)
                 .unwrap_or(*tree_root);
             let _ = deps
-                .turn_state_store
+                .agent_turn_runtime
                 .release_tree_descendants(scope, *tree_root, 1, idempotency_key)
                 .await;
         }
@@ -571,6 +552,7 @@ impl SubagentSpawnCapabilityPort {
             runtime: RuntimeKind::FirstParty,
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: (*self.parameters_schema).clone(),
         }
@@ -724,7 +706,7 @@ impl SubagentSpawnCapabilityPort {
         let owner_user_id = actor.user_id.clone();
         let parent_record = self
             .deps
-            .turn_state_store
+            .agent_turn_runtime
             .get_run_record(&self.run_context.scope, self.run_context.run_id)
             .await
             .map_err(map_turn_error)?
@@ -972,40 +954,49 @@ impl SubagentSpawnCapabilityPort {
                 },
             ));
         }
-        self.deps
-            .goal_store
-            .put_goal(
-                &child_turn_scope,
-                child_run_id,
-                SubagentGoalRecord {
-                    task: args.task.clone(),
-                    handoff: args.handoff.clone(),
-                },
+        let goal_payload = serde_json::to_vec(&SubagentGoalRecord {
+            task: args.task.clone(),
+            handoff: args.handoff.clone(),
+        })
+        .map_err(|error| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("subagent goal serialization failed: {error}"),
             )
-            .await?;
-        compensation.goal_written = Some((child_turn_scope.clone(), child_run_id));
+        })?;
+        let process_input = ProcessInputSubmission {
+            input_ref: ProcessInputRef::from_trusted("subagent-goal:v1"),
+            payload: ProcessInputPayload::new(goal_payload).map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("subagent goal is invalid: {error}"),
+                )
+            })?,
+        };
 
-        self.deps
-            .await_edge_writer
-            .record_awaited_child(AwaitedChildSetRecord {
-                gate_ref: gate_ref.clone(),
-                parent_run_context: self.run_context.clone(),
-                tree_root_run_id: tree_root,
-                child_scope: child_turn_scope.clone(),
+        let dependency_record = AwaitedChildSetRecord {
+            gate_ref: gate_ref.clone(),
+            parent_run_context: self.run_context.clone(),
+            tree_root_run_id: tree_root,
+            child_scope: child_turn_scope.clone(),
+            child_run_id,
+            child_thread_id: child_thread.thread_id.clone(),
+            source_binding_ref: source_binding_ref(self.run_context.run_id, child_run_id)?,
+            reply_target_binding_ref: reply_target_binding_ref(
+                self.run_context.run_id,
                 child_run_id,
-                child_thread_id: child_thread.thread_id.clone(),
-                source_binding_ref: source_binding_ref(self.run_context.run_id, child_run_id)?,
-                reply_target_binding_ref: reply_target_binding_ref(
-                    self.run_context.run_id,
-                    child_run_id,
-                )?,
-                subagent_kind: definition.subagent_kind.clone(),
-                spawn_capability_id: self.spawn_id.clone(),
-                result_ref: result_ref.clone(),
-                mode,
-            })
-            .await?;
-        compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
+            )?,
+            subagent_kind: definition.subagent_kind.clone(),
+            spawn_capability_id: self.spawn_id.clone(),
+            result_ref: result_ref.clone(),
+            mode,
+        };
+        let dependency_metadata = serde_json::to_value(&dependency_record).map_err(|error| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("subagent dependency metadata serialization failed: {error}"),
+            )
+        })?;
 
         let accepted = self
             .deps
@@ -1047,11 +1038,21 @@ impl SubagentSpawnCapabilityPort {
                 received_at: Utc::now(),
                 requested_run_id: Some(child_run_id),
                 spawn_tree_descendant_cap: self.limits.max_tree_descendants,
+                process_dependency: Some(ironclaw_processes::ProcessDependencySubmission {
+                    dependent_process_id: ironclaw_host_api::ProcessId::from_uuid(
+                        self.run_context.run_id.as_uuid(),
+                    ),
+                    root_process_id: ironclaw_host_api::ProcessId::from_uuid(tree_root.as_uuid()),
+                    group_ref: Some(gate_ref.as_str().to_string()),
+                    metadata: dependency_metadata,
+                }),
+                process_input: Some(process_input),
             })
             .await
             .map_err(map_turn_error)?;
         compensation.submitted_child_tree = Some((self.run_context.scope.clone(), tree_root));
         compensation.submitted_child_run = Some((child_turn_scope.clone(), actor.clone(), run_id));
+        compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
         if let Err(error) = self
             .deps
             .thread_service
@@ -1395,37 +1396,18 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
 /// Lightweight in-memory [`crate::AwaitEdgeWriter`] test fixture — no
 /// filesystem/CAS/roster semantics. For `loop_host`'s own unit tests that
 /// just need a legal writer, not a durability test; production and any test
-/// that exercises real await-edge behavior use `ironclaw_runner`'s
-/// `AwaitEdgeStore`.
+/// that exercises real dependency behavior use the process journal.
 #[derive(Default)]
-pub struct InMemoryAwaitEdgeWriter {
-    inner: parking_lot::Mutex<HashMap<(TurnRunId, TurnRunId), AwaitedChildSetRecord>>,
-}
-
-impl InMemoryAwaitEdgeWriter {
-    pub fn records(&self) -> Vec<AwaitedChildSetRecord> {
-        self.inner.lock().values().cloned().collect()
-    }
-}
+pub struct InMemoryAwaitEdgeWriter;
 
 #[async_trait]
 impl crate::AwaitEdgeWriter for InMemoryAwaitEdgeWriter {
-    async fn record_awaited_child(
-        &self,
-        record: AwaitedChildSetRecord,
-    ) -> Result<(), AgentLoopHostError> {
-        let key = (record.parent_run_context.run_id, record.child_run_id);
-        self.inner.lock().insert(key, record);
-        Ok(())
-    }
-
     async fn abandon_awaited_child(
         &self,
         _child_scope: &TurnScope,
-        parent_run_id: TurnRunId,
-        child_run_id: TurnRunId,
+        _parent_run_id: TurnRunId,
+        _child_run_id: TurnRunId,
     ) -> Result<(), AgentLoopHostError> {
-        self.inner.lock().remove(&(parent_run_id, child_run_id));
         Ok(())
     }
 }

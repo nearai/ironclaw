@@ -176,8 +176,7 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// Shorten the group's turn-state store lease TTL (default 90s,
-    /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
+    /// Shorten the group's process lease TTL (default 90s) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
     /// `None` (default) leaves today's behavior byte-identical.
     pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {

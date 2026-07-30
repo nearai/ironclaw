@@ -1,5 +1,8 @@
 // arch-exempt: large_file, targeted libSQL contention regression stays with its backend, plan #4088
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex as StdMutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -8,7 +11,7 @@ use ironclaw_libsql_runtime::{
     LibSqlRuntimeError, LibSqlWriteConnectionLease,
 };
 
-use crate::backend::EventRecord;
+use crate::backend::{EventRecord, StorageTxn};
 use crate::db::{
     descendant_path_range, direct_children, directory_append_error, directory_write_error,
     escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
@@ -18,13 +21,16 @@ use crate::db::{
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
-    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
+    VersionedEntry,
 };
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 #[derive(Debug)]
 pub struct LibSqlRootFilesystem {
     runtime: Arc<LibSqlRuntime>,
+    index_ddl_lock: tokio::sync::Mutex<()>,
+    projection_specs: StdMutex<HashMap<(String, IndexName), IndexSpec>>,
 }
 const LIBSQL_CHILD_ENTRIES_SQL: &str = "SELECT path, length(contents), is_dir \
     FROM root_filesystem_entries \
@@ -54,7 +60,11 @@ impl LibSqlRootFilesystem {
     }
 
     pub fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            index_ddl_lock: tokio::sync::Mutex::new(()),
+            projection_specs: StdMutex::new(HashMap::new()),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -197,6 +207,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .with(Capability::Events)
             .with(Capability::IndexFts)
             .with(Capability::IndexVector)
+            .with_txn(TxnCapability::MultiKey)
     }
 
     async fn put(
@@ -264,7 +275,6 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .get(1)
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
         if is_dir != 0 {
-            // Directories are not addressable as Entries.
             return Ok(None);
         }
         let body: Vec<u8> = row
@@ -280,10 +290,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let version_raw: i64 = row
             .get(5)
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let entry = build_entry(path, body, content_type_raw, kind_raw, indexed_raw)?;
         Ok(Some(VersionedEntry {
             path: path.clone(),
-            entry,
+            entry: build_entry(path, body, content_type_raw, kind_raw, indexed_raw)?,
             version: record_version_from_i64(path, version_raw)?,
         }))
     }
@@ -313,6 +322,52 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 reason: crate::IndexConflictReason::EmptyKeys,
             });
         }
+        let shared_projection = matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix);
+        let projection_key = (path.as_str().to_string(), spec.name.clone());
+        if shared_projection {
+            let cache = self
+                .projection_specs
+                .lock()
+                .map_err(|_| FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::EnsureIndex,
+                    reason: "projection index cache mutex poisoned".to_string(),
+                })?;
+            if let Some(existing) = cache.get(&projection_key) {
+                return if existing == spec {
+                    Ok(())
+                } else {
+                    Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    })
+                };
+            }
+        }
+        let _ddl_guard = self.index_ddl_lock.lock().await;
+        if shared_projection {
+            let cache = self
+                .projection_specs
+                .lock()
+                .map_err(|_| FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::EnsureIndex,
+                    reason: "projection index cache mutex poisoned".to_string(),
+                })?;
+            if let Some(existing) = cache.get(&projection_key) {
+                return if existing == spec {
+                    Ok(())
+                } else {
+                    Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    })
+                };
+            }
+        }
+        let catalog_prefix = path.as_str();
         let keys_json = serde_json::to_string(
             &spec
                 .keys
@@ -349,7 +404,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
              VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (prefix, name) DO NOTHING",
                 libsql::params![
-                    path.as_str(),
+                    catalog_prefix,
                     spec.name.as_str(),
                     keys_json.clone(),
                     kind_str.clone(),
@@ -364,7 +419,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let mut rows = transaction
             .query(
                 "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = ?1 AND name = ?2",
-                libsql::params![path.as_str(), spec.name.as_str()],
+                libsql::params![catalog_prefix, spec.name.as_str()],
             )
             .await
             .map_err(|error| {
@@ -398,18 +453,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
         match &spec.kind {
             IndexKind::Exact | IndexKind::Prefix => {
-                let expressions: Vec<String> = spec
-                    .keys
-                    .iter()
-                    .map(|k| format!("json_extract(indexed, '$.{}')", k.as_str()))
-                    .collect();
-                let ddl = format!(
-                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-                    expressions.join(", ")
-                );
-                transaction.execute(&ddl, ()).await.map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                ensure_libsql_ordered_projection(&conn, path, spec).await?;
             }
             IndexKind::Fts => {
                 // FTS indexes need exactly one text key; the FTS5 vtable has
@@ -559,10 +603,20 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 }
             }
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
+        transaction.commit().await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+        })?;
+        if shared_projection {
+            self.projection_specs
+                .lock()
+                .map_err(|_| FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::EnsureIndex,
+                    reason: "projection index cache mutex poisoned".to_string(),
+                })?
+                .insert(projection_key, spec.clone());
+        }
+        Ok(())
     }
 
     async fn query(
@@ -612,6 +666,162 @@ impl RootFilesystem for LibSqlRootFilesystem {
         )?));
 
         let conn = self.read_connection().await?;
+        let mut rows = conn
+            .query(&sql, params)
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            let row_path: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let row_path = VirtualPath::new(row_path)?;
+            let body: Vec<u8> = row.get(1).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let content_type_raw: String = row.get(2).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let kind_raw: Option<String> = row.get(3).ok();
+            let indexed_raw: String = row.get(4).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let version_raw: i64 = row.get(5).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_raw)?;
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            out.push(VersionedEntry {
+                path: row_path,
+                entry,
+                version,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let conn = self.read_connection().await?;
+        let mut spec_rows = conn
+            .query(
+                "SELECT keys, kind FROM root_filesystem_index_specs \
+                 WHERE prefix IN (?1, '/shared') AND name = ?2 \
+                 ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END \
+                 LIMIT 1",
+                libsql::params![path.as_str(), page.index.as_str()],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let spec = if let Some(row) = spec_rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            let keys_json: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let kind: String = row.get(1).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let keys = serde_json::from_str::<Vec<String>>(&keys_json)
+                .map_err(|_| FilesystemError::DeserializeIndexed {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                })?
+                .into_iter()
+                .map(IndexKey::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            let kind = match kind.as_str() {
+                "exact" => IndexKind::Exact,
+                "prefix" => IndexKind::Prefix,
+                _ => {
+                    return Err(FilesystemError::Unsupported {
+                        path: path.clone(),
+                        operation: FilesystemOperation::Query,
+                    });
+                }
+            };
+            Some(IndexSpec::new(page.index.clone(), keys, kind))
+        } else {
+            None
+        };
+        drop(spec_rows);
+        let Some(spec) = spec else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let Some(prefix_values) = crate::index::ordered_query_prefix_values(&spec, filter, page)
+        else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let sort_position = prefix_values.len();
+        let tie_position = sort_position.saturating_add(1);
+        if tie_position >= 8 {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        }
+        let expression = format!("ordered.k{sort_position}");
+        let tie_expression = format!("ordered.k{tie_position}");
+        let mut params = vec![
+            libsql::Value::Text(page.index.as_str().to_string()),
+            libsql::Value::Text(path.as_str().to_string()),
+        ];
+        let prefix_pattern = format!("{}/%", path.as_str().trim_end_matches('/'));
+        params.push(libsql::Value::Text(escape_like_with_trailing_wildcard(
+            &prefix_pattern,
+        )));
+        let mut sql = String::from(
+            "SELECT entry.path, entry.contents, entry.content_type, entry.kind, \
+                    entry.indexed, entry.version \
+             FROM root_filesystem_ordered_index_rows AS ordered \
+             JOIN root_filesystem_entries AS entry ON entry.path = ordered.path \
+             WHERE ordered.index_name = ?1 \
+               AND (ordered.path = ?2 OR ordered.path LIKE ?3 ESCAPE '!')",
+        );
+        for (position, value) in prefix_values.iter().enumerate() {
+            let value_index = bind_index_value(path, value, &mut params)?;
+            sql.push_str(&format!(" AND ordered.k{position} = ?{value_index}"));
+        }
+        if let Some(cursor) = &page.after {
+            let value_index = bind_index_value(path, &cursor.value, &mut params)?;
+            let tie_index = bind_index_value(path, &cursor.tie_breaker, &mut params)?;
+            let comparison = match page.direction {
+                crate::SortDirection::Ascending => ">",
+                crate::SortDirection::Descending => "<",
+            };
+            sql.push_str(&format!(
+                " AND ({expression} {comparison} ?{value_index} \
+                 OR ({expression} = ?{value_index} AND {tie_expression} {comparison} ?{tie_index}))"
+            ));
+        }
+        let direction = match page.direction {
+            crate::SortDirection::Ascending => "ASC",
+            crate::SortDirection::Descending => "DESC",
+        };
+        params.push(libsql::Value::Integer(i64::from(
+            page.limit.min(crate::Page::MAX_LIMIT),
+        )));
+        let limit_index = params.len();
+        sql.push_str(&format!(
+            " ORDER BY {expression} {direction}, {tie_expression} {direction} LIMIT ?{limit_index}"
+        ));
+
         let mut rows = conn
             .query(&sql, params)
             .await
@@ -893,40 +1103,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        // Range bounds rather than LIKE for the same reason reads use them:
-        // `root_filesystem_entries` and `_sequences` key on path and
-        // `_events` carries `idx_root_filesystem_events_path_seq`, so a
-        // subtree delete seeks each index instead of scanning every table.
-        let (prefix_lower, prefix_upper) = descendant_path_range(path);
-        let deleted = transaction
-            .execute(
-                "DELETE FROM root_filesystem_entries \
-                 WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
-                libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        if deleted == 0 {
-            return Err(not_found(path.clone(), FilesystemOperation::Delete));
-        }
-        // Sweep the append-event log for this path and its subtree.
-        transaction
-            .execute(
-                "DELETE FROM root_filesystem_events \
-                 WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
-                libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        // Sweep any reserved sequence counter for this path and subtree.
-        transaction
-            .execute(
-                "DELETE FROM root_filesystem_sequences \
-                 WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
-                libsql::params![path.as_str(), prefix_lower, prefix_upper],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        delete_libsql_inner(&transaction, path).await?;
         transaction
             .commit()
             .await
@@ -979,6 +1156,20 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))
     }
 
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let conn = self
+            .write_connection(path, FilesystemOperation::BeginTxn)
+            .await?;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::BeginTxn, error))?;
+        Ok(Box::new(LibSqlStorageTxn {
+            conn: Some(conn),
+            prefix: path.clone(),
+            active: true,
+        }))
+    }
+
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         let conn = self
             .write_connection(path, FilesystemOperation::Append)
@@ -987,45 +1178,14 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
-        // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
-        // insert. We capture the assigned id via last_insert_rowid() under
-        // the same connection so concurrent writers don't observe each
-        // other's rowids — libsql's per-connection model gives us that
-        // for free.
-        transaction
-            .execute(
-                r#"
-            INSERT INTO root_filesystem_events (path, payload, created_at)
-            VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            "#,
-                libsql::params![path.as_str(), libsql::Value::Blob(payload)],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let seq = append_libsql_inner(&transaction, path, payload).await?;
         #[cfg(test)]
         tests::pause_append_after_insert(Arc::as_ptr(&self.runtime) as usize, path).await;
-        let mut rows = transaction
-            .query("SELECT last_insert_rowid()", ())
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?
-            .ok_or_else(|| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::Append,
-                reason: "last_insert_rowid returned no row after insert".to_string(),
-            })?;
-        let seq_raw: i64 = row
-            .get(0)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
-        drop(rows);
         transaction
             .commit()
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
-        seq_no_from_i64(path, seq_raw, FilesystemOperation::Append)
+        Ok(seq)
     }
 
     async fn append_batch(
@@ -1196,35 +1356,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let conn = self
             .write_connection(path, FilesystemOperation::ReserveSeq)
             .await?;
-        let mut rows = conn
-            .query(
-                r#"
-                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
-                VALUES (?1, 2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                ON CONFLICT(path) DO UPDATE SET
-                    next_seq = root_filesystem_sequences.next_seq + 1,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                RETURNING next_seq - 1
-                "#,
-                libsql::params![path.as_str()],
-            )
-            .await
-            .map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error)
-            })?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?
-            .ok_or_else(|| FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ReserveSeq,
-                reason: "sequence reservation returned no row".to_string(),
-            })?;
-        let seq_raw: i64 = row.get(0).map_err(|error| {
-            libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error)
-        })?;
-        seq_no_from_i64(path, seq_raw, FilesystemOperation::ReserveSeq)
+        reserve_sequence_libsql_inner(&conn, path).await
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -1243,6 +1375,321 @@ impl RootFilesystem for LibSqlRootFilesystem {
         })
     }
 }
+struct LibSqlStorageTxn {
+    conn: Option<LibSqlWriteConnectionLease>,
+    prefix: VirtualPath,
+    active: bool,
+}
+
+impl LibSqlStorageTxn {
+    fn conn(&self) -> Result<&libsql::Connection, FilesystemError> {
+        self.conn
+            .as_deref()
+            .ok_or_else(|| FilesystemError::Backend {
+                path: self.prefix.clone(),
+                operation: FilesystemOperation::BeginTxn,
+                reason: "libSQL transaction already finished".to_string(),
+            })
+    }
+
+    fn check_path(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if crate::path_prefix_matches(self.prefix.as_str(), path.as_str()) {
+            Ok(())
+        } else {
+            Err(FilesystemError::PathOutsideMount { path: path.clone() })
+        }
+    }
+}
+
+#[async_trait]
+impl StorageTxn for LibSqlStorageTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.check_path(path)?;
+        let indexed_json = serde_json::to_string(&entry.indexed).map_err(|_| {
+            FilesystemError::SerializeIndexed {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            }
+        })?;
+        let kind_str = entry.kind.as_ref().map(|kind| kind.as_str().to_string());
+        let content_type_str = entry.content_type.as_str().to_string();
+        put_libsql_inner(
+            self.conn()?,
+            path,
+            entry.body,
+            content_type_str,
+            kind_str,
+            indexed_json,
+            cas,
+        )
+        .await
+    }
+
+    async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.check_path(path)?;
+        get_libsql_inner(self.conn()?, path).await
+    }
+
+    async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.check_path(path)?;
+        delete_libsql_inner(self.conn()?, path).await
+    }
+
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        reserve_sequence_libsql_inner(self.conn()?, path).await
+    }
+
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        reserve_sequence_range_libsql_inner(self.conn()?, path, count).await
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
+        let conn = self.conn.take().ok_or_else(|| FilesystemError::Backend {
+            path: self.prefix.clone(),
+            operation: FilesystemOperation::BeginTxn,
+            reason: "libSQL transaction already finished".to_string(),
+        })?;
+        match conn.execute("COMMIT", ()).await {
+            Ok(_) => {
+                self.active = false;
+                Ok(())
+            }
+            Err(error) => {
+                let mapped =
+                    libsql_db_error(self.prefix.clone(), FilesystemOperation::BeginTxn, error);
+                let _ = conn.execute("ROLLBACK", ()).await;
+                self.active = false;
+                Err(mapped)
+            }
+        }
+    }
+
+    async fn rollback(mut self: Box<Self>) {
+        if let Some(conn) = self.conn.take()
+            && self.active
+        {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for LibSqlStorageTxn {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(conn) = self.conn.take() {
+            tokio::spawn(async move {
+                let _ = conn.execute("ROLLBACK", ()).await;
+            });
+        }
+    }
+}
+
+async fn get_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<Option<VersionedEntry>, FilesystemError> {
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT contents, is_dir, content_type, kind, indexed, version
+            FROM root_filesystem_entries
+            WHERE path = ?1
+            "#,
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+    else {
+        return Ok(None);
+    };
+    let is_dir: i64 = row
+        .get(1)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    if is_dir != 0 {
+        return Ok(None);
+    }
+    let body = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let content_type = row
+        .get(2)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let kind = row.get(3).ok();
+    let indexed = row
+        .get(4)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let version: i64 = row
+        .get(5)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    Ok(Some(VersionedEntry {
+        path: path.clone(),
+        entry: build_entry(path, body, content_type, kind, indexed)?,
+        version: record_version_from_i64(path, version)?,
+    }))
+}
+
+async fn delete_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    // Range bounds let every subtree sweep seek its path index. Keep this
+    // shared helper so root and transactional deletes retain identical
+    // semantics.
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let deleted = conn
+        .execute(
+            "DELETE FROM root_filesystem_entries \
+             WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+            libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted == 0 {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
+    }
+    conn.execute(
+        "DELETE FROM root_filesystem_events \
+         WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+        libsql::params![path.as_str(), prefix_lower.clone(), prefix_upper.clone()],
+    )
+    .await
+    .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    conn.execute(
+        "DELETE FROM root_filesystem_sequences \
+         WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+        libsql::params![path.as_str(), prefix_lower, prefix_upper],
+    )
+    .await
+    .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    Ok(())
+}
+
+async fn append_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    payload: Vec<u8>,
+) -> Result<SeqNo, FilesystemError> {
+    conn.execute(
+        r#"
+        INSERT INTO root_filesystem_events (path, payload, created_at)
+        VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        "#,
+        libsql::params![path.as_str(), libsql::Value::Blob(payload)],
+    )
+    .await
+    .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+    let mut rows = conn
+        .query("SELECT last_insert_rowid()", ())
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?
+        .ok_or_else(|| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Append,
+            reason: "last_insert_rowid returned no row after insert".to_string(),
+        })?;
+    let seq: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+    seq_no_from_i64(path, seq, FilesystemOperation::Append)
+}
+
+async fn reserve_sequence_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<SeqNo, FilesystemError> {
+    let mut rows = conn
+        .query(
+            r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES (?1, 2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            RETURNING next_seq - 1
+            "#,
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?
+        .ok_or_else(|| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReserveSeq,
+            reason: "sequence reservation returned no row".to_string(),
+        })?;
+    let seq: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    seq_no_from_i64(path, seq, FilesystemOperation::ReserveSeq)
+}
+
+async fn reserve_sequence_range_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    count: u64,
+) -> Result<SeqNo, FilesystemError> {
+    if count == 0 {
+        return Ok(SeqNo::ZERO);
+    }
+    let count = i64::try_from(count).map_err(|_| FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::ReserveSeq,
+        reason: "sequence reservation range exceeds i64".to_string(),
+    })?;
+    let mut rows = conn
+        .query(
+            r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES (?1, ?2 + 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            RETURNING next_seq - 1
+            "#,
+            libsql::params![path.as_str(), count],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?
+        .ok_or_else(|| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReserveSeq,
+            reason: "sequence range reservation returned no row".to_string(),
+        })?;
+    let seq: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    seq_no_from_i64(path, seq, FilesystemOperation::ReserveSeq)
+}
+
 async fn put_libsql_inner(
     conn: &libsql::Connection,
     path: &VirtualPath,
@@ -1542,6 +1989,7 @@ async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), Fi
     ensure_libsql_root_is_dir_column(conn).await?;
     ensure_libsql_records_columns(conn).await?;
     ensure_libsql_index_specs_table(conn).await?;
+    ensure_libsql_ordered_index_table(conn).await?;
     ensure_libsql_events_table(conn).await?;
     ensure_libsql_sequences_table(conn).await?;
     Ok(())
@@ -1914,6 +2362,102 @@ async fn ensure_libsql_index_specs_table(conn: &libsql::Connection) -> Result<()
         .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
     Ok(())
 }
+async fn ensure_libsql_ordered_index_table(
+    conn: &libsql::Connection,
+) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_ORDERED_INDEX_SCHEMA)
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
+    Ok(())
+}
+
+async fn ensure_libsql_ordered_projection(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    spec: &IndexSpec,
+) -> Result<(), FilesystemError> {
+    const MAX_ORDERED_INDEX_KEYS: usize = 8;
+    if spec.keys.len() > MAX_ORDERED_INDEX_KEYS {
+        return Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::EnsureIndex,
+        });
+    }
+    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
+    let legacy_trigger_base = sql_index_name("/ordered_projection", spec.name.as_str());
+    let index_name = spec.name.as_str();
+    let escaped_prefix = path.as_str().replace('\'', "''");
+    let descendant_pattern = if path.as_str() == "/" {
+        "/%".to_string()
+    } else {
+        format!("{}/%", path.as_str().trim_end_matches('/'))
+    }
+    .replace('\'', "''");
+    let new_path_matches =
+        format!("(new.path = '{escaped_prefix}' OR new.path LIKE '{descendant_pattern}')");
+    let old_path_matches =
+        format!("(old.path = '{escaped_prefix}' OR old.path LIKE '{descendant_pattern}')");
+    let projected_values = spec
+        .keys
+        .iter()
+        .map(|key| format!("json_extract(new.indexed, '$.{}')", key.as_str()))
+        .chain(
+            std::iter::repeat_with(|| "NULL".to_string())
+                .take(MAX_ORDERED_INDEX_KEYS.saturating_sub(spec.keys.len())),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate = spec
+        .keys
+        .iter()
+        .map(|key| format!("json_type(new.indexed, '$.{}') IS NOT NULL", key.as_str()))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let insert = format!(
+        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ai \
+         AFTER INSERT ON root_filesystem_entries \
+         WHEN {new_path_matches} \
+         BEGIN \
+           INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
+             index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
+           ) \
+           SELECT '{index_name}', new.path, {projected_values} \
+           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
+         END;"
+    );
+    let update = format!(
+        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_au \
+         AFTER UPDATE ON root_filesystem_entries \
+         WHEN {old_path_matches} OR {new_path_matches} \
+         BEGIN \
+           DELETE FROM root_filesystem_ordered_index_rows \
+             WHERE index_name = '{index_name}' AND path = old.path; \
+           INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
+             index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
+           ) \
+           SELECT '{index_name}', new.path, {projected_values} \
+           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
+         END;"
+    );
+    let delete = format!(
+        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ad \
+         AFTER DELETE ON root_filesystem_entries \
+         WHEN {old_path_matches} \
+         BEGIN \
+           DELETE FROM root_filesystem_ordered_index_rows \
+             WHERE index_name = '{index_name}' AND path = old.path; \
+         END;"
+    );
+    let remove_legacy = format!(
+        "DROP TRIGGER IF EXISTS {legacy_trigger_base}_ai;\
+         DROP TRIGGER IF EXISTS {legacy_trigger_base}_au;\
+         DROP TRIGGER IF EXISTS {legacy_trigger_base}_ad;"
+    );
+    conn.execute_batch(&format!("{remove_legacy}{insert}{update}{delete}"))
+        .await
+        .map(|_| ())
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
+}
 async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
         .await
@@ -2194,6 +2738,25 @@ CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (
     PRIMARY KEY (prefix, name)
 );
 "#;
+const LIBSQL_ORDERED_INDEX_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_ordered_index_rows (
+    index_name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    k0,
+    k1,
+    k2,
+    k3,
+    k4,
+    k5,
+    k6,
+    k7,
+    PRIMARY KEY (index_name, path)
+);
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_values_v1
+    ON root_filesystem_ordered_index_rows(
+        index_name, k0, k1, k2, k3, k4, k5, k6, k7, path
+    );
+"#;
 const LIBSQL_EVENTS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2369,6 +2932,96 @@ mod tests {
                 "descendant lookup must not scan the complete path index, plan: {details:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ordered_query_plan_uses_declared_composite_projection_index() {
+        let (fs, _dir) = fresh_backend().await;
+        let prefix = VirtualPath::new("/threads/index").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("thread_activity_v2").unwrap(),
+            vec![
+                IndexKey::new("scope_key").unwrap(),
+                IndexKey::new("activity_sort").unwrap(),
+                IndexKey::new("thread_id").unwrap(),
+            ],
+            IndexKind::Exact,
+        );
+        fs.ensure_index(&prefix, &spec).await.unwrap();
+        let expected_index = "idx_root_filesystem_ordered_values_v1";
+        let conn = fs.read_connection().await.unwrap();
+        let mut rows = conn
+            .query(
+                "EXPLAIN QUERY PLAN \
+                 SELECT entry.path \
+                 FROM root_filesystem_ordered_index_rows AS ordered \
+                 JOIN root_filesystem_entries AS entry ON entry.path = ordered.path \
+                 WHERE ordered.index_name = ?1 \
+                   AND ordered.k0 = ?2 \
+                   AND (ordered.path = ?3 OR ordered.path LIKE ?4 ESCAPE '!') \
+                 ORDER BY ordered.k1 ASC, ordered.k2 ASC \
+                 LIMIT ?5",
+                libsql::params![
+                    spec.name.as_str(),
+                    "scope-a",
+                    prefix.as_str(),
+                    "/threads/index/%",
+                    201_i64
+                ],
+            )
+            .await
+            .unwrap();
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            details.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            details.iter().any(|detail| detail.contains(expected_index)),
+            "ordered query must use {expected_index}; plan={details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "ordered query must not materialize/sort the scope; plan={details:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_projection_specs_share_one_physical_index_across_prefixes() {
+        let (fs, _dir) = fresh_backend().await;
+        let spec = IndexSpec::new(
+            IndexName::new("thread_activity_v2").unwrap(),
+            vec![
+                IndexKey::new("scope_key").unwrap(),
+                IndexKey::new("activity_sort").unwrap(),
+                IndexKey::new("thread_id").unwrap(),
+            ],
+            IndexKind::Exact,
+        );
+        let alias_spec = IndexSpec::new(
+            IndexName::new("recent_threads").unwrap(),
+            spec.keys.clone(),
+            IndexKind::Exact,
+        );
+        for (prefix, declared_spec) in [
+            ("/threads/owner-a", &spec),
+            ("/threads/owner-b", &alias_spec),
+        ] {
+            fs.ensure_index(&VirtualPath::new(prefix).unwrap(), declared_spec)
+                .await
+                .unwrap();
+        }
+        let conn = fs.read_connection().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                libsql::params!["idx_root_filesystem_ordered_values_v1"],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 1);
     }
 
     /// The record `query` path is the hot read for every domain store, and it
@@ -2644,13 +3297,9 @@ mod tests {
             vec![IndexKey::new("status").unwrap()],
             IndexKind::Exact,
         );
-        let conflicting_name = sql_index_name(path.as_str(), spec.name.as_str());
         let writer = fs.migration_write_connection().await.unwrap();
         writer
-            .execute(
-                &format!("CREATE TABLE {conflicting_name} (value TEXT NOT NULL)"),
-                (),
-            )
+            .execute("DROP TABLE root_filesystem_entries", ())
             .await
             .unwrap();
         drop(writer);

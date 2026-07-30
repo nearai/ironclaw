@@ -147,7 +147,7 @@ A handler `invoke` returning `Err(AgentLoopHostError)` is mapped by `capability_
 
 | Site | Condition | Current | Fix |
 |---|---|---|---|
-| `crates/ironclaw_reborn_composition/src/runtime/local_dev/outbound_delivery.rs:108,213` (via `outbound_delivery_host_error`, :575) | model picks bad/nonexistent `target_id` (InvalidRequest/NotFound), forbidden, conflict, rate-limited, transient-unavailable | maps **all** `RebornServicesErrorCode` → `Err` → terminal | mirror `project_service_outcome`: InvalidRequest/NotFound→`Failed{InvalidInput}`; Unauthenticated/Forbidden→`Denied`; Conflict→`Failed{OperationFailed}`; RateLimited→`Failed{Resource}`; Unavailable→`Failed{Unavailable}`; only Internal→`Err` |
+| `crates/ironclaw_reborn_composition/src/runtime/capability_host/outbound_delivery.rs:108,213` (via `outbound_delivery_host_error`, :575) | model picks bad/nonexistent `target_id` (InvalidRequest/NotFound), forbidden, conflict, rate-limited, transient-unavailable | maps **all** `RebornServicesErrorCode` → `Err` → terminal | mirror `project_service_outcome`: InvalidRequest/NotFound→`Failed{InvalidInput}`; Unauthenticated/Forbidden→`Denied`; Conflict→`Failed{OperationFailed}`; RateLimited→`Failed{Resource}`; Unavailable→`Failed{Unavailable}`; only Internal→`Err` |
 | `outbound_delivery.rs:223` | model-supplied `target_id` interpolated into `safe_summary` | `format!("set delivery target to {target_id}")` — a delimiter in the id trips validation → terminal | fixed host-authored string; id travels in `output` |
 | `outbound_delivery.rs:208,340-351,392-394` (via `approval_lease_error`) | expired/lost approval lease, not-yet-approved gate | → `Unauthorized` `Err` (terminal) | route lease-state arms → `Ok(Denied)` (re-request); keep Persistence/CAS as `Err` |
 | `crates/ironclaw_host_runtime/src/production.rs:1990,1995` (`host_runtime_spawn_input_for_capability`) | malformed model-supplied `SandboxProcessPlan` | `HostRuntimeError::invalid_request` → `InvalidInvocation` → terminal | `Ok(CapabilityOutcome::Failed{InvalidInput})` (locked in by a test at `loop_support/.../capability_port.rs:6655` — update it) |
@@ -228,13 +228,13 @@ A test asserting: every `RunFailureReason` resolves to `SecurityStop` **only if*
 | AgentLoopExecutorError | `crates/ironclaw_agent_loop/src/executor.rs:99` |
 | Runtime→loop kind map | `crates/ironclaw_loop_host/src/capability_port.rs:2570` (`runtime_failure_kind_to_loop`) |
 | Dispatch kind map | `crates/ironclaw_host_runtime/src/production.rs:2068` (`failure_kind_from`), `:2113` (`From<DispatchFailureKind>`) |
-| outbound_delivery defect | `crates/ironclaw_reborn_composition/src/runtime/local_dev/outbound_delivery.rs:108,213,223,575` |
+| outbound_delivery defect | `crates/ironclaw_reborn_composition/src/runtime/capability_host/outbound_delivery.rs:108,213,223,575` |
 | sandbox-plan defect | `crates/ironclaw_host_runtime/src/production.rs:1990` |
 | Provider fidelity | `crates/ironclaw_llm/src/rig_adapter.rs:1019`, `bedrock.rs:700`, `openai_codex_provider.rs:830`, `codex_chatgpt.rs:673` |
 | Model-error path | `crates/ironclaw_agent_loop/src/executor/model.rs:125` |
 | Resumable checkpoint kinds | `crates/ironclaw_runner/src/planned_driver.rs:393`; first checkpoint `canonical.rs:111` |
 | Durable turn input | `crates/ironclaw_turns/src/request.rs:58` (`accepted_message_ref`) |
 | Lease expiry | `crates/ironclaw_turns/src/memory.rs` (`recover_expired_leases`) |
-| Exemplar recoverable handlers | `crates/ironclaw_reborn_composition/src/runtime/local_dev/{skill_activation,project_create}.rs` |
+| Exemplar recoverable handlers | `crates/ironclaw_reborn_composition/src/runtime/capability_host/{skill_activation,project_create}.rs` |
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_host_api::ResourceScope;
-use ironclaw_run_state::{ApprovalRequestStorePort, RunStateError};
 use ironclaw_turns::{GateRef, TurnRunId};
 
 use super::gate_ref::{approval_gate_ref, approval_request_id_from_gate_ref};
@@ -164,7 +164,7 @@ fn same_interaction_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
         && left.thread_id == right.thread_id
 }
 
-fn map_approval_read_error(_error: RunStateError) -> ProductSurfaceFailure {
+fn map_approval_read_error(_error: ApprovalStoreError) -> ProductSurfaceFailure {
     ProductSurfaceFailure::Transient {
         reason: "approval read model unavailable".to_string(),
     }

@@ -61,6 +61,23 @@ pub enum PermissionMode {
     Deny,
 }
 
+/// Provenance-backed policy for a capability's model-visible description.
+///
+/// This marker does not grant execution authority. It only records whether the
+/// description was supplied by a signature-verified catalog path and may
+/// therefore bypass vocabulary/path/credential-shape false-positive checks.
+/// Structural prompt limits still apply on every variant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDescriptionTrust {
+    /// Unknown, local, client-supplied, or otherwise unverified provenance.
+    #[default]
+    Untrusted,
+    /// Description came from a registry package whose catalog manifest and
+    /// artifacts were signature/digest verified before installation.
+    VerifiedCatalog,
+}
+
 /// Per-origin gate requirement (§5.2.1). Absence of a declaration for an
 /// origin means `Forbidden` (deny-by-default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

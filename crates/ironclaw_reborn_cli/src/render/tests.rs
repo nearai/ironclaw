@@ -18,7 +18,7 @@ fn sample_status() -> StatusDto {
         version: "0.1.0".to_string(),
         reborn_home: PathBuf::from("/home/user/.ironclaw/reborn"),
         home_source: "default",
-        profile: "local-dev".to_string(),
+        profile: "standalone".to_string(),
         config_file: FilePresence {
             path: PathBuf::from("/home/user/.ironclaw/reborn/config.toml"),
             present: true,
@@ -85,7 +85,7 @@ fn sample_config_list() -> ConfigListDto {
         entries: vec![
             ConfigEntry {
                 key: "boot.profile".to_string(),
-                value: Some(ConfigValue::String("local-dev".to_string())),
+                value: Some(ConfigValue::String("standalone".to_string())),
             },
             ConfigEntry {
                 key: "identity.tenant".to_string(),
@@ -105,7 +105,7 @@ fn status_json_round_trips() {
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["version"], "0.1.0");
-    assert_eq!(parsed["profile"], "local-dev");
+    assert_eq!(parsed["profile"], "standalone");
     assert_eq!(parsed["config_file"]["present"], true);
     assert_eq!(parsed["providers_file"]["present"], false);
     assert_eq!(parsed["drivers"]["text_only"]["status"], "initialized");
@@ -140,7 +140,7 @@ fn status_render_text_contains_all_fields() {
     assert!(text.contains("/home/user/.ironclaw/reborn"));
     assert!(text.contains("home_source:"));
     assert!(text.contains("profile:"));
-    assert!(text.contains("local-dev"));
+    assert!(text.contains("standalone"));
     assert!(text.contains("config_file:"));
     assert!(text.contains("(present)"));
     assert!(text.contains("providers_file:"));
@@ -233,7 +233,7 @@ fn config_list_json_round_trips() {
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["entries"][0]["key"], "boot.profile");
-    assert_eq!(parsed["entries"][0]["value"], "local-dev");
+    assert_eq!(parsed["entries"][0]["value"], "standalone");
     assert!(parsed["entries"][1]["value"].is_null());
     assert_eq!(parsed["entries"][2]["value"], 5);
 }
@@ -244,7 +244,7 @@ fn config_list_render_text_covers_entries() {
     assert!(text.contains("IronClaw Reborn config"));
     assert!(text.contains("config.toml"));
     assert!(text.contains("boot.profile"));
-    assert!(text.contains("local-dev"));
+    assert!(text.contains("standalone"));
     assert!(text.contains("identity.tenant"));
     assert!(text.contains("(not set)"));
     assert!(text.contains("runner.heartbeat_interval_secs"));
@@ -290,12 +290,12 @@ fn text_rendering_replaces_terminal_control_characters() {
 fn config_get_json_set_value() {
     let dto = ConfigGetDto {
         key: "boot.profile".to_string(),
-        value: Some(ConfigValue::String("local-dev".to_string())),
+        value: Some(ConfigValue::String("standalone".to_string())),
     };
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["key"], "boot.profile");
-    assert_eq!(parsed["value"], "local-dev");
+    assert_eq!(parsed["value"], "standalone");
 }
 
 #[test]
@@ -314,10 +314,10 @@ fn config_get_json_unset_value() {
 fn config_get_render_text_set_value() {
     let dto = ConfigGetDto {
         key: "boot.profile".to_string(),
-        value: Some(ConfigValue::String("local-dev".to_string())),
+        value: Some(ConfigValue::String("standalone".to_string())),
     };
     let text = render_to_string(&dto);
-    assert!(text.contains("local-dev"));
+    assert!(text.contains("standalone"));
     assert!(!text.contains("(not set)"));
 }
 

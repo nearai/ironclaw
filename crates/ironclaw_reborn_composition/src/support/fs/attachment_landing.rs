@@ -23,7 +23,7 @@ use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
 use ironclaw_product::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
-use crate::local_dev_mounts::WORKSPACE_ALIAS;
+use crate::runtime_mounts::WORKSPACE_ALIAS;
 
 /// Lands inbound attachments through a project-scoped workspace filesystem.
 pub(crate) struct ProjectScopedAttachmentLander<F: RootFilesystem> {

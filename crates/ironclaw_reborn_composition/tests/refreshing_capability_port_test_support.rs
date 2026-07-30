@@ -150,6 +150,7 @@ impl HostRuntime for StubHostRuntime {
                     resource_profile: None,
                     origin_gate_matrix: None,
                 },
+                description_trust: Default::default(),
                 access: VisibleCapabilityAccess::Available,
                 estimated_resources: ResourceEstimate::default(),
             })
@@ -405,9 +406,9 @@ fn test_parts(
         tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
-        approval_requests: Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
+        approval_requests: Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store()),
         capability_leases: Arc::new(in_memory_backed_capability_lease_store()),
-        gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+        gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
             ironclaw_reborn_composition::wrap_scoped(Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),

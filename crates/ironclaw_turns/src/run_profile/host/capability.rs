@@ -8,6 +8,8 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
+pub use ironclaw_host_api::CapabilityDescriptionTrust;
+
 use crate::run_profile::content_digest::ContentDigest;
 use crate::run_profile::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
 use crate::{CapabilityActivityId, LoopResultRef};
@@ -127,6 +129,9 @@ pub struct CapabilityDescriptorView {
     pub runtime: RuntimeKind,
     pub safe_name: String,
     pub safe_description: String,
+    /// Unknown and legacy sources default to the fully checked path.
+    #[serde(default)]
+    pub description_trust: CapabilityDescriptionTrust,
     pub concurrency_hint: ConcurrencyHint,
     #[serde(default)]
     pub parameters_schema: serde_json::Value,

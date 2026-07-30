@@ -1,8 +1,8 @@
 use crate::ProductSurfaceRejectionKind;
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ResourceScope,
 };
-use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
     GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
 };

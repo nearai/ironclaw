@@ -49,9 +49,9 @@
   pre-authorizing the existing scoped account. Do not route raw token values
   through chat commands, model-visible messages, serializable DTOs,
   projections, or route-local pending maps.
-- `RebornProductAuthServices::flow_record_source` is an optional WebUI/local-dev
+- `RebornProductAuthServices::flow_record_source` is an optional WebUI/standalone
   read-projection port, not a required product-auth capability. Filesystem-backed
-  local-dev composition wires the durable product-auth service itself as this
+  standalone composition wires the durable product-auth service itself as this
   source so pending auth gates can be rendered from blocked turn state plus
   auth-flow records. If a supplied product-auth bundle
   omits it, runtime composition must expose the WebUI auth interaction surface
@@ -60,10 +60,10 @@
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
-- Local-dev/WebUI capability result plumbing may stage results in memory, but any
+- Standalone/WebUI capability result plumbing may stage results in memory, but any
   durable thread append keyed by `LoopRunContext` (for example capability display
   preview timeline messages) must resolve the thread scope through
-  `ironclaw_runner::thread_scope::ThreadScopeResolver::resolve_for_turn` before
+  `ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn` before
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
@@ -81,7 +81,7 @@ middleware with v1's `src/channels/web/`.
 |---|---|
 | `RebornRuntime::product_surface(event_stream)` | Build the v2 `Arc<dyn ProductSurface>` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornRuntime::product_auth_services()` / `RebornRuntime::readiness()` | Runtime-owned host handles consumed by the CLI/WebUI host when mounting auth routes and reporting readiness |
-| `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
+| `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single standalone `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
 | `webui_v2_app(product_surface, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
@@ -384,24 +384,25 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
 
 ### How the standalone `ironclaw serve` consumes this
 
-The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
+The `serve` subcommand builds a full standalone `RebornRuntime`, asks
 `runtime.product_surface(None)` for the product surface, and hands
 the resulting router to the host-owned `ironclaw_webui`
 listener lifecycle. The default projection stream is backed by
 the runtime-owned durable event log plus `EventStreamManager`, so
 `/events` and `/ws` no longer advertise routes that only return
-`Unavailable`. In local-dev builds with `libsql` enabled, the log and
-runtime state stores sit behind the composed local-dev root filesystem
+`Unavailable`. In standalone builds with `libsql` enabled, the log and
+runtime state stores sit behind the composed standalone root filesystem
 (`reborn-local-dev.db` for durable records, `/projects` for workspace
 files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than WebUI ingress.
 
-Live cumulative assistant-text projections are producer-coalesced: the first
-update is published immediately, rapid replacements publish the latest value
-at most once per 75 ms, and any non-text milestone flushes the pending value
-before that milestone is projected. Reasoning, capability, and lifecycle
-milestones remain ordered and uncoalesced. The in-memory source still records
-the latest projection for replay when no browser subscriber is active.
+Live cumulative assistant-text projections are published at provider cadence.
+The live-text publisher conflates only sub-frame microbursts within a 16 ms
+window before they reach the event-stream manager's bounded subscriber.
+Ordinary provider cadence remains incremental, while each microburst retains
+its latest cumulative snapshot. Reasoning, capability, and lifecycle milestones
+remain ordered. The in-memory source still records the latest projection for
+replay when no browser subscriber is active.
 
 The opaque WebUI projection cursor stamps its process-local live position with
 the projection-services epoch. On an epoch mismatch, resume preserves durable
@@ -428,7 +429,7 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
 ### Tests
 
-- `src/runtime.rs::tests::local_dev_runtime_product_surface_reuses_thread_and_turn_services`
+- `src/runtime/tests/core.rs::standalone_runtime_webui_bundle_reuses_thread_and_turn_services`
   — regression guard that the product surface reuses the runtime turn/thread
   services.
 - `src/projection.rs::tests::product_event_stream_drains_run_status_projection_from_event_stream_manager`
@@ -439,13 +440,11 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   — regression guard that the product projection adapter uses the service
   request actor when selecting the runtime event stream, rather than a
   hidden runtime owner actor.
-- `src/projection/tests/live_progress_stream.rs::live_assistant_text_coalescer_flushes_latest_update_on_timer`
-  — regression guard that rapid cumulative text still advances while the
-  model continues streaming.
-- `src/projection/tests/live_progress_stream.rs::live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity`
-  — caller-level regression guard that a provider-rate text burst does not
-  terminate the bounded WebUI subscription and that the latest text is
-  published before the next capability milestone.
+- `src/projection/tests/live_progress_stream.rs::provider_rate_live_text_stays_smooth_and_precedes_tool_activity`
+  — caller-level regression guard that provider-rate cumulative text remains
+  smooth without terminating the bounded WebUI subscription, provider-cadence
+  snapshots precede the next capability milestone, and a sub-frame microburst
+  retains its latest cumulative snapshot before that milestone.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,

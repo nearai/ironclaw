@@ -332,255 +332,58 @@ pub(super) async fn turn_lifecycle(
     let actor = turn_lifecycle_actor(sample)?;
     let resolver = InMemoryRunProfileResolver::default();
 
-    let complete_scope = turn_lifecycle_scope(&key, sample, "complete")?;
-    let complete_submit = store
+    let lifecycle_scope = turn_lifecycle_scope(&key, sample, "process")?;
+    let submitted = store
         .submit_turn(
             turn_lifecycle_submit_request(
-                complete_scope.clone(),
+                lifecycle_scope.clone(),
                 actor.clone(),
                 &key,
-                "complete",
+                "process",
                 payload_len,
             )?,
             &AllowAllTurnAdmissionPolicy,
             &resolver,
         )
         .await?;
-    let (complete_turn_id, complete_run_id, complete_submit_status) =
-        accepted_run(&complete_submit);
-    let (runner_id, lease_token, claimed_state) = claim_expected_run(
-        Arc::clone(&store),
-        Some(complete_scope.clone()),
-        complete_run_id,
-        "complete first claim",
-    )
-    .await?;
-
-    let gate_ref = GateRef::new(format!("gate:latency-{key}-approval"))?;
-    let complete_checkpoint_id = TurnCheckpointId::new();
-    let complete_checkpoint_ref = LoopCheckpointStateRef::new(format!("checkpoint:latency-{key}"))?;
-    let blocked = store
-        .block_run(BlockRunRequest {
-            run_id: complete_run_id,
-            runner_id,
-            lease_token,
-            checkpoint_id: complete_checkpoint_id,
-            state_ref: complete_checkpoint_ref.clone(),
-            reason: BlockedReason::Approval {
-                gate_ref: gate_ref.clone(),
-            },
-        })
-        .await?;
-    ensure_status(blocked.status, TurnStatus::BlockedApproval, "block_run")?;
-    let checkpoint_code = record_turn_lifecycle_checkpoints(
-        Arc::clone(&store),
-        &complete_scope,
-        complete_turn_id,
-        complete_run_id,
-        complete_checkpoint_ref,
-        &key,
-        payload_len,
-    )
-    .await?;
-
-    let resumed = store
-        .resume_turn(ResumeTurnRequest {
-            scope: complete_scope.clone(),
-            actor: actor.clone(),
-            run_id: complete_run_id,
-            gate_resolution_ref: gate_ref,
-            source_binding_ref: SourceBindingRef::new(format!("source-{key}-resume"))?,
-            reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-{key}-resume"))?,
-            idempotency_key: IdempotencyKey::new(format!("idem-{key}-resume"))?,
-            precondition: ResumeTurnPrecondition::BlockedApprovalGate,
-            resume_disposition: None,
-        })
-        .await?;
-    ensure_status(resumed.status, TurnStatus::Queued, "resume_turn")?;
-
-    let (runner_id, lease_token, reclaimed_state) = claim_expected_run(
-        Arc::clone(&store),
-        Some(complete_scope.clone()),
-        complete_run_id,
-        "complete reclaim",
-    )
-    .await?;
-    let completed = store
-        .complete_run(CompleteRunRequest {
-            run_id: complete_run_id,
-            runner_id,
-            lease_token,
-        })
-        .await?;
-    ensure_status(completed.status, TurnStatus::Completed, "complete_run")?;
-    let completed_readback = store
+    let (_turn_id, run_id, submit_status) = accepted_run(&submitted);
+    let queued = store
         .get_run_state(GetRunStateRequest {
-            scope: complete_scope,
-            run_id: complete_run_id,
+            scope: lifecycle_scope.clone(),
+            run_id,
         })
         .await?;
-    ensure_status(
-        completed_readback.status,
-        TurnStatus::Completed,
-        "complete readback",
-    )?;
-
-    let cancel_scope = turn_lifecycle_scope(&key, sample, "cancel")?;
-    let cancel_submit = store
-        .submit_turn(
-            turn_lifecycle_submit_request(
-                cancel_scope.clone(),
-                actor.clone(),
-                &key,
-                "cancel",
-                payload_len,
-            )?,
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        )
-        .await?;
-    let (_cancel_turn_id, cancel_run_id, cancel_submit_status) = accepted_run(&cancel_submit);
-    let (cancel_runner_id, cancel_lease_token, cancel_claimed_state) = claim_expected_run(
-        Arc::clone(&store),
-        Some(cancel_scope.clone()),
-        cancel_run_id,
-        "cancel claim",
-    )
-    .await?;
+    ensure_status(queued.status, TurnStatus::Queued, "queued readback")?;
     let cancel_requested = store
         .request_cancel(CancelRunRequest {
-            scope: cancel_scope.clone(),
+            scope: lifecycle_scope.clone(),
             actor,
-            run_id: cancel_run_id,
+            run_id,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new(format!("idem-{key}-cancel"))?,
         })
         .await?;
-    ensure_status(
+    if !matches!(
         cancel_requested.status,
-        TurnStatus::CancelRequested,
-        "request_cancel",
-    )?;
-    let cancelled = store
-        .cancel_run(CancelRunCompletionRequest {
-            run_id: cancel_run_id,
-            runner_id: cancel_runner_id,
-            lease_token: cancel_lease_token,
-        })
-        .await?;
-    ensure_status(cancelled.status, TurnStatus::Cancelled, "cancel_run")?;
-    let cancelled_readback = store
-        .get_run_state(GetRunStateRequest {
-            scope: cancel_scope,
-            run_id: cancel_run_id,
-        })
-        .await?;
-    ensure_status(
-        cancelled_readback.status,
-        TurnStatus::Cancelled,
-        "cancel readback",
-    )?;
-
-    Ok(status_code(complete_submit_status)
-        ^ (status_code(claimed_state.status) << 4)
-        ^ (option_code(claimed_state.checkpoint_id.is_some()) << 8)
-        ^ (status_code(blocked.status) << 12)
-        ^ (status_code(resumed.status) << 16)
-        ^ (status_code(reclaimed_state.status) << 20)
-        ^ (option_code(reclaimed_state.checkpoint_id.is_some()) << 24)
-        ^ (status_code(completed.status) << 28)
-        ^ (status_code(completed_readback.status) << 32)
-        ^ (status_code(cancel_submit_status) << 36)
-        ^ (status_code(cancel_claimed_state.status) << 40)
-        ^ (option_code(cancel_claimed_state.checkpoint_id.is_some()) << 44)
-        ^ (status_code(cancel_requested.status) << 48)
-        ^ (status_code(cancelled.status) << 52)
-        ^ (status_code(cancelled_readback.status) << 56)
-        ^ checkpoint_code)
-}
-
-async fn record_turn_lifecycle_checkpoints(
-    store: Arc<dyn TurnLifecycleStore>,
-    scope: &TurnScope,
-    turn_id: TurnId,
-    run_id: TurnRunId,
-    first_state_ref: LoopCheckpointStateRef,
-    key: &str,
-    payload_len: usize,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let checkpoint_count = turn_lifecycle_checkpoint_count(payload_len);
-    let schema_id = CheckpointSchemaId::new("latency_turn_state")?;
-    let schema_version = RunProfileVersion::new(1);
-    let mut checksum = checkpoint_count as u64;
-
-    for index in 0..checkpoint_count {
-        let state_ref = if index == 0 {
-            first_state_ref.clone()
-        } else {
-            LoopCheckpointStateRef::new(format!("checkpoint:latency-{key}:{index}"))?
-        };
-        let record = store
-            .put_loop_checkpoint(PutLoopCheckpointRequest {
-                scope: scope.clone(),
-                turn_id,
-                run_id,
-                state_ref,
-                schema_id: schema_id.clone(),
-                schema_version,
-                kind: LoopCheckpointKind::BeforeBlock,
-                gate_ref: None,
-            })
-            .await?;
-        let readback = store
-            .get_loop_checkpoint(GetLoopCheckpointRequest {
-                scope: scope.clone(),
-                turn_id,
-                run_id,
-                checkpoint_id: record.checkpoint_id,
-            })
-            .await?
-            .ok_or_else(|| format!("checkpoint {index} missing after put"))?;
-        if readback != record {
-            return Err(format!("checkpoint {index} readback did not match put").into());
-        }
-        checksum ^= ((index as u64 + 1) << (index % 16)) ^ schema_version.as_u64();
-    }
-
-    Ok(checksum)
-}
-
-fn turn_lifecycle_checkpoint_count(payload_len: usize) -> usize {
-    (payload_len / 256).clamp(1, 16)
-}
-
-async fn claim_expected_run(
-    store: Arc<dyn TurnLifecycleStore>,
-    scope_filter: Option<TurnScope>,
-    expected_run_id: TurnRunId,
-    operation: &'static str,
-) -> Result<
-    (TurnRunnerId, TurnLeaseToken, ironclaw_turns::TurnRunState),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter,
-        })
-        .await?
-        .ok_or_else(|| format!("{operation} did not claim a run"))?;
-    if claimed.state.run_id != expected_run_id {
+        TurnStatus::CancelRequested | TurnStatus::Cancelled
+    ) {
         return Err(format!(
-            "{operation} claimed {}, expected {expected_run_id}",
-            claimed.state.run_id
+            "request_cancel returned unexpected status {:?}",
+            cancel_requested.status
         )
         .into());
     }
-    ensure_status(claimed.state.status, TurnStatus::Running, operation)?;
-    Ok((runner_id, lease_token, claimed.state))
+    let readback = store
+        .get_run_state(GetRunStateRequest {
+            scope: lifecycle_scope,
+            run_id,
+        })
+        .await?;
+    Ok(status_code(submit_status)
+        ^ (status_code(queued.status) << 8)
+        ^ (status_code(cancel_requested.status) << 16)
+        ^ (status_code(readback.status) << 24)
+        ^ u64::try_from(payload_len).unwrap_or(u64::MAX))
 }
 
 fn turn_lifecycle_key(

@@ -21,7 +21,7 @@ The intended flow is:
 CapabilityHost
   -> Authorization returns RequireApproval
   -> ApprovalRequestStore saves Pending request under tenant/user/agent scope
-  -> RunStateStore marks invocation BlockedApproval
+  -> ProcessJournalStore suspends the invocation on an approval gate
 
 ApprovalResolver
   -> reads Pending ApprovalRecord under the same tenant/user/agent scope
@@ -53,7 +53,7 @@ CapabilityHost::auth_resume_json
 
 ## 2. Approval request status transitions
 
-Approval records live in `ironclaw_run_state` because they explain why an invocation is `BlockedApproval`.
+Approval records and model-visible gate records live in `ironclaw_approvals`.
 
 The V1 status model is:
 

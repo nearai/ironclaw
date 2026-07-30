@@ -227,6 +227,7 @@ impl ProductSurface for ProgrammableProductSurface {
         Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
             events,
             next_cursor: None,
+            subscription: None,
         })
     }
 }

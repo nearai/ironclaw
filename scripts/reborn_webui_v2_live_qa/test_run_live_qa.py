@@ -240,6 +240,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(behavioral.blocking)
         with self.assertRaisesRegex(ValueError, "tier"):
             run_live_qa.CaseSpec(fake_case, tier="advisory", blocking=False)
+        with self.assertRaisesRegex(ValueError, "retry_policy"):
+            run_live_qa.CaseSpec(fake_case, retry_policy="always")
 
     def _fake_assistant_reply_page(
         self,
@@ -2877,10 +2879,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     (json.dumps(event), timestamp),
                 )
                 run_state = {
+                    "row_type": "process",
+                    "process_id": invocation_id,
                     "invocation_id": invocation_id,
                     "capability_id": capability_id,
                     "scope": {"thread_id": thread_id},
                     "status": "completed",
+                    "metadata": {
+                        "invocation_id": invocation_id,
+                        "capability_id": capability_id,
+                    },
                 }
                 db.execute(
                     """
@@ -2890,7 +2898,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     ) VALUES (?, ?, 0, ?, ?, 'application/json', 'run_state_record')
                     """,
                     (
-                        f"/run-state/threads/{thread_id}/runs/{invocation_id}.json",
+                        f"/processes/materialized/process/{invocation_id}",
                         json.dumps(run_state),
                         timestamp,
                         timestamp,
@@ -8117,7 +8125,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             match.group("body"),
         )
         self.assertIn("github.event_name == 'schedule'", match.group("body"))
-        self.assertNotIn("github.event.schedule ==", match.group("body"))
+        self.assertIn(
+            "github.event.schedule == '0 */3 * * *'",
+            match.group("body"),
+        )
+        self.assertNotIn(
+            "github.event.schedule == '30 5 * * 1'",
+            match.group("body"),
+            "the weekly provider matrix must not duplicate the 3-hourly UI QA",
+        )
         self.assertIn(
             "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
             match.group("body"),
@@ -8926,6 +8942,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "behavioral",
         )
         self.assertFalse(manifest_cases["behavioral_case"]["blocking"])
+        self.assertEqual(
+            manifest_cases["contract_case"]["retry_policy"],
+            "transient",
+        )
 
         self.assertFalse(contract_result.success)
         self.assertFalse(behavioral_result.success)
@@ -9777,6 +9797,25 @@ class RunCaseWithRetriesTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["attempts"], 2)
+        self.assertEqual(result.details["retry_outcome"], "flake")
+        self.assertTrue(result.details["flake"])
+        self.assertEqual(
+            result.details["attempt_history"],
+            [
+                {
+                    "attempt": 1,
+                    "success": False,
+                    "latency_ms": 1,
+                    "details": {"error": "assertion mismatch"},
+                },
+                {
+                    "attempt": 2,
+                    "success": True,
+                    "latency_ms": 1,
+                    "details": {"text_excerpt": "ok"},
+                },
+            ],
+        )
         self.assertEqual(calls["count"], 2)
 
     def test_does_not_retry_blocked_failure(self):
@@ -9822,6 +9861,32 @@ class RunCaseWithRetriesTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.details["attempts"], 1)
         self.assertEqual(calls["count"], 1)
+
+    def test_does_not_retry_deterministic_security_or_idempotency_failure(self):
+        for failure_class in ("deterministic", "security", "idempotency"):
+            with self.subTest(failure_class=failure_class):
+                calls = {"count": 0}
+
+                async def deterministic_fn(
+                    _ctx,
+                    _calls=calls,
+                    _failure_class=failure_class,
+                ):
+                    _calls["count"] += 1
+                    return self._probe(False, {"failure_class": _failure_class})
+
+                result = asyncio.run(
+                    run_live_qa._run_case_with_retries(
+                        deterministic_fn,
+                        object(),
+                        attempts=3,
+                        is_retriable=run_live_qa._is_case_retriable,
+                    )
+                )
+
+                self.assertFalse(result.success)
+                self.assertEqual(result.details["attempts"], 1)
+                self.assertEqual(calls["count"], 1)
 
     def test_does_not_retry_provider_incident(self):
         calls = {"count": 0}
@@ -9872,9 +9937,76 @@ class RunCaseWithRetriesTests(unittest.TestCase):
         self.assertEqual(result.details["attempts"], 3)
         self.assertEqual(calls["count"], 3)
         self.assertEqual(result.details["error"], "attempt 3")
+        self.assertEqual(result.details["retry_outcome"], "failed")
+        self.assertFalse(result.details["flake"])
+        self.assertEqual(
+            [
+                entry["details"]["error"]
+                for entry in result.details["attempt_history"]
+            ],
+            ["attempt 1", "attempt 2", "attempt 3"],
+        )
 
     def test_default_attempts_constant_allows_one_retry(self):
         self.assertGreaterEqual(run_live_qa.LIVE_QA_CASE_ATTEMPTS, 2)
+
+    def test_exactly_once_case_is_never_retried(self):
+        spec = run_live_qa.CASES["qa_9b_routine_dm_delivery_exactly_once"]
+        calls = {"count": 0}
+
+        async def deterministic_failure(_ctx):
+            calls["count"] += 1
+            return self._probe(
+                False,
+                {
+                    "failure_class": "idempotency",
+                    "failure_category": "duplicate_delivery",
+                },
+            )
+
+        result = asyncio.run(
+            run_live_qa._run_case_with_retries(
+                deterministic_failure,
+                object(),
+                attempts=run_live_qa._case_attempts(
+                    "qa_9b_routine_dm_delivery_exactly_once",
+                    spec,
+                    configured_attempts=3,
+                ),
+                is_retriable=run_live_qa._is_case_retriable,
+            )
+        )
+
+        self.assertEqual(spec.retry_policy, "never")
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["attempts"], 1)
+        self.assertEqual(calls["count"], 1)
+
+    def test_mechanically_identifiable_deterministic_cases_are_no_retry(self):
+        retryable = [
+            name
+            for name, spec in run_live_qa.CASES.items()
+            if any(
+                marker in name
+                for marker in run_live_qa.NO_RETRY_CASE_NAME_MARKERS
+            )
+            and spec.retry_policy != "never"
+        ]
+
+        self.assertEqual(retryable, [])
+
+    def test_slack_strategy_doc_side_effect_is_no_retry(self):
+        spec = run_live_qa.CASES["qa_5d_slack_strategy_doc_answer"]
+
+        self.assertEqual(spec.retry_policy, "never")
+        self.assertEqual(
+            run_live_qa._case_attempts(
+                "qa_5d_slack_strategy_doc_answer",
+                spec,
+                configured_attempts=3,
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":

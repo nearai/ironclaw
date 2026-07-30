@@ -18,14 +18,66 @@
 #![allow(dead_code)]
 
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::ProcessId;
+use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_resources::ResourceGovernor;
+use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
+use ironclaw_turns::TurnRunId;
 use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+pub(crate) fn validate_process_ownership(
+    processes: &[(ProcessId, ProcessKind, Option<ProcessId>)],
+    expected_process_ids: &[ProcessId],
+) -> HarnessResult<()> {
+    for (process_id, _, _) in processes
+        .iter()
+        .filter(|(_, process_kind, _)| process_kind == &ProcessKind::AgentTurn)
+    {
+        if !expected_process_ids.contains(process_id) {
+            return Err(format!(
+                "orphan agent-turn process {process_id}; expected only {expected_process_ids:?}"
+            )
+            .into());
+        }
+    }
+
+    for expected in expected_process_ids {
+        let Some((_, process_kind, _)) = processes
+            .iter()
+            .find(|(process_id, _, _)| process_id == expected)
+        else {
+            return Err(format!(
+                "expected agent-turn process {expected} is missing from the process journal"
+            )
+            .into());
+        };
+        if process_kind != &ProcessKind::AgentTurn {
+            return Err(format!(
+                "expected process {expected} has kind {process_kind:?}, not AgentTurn"
+            )
+            .into());
+        }
+    }
+
+    for (process_id, _, parent_process_id) in processes {
+        if let Some(parent_process_id) = parent_process_id
+            && !processes
+                .iter()
+                .any(|(candidate_id, _, _)| candidate_id == parent_process_id)
+        {
+            return Err(format!(
+                "orphan process {process_id} names missing parent {parent_process_id}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
 
 /// The two model-visible tool-error outcome classes a capability can surface
 /// (`CapabilityOutcome::Failed` vs `Denied`). A `Failed` and a `Denied` outcome
@@ -53,6 +105,80 @@ impl ToolErrorClass {
 }
 
 impl RebornIntegrationHarness {
+    /// Assert every agent-turn process belongs to `expected_run_ids` and every
+    /// process parent is present.
+    ///
+    /// Since #6696, admission/active-lock state is updated atomically with the
+    /// process snapshot rather than stored as a second reservation record.
+    /// Exact process ownership replaces the retired dual-store orphan check.
+    pub async fn assert_process_ownership(
+        &self,
+        expected_run_ids: &[TurnRunId],
+    ) -> HarnessResult<()> {
+        let snapshots = self
+            ._shared
+            .process_system
+            .runtime()
+            .process_snapshots(&self.turn_scope.to_resource_scope())
+            .await
+            .map_err(|err| format!("read process journal snapshots: {err}"))?;
+        let expected_process_ids: Vec<_> = expected_run_ids
+            .iter()
+            .copied()
+            .map(ironclaw_turns::process_projection::process_id_from_turn_run_id)
+            .collect();
+        let process_ownership: Vec<_> = snapshots
+            .iter()
+            .map(|process| {
+                (
+                    process.process_id,
+                    process.process_kind.clone(),
+                    process.parent_process_id,
+                )
+            })
+            .collect();
+        validate_process_ownership(&process_ownership, &expected_process_ids)
+    }
+
+    /// Assert the production-composed capability governor has no live holds.
+    ///
+    /// This deliberately reads the production-composed governor rather than a
+    /// test-owned imitation. A harness that cannot expose that authority fails
+    /// loudly instead of silently weakening the invariant.
+    pub fn assert_no_capability_resource_reservations(&self) -> HarnessResult<()> {
+        let governor = self.capability_recorder.resource_governor().ok_or(
+            "harness does not expose its production-composed capability resource governor",
+        )?;
+        let tenant_account = ResourceAccount::tenant(self.binding.tenant_id.clone());
+        if let Some(account) = governor
+            .account_snapshot(&tenant_account)
+            .map_err(|err| format!("read capability resource account: {err}"))?
+            && account.ledger.reserved != ResourceTally::default()
+        {
+            return Err(format!(
+                "orphan capability resource reservation remains for {tenant_account:?}: {:?}",
+                account.ledger.reserved
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+
+    /// Assert process ownership and zero capability holds at a quiescent
+    /// blocked or terminal boundary.
+    ///
+    /// Call [`Self::assert_process_ownership`] alone while a run is actively
+    /// executing: an in-flight capability reservation is legitimate until the
+    /// transition settles and must not be mislabeled as an orphan.
+    pub async fn assert_no_orphan_runs_or_reservations(
+        &self,
+        expected_run_ids: &[TurnRunId],
+    ) -> HarnessResult<()> {
+        self.assert_process_ownership(expected_run_ids).await?;
+        self.assert_no_capability_resource_reservations()
+    }
+
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.
     pub async fn assert_egress_count(&self, expected: usize) -> HarnessResult<()> {
         let actual = self.captured_egress_requests().len();
@@ -254,6 +380,23 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Inverse of [`assert_system_prompt_contains`]: assert no captured
+    /// model-visible `System`-role prompt contains `text`. Fails rather than
+    /// passing vacuously when no system prompts were captured.
+    pub async fn assert_system_prompt_excludes(&self, text: &str) -> HarnessResult<()> {
+        let prompts = self.captured_system_prompts();
+        if prompts.is_empty() {
+            return Err(format!(
+                "vacuous exclusion: no system prompts were captured; cannot prove {text:?} was omitted"
+            )
+            .into());
+        }
+        if prompts.iter().any(|prompt| prompt.contains(text)) {
+            return Err(format!("captured system prompt unexpectedly contained {text:?}").into());
+        }
+        Ok(())
+    }
+
     /// Assert that some model request this thread sent to the scripted provider
     /// contains `needle` anywhere in its serialized messages — the caller-tier
     /// proof that host-injected context (e.g. activated-skill instructions)
@@ -405,6 +548,25 @@ impl RebornIntegrationHarness {
             "expected at least {minimum} text-only model provider call(s), observed {actual}"
         )
         .into())
+    }
+
+    /// Assert the exact number of text-only system-inference provider calls.
+    pub async fn assert_text_model_provider_call_count(
+        &self,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.text_calls();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected {expected} text-only model provider call(s), observed {actual}")
+                .into(),
+        )
     }
 
     /// Assert no request seen by the recoverable-failure provider contains
@@ -1123,6 +1285,36 @@ impl RebornIntegrationHarness {
         Err(format!(
             "expected seeded user daily cap {expected:?} (compiled default), saw {:?}",
             limits.max_usd
+        )
+        .into())
+    }
+
+    /// Assert provider-reported token usage was durably reconciled by the
+    /// production budget accountant.
+    pub async fn assert_budget_spent_tokens(
+        &self,
+        expected_input: u64,
+        expected_output: u64,
+    ) -> HarnessResult<()> {
+        let governor = self._shared.budget_governor.as_ref().ok_or(
+            "harness was not built with budget accounting wired (call with_budget_accounting)",
+        )?;
+        let account = self
+            ._shared
+            .budget_account
+            .as_ref()
+            .ok_or("budget-accounting harness is missing its run-owner account")?;
+        let snapshot = governor
+            .account_snapshot(account)
+            .map_err(|e| format!("budget account snapshot failed: {e}"))?
+            .ok_or("budget accountant never recorded model usage")?;
+        let spent = snapshot.ledger.spent;
+        if spent.input_tokens == expected_input && spent.output_tokens == expected_output {
+            return Ok(());
+        }
+        Err(format!(
+            "expected spent tokens ({expected_input}, {expected_output}), saw ({}, {})",
+            spent.input_tokens, spent.output_tokens
         )
         .into())
     }

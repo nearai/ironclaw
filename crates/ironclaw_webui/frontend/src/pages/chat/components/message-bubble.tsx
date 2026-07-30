@@ -121,6 +121,7 @@ function MessageBubbleImpl({
   const isStreamingAssistantReply =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === false &&
+    message.isStreaming !== false &&
     messageBelongsToActiveRun(message, activeRunId);
   const isStreamingThinking =
     role === CHAT_MESSAGE_ROLES.THINKING &&
@@ -240,10 +241,15 @@ function MessageBubbleImpl({
     );
   }
 
-  const timeLabel = formatTimestamp(timestamp);
+  const isIntermediateAssistantPhase =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === false;
+  const timeLabel = isIntermediateAssistantPhase ? "" : formatTimestamp(timestamp);
   const showActions =
     role === CHAT_MESSAGE_ROLES.USER ||
-    (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+    (role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+      !isOptimistic &&
+      !isIntermediateAssistantPhase);
   const showArtifactAction = Boolean(
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === true &&

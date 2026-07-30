@@ -13,6 +13,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_network::NetworkHttpRequest;
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -48,6 +49,38 @@ fn assert_recorded_tools_call(server: &MockMcpServer, expected_tool: &str, expec
             .and_then(|q| q.as_str()),
         Some(expected_query)
     );
+}
+
+fn observed_hosted_mcp_tools_call<'a>(
+    requests: &'a [NetworkHttpRequest],
+    expected_query: &str,
+) -> (&'a NetworkHttpRequest, serde_json::Value) {
+    let (request, body) = requests
+        .iter()
+        .filter_map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .map(|body| (request, body))
+        })
+        .find(|(_, body)| {
+            body["method"] == "tools/call"
+                && body["params"]["arguments"]["query"] == expected_query
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no hosted MCP tools/call for {expected_query:?} captured across {} redacted request(s)",
+                requests.len()
+            )
+        });
+    assert!(
+        request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value.starts_with("Bearer ")
+                && value.len() > "Bearer ".len()
+        }),
+        "hosted MCP tools/call must carry a mediated bearer credential"
+    );
+    (request, body)
 }
 
 /// The bundled `nearai` package is hosted MCP rather than Emulate-backed.
@@ -103,35 +136,141 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
         .expect("hosted MCP response reached the model-facing result");
 
     let requests = h.captured_network_requests_for_test();
-    let tools_call = requests
-        .iter()
-        .find(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body)
-                .ok()
-                .and_then(|body| body["method"].as_str().map(str::to_owned))
-                .as_deref()
-                == Some("tools/call")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "no hosted MCP tools/call captured across {} redacted request(s)",
-                requests.len()
-            )
-        });
-    let body: serde_json::Value =
-        serde_json::from_slice(&tools_call.body).expect("tools/call body is JSON");
+    let (_, body) = observed_hosted_mcp_tools_call(&requests, "IronClaw capability evidence");
     assert_eq!(body["params"]["name"], "web_search");
+}
+
+/// The bundled hosted-MCP path also preserves an authenticated, successful
+/// empty provider result. This separately pins the request and the outcome so
+/// a locally fabricated empty value cannot satisfy the contract.
+#[tokio::test]
+async fn nearai_web_search_empty_result_dispatches_through_bundled_hosted_mcp() {
+    let group = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("extension-lifecycle group builds");
+    let h = group
+        .thread("nearai-hosted-mcp-empty-result")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                serde_json::json!({"extension_id": "nearai"}),
+            ),
+            RebornScriptedReply::text("NEAR AI search is installed."),
+            RebornScriptedReply::tool_call(
+                "nearai.web_search",
+                serde_json::json!({"query": "NEARAI_EMPTY_PROVIDER_RESULT"}),
+            ),
+            RebornScriptedReply::text("search complete"),
+        ])
+        .build()
+        .await
+        .expect("NEAR AI lifecycle thread builds");
+
+    h.seed_capability_credential_account("nearai", "NEAR AI integration account", &[])
+        .await
+        .expect("NEAR AI account is seeded under the dispatching user");
+    h.submit_turn("install NEAR AI search")
+        .await
+        .expect("install turn completes");
+    h.submit_turn("search for the empty-result sentinel")
+        .await
+        .expect("empty search turn completes");
+    h.assert_tool_invoked("nearai.web_search")
+        .await
+        .expect("canonical NEAR AI capability dispatched");
+
+    let requests = h.captured_network_requests_for_test();
+    observed_hosted_mcp_tools_call(&requests, "NEARAI_EMPTY_PROVIDER_RESULT");
+
+    let output = h
+        .tool_result_output("nearai.web_search")
+        .await
+        .expect("empty hosted MCP result was recorded");
     assert_eq!(
-        body["params"]["arguments"]["query"],
-        "IronClaw capability evidence"
+        output["content"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "[]"
+        }])
     );
+}
+
+/// Provider credentials are selected at the authenticated run-owner boundary:
+/// actor A can dispatch with A's exact account, while actor B cannot install
+/// or call the same hosted extension with A's credential.
+#[tokio::test]
+async fn nearai_hosted_mcp_isolates_provider_accounts_across_actors() {
+    const ACTOR_A_TOKEN: &str = "nearai-provider-account-actor-a";
+    let group = RebornIntegrationGroup::extension_lifecycle_multiuser()
+        .await
+        .expect("multiuser extension-lifecycle group builds");
+    let actor_a = group
+        .thread("nearai-provider-account-actor-a")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                serde_json::json!({"extension_id": "nearai"}),
+            ),
+            RebornScriptedReply::text("NEAR AI search is installed."),
+            RebornScriptedReply::tool_call(
+                "nearai.web_search",
+                serde_json::json!({"query": "actor-a-provider-query"}),
+            ),
+            RebornScriptedReply::text("search complete"),
+        ])
+        .build()
+        .await
+        .expect("actor A lifecycle thread builds");
+    actor_a
+        .seed_capability_credential_account_with_token(
+            "nearai",
+            "actor A NEAR AI account",
+            &[],
+            ACTOR_A_TOKEN,
+        )
+        .await
+        .expect("actor A account is seeded under actor A");
+    actor_a
+        .submit_turn("install NEAR AI search for actor A")
+        .await
+        .expect("actor A install completes");
+    actor_a
+        .submit_turn("search with actor A's account")
+        .await
+        .expect("actor A provider read completes");
+
+    let actor_a_requests = actor_a.captured_network_requests_for_test();
+    let (actor_a_tools_call, _) =
+        observed_hosted_mcp_tools_call(&actor_a_requests, "actor-a-provider-query");
     assert!(
-        tools_call.headers.iter().any(|(name, value)| {
+        actor_a_tools_call.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("authorization")
-                && value.starts_with("Bearer ")
-                && value.len() > "Bearer ".len()
+                && value == &format!("Bearer {ACTOR_A_TOKEN}")
         }),
-        "hosted MCP tools/call must carry a mediated bearer credential"
+        "actor A request must carry actor A's exact provider account"
+    );
+
+    let actor_b = group
+        .thread("nearai-provider-account-actor-b")
+        .with_actor_id("nearai-provider-account-distinct-actor-b")
+        .script([RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            serde_json::json!({"extension_id": "nearai"}),
+        )])
+        .build()
+        .await
+        .expect("actor B lifecycle thread builds");
+    assert_ne!(
+        actor_a.binding.subject_user_id, actor_b.binding.subject_user_id,
+        "the isolation test requires distinct authenticated actors"
+    );
+    actor_b
+        .submit_turn_until_auth_blocked("install NEAR AI search for actor B")
+        .await
+        .expect("actor B must block on its own missing provider account");
+    assert!(
+        actor_b.captured_network_requests_for_test().is_empty(),
+        "actor B must not reach hosted MCP with actor A's provider account"
     );
 }
 

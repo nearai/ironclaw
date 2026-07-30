@@ -331,6 +331,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         std::fs::read_to_string(root.join(".github/workflows/ironclaw-release.yml"))
             .expect("release workflow")
             .replace("\r\n", "\n");
+    let code_style_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/code_style.yml"))
+            .expect("code style workflow")
+            .replace("\r\n", "\n");
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("workspace manifest")
         .replace("\r\n", "\n");
@@ -386,7 +390,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("corepack enable pnpm")
             && compile_workflow.contains("binary: ironclaw.exe")
             && !compile_workflow.contains("binary: ironclaw-reborn")
-            && compile_workflow.contains("core.longpaths true"),
+            && compile_workflow.contains("core.longpaths true")
+            && compile_workflow.contains("name: Install Python for release smoke")
+            && compile_workflow.contains("python-version: \"3.12\"")
+            && release_workflow.contains("name: Install Python for release smoke"),
         "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
     );
     for matrix_entry in [
@@ -429,11 +436,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("readelf --dynamic --wide")
             && compile_workflow.contains("INTERP")
             && compile_workflow.contains("(NEEDED)")
-            && compile_workflow.contains("name: Smoke compiled binary")
-            && compile_workflow.contains("\"$binary_path\" --version")
-            && compile_workflow.contains("\"$binary_path\" --help > /dev/null")
-            && compile_workflow.contains("\"$binary_path\" profile list --json > /dev/null"),
-        "release CI must reject non-portable musl binaries and smoke the exact native artifacts"
+            && compile_workflow.contains("name: Smoke exact release binary")
+            && compile_workflow
+                .contains("python scripts/ci/smoke-release-binary.py --binary \"$binary_path\""),
+        "release CI must reject non-portable musl binaries and run the shared product smoke against the exact native artifacts"
     );
 
     let build_position = compile_workflow
@@ -443,7 +449,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         .find("name: Verify musl portability")
         .expect("musl linkage step");
     let smoke_position = compile_workflow
-        .find("name: Smoke compiled binary")
+        .find("name: Smoke exact release binary")
         .expect("binary smoke step");
     let upload_position = compile_workflow
         .find("name: Upload compile evidence")
@@ -453,6 +459,32 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && linkage_position < smoke_position
             && smoke_position < upload_position,
         "linkage and runtime validation must gate artifact upload"
+    );
+    let release_build_position = release_workflow
+        .find("name: Build artifacts")
+        .expect("cargo-dist build step");
+    let release_smoke_position = release_workflow
+        .find("name: Smoke exact binaries before packaging upload")
+        .expect("cargo-dist binary smoke step");
+    let release_post_build_position = release_workflow
+        .find("name: Post-build")
+        .expect("cargo-dist post-build upload-list step");
+    assert!(
+        release_build_position < release_smoke_position
+            && release_smoke_position < release_post_build_position
+            && release_workflow.contains("TARGETS: ${{ join(matrix.targets, ' ') }}")
+            && release_workflow.contains("archives=(target/distrib/*\"$target\"*.tar.gz)")
+            && release_workflow.contains("--archive \"${archives[0]}\"")
+            && release_workflow.contains("--binary-name \"$binary\"")
+            && release_workflow.contains("if [[ \"$target\" == *-windows-* ]]"),
+        "the cargo-dist publisher must extract and smoke every exact native archive before it can enter the artifact upload set"
+    );
+    assert!(
+        code_style_workflow.contains("scripts/ci/smoke-release-binary\\.py$")
+            && code_style_workflow.contains("tests/test_smoke_release_binary\\.py$")
+            && code_style_workflow
+                .contains("python3 -m unittest tests/test_smoke_release_binary.py"),
+        "release-smoke script changes must select and run their sabotage self-tests on pull requests"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
@@ -563,7 +595,7 @@ fn run_reborn_webui_builds_frontend_before_cargo() {
 }
 
 #[test]
-fn docker_reborn_config_defaults_to_local_dev() {
+fn docker_reborn_config_defaults_to_standalone() {
     let config = std::fs::read_to_string(workspace_root().join("docker/reborn/config.toml"))
         .expect("docker reborn config");
     let parsed = ironclaw_reborn_config::RebornConfigFile::parse_text(
@@ -694,7 +726,7 @@ fn docker_reborn_entrypoint_rejects_ephemeral_railway_without_volume() {
 
 #[cfg(unix)]
 #[test]
-fn docker_reborn_entrypoint_rejects_sparse_config_as_local_dev_on_railway() {
+fn docker_reborn_entrypoint_rejects_sparse_config_as_standalone_on_railway() {
     let temp = tempfile::tempdir().expect("tempdir");
     let bin_dir = temp.path().join("bin");
     fake_reborn_bin(&bin_dir);
@@ -722,7 +754,7 @@ fn docker_reborn_entrypoint_rejects_sparse_config_as_local_dev_on_railway() {
 
 #[cfg(unix)]
 #[test]
-fn docker_reborn_entrypoint_rejects_local_dev_home_outside_railway_volume() {
+fn docker_reborn_entrypoint_rejects_standalone_home_outside_railway_volume() {
     let temp = tempfile::tempdir().expect("tempdir");
     let bin_dir = temp.path().join("bin");
     fake_reborn_bin(&bin_dir);
@@ -788,7 +820,7 @@ fn docker_reborn_entrypoint_allows_railway_production_without_volume() {
 
 #[cfg(unix)]
 #[test]
-fn docker_reborn_entrypoint_rejects_stale_local_dev_config_for_production() {
+fn docker_reborn_entrypoint_rejects_stale_standalone_config_for_production() {
     let temp = tempfile::tempdir().expect("tempdir");
     let bin_dir = temp.path().join("bin");
     fake_reborn_bin(&bin_dir);
@@ -843,7 +875,7 @@ fn docker_reborn_entrypoint_migrates_a_stale_baked_llm_default_stub() {
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
     let original_config = format!(
-        "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"local-dev\"\n\n{STALE_BAKED_LLM_DEFAULT_STUB}\n[slack]\nenabled = false\n"
+        "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"standalone\"\n\n{STALE_BAKED_LLM_DEFAULT_STUB}\n[slack]\nenabled = false\n"
     );
     let config_path = reborn_home.join("config.toml");
     std::fs::write(&config_path, &original_config).expect("write stale config");
@@ -876,7 +908,7 @@ fn docker_reborn_entrypoint_migrates_a_stale_baked_llm_default_stub() {
         "the stale [llm.default] section must be stripped: {migrated_config}"
     );
     assert!(
-        migrated_config.contains("profile = \"local-dev\"") && migrated_config.contains("[slack]"),
+        migrated_config.contains("profile = \"standalone\"") && migrated_config.contains("[slack]"),
         "unrelated sections must survive the migration untouched: {migrated_config}"
     );
 
@@ -930,7 +962,7 @@ fn docker_reborn_entrypoint_does_not_migrate_an_operator_modified_llm_default() 
     fake_reborn_bin(&bin_dir);
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
-    let original_config = "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"local-dev\"\n\n[llm.default]\nprovider_id = \"nearai\"\nmodel = \"an-operator-chosen-model\"\napi_key_env = \"NEARAI_API_KEY\"\n\n[slack]\nenabled = false\n";
+    let original_config = "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"standalone\"\n\n[llm.default]\nprovider_id = \"nearai\"\nmodel = \"an-operator-chosen-model\"\napi_key_env = \"NEARAI_API_KEY\"\n\n[slack]\nenabled = false\n";
     let config_path = reborn_home.join("config.toml");
     std::fs::write(&config_path, original_config).expect("write operator-modified config");
 
@@ -990,6 +1022,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
     assert!(stdout.contains("extension"), "stdout: {stdout}");
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
+    assert!(stdout.contains("ironhub"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
     assert!(stdout.contains("onboard"), "stdout: {stdout}");
@@ -1007,6 +1040,88 @@ fn help_mentions_reborn_commands() {
     assert!(
         !stdout.to_lowercase().contains("tui"),
         "unexpected tui subcommand: {stdout}"
+    );
+}
+
+#[test]
+fn ironhub_help_lists_catalog_and_install_verbs() {
+    let output = Command::new(reborn_bin())
+        .arg("ironhub")
+        .arg("--help")
+        .output()
+        .expect("ironclaw-reborn ironhub --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for verb in ["search", "list", "info", "install"] {
+        assert!(stdout.contains(verb), "missing `{verb}` verb: {stdout}");
+    }
+    assert!(stdout.contains("--confirm-host-access"), "stdout: {stdout}");
+}
+
+#[test]
+fn ironhub_install_help_lists_safety_and_replacement_flags() {
+    let output = Command::new(reborn_bin())
+        .args(["ironhub", "install", "--help"])
+        .output()
+        .expect("ironclaw-reborn ironhub install --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in [
+        "--kind",
+        "--force",
+        "--acknowledge-unverified",
+        "--expected-version",
+        "--expected-artifact-digest",
+        "--json",
+    ] {
+        assert!(stdout.contains(flag), "missing `{flag}` flag: {stdout}");
+    }
+}
+
+#[test]
+fn ironhub_install_uses_reborn_state_and_rejects_insecure_catalog_url() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_home = temp.path().join("v1-home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let mut command = isolated_no_llm_command(&workspace, &reborn_home);
+    let output = command
+        .args(["ironhub", "install", "catalog-helper", "--kind", "skill"])
+        .env("IRONCLAW_BASE_DIR", &v1_home)
+        .env(
+            "IRONHUB_MANIFEST_URL",
+            "http://hub.ironclaw.com/manifest.json",
+        )
+        .output()
+        .expect("ironclaw-reborn ironhub install should run");
+
+    assert!(
+        !output.status.success(),
+        "insecure manifest URL should fail before install"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hub-manifest.manifest_url must use https"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        reborn_home.join("local-dev").exists(),
+        "IronHub should initialize only the Reborn runtime state"
+    );
+    assert!(
+        !v1_home.exists(),
+        "IronHub must not create or read legacy v1 state"
     );
 }
 
@@ -1251,10 +1366,7 @@ fn skills_list_reports_reborn_skill_data() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("configured:"), "stdout: {stdout}");
-    assert!(
-        stdout.contains("source: reborn-local-dev"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("source: standalone"), "stdout: {stdout}");
     assert!(
         stdout.contains("- code-review (system)"),
         "stdout: {stdout}"
@@ -1267,7 +1379,7 @@ fn skills_list_reports_reborn_skill_data() {
     assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
     assert!(
         !reborn_home
-            .join("local-dev/system/skills/code-review/SKILL.md")
+            .join("standalone/system/skills/code-review/SKILL.md")
             .exists(),
         "skills list should report bundled skills without installing them"
     );
@@ -1299,14 +1411,14 @@ fn skills_list_verbose_reports_reborn_skill_details() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
-    assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
+    assert!(stdout.contains("standalone_root:"), "stdout: {stdout}");
     assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
     assert!(stdout.contains("version: 1.2.3"), "stdout: {stdout}");
     assert!(
         stdout.contains("keywords: catalog, helper"),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("tags: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("tags: standalone"), "stdout: {stdout}");
     assert!(
         stdout.contains("requires_skills: companion-helper"),
         "stdout: {stdout}"
@@ -1339,7 +1451,7 @@ fn skills_list_json_reports_reborn_skill_data() {
         json["configured"].as_u64().expect("configured count") > 1,
         "json: {json}"
     );
-    assert_eq!(json["source"], "reborn-local-dev");
+    assert_eq!(json["source"], "standalone");
     assert_skill_source(&json, "code-review", "system");
     assert_skill_source(&json, "json-helper", "user");
     assert_eq!(json["details"]["profile"], "local-dev");
@@ -1629,7 +1741,7 @@ version: "1.2.3"
 description: {description}
 activation:
   keywords: ["catalog", "helper"]
-  tags: ["local-dev"]
+  tags: ["standalone"]
 requires:
   skills: ["companion-helper"]
 ---
@@ -2050,7 +2162,7 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
 
 /// Companion regression pin: cwd=reborn_home itself (the crate's first,
 /// insufficient fix attempt) still fails, because reborn_home is an
-/// ancestor of the default local-dev skill/extension roots and trips
+/// ancestor of the default standalone skill/extension roots and trips
 /// composition's `paths_overlap` check. Guards against reverting the
 /// installer back to cwd=reborn_home.
 #[test]
@@ -2088,7 +2200,7 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("local-dev workspace root must not overlap default skill root"),
+        stderr.contains("workspace root must not overlap default skill root"),
         "expected the exact composition overlap error this fix eliminates for \
          <reborn_home>/workspace: stderr={stderr}"
     );
@@ -3004,7 +3116,7 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     // is started, no state directories are created. The same shell
     // identifiers (profile, home, v1_state, readiness) are reported so
     // existing tooling that scrapes `run` output keeps working. Without
-    // the flag, `run` boots the live agent and would create the local-dev
+    // the flag, `run` boots the live agent and would create the standalone
     // root, which the rest of this test forbids.
     let output = Command::new(reborn_bin())
         .arg("run")
@@ -4901,8 +5013,8 @@ fn patch_config_base_url_replacing_previous(reborn_home: &Path, base_url: &str) 
     }
 }
 
-/// Seed the local-dev encrypted secret store with an LLM API key for
-/// `provider_id`, through the same `open_local_dev_secret_store` +
+/// Seed the standalone encrypted secret store with an LLM API key for
+/// `provider_id`, through the same `open_standalone_secret_store` +
 /// `LlmKeyStore::put` opener `onboard`'s interactive credential prompt uses
 /// — bypassing the prompt UI. Also seeds the cached master-key dotfile first
 /// so the resolver never reaches the OS keychain (a headless run would
@@ -4911,7 +5023,7 @@ fn patch_config_base_url_replacing_previous(reborn_home: &Path, base_url: &str) 
 /// call site for the same rationale).
 fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     std::fs::write(
-        reborn_home.join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+        reborn_home.join(ironclaw_reborn_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
         ironclaw_secrets::keychain::generate_master_key_hex(),
     )
     .expect("seed cached master key dotfile");
@@ -4923,9 +5035,9 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     let key = key.to_string();
     let reborn_home = reborn_home.to_path_buf();
     seed_rt.block_on(async move {
-        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
+        let store = ironclaw_reborn_composition::open_standalone_secret_store(&reborn_home)
             .await
-            .expect("open local dev secret store");
+            .expect("open standalone secret store");
         ironclaw_operator::LlmKeyStore::new(store)
             .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
             .await
@@ -4934,7 +5046,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
 }
 
 /// Seed the stored LLM key at the SAME secret-store root `serve` actually
-/// reads from for a `local-dev` boot — `<reborn_home>/local-dev/…` (see
+/// reads from for a `standalone` boot — `<reborn_home>/standalone/…` (see
 /// `local_runtime_storage_root` / `RebornProfile::local_runtime_storage_
 /// subdir`), NOT the bare `reborn_home` root [`seed_stored_llm_key`] (and
 /// `onboard`'s own interactive credential prompt) write to.
@@ -4942,7 +5054,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
 /// This distinction matters for these real-turn tests specifically: they
 /// pin the fix to `RebornLlmReloadAdapter::reload`, which reads through
 /// `RebornRuntime`'s own `services.secret_store()` — rooted at the
-/// `local-dev` subdirectory. Seeding through the bare-root opener instead
+/// `standalone` subdirectory. Seeding through the bare-root opener instead
 /// (matching `onboard`'s CLI path) would silently miss that store and fail
 /// for an unrelated reason (a pre-existing root mismatch between `onboard`'s
 /// credential prompt and the runtime's own store, out of scope here — filed
@@ -4951,7 +5063,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
 /// directly, so this is the faithful root to seed for these tests.
 fn seed_stored_llm_key_at_runtime_root(reborn_home: &Path, provider_id: &str, key: &str) {
     let runtime_root = reborn_home.join("local-dev");
-    std::fs::create_dir_all(&runtime_root).expect("runtime local-dev root dir");
+    std::fs::create_dir_all(&runtime_root).expect("runtime standalone root dir");
     seed_stored_llm_key(&runtime_root, provider_id, key);
 }
 
@@ -5166,7 +5278,7 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
 /// ordering relative to config resolution would still pass it. This test
 /// seeds an encrypted NearAI credential AFTER provider selection, AT THE
 /// SAME RUNTIME STORAGE ROOT `serve` actually opens
-/// (`local_runtime_storage_root`, i.e. `<reborn_home>/local-dev` —
+/// (`local_runtime_storage_root`, i.e. `<reborn_home>/standalone` —
 /// `seed_stored_llm_key_at_runtime_root`, not the bare-root
 /// `seed_stored_llm_key`, which writes to a root `serve` never reads), with
 /// both NearAI env overrides removed. Asserts through the resolved-LLM
@@ -5511,7 +5623,7 @@ fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
         // `apply_service_suppression` passes `Running`/`Unknown` through
         // unchanged by design — `Unknown` is what CI runners actually hit
         // (no user dbus session to query), so this arm is load-bearing for
-        // CI, not just local-dev symmetry.
+        // CI, not just standalone symmetry.
         "running" | "unknown" => assert!(
             stdout.contains("login_note:") && stdout.contains("IRONCLAW_REBORN_WEBUI_TOKEN is set"),
             "service is running or unknown, so the env-token note must still win: {stdout}"
@@ -5819,9 +5931,9 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
 /// boot) — it's a no-op that reports `cached dotfile already present`.
 ///
 /// The dotfile is seeded at the RUNTIME storage root
-/// (`<reborn_home>/local-dev/…`, `local_runtime_storage_root`'s subdir for
-/// `RebornProfile::LocalDev`) — the same root the real resolver
-/// (`resolve_local_dev_secret_master_key_with_env`) reads/writes and
+/// (`<reborn_home>/standalone/…`, `local_runtime_storage_root`'s subdir for
+/// `RebornProfile::Standalone`) — the same root the real resolver
+/// (`resolve_standalone_secret_master_key_with_env`) reads/writes and
 /// `serve` actually boots against — not the bare `reborn_home` root (PR
 /// #6174 item D: `provision_master_key` used to check the bare root, so its
 /// `exists()` check was always false and it re-attempted keychain
@@ -6248,7 +6360,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
 }
 
 #[test]
-fn run_confirm_host_access_flag_gates_local_dev_yolo() {
+fn run_confirm_host_access_flag_gates_standalone_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["run", "-m", "ping"])
@@ -6278,7 +6390,7 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
         .expect("confirmed first runtime start should seed config");
     assert!(
         config.contains("profile = \"local-dev\""),
-        "env-selected local-dev-yolo must not become the persistent default: {config}"
+        "env-selected standalone-unrestricted must not become the persistent default: {config}"
     );
 }
 
@@ -6330,7 +6442,7 @@ fn run_confirm_host_access_uses_userprofile_when_home_is_absent() {
 }
 
 #[test]
-fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
+fn repl_confirm_host_access_flag_gates_standalone_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = local_yolo_command(&temp, &["repl"])
         .stdin(Stdio::null())
@@ -6356,7 +6468,7 @@ fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
 }
 
 #[test]
-fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
+fn serve_confirm_host_access_flag_gates_standalone_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["serve"])
@@ -6397,7 +6509,7 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
 }
 
 #[test]
-fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
+fn serve_confirmed_standalone_yolo_rejects_non_loopback_cli_host() {
     let temp = tempfile::tempdir().expect("tempdir");
     let output = local_yolo_command(
         &temp,
@@ -6427,7 +6539,7 @@ fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
 }
 
 #[test]
-fn serve_confirmed_local_dev_yolo_rejects_non_loopback_config_host() {
+fn serve_confirmed_standalone_yolo_rejects_non_loopback_config_host() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
@@ -6465,7 +6577,7 @@ listen_host = "0.0.0.0"
 }
 
 #[test]
-fn serve_local_dev_allows_non_loopback_without_trusted_laptop_access() {
+fn serve_standalone_allows_non_loopback_without_trusted_laptop_access() {
     let temp = tempfile::tempdir().expect("tempdir");
     let output = Command::new(reborn_bin())
         .args(["serve", "--host", "0.0.0.0", "--port", "0"])
@@ -6483,11 +6595,11 @@ fn serve_local_dev_allows_non_loopback_without_trusted_laptop_access() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
-        "ordinary local-dev serve should reach WebUI token validation; got: {stderr}"
+        "ordinary standalone serve should reach WebUI token validation; got: {stderr}"
     );
     assert!(
         !stderr.contains("trusted-laptop host access"),
-        "ordinary local-dev serve should not trigger the trusted-laptop listener refusal; got: {stderr}"
+        "ordinary standalone serve should not trigger the trusted-laptop listener refusal; got: {stderr}"
     );
 }
 

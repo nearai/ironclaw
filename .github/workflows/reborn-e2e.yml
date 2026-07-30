@@ -70,6 +70,7 @@ env:
   # schedule text, which are exactly the values that shift with TZ/locale.
   TZ: "UTC"
   LANG: "C.UTF-8"
+  IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER: "emulate-slack-channel-token"
 
 jobs:
   changes:
@@ -199,11 +200,25 @@ jobs:
           key: reborn-e2e-webui-v2-smoke
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          # Keep this Wasmtime-heavy binary cache-only. Distributed builders
+          # cannot access generated Wasmtime/Wiggle registry inputs.
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
       - name: Build ironclaw-reborn with WebChat v2 surface
-        run: >-
-          cargo build
-          -p ironclaw
-          --bin ironclaw
+        run: |
+          set -euo pipefail
+          cargo build -p ironclaw --bin ironclaw
+          cargo build -p ironclaw --bin ironclaw \
+            --features test-support \
+            --target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
@@ -227,8 +242,45 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
+      - name: Validate product-surface evidence contracts
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_product_surface_coverage.py
+          tests/e2e/scenarios/test_provider_capability_inventory.py
+          tests/e2e/scenarios/test_journey_coverage.py
+          -q
+
+      - id: product_surface_coverage
+        name: Generate product-surface coverage matrix
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          echo "source_commit=${source_commit}" >> "$GITHUB_OUTPUT"
+          set +e
+          python tests/e2e/product_surface_coverage.py \
+            --json artifacts/product-surface-coverage/matrix.json \
+            --markdown artifacts/product-surface-coverage/matrix.md
+          coverage_status=$?
+          if [[ -f artifacts/product-surface-coverage/matrix.md ]]; then
+            cat artifacts/product-surface-coverage/matrix.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$coverage_status"
+
+      - name: Upload product-surface coverage matrix
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: product-surface-coverage-${{ steps.product_surface_coverage.outputs.source_commit }}
+          path: artifacts/product-surface-coverage/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Run Reborn WebUI v2 smoke
-        run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+          tests/e2e/scenarios/test_reborn_webui_v2_sso.py
+          -v
+          --timeout=120
 
       - name: Run harvested QA replay and provider contracts with Emulate
         env:

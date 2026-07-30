@@ -2,14 +2,14 @@
 
 `ironclaw_stress` is a developer tool for finding IronClaw infrastructure
 bottlenecks. It runs synthetic workloads through the same storage, thread,
-turn, resource-governor, and process-pressure paths used by the runtime, then
+process-journal, resource-governor, and process-pressure paths used by the runtime, then
 prints JSON plus optional human-readable bottleneck reports.
 
 The tool is intentionally diagnostic rather than a correctness test. Use it to
 answer questions like:
 
 - How far can local `libsql` go before p95 latency or throughput degrades?
-- Is the current limit storage writes, context reads, the turn store, resource
+- Is the current limit storage writes, context reads, the process journal, resource
   governor writes, synthetic model/tool latency, CPU, or memory?
 - Does a hot thread serialize work as expected?
 - Does context growth or tool output size cause write/read amplification?
@@ -113,7 +113,8 @@ Operation attribution groups those stages into broader bottleneck classes:
 - `thread_store_writes`: thread service writes such as inbound messages,
   assistant output, tool results, previews, and draft updates.
 - `context_reads`: context-window loads.
-- `turn_store`: turn submission, claim, and completion transitions.
+- `turn_store`: process-journal submission, claim, and completion transitions.
+  The field name is retained for result-schema compatibility.
 - `resource_governor`: reserve, reconcile, and release operations.
 - `model_tool_wait`: model and tool waits. By default these are synthetic
   sleeps; with `--model-latency-source provider`, `model_wait` is a real LLM
@@ -128,8 +129,8 @@ Use `--scenario` for a single workload.
 | --- | --- |
 | `reserve-release` | Resource governor reserve/release pressure. |
 | `reserve-reconcile` | Resource governor reserve/reconcile/release pressure. |
-| `chat-turn` | One realistic user turn with thread writes, turn state, assistant write, and context load. |
-| `turn-lifecycle-churn` | Turn-state-only submit/claim/complete churn for terminal-run cache and RSS checks. |
+| `chat-turn` | One realistic user turn with thread writes, process journal, assistant write, and context load. |
+| `turn-lifecycle-churn` | Process-journal-only submit/claim/complete churn for terminal-history and RSS checks. |
 | `mixed-user-session` | Realistic user turn with configurable synthetic or provider-backed model latency. |
 | `context-growth` | Sequentially grows history, then loads context to expose context read amplification. |
 | `tool-session` | Realistic turn with synthetic tool calls, tool previews, tool results, and optional tool wait/failure paths. |
@@ -561,7 +562,7 @@ Then map `top_group` to the next probe:
 | --- | --- | --- |
 | `thread_store_writes` | Message/tool transcript writes dominate. | Sweep message/tool payload sizes and active thread count. |
 | `context_reads` | Context window loading dominates. | Increase/decrease prefill and `--context-max-messages`. |
-| `turn_store` | Turn submission/claim/complete state dominates. | Compare `chat-turn` to `reserve-reconcile`. |
+| `turn_store` | Process submission/claim/complete dominates. | Compare `chat-turn` to `turn-lifecycle-churn`. |
 | `resource_governor` | Reservation/reconcile/release writes dominate. | Run `resource-contention` and compare concurrency. |
 | `model_tool_wait` | Model/tool wait dominates. | Lower synthetic model/tool latency, or inspect provider latency when using provider mode, to reveal storage overhead. |
 

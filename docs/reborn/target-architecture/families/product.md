@@ -1,0 +1,113 @@
+# `crates/product/` — first-party userland above the kernel
+
+**Layer(s):** `products` · **Crates:** 5 — `ironclaw_assistant`, `ironclaw_operator`, `ironclaw_openai_compat`, `ironclaw_webui`, `ironclaw_host_ingress` · **Security posture:** the family holds no standing authority of its own. Every privileged effect it triggers crosses a kernel port it does not define; its own trust jobs are narrow and named — host authentication at the listener, admission and idempotency at the product boundary, and delivery semantics that hand off to an at-most-once reservation it does not own.
+
+*This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
+
+```text
+crates/product/
+├── ironclaw_assistant       the assistant: ProductSurface impl, workflow & delivery
+├── ironclaw_operator        deployment-operator control plane
+├── ironclaw_openai_compat   OpenAI-compatible ingress adapter
+├── ironclaw_webui           web host: routes, auth, gateway, SPA
+└── ironclaw_host_ingress    Axum route-mount carriers
+```
+
+`ironclaw_assistant` is named for what it is — the personal assistant is the product — so the family directory and its central crate don't collapse into the same word.
+
+## Role
+
+`product/` is the supported first-party experience: the single place that turns validated channel and HTTP traffic into admitted, idempotent, durably bound turns, and turns kernel and domain state back into redacted, product-safe views and deliveries. `ironclaw_assistant` implements the product surface end to end — binding resolution, command admission, delivery semantics, and the click-approval and click-auth interaction services that stand between a human and a blocked run. Around it sit four supporting crates, each a distinct responsibility rather than a smaller copy of the center: `ironclaw_operator` is the deployment-operator control plane — LLM provider administration, service lifecycle, log capture — a different kind of "operator" than an installed extension's own management surface; `ironclaw_openai_compat` and `ironclaw_webui` are two protocol skins over the same conversational core, one for OpenAI-shaped API clients and one for the browser single-page application and its host-owned authentication; and `ironclaw_host_ingress` is the thin carrier vocabulary that lets the family hand a composed router to whoever assembles a deployment without pulling a web framework into neutral vocabulary.
+
+The family exists so that three different front doors — the browser SPA, OpenAI-compatible API clients, and, one layer below in the extensions family, channel adapters — never each reimplement binding resolution, idempotency, command grammar, or delivery policy. Adding a new product command illustrates the discipline this buys: it touches a wire descriptor only if a genuinely new one is unavoidable, a command constant and its durable mutation inside `ironclaw_assistant`, and a route plus a screen affordance inside `ironclaw_webui` — nothing in the kernel, nothing in the assembly layer, and never more than three product-side crates (plus the owning domain when a record gains a new state). That bounded blast radius is what the boundaries below exist to guarantee.
+
+## Boundaries — what makes this family distinct
+
+**Against `kernel/` — product asks, kernel decides.** Every capability invocation, authorization, and lease is a kernel-family act. Product never authorizes a capability, never mints an authorization witness, and never holds ambient secrets or network handles. Where it needs a kernel decision it goes through a read-model or resolution port whose implementation it does not own: the click-approval and click-auth interaction services render redacted views and forward a human's decision through a resolution port and the turn coordinator — they never execute a tool or mutate an approval record directly. Kernel mediates every privileged effect; product narrates it and asks permission on a caller's behalf.
+
+**Against `extensions/` — product is not an extension.** Product is first-party userland above the kernel, full stop: it carries no manifest, no installation lifecycle, no runtime binding, no channel-adapter implementation. Conversation UX — binding, idempotency, command grammar, delivery semantics — is product's job. Extension *management* UX — catalog browsing, install and remove, channel configuration, pairing workflows — is a different family's crate entirely, sitting at the same layer but organized around extension lifecycle rather than conversation lifecycle. The two must never blur: an extension-hosting crate consumes product's contracts to deliver a message; it never reaches into product's internals, and product never reaches into an extension's manifest or installation record.
+
+**Against `contracts/` — product implements the product surface; it does not define it.** The product-surface trait, its wire DTOs, and its command, view, and capability descriptor types are neutral vocabulary that belongs to the contracts family, because every crate that implements or calls the surface — this family's own `ironclaw_webui` and `ironclaw_openai_compat`, plus extension-hosting and operator crates elsewhere — needs it without importing product's full behavioral mass. `ironclaw_assistant` is the canonical implementation and the frozen concrete inventory of the descriptor *constants* it exposes, but the trait's shape belongs to contracts, and everyone else compiles against that shape rather than against `ironclaw_assistant` itself.
+
+**Against `app/` — product owns a domain; the app family assembles it.** The assembly layer constructs product's dependencies and hands the finished surface to `ironclaw_webui` and `ironclaw_openai_compat`; it never implements the surface itself, never resolves a binding, never decides a command grammar. Product, in turn, never wires anything: it holds no factory functions that construct another crate's concrete stores and no deployment-mode branching. Anything that looks like assembly logic inside a product-family crate is a boundary violation, not a convenience.
+
+## What belongs here / What never belongs here
+
+**Belongs:** the product-surface implementation and its admission, binding, and idempotency machinery; command grammar, kept strictly distinct from turns — a product command is never dispatched as a turn; delivery *semantics* — retry policy, reply-context resolution, and the decision of when and through which resolved target to speak, never the transport call itself; the deployment-operator control plane; the two HTTP-facing protocol adapters; and the route-mount carrier vocabulary that keeps a web framework out of neutral contracts.
+
+**Never belongs:** authority decisions of any kind; lane mechanics; vendor protocol behavior beyond two narrowly scoped exceptions this family is explicitly permitted — LLM-vendor administration inside `ironclaw_operator`, and OAuth login providers inside `ironclaw_webui`'s authentication module; and assembly or wiring logic, which belongs exclusively to the app family. Raw secrets, raw host paths, backend error strings, and unredacted user content must never cross a product-family error, event, snapshot, or log boundary.
+
+## Dependency direction
+
+Product never touches `ironclaw_host_runtime`, and never touches a lane crate — no `ironclaw_wasm`, no `ironclaw_mcp`, no `ironclaw_sandbox` — and never the network substrate directly, and never touches the extension registry or hosting crates directly; wherever it needs extension-surface vocabulary it depends on the neutral extension contracts, never on the registry or host implementation. `ironclaw_webui` and `ironclaw_openai_compat` compile against `ironclaw_product_contracts` for the product surface, its DTOs, and its descriptor types, rather than against `ironclaw_assistant` itself — `ironclaw_assistant` is the only crate in the family that holds the full behavioral mass, and every other crate in the family consumes it only through the neutral contract. `ironclaw_operator` implements operator-service ports defined in `ironclaw_product_contracts` rather than depending on `ironclaw_assistant` directly, inverting what would otherwise be an upward dependency from a control-plane crate into the conversational core. `ironclaw_host_ingress` sits beneath the rest of the family — depended on by `ironclaw_webui` and `ironclaw_operator` for the router-plus-descriptor carrier shapes both need — and depends on nothing but the neutral host authority vocabulary itself. Sibling dependencies within the family are legal and used deliberately: `ironclaw_webui` depends on `ironclaw_openai_compat` to stamp caller scope onto protected OpenAI-compatible route mounts. `ironclaw_webui` alone is the crate meant to own a web framework as a listener-binding concern; no other crate in the family binds a socket.
+
+## Security & authority
+
+Host authentication happens at the listener, entirely inside `ironclaw_webui`: a fixed middleware order authenticates every caller — bearer, session, or OIDC — before a request reaches product, and public webhook routes are the one path permitted to skip this stage, because they carry their own verification recipe and are validated one layer down, in the extensions family. The evidence a successful authentication produces is minted only by a sealed constructor inside `ironclaw_host_api` — never fabricated by a handler, never passed through an unsealed value a caller could forge — and it is this sealed evidence, not the caller's own claim, that every downstream product-family decision trusts.
+
+Admission and idempotency are product's own decision, and a narrowly durable one: `ironclaw_assistant` resolves a binding, checks for replay or an in-flight duplicate, admits a command, and only then hands off to the turn coordinator to persist the request under a single-active-run lock per thread. This is a durability decision, never an authority one — it decides whether a request is new, never whether it is allowed. The dedup here is the product boundary's fast path over product-surface requests; the durable, kernel-side idempotency guarantee lives in the turn kernel beneath it.
+
+Delivery semantics live in `ironclaw_assistant`'s delivery coordinator, which decides target, retry policy, and reply context, but the at-most-once guarantee itself — the sealed reservation that prevents a message from going out twice — belongs to `ironclaw_outbound`, one layer down; product calls into it and then calls the resolved package's delivery method. Watch-authorization for live event streams and push-authorization for outbound delivery remain two separate decisions the family never conflates.
+
+Two narrow tightenings define the family's authority surface at its edges: `ironclaw_operator` reaches secret storage only through a port implemented by whoever assembles the deployment, never through a direct handle into the secret store; and `ironclaw_webui`'s authentication middleware is the only place in the entire product family permitted to construct authenticated-caller evidence.
+
+## Crates
+
+### `ironclaw_assistant`
+
+- **Purpose:** the product-surface implementation and the orchestration around it — workflow and admission, conversation and target binding, the idempotency ledger, delivery semantics, projection-to-view assembly, and the click-approval and click-auth interaction services.
+- **Owns:** the product-surface implementation; command admission and the frozen inventory of command, capability, and view descriptor constants; conversation and target binding; the idempotency ledger; the delivery coordinator and its run-delivery drivers; the click-approval and click-auth interaction services and their redacted read models.
+- **Never contains:** the product-surface trait or DTO *definitions*, which belong to the contracts family; vendor-specific parsing of any kind; any dependency on a lane, on host-level runtime services, or on the extension registry or hosting crates.
+- **Public surface:** the product-surface implementation, the delivery coordinator, the click-approval and click-auth interaction services, and the idempotency ledger, each directly consumable by whoever assembles a deployment.
+- **Depends on:** `ironclaw_host_api`, `ironclaw_common`, `ironclaw_product_contracts`, `ironclaw_extension_contracts`; the domain crates that own conversation, thread, and outbound state; and the kernel crates that expose narrow admission and approval-resolution ports.
+- **Never depends on:** `ironclaw_host_runtime`, any lane crate, or the extension registry and hosting crates.
+- **Security & authority role:** owns the admission boundary — binding, idempotency, and command-grammar durability decisions — and enforces that click-approval and click-auth interactions are strictly redacted, scoped, and routed through canonical resolution ports; it never executes a tool or mutates an approval record on its own authority.
+- **Why a separate crate:** it is the product authority itself — bindings, admission, delivery semantics, and the product surface's frozen contract — with a deliberately frozen public method set so its behavior can be reasoned about as one stable artifact from outside.
+
+### `ironclaw_operator`
+
+- **Purpose:** the deployment-operator control plane — LLM provider administration, operator log capture, and platform service lifecycle — implemented against contracts rather than against product directly.
+- **Owns:** LLM provider registry administration, including key management and active-model selection; the operator log ring; the service-lifecycle abstraction platform tooling drives.
+- **Never contains:** conversation or channel behavior of any kind; extension lifecycle; route-handling logic beyond mounting a carrier supplied by the ingress vocabulary.
+- **Public surface:** implementations of the operator-service ports — LLM configuration, active-model reading, log service, service-lifecycle service, and status service — each defined in `ironclaw_product_contracts`.
+- **Depends on:** `ironclaw_product_contracts` for the ports it implements, `ironclaw_llm` for provider mechanics, and `ironclaw_host_ingress` for its route carriers; boot-time values it needs arrive as construction input from whoever assembles the deployment, never as a direct dependency on the boot-configuration crate.
+- **Never depends on:** `ironclaw_assistant` directly, any lane crate, the extension registry or hosting crates, or a web framework beyond what the ingress carrier vocabulary already supplies.
+- **Security & authority role:** a control-plane implementer, not a decision-maker; its one deliberate vendor scope is LLM-provider administration, one of the two vendor exceptions this family is permitted.
+- **Why a separate crate:** a distinct operator authority with its own vendor-integration surface, consumed only by the assembly layer and never by conversational code.
+
+### `ironclaw_openai_compat`
+
+- **Purpose:** the OpenAI-shaped ingress adapter over the product surface — route descriptors, wire DTOs, a sanitized error envelope, and workflows over a bound product surface.
+- **Owns:** the OpenAI-compatible wire contract for chat and response-style completions, its route descriptor table, a sanitized error taxonomy, and the idempotency reference store scoped to this surface.
+- **Never contains:** conversation-binding logic, which it delegates entirely to the product contracts; channel-adapter behavior; or any vendor name beyond describing the OpenAI-shaped wire contract itself.
+- **Public surface:** the route descriptor table and wire DTOs consumed by whoever mounts this surface behind a listener.
+- **Depends on:** `ironclaw_product_contracts` and `ironclaw_extension_contracts` for DTOs and shared vocabulary, plus `ironclaw_attachments` and `ironclaw_filesystem` for the ledger it keeps.
+- **Never depends on:** `ironclaw_host_runtime`, any lane crate, the extension registry or hosting crates, or `ironclaw_assistant` directly.
+- **Security & authority role:** none beyond input sanitization and its sealed error envelope; authority is entirely delegated to whatever bound product surface it is handed.
+- **Why a separate crate:** the assembly layer mounts this surface without the web host — folding it into `ironclaw_webui` would drag the embedded SPA artifact and the full listener stack into every deployment of the API skin; the wire-stability promise then rides on its own contract tests.
+
+### `ironclaw_webui`
+
+- **Purpose:** the host-owned WebChat HTTP gateway — the route surface and its embedded single-page application, gateway assembly and middleware, the serve loop, host authentication, and product-authentication HTTP route serving.
+- **Owns:** a fixed middleware order — origin check, body limit, bearer/session/OIDC authentication, rate limit, then the handler; every host-authenticator implementation; the full WebChat route surface, frozen by contract; the OAuth login stack and its provider implementations; product-authentication HTTP route parsing and bounding; and the embedded single-page application.
+- **Never contains:** business logic independent of a listener; raw credential handling beyond what OAuth code exchange requires; a second implementation of the product surface.
+- **Public surface:** the host-authenticator trait and its implementations, the frozen route descriptor table, and the route-mount carriers it re-exports from the ingress vocabulary.
+- **Depends on:** `ironclaw_product_contracts`, `ironclaw_extension_contracts`, `ironclaw_auth` for durable authentication-flow logic, `ironclaw_host_ingress`, and `ironclaw_openai_compat` for caller-scope stamping on shared route mounts.
+- **Never depends on:** `ironclaw_host_runtime`, any lane crate, the extension registry or hosting crates, or `ironclaw_assistant` directly.
+- **Security & authority role:** the sole listener in the family — every external request that is not a public webhook authenticates here before touching product, and this crate alone constructs authenticated-caller evidence.
+- **Why a separate crate:** the transport and presentation artifact — a web-framework and single-page-application dependency cone that must never leak into crates that only need to call the surface it hosts.
+
+### `ironclaw_host_ingress`
+
+- **Purpose:** host-owned HTTP route-mount vocabulary — carriers that pair a prebuilt router with ingress policy descriptors, so a listener-owning crate can layer authentication, rate limiting, and body limits around routes someone else built.
+- **Owns:** the public, protected, and combined route-mount carrier types, and the drain-hook vocabulary used to flush background work at shutdown.
+- **Never contains:** authority vocabulary or route-policy *definitions*, which belong to the neutral host authority vocabulary; any listener binding, authentication enforcement, middleware construction, or persistence logic of its own.
+- **Public surface:** the route-mount carrier types and the drain-hook trait.
+- **Depends on:** `ironclaw_host_api` only.
+- **Never depends on:** anything else, without exception.
+- **Security & authority role:** none directly; it exists precisely so that neutral contracts never need a web-framework dependency, keeping that framework confined to the crates that actually bind a listener or construct a router.
+- **Why a separate crate:** the smallest possible surface with a single external dependency, so a crate needing only the carrier shapes never pulls in a listener's full dependency cone.
+
+## Family AGENTS.md requirements
+
+The family's root guidance states, once: what belongs here at all — the product-surface implementation and its admission, binding, idempotency, and delivery-semantics machinery, the operator control plane, the two protocol adapters, and the route-mount carrier vocabulary; the frozen-surface discipline — the product surface's method set is a stable contract, and extending it is a deliberate, reviewed act rather than a routine addition; the rule that transports consume `ironclaw_product_contracts`, never `ironclaw_assistant`'s own implementation, directly; the prohibition on any product-family crate minting trusted inbound evidence, which is sealed to the listener and to the extension family's verifier alone; the family's narrow, named vendor-exception scope — LLM administration in `ironclaw_operator`, OAuth login providers in `ironclaw_webui`'s authentication module, and nowhere else; and the rule that only `ironclaw_webui` binds a listener or owns a web framework as a first-class dependency.

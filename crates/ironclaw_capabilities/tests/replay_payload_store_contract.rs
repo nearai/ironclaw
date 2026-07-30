@@ -12,7 +12,7 @@
 //! not loadable under another (the cross-tenant + within-tenant regression
 //! `database.md` / `safety-and-sandbox.md` require).
 //!
-//! Mirrors `ironclaw_run_state`'s `gate_record_store_contract.rs`.
+//! Mirrors `ironclaw_approvals`'s `gate_record_store_contract.rs`.
 
 use std::sync::Arc;
 
