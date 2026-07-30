@@ -18,8 +18,11 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    ScopedPath, TenantId, UserId, VirtualPath, resource_scope_path_segment,
+    error::HostApiError,
+    ids::{InvocationId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceScope, resource_scope_path_segment},
 };
 use ironclaw_product::{
     ChannelAttachmentRef, ExternalActorRef, ExternalConversationRef, ExternalEventId,

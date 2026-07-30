@@ -15,8 +15,8 @@
 
 use async_trait::async_trait;
 
-use crate::RestrictedEgress;
 use crate::attachment::{InboundAttachment, WorkspaceFile};
+use crate::tool_adapter::RestrictedEgress;
 
 use crate::product_adapter::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -273,7 +273,7 @@ pub enum OutboundPart {
     /// unchanged; each channel adapter owns native rendering while preserving
     /// the same recipe materialization WebUI consumes.
     AuthPrompt {
-        view: Box<crate::AuthPromptView>,
+        view: Box<crate::product_adapter::AuthPromptView>,
         direct_message: bool,
     },
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
@@ -372,7 +372,7 @@ impl ImmediateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ProductAttachmentKind;
+    use crate::product_adapter::ProductAttachmentKind;
 
     #[test]
     fn channel_attachment_ref_debug_redacts_the_vendor_reference() {

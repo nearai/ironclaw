@@ -38,8 +38,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, ExtensionId, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{
+        AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
@@ -104,7 +109,7 @@ use ironclaw_extension_host::{
     FilesystemAdminConfigurationStore,
 };
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
-use ironclaw_host_api::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
@@ -123,8 +128,11 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
         _message_id: &str,
-        _attachments: Vec<ironclaw_host_api::InboundAttachment>,
-    ) -> Result<Vec<ironclaw_threads::AttachmentRef>, ironclaw_host_api::ProductSurfaceError> {
+        _attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
+    ) -> Result<
+        Vec<ironclaw_threads::AttachmentRef>,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
         Ok(Vec::new())
     }
 
@@ -132,7 +140,7 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
         _attachments: &[ironclaw_threads::AttachmentRef],
-    ) -> Result<(), ironclaw_host_api::ProductSurfaceError> {
+    ) -> Result<(), ironclaw_host_api::product_surface::ProductSurfaceError> {
         Ok(())
     }
 
@@ -140,8 +148,10 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
         _referenced_storage_keys: &[String],
-    ) -> Result<ironclaw_product::AttachmentCleanupReport, ironclaw_host_api::ProductSurfaceError>
-    {
+    ) -> Result<
+        ironclaw_product::AttachmentCleanupReport,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
         Ok(ironclaw_product::AttachmentCleanupReport::default())
     }
 }
@@ -296,6 +306,45 @@ impl Harness {
             )
             .await
             .expect("router should respond") // safety: in-process test router should not fail
+    }
+
+    /// Identical to [`Self::post_event_with_signature`], but for the native
+    /// slash-command form transport (PR-3): Slack's slash POSTs (and the
+    /// `ssl_check` probe) carry `Content-Type:
+    /// application/x-www-form-urlencoded`, which the Events API JSON helpers
+    /// above never set (axum defaults to no content-type header when none is
+    /// given). The HMAC recipe signs raw body bytes regardless of shape, so
+    /// this signs `form_body` with the exact same [`slack_signature`] recipe
+    /// and sets the content-type explicitly so the adapter's Content-Type
+    /// branch actually dispatches to the form-decoding path under test.
+    async fn post_slash_command_with_signature(
+        &self,
+        form_body: &str,
+        timestamp: u64,
+        signature: String,
+    ) -> axum::response::Response {
+        self.mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, signature)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form_body.to_string().into_bytes()))
+                    .expect("request should build"), // safety: static test request fixtures are valid.
+            )
+            .await
+            .expect("router should respond") // safety: in-process test router should not fail
+    }
+
+    async fn post_slash_command(&self, form_body: &str) -> axum::response::Response {
+        let timestamp = current_unix_timestamp();
+        let signature = slack_signature(timestamp, form_body);
+        self.post_slash_command_with_signature(form_body, timestamp, signature)
+            .await
     }
 
     async fn drain(&self) {
@@ -520,9 +569,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
             operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
         },
-        identity_lookup: Some(
-            Arc::clone(&identity_lookup) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>
-        ),
+        identity_lookup: Some(Arc::clone(&identity_lookup)
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>),
         delivery: Some(ChannelHostDeliveryDeps {
             project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
             coordinator: delivery_coordinator,
@@ -547,9 +595,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
-    let command_surface_set = assembly.set_product_command_surface(
-        Arc::clone(&command_executions) as Arc<dyn ironclaw_host_api::ProductSurface>
-    );
+    let command_surface_set = assembly.set_product_command_surface(Arc::clone(&command_executions)
+        as Arc<dyn ironclaw_host_api::product_surface::ProductSurface>);
     assert!(command_surface_set); // safety: this file is included only by cfg(test).
     // Vendor extras exactly as the binary's channel-extension binding feeds
     // them: the preference-target codec — no storage-root override.
@@ -3316,14 +3363,14 @@ impl RecordingCommandExecutionSurface {
 }
 
 #[async_trait]
-impl ironclaw_host_api::ProductSurface for RecordingCommandExecutionSurface {
+impl ironclaw_host_api::product_surface::ProductSurface for RecordingCommandExecutionSurface {
     async fn invoke(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         let operation_id = request.operation_id.as_str().to_string();
         let title = if operation_id == "product.status.command" {
@@ -3339,32 +3386,36 @@ impl ironclaw_host_api::ProductSurface for RecordingCommandExecutionSurface {
                 caller.user_id.as_str().to_string(),
                 request.input,
             ));
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse {
-            output: serde_json::json!({
-                "title": title,
-                "fields": [{"label": "Provider", "value": "stub-provider"}],
-            }),
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse {
+                output: serde_json::json!({
+                    "title": title,
+                    "fields": [{"label": "Provider", "value": "stub-provider"}],
+                }),
+            },
+        )
     }
 
     async fn query(
         &self,
-        _caller: ironclaw_host_api::ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
-    {
-        Err(ironclaw_host_api::ProductSurfaceError::internal())
+        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
     }
 
     async fn stream_events(
         &self,
-        _caller: ironclaw_host_api::ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceStreamResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
-        Err(ironclaw_host_api::ProductSurfaceError::internal())
+        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
     }
 }
 
@@ -3397,8 +3448,10 @@ impl ChannelEgressTransport for RecordingEgress {
     async fn execute(
         &self,
         approved: ApprovedChannelEgress,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
         let response = slack_response_for_approved(&approved);
         self.requests
             .lock()
@@ -3410,9 +3463,9 @@ impl ChannelEgressTransport for RecordingEgress {
 
 fn slack_response_for_approved(
     approved: &ApprovedChannelEgress,
-) -> ironclaw_host_api::RestrictedEgressResponse {
-    fn response(body: &[u8]) -> ironclaw_host_api::RestrictedEgressResponse {
-        ironclaw_host_api::RestrictedEgressResponse {
+) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+    fn response(body: &[u8]) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
             status: 200,
             body: body.to_vec(),
         }
@@ -3632,7 +3685,7 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: ironclaw_host_api::SecretHandle,
+        _handle: ironclaw_host_api::ids::SecretHandle,
         _material: secrecy::SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
         Err(AdminUserError::Internal)
@@ -3642,7 +3695,7 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: ironclaw_host_api::SecretHandle,
+        _handle: ironclaw_host_api::ids::SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Internal)
     }
@@ -4968,9 +5021,9 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
 
     let feedback =
         wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
-            payload["text"]
-                .as_str()
-                .is_some_and(|text| text == "Available commands:\n/model\n/status")
+            payload["text"].as_str().is_some_and(|text| {
+                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+            })
         })
         .await;
     let text = feedback[0]["text"].as_str().expect("feedback text");
@@ -5006,7 +5059,9 @@ async fn disabled_dm_slash_commands_are_rejected_without_execution() {
     let scoped_help = harness
         .slack_messages()
         .into_iter()
-        .filter(|payload| payload["text"] == "Available commands:\n/model\n/status")
+        .filter(|payload| {
+            payload["text"] == "Available commands:\n/ironclaw model\n/ironclaw status"
+        })
         .count();
     assert_eq!(scoped_help, 2, "one scoped rejection per disabled command");
     assert!(harness.command_executions.invokes().is_empty());
@@ -5080,6 +5135,190 @@ async fn shared_channel_slash_command_is_denied_with_notice() {
     )
     .await;
     assert_eq!(feedback[0]["channel"], "C123");
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+// ── native slash-command dispatcher, signed form bodies (PR-3 Task 3) ──────
+//
+// The JSON-based `dm_slash_command_executes_and_delivers_rendered_result` /
+// `unknown_dm_slash_command_returns_inventory_help_without_a_turn` /
+// `shared_channel_slash_command_is_denied_with_notice` scenarios above pin
+// the SAME production behavior driven through Slack's Events API message
+// shape. These scenarios drive the identical behavior through Slack's real
+// slash-command transport: a signed `application/x-www-form-urlencoded` POST
+// to the SAME ingress route, decoded by `normalize_slack_slash_command`
+// (Task 1) and rendered through the manifest's `/ironclaw `-prefixed help
+// text (Task 2).
+
+/// `/ironclaw status` posted as a signed slash-command form in the bound DM
+/// (`U123`/`D123`) must cross the production channel graph exactly like the
+/// Events-API path: one `product.status.command` invoke as the bound user,
+/// rendered Status feedback delivered to the DM, and no turn submitted.
+#[tokio::test]
+async fn slash_dispatcher_dm_status_executes_and_delivers_result() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command(
+            "command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&team_id=T-A&trigger_id=111.222.slash-status",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "rendered slash command result",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Status"))
+        },
+    )
+    .await;
+    let invokes = harness.command_executions.invokes();
+    assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
+    assert_eq!(invokes[0].0, "product.status.command");
+    assert_eq!(invokes[0].1, USER, "caller is the bound user");
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "product commands are not turns"
+    );
+}
+
+/// A bare `/ironclaw` slash invocation (empty `text`) in the DM must render
+/// the SAME manifest-prefixed help text `dm_slash_command`'s sibling JSON
+/// scenario pins (`unknown_dm_slash_command_returns_inventory_help_without_a_turn`),
+/// proving Task 1's dispatcher mapping (`empty text -> "/help"`) and Task 2's
+/// `/ironclaw `-prefixed rendering compose end-to-end over the real form
+/// transport.
+#[tokio::test]
+async fn slash_dispatcher_bare_returns_prefixed_help() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command(
+            "command=%2Fironclaw&text=&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.slash-bare",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "prefixed command inventory help",
+        |payload| {
+            payload["text"].as_str().is_some_and(|text| {
+                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+            })
+        },
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// A slash invocation from OUTSIDE the DM (`channel_name=general`, a
+/// `C`-prefixed `channel_id`) must derive a non-`DirectChat` trigger (Task
+/// 1's DM-detection fix) and hit the SAME direct-conversation-only admission
+/// gate the JSON `shared_channel_slash_command_is_denied_with_notice`
+/// scenario pins — `post_command_feedback` addresses the rejection notice at
+/// `envelope.external_conversation_ref()` directly (verified by reading
+/// `crates/ironclaw_product/src/run_delivery/observer.rs`), independent of
+/// any shared-conversation binding/allowlist resolution, so the notice
+/// targets the invoking channel even though `C777` is never configured on
+/// `slack_allowed_channels` (only `C123` is). No command executes and no
+/// turn is submitted.
+#[tokio::test]
+async fn slash_dispatcher_outside_dm_is_rejected_direct_only() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command(
+            "command=%2Fironclaw&text=status&channel_id=C777&channel_name=general&user_id=U123&trigger_id=111.222.slash-outside",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "direct-conversation slash command denial",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("direct conversation"))
+        },
+    )
+    .await;
+    assert_eq!(
+        feedback[0]["channel"], "C777",
+        "the denial notice targets the invoking (non-DM, non-allowlisted) channel"
+    );
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// A syntactically valid slash form with a forged `X-Slack-Signature` must be
+/// rejected at the SAME HMAC verification layer the JSON
+/// `slack_events_rejects_forged_hmac_signature` scenario pins — content-type
+/// branching happens strictly after verification (`ingress/router.rs`'s
+/// verify-then-parse order), so a form body never reaches the adapter at
+/// all: nothing is admitted, no notice is posted, no command executes, no
+/// turn is submitted.
+#[tokio::test]
+async fn slash_form_with_forged_signature_is_rejected() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "must not send".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command_with_signature(
+            "command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.slash-forged",
+            current_unix_timestamp(),
+            "v0=deadbeef".to_string(),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    harness.drain().await;
+    assert!(harness.slack_messages().is_empty());
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// Slack's endpoint-verification `ssl_check` probe (form-encoded, distinct
+/// from the Events API's JSON `url_verification` challenge) must get an
+/// immediate empty 200 straight from the adapter (Task 1's
+/// `SlackInboundEvent::SslCheck` arm) WITHOUT ever reaching durable
+/// admission: no `chat.postMessage`, no command-surface invoke, no turn.
+#[tokio::test]
+async fn ssl_check_form_gets_empty_200_without_admission() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_slash_command("ssl_check=1&token=x").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_body(response, "").await;
+    harness.drain().await;
+    assert!(harness.slack_messages().is_empty());
     assert!(harness.command_executions.invokes().is_empty());
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
 }

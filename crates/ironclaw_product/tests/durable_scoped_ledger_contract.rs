@@ -6,8 +6,10 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
+    ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_product::ProductInboundAck;
 use ironclaw_product::RebornFilesystemIdempotencyLedger;

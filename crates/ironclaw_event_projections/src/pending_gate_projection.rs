@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+};
 use ironclaw_turns::{
     EventCursor as TurnEventCursor, GateRef, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
     TurnEventKind, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent, TurnRunId,

@@ -21,7 +21,7 @@ use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, product_surface::ChannelInboundProductSurface};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
@@ -706,7 +706,7 @@ mod serve_mount {
         routing::post,
     };
     use ironclaw_extension_host::ingress::{IngressRequest, IngressResponse};
-    use ironclaw_host_api::NetworkMethod;
+    use ironclaw_host_api::action::NetworkMethod;
     use ironclaw_host_api::ingress::{
         AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
         IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
@@ -855,8 +855,8 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::UserId;
-    use ironclaw_host_api::{
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
     use ironclaw_product::{
@@ -953,7 +953,7 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
             _channel_adapter: Arc<dyn ChannelAdapter>,
-            _channel_egress: Arc<dyn ironclaw_host_api::RestrictedEgress>,
+            _channel_egress: Arc<dyn ironclaw_host_api::tool_adapter::RestrictedEgress>,
         ) -> ChannelInboundSurfaceOutcome {
             self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
             self.admit_channel_inbound(request).await

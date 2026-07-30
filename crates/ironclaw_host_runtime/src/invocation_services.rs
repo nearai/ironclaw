@@ -18,9 +18,14 @@ use ironclaw_filesystem::{
     VersionedEntry,
 };
 use ironclaw_host_api::{
-    MountPermissions, MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, ScopedPath,
-    VirtualPath,
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    mount::{MountPermissions, MountView},
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
     runtime_policy::{
         DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
     },

@@ -85,13 +85,13 @@ impl AuthInteractionRejectionKind {
 /// Caller-visible scope for auth interactions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthInteractionScope {
-    pub tenant_id: ironclaw_host_api::TenantId,
-    pub user_id: ironclaw_host_api::UserId,
+    pub tenant_id: ironclaw_host_api::ids::TenantId,
+    pub user_id: ironclaw_host_api::ids::UserId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<ironclaw_host_api::AgentId>,
+    pub agent_id: Option<ironclaw_host_api::ids::AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ironclaw_host_api::ProjectId>,
-    pub thread_id: ironclaw_host_api::ThreadId,
+    pub project_id: Option<ironclaw_host_api::ids::ProjectId>,
+    pub thread_id: ironclaw_host_api::ids::ThreadId,
 }
 
 impl AuthInteractionScope {
@@ -373,7 +373,7 @@ fn display_safe_auth_summary() -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 
     use super::*;
 

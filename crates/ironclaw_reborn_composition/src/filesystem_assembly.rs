@@ -6,7 +6,7 @@ use ironclaw_filesystem::{
     DiskFilesystem, IndexPolicy, LibSqlRootFilesystem, MountDescriptor, PostgresRootFilesystem,
     RootFilesystem, StorageClass,
 };
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 
 use crate::RebornBuildError;
 use crate::host_access_assembly::HostHomeRoot;

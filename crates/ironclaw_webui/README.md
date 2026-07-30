@@ -27,7 +27,7 @@ across it:
 ### 1. WebChat v2 route surface + SPA (`src/webui_v2/`)
 
 The native WebChat v2 HTTP routes on top of
-`ironclaw_host_api::ProductSurface`. Handlers are thin: they read the
+`ironclaw_host_api::product_surface::ProductSurface`. Handlers are thin: they read the
 `ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
 dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
 
@@ -85,10 +85,10 @@ attach under their feature flag.
 ## Layering & boundaries
 
 - Reaches the rest of Reborn **only** through
-  `ironclaw_host_api::ProductSurface` and the neutral
+  `ironclaw_host_api::product_surface::ProductSurface` and the neutral
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary supplied by the host.
 - Direct `ironclaw_product` access is limited to wire DTOs and ProductSurface
-  descriptors; handlers reach behavior through `ironclaw_host_api::ProductSurface`.
+  descriptors; handlers reach behavior through `ironclaw_host_api::product_surface::ProductSurface`.
   There is no v1 `src/` import, v1 secrets/settings/DB, or lower-substrate
   access. Host auth stays host-owned here (Path A of
   `docs/reborn/how-to-port-channel-to-reborn.md`).

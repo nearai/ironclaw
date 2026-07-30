@@ -11,11 +11,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::{
-    ActivityId, AdapterInstallationId, AgentId, CapabilityId, ChannelAdapter,
-    ChannelInboundClassification, NormalizedInboundMessage, ProductAdapterError, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, ProductSurfaceRejectionKind,
-    ProjectId, ProtocolAuthEvidence, RedactedString, RestrictedEgress, TenantId, ThreadId,
-    TurnActor, TurnScope, UserId,
+    ids::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    product_adapter::{
+        AdapterInstallationId, ChannelAdapter, ChannelInboundClassification,
+        NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+        ProductSourceChannel, ProtocolAuthEvidence,
+    },
+    product_adapter_error::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString},
+    tool_adapter::RestrictedEgress,
+    turn::{TurnActor, TurnScope},
 };
 
 /// One verified, normalized channel message admitted through a product surface.
@@ -656,7 +660,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{AgentId, ProjectId, TenantId, UserId};
+    use crate::ids::{AgentId, ProjectId, TenantId, UserId};
 
     #[test]
     fn product_stream_continuation_is_single_consumer() {

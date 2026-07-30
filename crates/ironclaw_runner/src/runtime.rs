@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
@@ -968,8 +968,9 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
-        ThreadId,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
+        resolution::{Resolution, ResolutionBatch},
+        runtime::RuntimeKind,
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,

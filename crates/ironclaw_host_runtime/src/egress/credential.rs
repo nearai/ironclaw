@@ -1,6 +1,10 @@
 use ironclaw_host_api::{
-    CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    },
+    ids::{CapabilityId, SecretHandle},
+    runtime::RuntimeKind,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
@@ -594,8 +598,11 @@ mod tests {
     use super::*;
     use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
-        Timestamp, UserId,
+        Timestamp,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_secrets::{
         SecretLease, SecretLeaseId, SecretMetadata, SecretStore, SecretStoreError,
@@ -928,9 +935,11 @@ mod tests {
 mod path_placeholder_tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
-        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
-        TenantId, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest},
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_secrets::SecretStore;
 

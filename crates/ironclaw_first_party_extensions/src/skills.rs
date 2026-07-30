@@ -8,7 +8,9 @@ use std::sync::{Arc, LazyLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
+use ironclaw_host_api::{
+    dispatch::RuntimeDispatchErrorKind, mount::MountView, resource::ResourceScope,
+};
 use ironclaw_skills::{
     InstalledSkillMetadataSource, SkillContentRequest, SkillInstallFile, SkillInstallRequest,
     SkillInstallSource, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
@@ -413,7 +415,11 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        mount::MountView,
+        resource::ResourceScope,
+    };
     use serde_json::json;
 
     use super::*;

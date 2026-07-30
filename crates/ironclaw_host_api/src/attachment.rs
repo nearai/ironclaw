@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::ScopedPath;
+use crate::path::ScopedPath;
 
 /// One inbound attachment with its raw bytes, ready to be landed and turned
 /// into a transcript attachment reference.

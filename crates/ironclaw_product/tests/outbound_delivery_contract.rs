@@ -7,8 +7,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::WorkspaceFile;
-use ironclaw_host_api::{AgentId, ProjectId, ScopedPath, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    attachment::WorkspaceFile,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    path::ScopedPath,
+};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
@@ -261,13 +264,15 @@ use ironclaw_product::{
 struct CoordinatorDenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::RestrictedEgress for CoordinatorDenyAllEgress {
+impl ironclaw_host_api::tool_adapter::RestrictedEgress for CoordinatorDenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::RestrictedEgressRequest,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
-        Err(ironclaw_host_api::RestrictedEgressError::PolicyDenied)
+        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
+        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -319,7 +324,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         let attempts = self
             .store

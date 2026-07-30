@@ -69,7 +69,7 @@ impl BudgetStrategy for DefaultBudgetStrategy {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{

@@ -25,8 +25,9 @@ use ironclaw_filesystem::{
     TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,

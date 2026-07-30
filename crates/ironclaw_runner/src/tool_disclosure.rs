@@ -6,7 +6,10 @@ use std::{
     sync::LazyLock,
 };
 
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName},
+    runtime::RuntimeKind,
+};
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_turns::run_profile::{
     CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition,

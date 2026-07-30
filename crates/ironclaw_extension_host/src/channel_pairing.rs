@@ -33,8 +33,11 @@ use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_product::AdapterInstallationId;
 use ironclaw_product::{ChannelConnectionNoticePolicy, ChannelConnectionRequirement};
@@ -43,7 +46,7 @@ use thiserror::Error;
 
 use ironclaw_auth::RebornAuthContinuationDispatcher;
 use ironclaw_extension_host::channel_identity_path_segment as path_segment;
-use ironclaw_host_api::{
+use ironclaw_host_api::user_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, installation_scoped_provider_user_id,
@@ -356,7 +359,7 @@ impl std::fmt::Debug for FilesystemChannelPairingStore {
 }
 
 fn pairing_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
-    let tenant = ironclaw_host_api::resource_scope_path_segment(scope.tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(PAIRING_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-pairing"))?,

@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ErrRef;
+use crate::ids::ErrRef;
 
 /// An infrastructure/host failure — the `Err` arm of the kernel capability fold
 /// (§3). The variant is the **sanitized recoverability class**; the raw cause is
@@ -160,7 +160,7 @@ mod tests {
         // host id's UUID verbatim.
         let minted = ErrRef::new();
         assert_eq!(ErrRef::parse(&minted.to_string()).unwrap(), minted);
-        let inv = crate::InvocationId::new();
+        let inv = crate::ids::InvocationId::new();
         assert_eq!(ErrRef::from_uuid(inv.as_uuid()).as_uuid(), inv.as_uuid());
     }
 }

@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId};
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
 use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductSurfaceFailure,

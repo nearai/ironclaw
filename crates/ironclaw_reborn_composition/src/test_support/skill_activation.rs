@@ -48,7 +48,7 @@ impl SkillActivationTestSource {
 #[cfg(feature = "test-support")]
 pub fn build_skill_context_source_for_test(
     runtime: &crate::RebornRuntime,
-    _tenant_id: &ironclaw_host_api::TenantId,
+    _tenant_id: &ironclaw_host_api::ids::TenantId,
     _regex_skill_activation_enabled: bool,
 ) -> Option<SkillActivationTestSource> {
     Some(SkillActivationTestSource {

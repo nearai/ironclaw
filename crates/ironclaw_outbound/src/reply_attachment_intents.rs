@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_host_api::{ResourceScope, RunId, ScopedPath};
+use ironclaw_host_api::{ids::RunId, path::ScopedPath, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

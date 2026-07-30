@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

@@ -323,7 +323,7 @@ mod tests {
         reborn_failure_summary_for_category_and_detail,
     };
     use ironclaw_agent_loop::state::CheckpointKind;
-    use ironclaw_host_api::{MODEL_DIAGNOSTIC_MAX_BYTES, ModelDiagnostic};
+    use ironclaw_host_api::result_meta::{MODEL_DIAGNOSTIC_MAX_BYTES, ModelDiagnostic};
     use ironclaw_turns::{ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary};
 
     #[test]

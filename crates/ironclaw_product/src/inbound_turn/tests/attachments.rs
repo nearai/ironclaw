@@ -10,13 +10,16 @@ use crate::{
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemError, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    product_surface::ProductSurfaceError,
+};
 use ironclaw_threads::{
     AttachmentKind, AttachmentRef, FilesystemSessionThreadService, InMemorySessionThreadService,
 };
 
 use crate::binding::ResolveBindingRequest;
-use ironclaw_host_api::ProductSurfaceError;
 
 struct LandingBindingStub;
 

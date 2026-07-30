@@ -9,8 +9,14 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExecutionContext, ExtensionId, FailureKind, InvocationId, MountView,
-    Resolution, ResourceScope, RuntimeKind, TrustClass, UserId,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    resolution::Resolution,
+    resource::ResourceScope,
+    result_meta::FailureKind,
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
@@ -1260,16 +1266,18 @@ fn host_api_agent_loop_error(
 /// shape — replacing the byte-identical per-file copies (CodeRabbit #6299).
 #[cfg(test)]
 pub(crate) fn assert_recoverable_failure(
-    resolution: &ironclaw_host_api::Resolution,
-    expected: ironclaw_host_api::FailureKind,
+    resolution: &ironclaw_host_api::resolution::Resolution,
+    expected: ironclaw_host_api::result_meta::FailureKind,
 ) {
     match resolution {
-        ironclaw_host_api::Resolution::Done(outcome) => {
+        ironclaw_host_api::resolution::Resolution::Done(outcome) => {
             assert_eq!(outcome.verdict.error_kind(), Some(&expected));
             let detail = outcome
                 .verdict
                 .diagnostic()
-                .and_then(ironclaw_host_api::ModelFailureDiagnostic::model_visible_text)
+                .and_then(
+                    ironclaw_host_api::result_meta::ModelFailureDiagnostic::model_visible_text,
+                )
                 .expect("recoverable failures must carry a model-visible cause");
             assert!(
                 !detail.trim().is_empty(),

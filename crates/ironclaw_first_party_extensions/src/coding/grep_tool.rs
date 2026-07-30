@@ -8,7 +8,10 @@ use std::{
 
 use glob::Pattern;
 use ironclaw_filesystem::{FileStat, FileType, FilesystemOperation};
-use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    dispatch::RuntimeDispatchErrorKind,
+    path::{ScopedPath, VirtualPath},
+};
 use regex::RegexBuilder;
 use serde_json::{Value, json};
 

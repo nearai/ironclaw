@@ -12,7 +12,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{
     CasExpectation, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem, SeqNo,
 };
-use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath};
+use ironclaw_host_api::{ids::ProcessId, path::ScopedPath, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -355,7 +355,7 @@ where
     async fn read_journal_page(
         &self,
         scope: Option<&ResourceScope>,
-        owner_user_id: Option<&ironclaw_host_api::UserId>,
+        owner_user_id: Option<&ironclaw_host_api::ids::UserId>,
         after: Option<ProcessJournalCursor>,
         limit: usize,
     ) -> Result<ProcessJournalPage, ProcessJournalStoreError> {
@@ -1298,7 +1298,7 @@ struct ProcessTransitionMutation {
     kind: ProcessJournalKind,
     suspension: Option<ProcessSuspension>,
     checkpoint_ref: Option<crate::ProcessCheckpointRef>,
-    failure: Option<ironclaw_host_api::SanitizedFailure>,
+    failure: Option<ironclaw_host_api::turn::SanitizedFailure>,
     #[serde(default)]
     failure_recovery: crate::ProcessFailureRecovery,
     metadata: Option<serde_json::Value>,
@@ -1374,7 +1374,7 @@ where
     async fn read_process_journal_after(
         &self,
         scope: &ResourceScope,
-        owner_user_id: Option<&ironclaw_host_api::UserId>,
+        owner_user_id: Option<&ironclaw_host_api::ids::UserId>,
         after: Option<ProcessJournalCursor>,
         limit: usize,
     ) -> Result<ProcessJournalPage, Self::Error> {

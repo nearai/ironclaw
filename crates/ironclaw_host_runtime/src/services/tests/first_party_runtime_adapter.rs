@@ -3,9 +3,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    DispatchError, ExtensionId, InvocationOrigin, ResourceEstimate, RunId,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId,
-    VendorId,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    ids::{ExtensionId, RunId, SecretHandle, UserId, VendorId},
+    invocation::InvocationOrigin,
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
 };
 use serde_json::json;
 
@@ -13,7 +16,7 @@ use super::*;
 
 #[tokio::test]
 async fn reply_attachment_builtin_is_discoverable_but_default_handler_fails_closed() {
-    let capability_id = ironclaw_host_api::CapabilityId::new(
+    let capability_id = ironclaw_host_api::ids::CapabilityId::new(
         crate::first_party_tools::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
     )
     .expect("reply attachment capability id");
@@ -36,7 +39,7 @@ async fn reply_attachment_builtin_is_discoverable_but_default_handler_fails_clos
         .expect("fail-closed reply attachment handler");
     let filesystem = Arc::new(InMemoryBackend::new());
     let target =
-        ironclaw_host_api::VirtualPath::new("/projects/reply-attachment/report.txt").unwrap();
+        ironclaw_host_api::path::VirtualPath::new("/projects/reply-attachment/report.txt").unwrap();
     filesystem
         .put(
             &target,
@@ -45,12 +48,13 @@ async fn reply_attachment_builtin_is_discoverable_but_default_handler_fails_clos
         )
         .await
         .expect("seed workspace file");
-    let mounts = ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
-        ironclaw_host_api::MountAlias::new("/workspace").unwrap(),
-        ironclaw_host_api::VirtualPath::new("/projects/reply-attachment").unwrap(),
-        ironclaw_host_api::MountPermissions::read_only(),
-    )])
-    .unwrap();
+    let mounts =
+        ironclaw_host_api::mount::MountView::new(vec![ironclaw_host_api::mount::MountGrant::new(
+            ironclaw_host_api::path::MountAlias::new("/workspace").unwrap(),
+            ironclaw_host_api::path::VirtualPath::new("/projects/reply-attachment").unwrap(),
+            ironclaw_host_api::mount::MountPermissions::read_only(),
+        )])
+        .unwrap();
     let mut request = crate::FirstPartyCapabilityRequest::request_for_test(
         capability_id,
         sample_scope(),
@@ -130,7 +134,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
     assert_eq!(recorded.1.as_ref().map(UserId::as_str), Some("slack-alice"));
 }
 
-type RecordedActorRequest = (ironclaw_host_api::ResourceScope, Option<UserId>);
+type RecordedActorRequest = (ironclaw_host_api::resource::ResourceScope, Option<UserId>);
 
 struct RecordingActorFirstPartyHandler {
     recorded: Arc<Mutex<Option<RecordedActorRequest>>>,
@@ -213,7 +217,7 @@ impl crate::FirstPartyCapabilityHandler for RecordingOriginFirstPartyHandler {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = request.origin;
         Ok(crate::FirstPartyCapabilityResult::new(
             json!({"ok": true}),
-            ironclaw_host_api::ResourceUsage::default(),
+            ironclaw_host_api::resource::ResourceUsage::default(),
         ))
     }
 }
@@ -231,7 +235,7 @@ impl crate::FirstPartyCapabilityHandler for RecordingActorFirstPartyHandler {
             Some((request.scope, request.authenticated_actor_user_id));
         Ok(crate::FirstPartyCapabilityResult::new(
             json!({"ok": true}),
-            ironclaw_host_api::ResourceUsage::default(),
+            ironclaw_host_api::resource::ResourceUsage::default(),
         ))
     }
 }
@@ -418,7 +422,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 async fn first_party_adapter_forwards_credential_requirements_from_auth_required_handler() {
     let requirement = RuntimeCredentialAuthRequirement {
         provider: VendorId::new("google").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
         requester_extension: ExtensionId::new("gmail").unwrap(),
@@ -629,17 +633,17 @@ impl ResourceGovernor for ReconcileFailingGovernor {
 
     fn reserve_with_outcome(
         &self,
-        scope: ironclaw_host_api::ResourceScope,
-        estimate: ironclaw_host_api::ResourceEstimate,
+        scope: ironclaw_host_api::resource::ResourceScope,
+        estimate: ironclaw_host_api::resource::ResourceEstimate,
     ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
         self.inner.reserve_with_outcome(scope, estimate)
     }
 
     fn reserve_with_id_and_outcome(
         &self,
-        scope: ironclaw_host_api::ResourceScope,
-        estimate: ironclaw_host_api::ResourceEstimate,
-        reservation_id: ironclaw_host_api::ResourceReservationId,
+        scope: ironclaw_host_api::resource::ResourceScope,
+        estimate: ironclaw_host_api::resource::ResourceEstimate,
+        reservation_id: ironclaw_host_api::ids::ResourceReservationId,
     ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
         self.inner
             .reserve_with_id_and_outcome(scope, estimate, reservation_id)
@@ -647,23 +651,25 @@ impl ResourceGovernor for ReconcileFailingGovernor {
 
     fn reconcile(
         &self,
-        reservation_id: ironclaw_host_api::ResourceReservationId,
-        _actual: ironclaw_host_api::ResourceUsage,
-    ) -> Result<ironclaw_host_api::ResourceReceipt, ironclaw_resources::ResourceError> {
+        reservation_id: ironclaw_host_api::ids::ResourceReservationId,
+        _actual: ironclaw_host_api::resource::ResourceUsage,
+    ) -> Result<ironclaw_host_api::resource::ResourceReceipt, ironclaw_resources::ResourceError>
+    {
         Err(ironclaw_resources::ResourceError::UnknownReservation { id: reservation_id })
     }
 
     fn validate_reservation(
         &self,
-        reservation: &ironclaw_host_api::ResourceReservation,
+        reservation: &ironclaw_host_api::resource::ResourceReservation,
     ) -> Result<(), ironclaw_resources::ResourceError> {
         self.inner.validate_reservation(reservation)
     }
 
     fn release(
         &self,
-        reservation_id: ironclaw_host_api::ResourceReservationId,
-    ) -> Result<ironclaw_host_api::ResourceReceipt, ironclaw_resources::ResourceError> {
+        reservation_id: ironclaw_host_api::ids::ResourceReservationId,
+    ) -> Result<ironclaw_host_api::resource::ResourceReceipt, ironclaw_resources::ResourceError>
+    {
         self.inner.release(reservation_id)
     }
 
@@ -856,7 +862,7 @@ impl crate::FirstPartyCapabilityHandler for SucceedingFirstPartyHandler {
         Ok(crate::FirstPartyCapabilityResult {
             output: serde_json::json!({"ok": true}),
             display_preview: None,
-            usage: ironclaw_host_api::ResourceUsage::default(),
+            usage: ironclaw_host_api::resource::ResourceUsage::default(),
         })
     }
 }
@@ -874,7 +880,7 @@ impl crate::FirstPartyCapabilityHandler for DispatchFailingWithUsageHandler {
         &self,
         _request: crate::FirstPartyCapabilityRequest,
     ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
-        let usage = ironclaw_host_api::ResourceUsage::default().set_output_bytes(64);
+        let usage = ironclaw_host_api::resource::ResourceUsage::default().set_output_bytes(64);
         Err(
             crate::FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                 .with_usage(usage),

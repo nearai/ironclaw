@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{DurableEventLog, EventError, RuntimeEvent, RuntimeEventId};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
@@ -411,8 +411,9 @@ mod tests {
     use super::*;
     use ironclaw_events::{EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEventKind};
     use ironclaw_host_api::{
-        AgentId, ExtensionId, FailureKind, InvocationId, ProjectId, RuntimeKind, TenantId,
-        ThreadId, UserId,
+        ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+        result_meta::FailureKind,
+        runtime::RuntimeKind,
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::{

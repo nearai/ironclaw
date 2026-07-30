@@ -324,7 +324,7 @@ mod tests {
         use super::super::PostSubmitDeliveryHook;
         use async_trait::async_trait;
         use chrono::Utc;
-        use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+        use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
         use ironclaw_triggers::{
             TriggerAcceptedFireSettlement, TriggerFire, TriggerFireIdentity,
             TriggerFireSettlementObserver, TriggerId,

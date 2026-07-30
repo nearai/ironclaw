@@ -5,7 +5,7 @@ pub mod resolver;
 pub mod store;
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{CapabilityId, ThreadId};
+use ironclaw_host_api::ids::{CapabilityId, ThreadId};
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use ironclaw_turns::{
     GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,

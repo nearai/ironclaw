@@ -17,7 +17,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{
-    ChannelIngressDescriptor, ChannelIngressMethod, RestrictedEgress, SecretHandle,
+    channel::{ChannelIngressDescriptor, ChannelIngressMethod},
+    ids::SecretHandle,
+    tool_adapter::RestrictedEgress,
 };
 use ironclaw_product::{
     ChannelAdapter, ChannelError, InboundBatchFragment, InboundOutcome, NormalizedInboundMessage,

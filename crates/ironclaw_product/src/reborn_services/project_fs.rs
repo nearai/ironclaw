@@ -16,7 +16,7 @@
 //! out are scoped paths (`/workspace/...`) — never host or virtual paths.
 
 use async_trait::async_trait;
-use ironclaw_host_api::WorkspaceFile;
+use ironclaw_host_api::attachment::WorkspaceFile;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_threads::ThreadScope;

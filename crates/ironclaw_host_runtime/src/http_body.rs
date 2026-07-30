@@ -2,8 +2,10 @@ use std::{fmt, sync::LazyLock};
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, MountView, ResourceScope, RuntimeHttpEgressError, RuntimeHttpSaveTarget,
-    RuntimeHttpSavedBody,
+    http::{RuntimeHttpEgressError, RuntimeHttpSaveTarget, RuntimeHttpSavedBody},
+    ids::CapabilityId,
+    mount::MountView,
+    resource::ResourceScope,
 };
 use ironclaw_network::NetworkHttpResponse;
 use thiserror::Error;

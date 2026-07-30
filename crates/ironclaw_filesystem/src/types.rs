@@ -1,6 +1,9 @@
 use std::time::SystemTime;
 
-use ironclaw_host_api::{HostApiError, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    error::HostApiError,
+    path::{ScopedPath, VirtualPath},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

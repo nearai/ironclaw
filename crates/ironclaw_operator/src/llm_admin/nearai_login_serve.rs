@@ -20,7 +20,7 @@ use ironclaw_host_api::ingress::{
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{HostApiError, IngressScopeSource, NetworkMethod};
+use ironclaw_host_api::{action::NetworkMethod, error::HostApiError, ingress::IngressScopeSource};
 use ironclaw_reborn_config::RebornBootConfig;
 use serde::Deserialize;
 

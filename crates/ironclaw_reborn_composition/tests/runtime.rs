@@ -8,7 +8,9 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
+    scope::Principal,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,

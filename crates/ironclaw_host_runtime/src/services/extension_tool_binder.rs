@@ -19,8 +19,13 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, DispatchError, RuntimeKind, RuntimeLane, ToolAdapter,
-    ToolCall, ToolError, ToolPorts, ToolResult, runtime_policy::EffectiveRuntimePolicy,
+    capability::CapabilityDescriptor,
+    dispatch::DispatchError,
+    ids::CapabilityId,
+    lane::RuntimeLane,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    tool_adapter::{ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult},
 };
 use ironclaw_resources::ResourceGovernor;
 
@@ -137,7 +142,7 @@ where
     ) -> Result<ToolResult, ToolError> {
         let Some(descriptor) = self.descriptors.get(&call.capability_id) else {
             return Err(ToolError::Failed {
-                kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
+                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
                 model_visible_cause: None,
             });
@@ -218,7 +223,7 @@ fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             model_visible_cause: None,
         },
         other => ToolError::Failed {
-            kind: ironclaw_host_api::RuntimeDispatchErrorKind::Client,
+            kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client,
             safe_summary: Some(other.event_kind().replace('_', " ")),
             model_visible_cause: None,
         },
@@ -232,7 +237,7 @@ mod tests {
 
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::DiskFilesystem;
-    use ironclaw_host_api::HostPortCatalog;
+    use ironclaw_host_api::host_port::HostPortCatalog;
     use ironclaw_host_api::runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -280,7 +285,7 @@ prompt_doc_ref = "prompts/test-lane-binder/run.md"
         contracts
     }
 
-    fn test_package(root: ironclaw_host_api::VirtualPath) -> ExtensionPackage {
+    fn test_package(root: ironclaw_host_api::path::VirtualPath) -> ExtensionPackage {
         let manifest = ExtensionManifest::parse(
             TEST_MANIFEST,
             ManifestSource::HostBundled,
@@ -314,7 +319,7 @@ prompt_doc_ref = "prompts/test-lane-binder/run.md"
     /// growing any production-facing test seam.
     #[test]
     fn lane_backed_tool_adapter_holds_the_root_it_was_built_with() {
-        let root = ironclaw_host_api::VirtualPath::new("/system/extensions/test-lane-binder")
+        let root = ironclaw_host_api::path::VirtualPath::new("/system/extensions/test-lane-binder")
             .expect("root");
         let package = Arc::new(test_package(root.clone()));
         let adapter = LaneBackedToolAdapter {

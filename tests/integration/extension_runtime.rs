@@ -75,9 +75,11 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
             parts: vec![OutboundPart::Text("conformance reply".to_string())],
             reply_context: None,
         },
-        vendor_responses: Arc::new(|_request| ironclaw_host_api::RestrictedEgressResponse {
-            status: 200,
-            body: br#"{"ok":true}"#.to_vec(),
+        vendor_responses: Arc::new(|_request| {
+            ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+                status: 200,
+                body: br#"{"ok":true}"#.to_vec(),
+            }
         }),
         config: Vec::new(),
         expects_unsupported_free_target_listing: true,

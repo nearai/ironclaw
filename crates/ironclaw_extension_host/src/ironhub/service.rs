@@ -4,9 +4,15 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InstallationState, InvocationId, NetworkMethod, ResourceScope,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, TrustClass,
+    action::NetworkMethod,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, InvocationId},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    state::InstallationState,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,

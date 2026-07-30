@@ -16,7 +16,10 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId},
+    resolution::{Resolution, ResolutionBatch},
+};
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityAllowSet,
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
@@ -748,7 +751,7 @@ impl EventTriggeredHookSubscription {
     async fn spawn(
         self,
         dispatcher: Arc<HookDispatcher>,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> EventTriggeredHookSubscriptionHandle {
@@ -822,7 +825,7 @@ impl EventTriggeredHookSubscription {
     async fn run(
         self,
         dispatcher: Arc<HookDispatcher>,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         startup_head: EventCursor,
@@ -2711,7 +2714,7 @@ mod hook_resolver_adapter_tests {
     //! exercise every error branch without standing up a full Reborn host.
 
     use super::*;
-    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion,
         LoopRequest,
@@ -2864,7 +2867,7 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
     use ironclaw_turns::{
         InMemoryRunProfileResolver, ProcessLoopCheckpointStore, RunProfileResolver, TurnActor,
@@ -3095,7 +3098,8 @@ mod event_subscription_scope_tests {
     use super::*;
     use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::TurnScope;
@@ -3291,7 +3295,8 @@ mod event_subscription_scope_tests {
     #[test]
     fn effective_read_scope_rejects_mission_widening() {
         let (tenant, agent, user, project, thread) = ids();
-        let foreign_mission = ironclaw_host_api::MissionId::new("mission-OTHER").expect("mission");
+        let foreign_mission =
+            ironclaw_host_api::ids::MissionId::new("mission-OTHER").expect("mission");
         let supplied = ReadScope {
             mission_id: Some(foreign_mission),
             ..ReadScope::any()
@@ -3349,11 +3354,11 @@ mod event_subscription_scope_tests {
             project_id: Some(project.clone()),
             mission_id: None,
             thread_id: Some(thread.clone()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let foreign_scope = ResourceScope {
             project_id: Some(other_project.clone()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
             ..our_scope.clone()
         };
 

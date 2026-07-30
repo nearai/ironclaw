@@ -146,7 +146,7 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
-use ironclaw_host_api::RunId;
+use ironclaw_host_api::ids::RunId;
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
 };
@@ -1075,7 +1075,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request.surface_version != empty_surface_version {
             return Err(AgentLoopHostError::new(
@@ -1089,7 +1089,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request
             .invocations
@@ -1112,7 +1112,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
                 .resolution
             })
             .collect();
-        Ok(ironclaw_host_api::ResolutionBatch {
+        Ok(ironclaw_host_api::resolution::ResolutionBatch {
             resolutions,
             stopped_on_suspension: false,
         })
@@ -1858,7 +1858,7 @@ pub struct HostManagedModelImagePart {
 pub trait LoopAttachmentReadPort: Send + Sync {
     async fn read_attachment_bytes(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         storage_key: &str,
     ) -> Result<Vec<u8>, LoopAttachmentReadError>;
 }
@@ -2977,7 +2977,7 @@ mod tests {
     /// so it pins what production actually stores.
     #[test]
     fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
-        use ironclaw_host_api::{CapabilityRecoveryHint, SameCallRetryConstraint};
+        use ironclaw_host_api::result_meta::{CapabilityRecoveryHint, SameCallRetryConstraint};
         use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
         use ironclaw_turns::run_profile::{
             MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
@@ -2991,7 +2991,7 @@ mod tests {
                 status: ToolObservationStatus::Error,
                 summary: "The capability failed.".to_string(),
                 detail: ToolObservationDetail::GenericFailure {
-                    failure_kind: ironclaw_host_api::FailureKind::PolicyDenied,
+                    failure_kind: ironclaw_host_api::result_meta::FailureKind::PolicyDenied,
                     detail: None,
                 },
                 artifacts: Vec::new(),

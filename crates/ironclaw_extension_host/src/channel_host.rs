@@ -30,11 +30,14 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ChannelInboundProductSurface;
+use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    RecipeSecretField, ResourceScope, SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{AgentId, ExtensionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    recipe::RecipeSecretField,
+    resource::ResourceScope,
 };
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
 use ironclaw_product::{
@@ -120,7 +123,7 @@ pub fn default_channel_workflow_storage_roots(
     tenant_id: &TenantId,
     extension_id: &str,
 ) -> Result<ChannelWorkflowStorageRoots, String> {
-    let tenant = ironclaw_host_api::resource_scope_path_segment(tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(tenant_id.as_str());
     let base = format!("/tenants/{tenant}/shared/channel-extensions/{extension_id}");
     Ok(ChannelWorkflowStorageRoots {
         idempotency: VirtualPath::new(format!("{base}/product-workflow/idempotency"))
@@ -272,60 +275,62 @@ pub struct ChannelHostDeliveryDeps {
 /// execution fails closed with retryable service unavailability.
 #[derive(Clone, Default)]
 struct SharedCommandSurface {
-    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_host_api::ProductSurface>>>,
+    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_host_api::product_surface::ProductSurface>>>,
 }
 
 impl SharedCommandSurface {
-    fn set(&self, surface: Arc<dyn ironclaw_host_api::ProductSurface>) -> bool {
+    fn set(&self, surface: Arc<dyn ironclaw_host_api::product_surface::ProductSurface>) -> bool {
         self.cell.set(surface).is_ok()
     }
 }
 
 #[async_trait]
-impl ironclaw_host_api::ProductSurface for SharedCommandSurface {
+impl ironclaw_host_api::product_surface::ProductSurface for SharedCommandSurface {
     async fn invoke(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.invoke(caller, request).await,
-            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
-                true,
-            )),
+            None => Err(
+                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+            ),
         }
     }
 
     async fn query(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
-    {
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
         match self.cell.get() {
             Some(surface) => surface.query(caller, request).await,
-            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
-                true,
-            )),
+            None => Err(
+                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+            ),
         }
     }
 
     async fn stream_events(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceStreamResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.stream_events(caller, request).await,
-            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
-                true,
-            )),
+            None => Err(
+                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+            ),
         }
     }
 }
@@ -349,7 +354,8 @@ pub struct GenericChannelHostDeps {
     /// on auth-declaring channel extensions resolve through it. `None`
     /// (composition paths without the durable store) falls back to the
     /// operator-actor policy.
-    pub identity_lookup: Option<Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>>,
+    pub identity_lookup:
+        Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
     pub delivery: Option<ChannelHostDeliveryDeps>,
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
@@ -474,7 +480,7 @@ impl GenericChannelHostAssembly {
     /// authority under already-running channel graphs.
     pub fn set_product_command_surface(
         &self,
-        surface: Arc<dyn ironclaw_host_api::ProductSurface>,
+        surface: Arc<dyn ironclaw_host_api::product_surface::ProductSurface>,
     ) -> bool {
         self.command_surface.set(surface)
     }
@@ -858,7 +864,7 @@ impl GenericChannelHostAssembly {
         source: &HostedChannelSource,
     ) -> (
         String,
-        Option<Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>>,
+        Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
     ) {
         let pairing_extension = self
             .deps
@@ -904,7 +910,7 @@ impl GenericChannelHostAssembly {
             project_id: identity.project_id.clone(),
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let workflow_state = self.deps.workflow_state.build(&roots, ledger_scope).await?;
 
@@ -1042,13 +1048,18 @@ impl GenericChannelHostAssembly {
             .as_ref()
             .map(|channel| channel.commands.as_slice())
             .unwrap_or_default();
+        let command_prefix = source
+            .resolved()
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.presentation.command_prefix.as_deref());
         let observer = Arc::new(
             RunDeliveryObserver::with_settings_and_connection_notices(
                 services,
                 delivery.settings,
                 connection_notices.clone(),
             )
-            .with_enabled_commands(enabled_commands.iter().map(String::as_str)),
+            .with_enabled_commands(enabled_commands.iter().map(String::as_str), command_prefix),
         );
         Ok(Arc::new(RunDeliveryPostAdmissionObserver {
             observer,

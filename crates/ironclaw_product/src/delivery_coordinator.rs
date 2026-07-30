@@ -30,7 +30,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_host_api::{RestrictedEgress, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, tool_adapter::RestrictedEgress};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,

@@ -6,8 +6,12 @@ use ironclaw_common::normalize_mime_type;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_filesystem::{FileType, FilesystemError, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
-    PermissionMode, ResourceUsage, RuntimeDispatchErrorKind, ScopedPath,
+    capability::{EffectKind, PermissionMode},
+    dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
+    error::HostApiError,
+    ids::CapabilityId,
+    path::ScopedPath,
+    resource::ResourceUsage,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
@@ -270,8 +274,8 @@ struct UnavailableReplyAttachmentIntentPort;
 impl ReplyAttachmentIntentPort for UnavailableReplyAttachmentIntentPort {
     async fn register(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
-        _run_id: &ironclaw_host_api::RunId,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _run_id: &ironclaw_host_api::ids::RunId,
         _intent: ReplyAttachmentIntent,
     ) -> Result<(), OutboundError> {
         Err(OutboundError::Backend)
@@ -279,8 +283,8 @@ impl ReplyAttachmentIntentPort for UnavailableReplyAttachmentIntentPort {
 
     async fn seal(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
-        _run_id: &ironclaw_host_api::RunId,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _run_id: &ironclaw_host_api::ids::RunId,
     ) -> Result<Vec<ReplyAttachmentIntent>, OutboundError> {
         Err(OutboundError::Backend)
     }
@@ -292,8 +296,11 @@ mod tests {
 
     use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{
-        CapabilityId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, RunId,
-        RuntimeDispatchErrorKind, VirtualPath,
+        dispatch::RuntimeDispatchErrorKind,
+        ids::{CapabilityId, RunId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use ironclaw_outbound::{OutboundStateStore, ReplyAttachmentIntentPort};
     use serde_json::{Value, json};

@@ -63,7 +63,7 @@ pub(super) fn install_first_party_hooks(
 /// passed scratch validation and are committed to the real builder per run.
 /// Deterministic replay material — identical inputs each run.
 pub(super) struct ProjectedExtensionHooks {
-    pub(super) extension_id: ironclaw_host_api::ExtensionId,
+    pub(super) extension_id: ironclaw_host_api::ids::ExtensionId,
     pub(super) extension_version: String,
     pub(super) entries: Vec<HookManifestEntry>,
 }
@@ -106,8 +106,8 @@ pub(super) struct ProjectedExtensionHooks {
 pub(super) fn project_extension_hook_sets(
     projections: impl Iterator<Item = impl std::ops::Deref<Target = HookProjection>>,
     registrar: &HookRegistrar,
-    tenant_id: &ironclaw_host_api::TenantId,
-    tenant_root: Option<&ironclaw_host_api::VirtualPath>,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
+    tenant_root: Option<&ironclaw_host_api::path::VirtualPath>,
 ) -> Result<Vec<ProjectedExtensionHooks>, RebornBuildError> {
     let mut survivors: Vec<ProjectedExtensionHooks> = Vec::new();
     let mut considered = 0usize;
@@ -277,7 +277,7 @@ pub fn build_hook_dispatcher_builder_factory(
 pub fn build_hook_dispatcher_builder_factory_for_tenant(
     config: HooksActivationConfig,
     registry: &HookProjectionRegistry,
-    tenant_id: &ironclaw_host_api::TenantId,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
 ) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError> {
     // The tenant-derived extension root is the same root discovery/admission
     // computed; recomputing it here is deterministic (pure function of the
@@ -305,8 +305,8 @@ pub(super) fn build_hook_dispatcher_builder_factory_with<F>(
     config: HooksActivationConfig,
     registry: &HookProjectionRegistry,
     tenant_context: Option<(
-        &ironclaw_host_api::TenantId,
-        &ironclaw_host_api::VirtualPath,
+        &ironclaw_host_api::ids::TenantId,
+        &ironclaw_host_api::path::VirtualPath,
     )>,
     install_first_party: F,
 ) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError>
@@ -343,14 +343,14 @@ where
     // run. A fallback synthetic tenant label keeps audit events well-formed when
     // no explicit tenant context is threaded (the convenience entry point).
     let fallback_tenant =
-        ironclaw_host_api::TenantId::new("reborn-hook-projection").map_err(|error| {
+        ironclaw_host_api::ids::TenantId::new("reborn-hook-projection").map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("could not build fallback audit tenant id: {error}"),
             }
         })?;
     let (audit_tenant, audit_root): (
-        &ironclaw_host_api::TenantId,
-        Option<&ironclaw_host_api::VirtualPath>,
+        &ironclaw_host_api::ids::TenantId,
+        Option<&ironclaw_host_api::path::VirtualPath>,
     ) = match tenant_context {
         Some((tenant, root)) => (tenant, Some(root)),
         None => (&fallback_tenant, None),

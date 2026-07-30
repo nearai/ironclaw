@@ -70,7 +70,7 @@ fn invalid_invocation(error: ProviderValidationError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ProviderToolName;
+    use ironclaw_host_api::ids::ProviderToolName;
 
     fn provider_name(value: &str) -> ProviderToolName {
         ProviderToolName::new(value).expect("provider tool name")

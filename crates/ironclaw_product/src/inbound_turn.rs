@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 #[cfg(test)]
-use ironclaw_host_api::UserId;
-use ironclaw_host_api::{InboundAttachment, RestrictedEgress};
+use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::{attachment::InboundAttachment, tool_adapter::RestrictedEgress};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,

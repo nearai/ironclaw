@@ -16,8 +16,8 @@ use crate::{
 use async_trait::async_trait;
 use chrono::TimeZone;
 use ironclaw_host_api::{
-    AgentId, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse, TenantId,
-    ThreadId, UserId,
+    ids::{AgentId, TenantId, ThreadId, UserId},
+    tool_adapter::{RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -127,7 +127,7 @@ impl ironclaw_threads::SessionThreadService for StubSessionThreadService {
     async fn mark_message_submitted(
         &self,
         _scope: &ThreadScope,
-        _thread_id: &ironclaw_host_api::ThreadId,
+        _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
         _turn_id: String,
         _turn_run_id: String,
@@ -138,7 +138,7 @@ impl ironclaw_threads::SessionThreadService for StubSessionThreadService {
     async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
-        _thread_id: &ironclaw_host_api::ThreadId,
+        _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         unimplemented!("not used in submit path tests")
@@ -182,7 +182,7 @@ impl ironclaw_threads::SessionThreadService for StubSessionThreadService {
     async fn finalize_assistant_message(
         &self,
         _scope: &ThreadScope,
-        _thread_id: &ironclaw_host_api::ThreadId,
+        _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
         _content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {

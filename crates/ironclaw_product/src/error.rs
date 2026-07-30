@@ -5,7 +5,10 @@
 //! adapters never see host-layer details.
 
 use crate::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString};
-use ironclaw_host_api::{HostApiError, ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_host_api::{
+    error::HostApiError,
+    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode},
+};
 use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 

@@ -12,9 +12,17 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_host_api::{
-    ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage, CorrelationId,
-    DecisionSummary, EffectKind, ExtensionId, ExtensionLifecycleOperation, HostPortCatalog,
-    InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, UserId, VirtualPath,
+    action::ExtensionLifecycleOperation,
+    audit::{ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::EffectKind,
+    host_port::HostPortCatalog,
+    ids::{
+        AgentId, AuditEventId, CorrelationId, ExtensionId, InvocationId, ProjectId, TenantId,
+        UserId,
+    },
+    path::VirtualPath,
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,

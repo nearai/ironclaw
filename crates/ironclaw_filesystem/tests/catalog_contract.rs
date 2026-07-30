@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::*;
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 use tempfile::tempdir;
 
 #[tokio::test]

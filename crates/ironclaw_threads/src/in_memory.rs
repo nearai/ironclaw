@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 

@@ -9,8 +9,10 @@ use std::collections::HashMap;
 
 use ironclaw_host_api::product_adapter::{ChannelAttachmentRef, ChannelError, PartDeliveryOutcome};
 use ironclaw_host_api::{
-    InboundAttachment, NetworkMethod, RestrictedEgress, RestrictedEgressError,
-    RestrictedEgressRequest, SecretHandle, WorkspaceFile,
+    action::NetworkMethod,
+    attachment::{InboundAttachment, WorkspaceFile},
+    ids::SecretHandle,
+    tool_adapter::{RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest},
 };
 use serde::Deserialize;
 use url::Url;

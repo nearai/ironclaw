@@ -54,7 +54,7 @@ impl ThreadScopeResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 
     fn scope(owner: Option<&str>) -> ThreadScope {
         ThreadScope {
@@ -106,7 +106,7 @@ mod tests {
             base.tenant_id.clone(),
             Some(base.agent_id.clone()),
             base.project_id.clone(),
-            ironclaw_host_api::ThreadId::new("thread").unwrap(),
+            ironclaw_host_api::ids::ThreadId::new("thread").unwrap(),
             None,
         );
 

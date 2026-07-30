@@ -111,14 +111,14 @@ impl HookRegistrar {
     /// no further opportunity to mutate the dispatcher.
     pub fn install(
         &self,
-        extension: ironclaw_host_api::ExtensionId,
+        extension: ironclaw_host_api::ids::ExtensionId,
         extension_version: &str,
         entries: &[HookManifestEntry],
         mut builder: HookDispatcherBuilder,
     ) -> Result<(HookDispatcherBuilder, Vec<HookId>), HookError> {
         // Mirror the host-validated `ExtensionId` into the content-addressed
         // identity wrapper used by `HookId::derive`. The two types coexist:
-        // `ironclaw_host_api::ExtensionId` is the authority-bearing identifier
+        // `ironclaw_host_api::ids::ExtensionId` is the authority-bearing identifier
         // (validated, comparable across the host); `crate::identity::ExtensionId`
         // is a transparent string newtype the hash derivation consumes.
         //
@@ -156,7 +156,7 @@ impl HookRegistrar {
     /// manifest, multi-source loader) cannot bypass the cap by splitting
     /// the registrations into multiple batches.
     fn enforce_registration_caps(
-        extension: &ironclaw_host_api::ExtensionId,
+        extension: &ironclaw_host_api::ids::ExtensionId,
         entries: &[HookManifestEntry],
         dispatcher: &crate::dispatch::HookDispatcher,
     ) -> Result<(), HookError> {
@@ -198,7 +198,7 @@ impl HookRegistrar {
 
     fn install_one(
         &self,
-        owning_extension: &ironclaw_host_api::ExtensionId,
+        owning_extension: &ironclaw_host_api::ids::ExtensionId,
         identity_extension: &ExtensionId,
         extension_version: &str,
         entry: &HookManifestEntry,
@@ -406,8 +406,8 @@ mod tests {
     use crate::predicate::{CapabilityPredicate, HookPredicateSpec};
     use crate::registry::HookRegistry;
 
-    fn extension() -> ironclaw_host_api::ExtensionId {
-        ironclaw_host_api::ExtensionId::new("polymarket-trader").expect("valid extension id")
+    fn extension() -> ironclaw_host_api::ids::ExtensionId {
+        ironclaw_host_api::ids::ExtensionId::new("polymarket-trader").expect("valid extension id")
     }
 
     fn identity_extension() -> ExtensionId {
@@ -449,7 +449,7 @@ mod tests {
         // manifest scope is `OwnCapabilities`, so the dispatch ctx must
         // include a `provider` matching the registrar's extension or the hook
         // is filtered out as out-of-scope.
-        let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+        let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
         let ctx = BeforeCapabilityHookContext::new(
             tenant,
             "shell.exec".to_string(),
@@ -628,7 +628,7 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let dispatcher = builder.build_arc();
 
-        let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+        let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
         let ctx = BeforeCapabilityHookContext::new(
             tenant,
             "polymarket.place_order".to_string(),
@@ -804,7 +804,7 @@ mod tests {
         tenant_scope.requires_grant = Some("cross_extension_observation".to_string());
 
         let host_extension =
-            ironclaw_host_api::ExtensionId::new("polymarket-trader").expect("valid ext id");
+            ironclaw_host_api::ids::ExtensionId::new("polymarket-trader").expect("valid ext id");
         let entries = vec![own.clone(), tenant_scope.clone()];
         let (builder, ids) = registrar
             .install(host_extension.clone(), "0.4.2", &entries, builder)

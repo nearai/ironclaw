@@ -20,6 +20,11 @@ ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Form-encoded Slack slash-command / ssl_check payloads (PR-3 native
+# dispatcher). Already resolved workspace-wide via axum's `Form` extractor
+# (used in ironclaw_webui's OAuth callbacks), so this adds zero new compiled
+# crates to the dependency graph.
+serde_urlencoded = "0.7"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 url = "2"

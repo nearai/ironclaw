@@ -39,8 +39,11 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, AuditEnvelope};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{audit::AuditEnvelope, ids::AgentId};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -1768,7 +1771,8 @@ async fn create_secure_dir_all(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, TenantId, UserId,
+        ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, UserId},
+        resource::ResourceScope,
     };
 
     use super::*;

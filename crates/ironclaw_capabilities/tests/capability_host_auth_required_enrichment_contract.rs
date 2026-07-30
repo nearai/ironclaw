@@ -20,7 +20,14 @@ use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_capabilities::*;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    capability::{CapabilityDescriptor, CapabilitySet, RuntimeCredentialAccountSetup},
+    decision::{Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement},
+    dispatch::DispatchError,
+    ids::{ExtensionId, SecretHandle, VendorId},
+    resource::ResourceEstimate,
+    scope::ExecutionContext,
+};
 use ironclaw_trust::TrustDecision;
 use serde_json::json;
 

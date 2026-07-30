@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use tokio::sync::Mutex;
 
 use crate::backend::{EventRecord, StorageTxn};

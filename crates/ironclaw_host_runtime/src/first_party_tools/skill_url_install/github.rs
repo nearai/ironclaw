@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ironclaw_host_api::{ResourceUsage, RuntimeDispatchErrorKind};
+use ironclaw_host_api::{dispatch::RuntimeDispatchErrorKind, resource::ResourceUsage};
 use serde::Deserialize;
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};

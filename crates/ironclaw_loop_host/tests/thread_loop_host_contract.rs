@@ -7,9 +7,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, DenyReason, DispatchInputIssueCode, MissionId, ProjectId,
-    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, RunId, ScopedPath, TenantId,
-    ThreadId, UserId,
+    decision::DenyReason,
+    dispatch::DispatchInputIssueCode,
+    ids::{
+        AgentId, CapabilityId, MissionId, ProjectId, ProviderToolName, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    path::ScopedPath,
+    resolution::{Resolution, ResolutionBatch},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,

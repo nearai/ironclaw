@@ -8,8 +8,8 @@ use crate::{ProductInboundEnvelope, ProductInboundPayload, ProductRejection, Use
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    AgentId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, TenantId,
-    ThreadId, UserId,
+    ids::{AgentId, TenantId, ThreadId, UserId},
+    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -715,7 +715,7 @@ impl crate::ProjectFilesystemReader for NoProjectFilesystem {
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
         _path: &str,
-    ) -> Result<ironclaw_host_api::WorkspaceFile, crate::ProjectFsError> {
+    ) -> Result<ironclaw_host_api::attachment::WorkspaceFile, crate::ProjectFsError> {
         Err(crate::ProjectFsError::NotFound)
     }
 

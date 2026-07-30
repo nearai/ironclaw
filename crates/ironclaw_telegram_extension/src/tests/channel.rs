@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use ironclaw_host_api::product_adapter::ProductTriggerReason;
-use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
+use ironclaw_host_api::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
 use super::*;
 

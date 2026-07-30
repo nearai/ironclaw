@@ -5,7 +5,7 @@ use ironclaw_auth::{
     AuthChallenge, AuthFlowOwnerScope, AuthGateRef, AuthProductError, RebornProductAuthServices,
     TurnGateAuthFlowQuery, TurnRunRef,
 };
-use ironclaw_host_api::{RuntimeCredentialAuthRequirement, UserId};
+use ironclaw_host_api::{decision::RuntimeCredentialAuthRequirement, ids::UserId};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{

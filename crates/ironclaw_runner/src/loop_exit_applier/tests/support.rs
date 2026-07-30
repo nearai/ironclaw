@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProcessId, TenantId, ThreadId};
+use ironclaw_host_api::ids::{ProcessId, TenantId, ThreadId};
 use ironclaw_processes::{
     ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, JournaledProcessSnapshot,
     ProcessJournalCursor, ProcessLeaseRequest, ProcessLifecycleStatus,

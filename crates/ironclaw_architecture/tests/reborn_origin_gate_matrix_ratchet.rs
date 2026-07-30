@@ -77,7 +77,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::{
-    CapabilityId, OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES,
+    capability::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES},
+    ids::CapabilityId,
 };
 
 /// The reviewed S5 seed of builtins the model may invoke UNGATED (§5.2.1/§10).

@@ -32,7 +32,7 @@ use crate::{
     OutboundPart, ProductAdapterError,
 };
 use async_trait::async_trait;
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
     OutboundStateStorePort,

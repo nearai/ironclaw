@@ -8,7 +8,7 @@
 //! installation state and the active snapshot ([`lifecycle`]).
 //!
 //! It contains no concrete product name, protocol route, or behavior branch:
-//! concrete extensions implement the [`ironclaw_host_api::ToolAdapter`] and
+//! concrete extensions implement the [`ironclaw_host_api::tool_adapter::ToolAdapter`] and
 //! [`ironclaw_product::ChannelAdapter`] traits and are supplied by the binary.
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
@@ -99,7 +99,7 @@ pub async fn filesystem_installation_store_for_test()
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
     ironclaw_extensions::ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),

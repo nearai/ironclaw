@@ -1,10 +1,12 @@
 //! Outbound envelope, projection-derived payloads, and projection cursor.
 // arch-exempt: large_file, product activity view compatibility before DTO split, plan #6543
 
+use crate::turn::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
 use crate::{
-    CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProcessId, RuntimeKind, ThreadId,
+    action::NetworkMethod,
+    ids::{CapabilityId, ExtensionId, InvocationId, ProcessId, ThreadId},
+    runtime::RuntimeKind,
 };
-use crate::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -41,8 +43,8 @@ const APPROVAL_PROMPT_DETAIL_MAX_ITEMS: usize = 16;
 #[derive(Debug, Clone, Copy)]
 pub struct PreferenceTargetEncodeRequest<'a> {
     pub installation_id: &'a AdapterInstallationId,
-    pub agent_id: &'a crate::AgentId,
-    pub project_id: Option<&'a crate::ProjectId>,
+    pub agent_id: &'a crate::ids::AgentId,
+    pub project_id: Option<&'a crate::ids::ProjectId>,
     pub conversation: &'a ExternalConversationRef,
 }
 
@@ -435,7 +437,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             provider: Option<ExtensionId>,
             #[serde(
                 default,
-                deserialize_with = "crate::deserialize_trusted_optional_runtime_kind"
+                deserialize_with = "crate::runtime::deserialize_trusted_optional_runtime_kind"
             )]
             runtime: Option<RuntimeKind>,
             process_id: Option<ProcessId>,

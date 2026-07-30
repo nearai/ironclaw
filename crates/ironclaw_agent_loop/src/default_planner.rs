@@ -237,7 +237,7 @@ impl Default for DefaultStrategySlots {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{

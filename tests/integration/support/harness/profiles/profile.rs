@@ -1,6 +1,6 @@
 //! Profile domain tools profile (`profile_tools`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions};
+use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountPermissions};
 use ironclaw_host_runtime::PROFILE_SET_CAPABILITY_ID;
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};

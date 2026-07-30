@@ -3,10 +3,14 @@ use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, Blocked, CapabilityRecoveryHint, CorrelationId, DenyReason,
-    DependentRunResult, FailureKind, INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic,
-    ModelInputIssue, Outcome, Resolution, ResultProgress, ResumeToken, SameCallRetryConstraint,
-    Suspension, ToolVerdict,
+    decision::DenyReason,
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{ApprovalRequestId, CorrelationId},
+    resolution::{Blocked, DependentRunResult, Outcome, Resolution, Suspension, ToolVerdict},
+    result_meta::{
+        CapabilityRecoveryHint, FailureKind, LoopRef, ModelFailureDiagnostic, ModelInputIssue,
+        ResultProgress, ResumeToken, SameCallRetryConstraint,
+    },
 };
 use ironclaw_turns::{
     LoopFailureKind, LoopGateRef, LoopResultRef,
@@ -1891,7 +1895,7 @@ mod tests {
     };
 
     fn call(input: &str) -> CapabilityCallCandidate {
-        let capability_id = ironclaw_host_api::CapabilityId::new("test.cap").unwrap();
+        let capability_id = ironclaw_host_api::ids::CapabilityId::new("test.cap").unwrap();
         CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("test-v1").unwrap(),

@@ -11,8 +11,13 @@ use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    CapabilityId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy, ResourceScope,
-    RuntimeKind, ScopedPath, SecretHandle,
+    action::{NetworkMethod, NetworkPolicy},
+    error::HostApiError,
+    ids::{CapabilityId, SecretHandle},
+    mount::MountGrant,
+    path::ScopedPath,
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 
 /// Runtime HTTP request accepted by the host-owned egress service.
@@ -545,7 +550,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InvocationId, UserId};
+    use crate::ids::{InvocationId, UserId};
 
     #[test]
     fn runtime_http_egress_request_scrubs_url_and_header_values() {

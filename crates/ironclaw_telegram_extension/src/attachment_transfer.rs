@@ -5,8 +5,10 @@
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_host_api::product_adapter::{ChannelAttachmentRef, ChannelError, PartDeliveryOutcome};
 use ironclaw_host_api::{
-    InboundAttachment, NetworkMethod, RestrictedEgress, RestrictedEgressRequest, SecretHandle,
-    WorkspaceFile,
+    action::NetworkMethod,
+    attachment::{InboundAttachment, WorkspaceFile},
+    ids::SecretHandle,
+    tool_adapter::{RestrictedEgress, RestrictedEgressRequest},
 };
 
 use crate::channel::{
@@ -195,8 +197,8 @@ fn status_error(status: u16) -> ChannelError {
     )
 }
 
-fn map_egress_error(error: ironclaw_host_api::RestrictedEgressError) -> ChannelError {
-    use ironclaw_host_api::RestrictedEgressError as EgressError;
+fn map_egress_error(error: ironclaw_host_api::tool_adapter::RestrictedEgressError) -> ChannelError {
+    use ironclaw_host_api::tool_adapter::RestrictedEgressError as EgressError;
     match error {
         EgressError::Transport { .. } => transfer_error(
             "telegram attachment transfer is temporarily unavailable",

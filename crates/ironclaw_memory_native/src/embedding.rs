@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::path::{MemoryDocumentScope, memory_error, valid_memory_path};
 

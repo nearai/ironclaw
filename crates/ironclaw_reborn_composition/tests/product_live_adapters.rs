@@ -7,10 +7,17 @@ use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, Resolution,
-    RuntimeKind, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resolution::Resolution,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
@@ -1715,7 +1722,7 @@ fn host_visible_capability_request(label: &str) -> HostVisibleCapabilityRequest 
         RuntimeKind::Wasm,
         TrustClass::UserTrusted,
         CapabilitySet::default(),
-        ironclaw_host_api::MountView::default(),
+        ironclaw_host_api::mount::MountView::default(),
     )
     .unwrap();
     let thread_id = ThreadId::new(format!("thread-{label}")).unwrap();

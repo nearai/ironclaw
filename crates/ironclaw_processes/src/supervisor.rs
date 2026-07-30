@@ -5,7 +5,7 @@ use std::{collections::HashMap, fmt, panic::AssertUnwindSafe, sync::Arc, time::D
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::FutureExt;
-use ironclaw_host_api::{ProcessId, ResourceScope, SanitizedFailure};
+use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope, turn::SanitizedFailure};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::{JoinHandle, JoinSet},
@@ -777,8 +777,8 @@ mod tests {
         test_support::in_memory_backed_processes_filesystem,
     };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
-    use ironclaw_host_api::VirtualPath;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::path::VirtualPath;
     use tokio::sync::Notify;
 
     #[derive(Clone, Copy)]

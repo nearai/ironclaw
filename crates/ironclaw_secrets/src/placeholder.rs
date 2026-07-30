@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, TenantId, UserId};
+use ironclaw_host_api::ids::{CapabilityId, ExtensionId, InvocationId, TenantId, UserId};
 use uuid::Uuid;
 
 use crate::{
@@ -456,7 +456,7 @@ impl InMemoryCredentialBroker {
     pub fn find_session_by_placeholder(
         &self,
         placeholder: &CredentialPlaceholderToken,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
     ) -> Result<Option<crate::CredentialSession>, CredentialBrokerError> {
         let now = chrono::Utc::now();
         let state = lock_or_recover(&self.session_state);

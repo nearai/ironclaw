@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
 

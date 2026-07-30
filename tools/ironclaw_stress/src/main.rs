@@ -59,7 +59,9 @@ use crate::{
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
+    ids::TenantId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
 use serde::{Deserialize, Serialize};

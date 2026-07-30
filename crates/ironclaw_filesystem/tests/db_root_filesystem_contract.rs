@@ -6,7 +6,7 @@ use ironclaw_filesystem::{
     FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     LibSqlRootFilesystem, Page, RecordKind, SeqNo, SortDirection,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 #[tokio::test]
 async fn libsql_create_subtree_atomic_publishes_the_complete_batch() {
@@ -1867,7 +1867,7 @@ mod postgres_tests {
         FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
         PostgresRootFilesystem, RecordKind, SeqNo, TxnCapability,
     };
-    use ironclaw_host_api::VirtualPath;
+    use ironclaw_host_api::path::VirtualPath;
 
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
         if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {

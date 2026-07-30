@@ -1,5 +1,7 @@
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, InvocationOrigin, OriginGateMatrix, OriginGatePolicy,
+    capability::{EffectKind, OriginGateMatrix, OriginGatePolicy},
+    ids::CapabilityId,
+    invocation::InvocationOrigin,
     runtime_policy::ApprovalPolicy,
 };
 use ironclaw_runtime_policy::MinimalApprovalBypass;
@@ -151,7 +153,7 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        EffectKind,
+        capability::EffectKind,
         runtime_policy::{ApprovalPolicy, DeploymentMode, RuntimeProfile},
     };
     use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest};

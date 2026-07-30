@@ -25,7 +25,7 @@ use ironclaw_hooks::identity::{HookId, HookVersion};
 use ironclaw_hooks::points::ObserverHookContext;
 use ironclaw_hooks::registry::HookPointSpec;
 use ironclaw_hooks::sink::{ObserverHook, ObserverSink};
-use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
 /// Canonical identity path for the TEST-ONLY first-party no-op observer.
 /// Lives here (not in the production catalog) so the activation machinery
@@ -572,9 +572,9 @@ fn root_containment_rejects_traversal_and_non_child() {
 /// in the integration test driving two distinct per-tenant filesystems.
 #[test]
 fn tenant_root_is_the_fixed_system_extensions_root() {
-    let a = tenant_extension_root(&ironclaw_host_api::TenantId::new("alpha").expect("a"))
+    let a = tenant_extension_root(&ironclaw_host_api::ids::TenantId::new("alpha").expect("a"))
         .expect("root a");
-    let b = tenant_extension_root(&ironclaw_host_api::TenantId::new("beta").expect("b"))
+    let b = tenant_extension_root(&ironclaw_host_api::ids::TenantId::new("beta").expect("b"))
         .expect("root b");
     assert_eq!(a.as_str(), "/system/extensions");
     assert_eq!(b.as_str(), "/system/extensions");
@@ -625,7 +625,7 @@ async fn third_party_subflag_off_yields_builtin_only_projection() {
     use ironclaw_filesystem::InMemoryBackend;
 
     let fs = InMemoryBackend::new();
-    let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+    let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
     let builtin = ExtensionRegistry::new();
     // Master ON, third-party OFF.
     let config = HooksActivationConfig::enabled();
@@ -752,8 +752,10 @@ body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "bloc
 /// Write `body` as `/system/extensions/<id>/manifest.toml` on `fs`.
 async fn write_manifest<F: ironclaw_filesystem::RootFilesystem>(fs: &F, id: &str, body: &str) {
     fs.write_file(
-        &ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{id}/manifest.toml"))
-            .expect("manifest path"),
+        &ironclaw_host_api::path::VirtualPath::new(format!(
+            "/system/extensions/{id}/manifest.toml"
+        ))
+        .expect("manifest path"),
         body.as_bytes(),
     )
     .await
@@ -773,7 +775,7 @@ async fn malformed_sibling_manifest_does_not_drop_the_whole_third_party_set() {
     write_manifest(&fs, "bad", "not valid toml {{{").await;
     write_manifest(&fs, "good-b", &manifest_toml_with_hook("good-b")).await;
 
-    let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+    let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
     let config = HooksActivationConfig::enabled().with_third_party_enabled(true);
     let projection_registry = build_hook_projection_registry(
         ExtensionRegistry::new(),
@@ -818,7 +820,7 @@ async fn product_adapter_manifest_with_hooks_survives_discovery() {
     )
     .await;
 
-    let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+    let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
     let projection_registry = build_hook_projection_registry(
         ExtensionRegistry::new(),
         Some(ThirdPartyDiscoveryInput {
@@ -845,7 +847,7 @@ async fn unreadable_extension_root_falls_back_to_builtin_only() {
     use ironclaw_filesystem::{
         DirEntry, FileStat, FilesystemError, FilesystemOperation, RootFilesystem,
     };
-    use ironclaw_host_api::VirtualPath;
+    use ironclaw_host_api::path::VirtualPath;
 
     struct UnreadableRootFs;
 
@@ -867,7 +869,7 @@ async fn unreadable_extension_root_falls_back_to_builtin_only() {
         }
     }
 
-    let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+    let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
     let config = HooksActivationConfig::enabled().with_third_party_enabled(true);
     let projection_registry = build_hook_projection_registry(
         ExtensionRegistry::new(),
@@ -900,7 +902,7 @@ async fn failed_merge_does_not_consume_hook_budget() {
     write_manifest(&fs, "alpha", &manifest_toml_with_hook("alpha")).await;
     write_manifest(&fs, "beta", &manifest_toml_with_hook("beta")).await;
 
-    let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+    let tenant = ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant");
     let config = HooksActivationConfig::enabled().with_third_party_enabled(true);
 
     // Seed the builtin registry with a package whose id collides with
@@ -977,7 +979,7 @@ body = { mode = "nonsense" }
         &manifest_toml("broken-ext", hooks_block),
     ));
 
-    let real_tenant = ironclaw_host_api::TenantId::new("acme-real-tenant").expect("tenant");
+    let real_tenant = ironclaw_host_api::ids::TenantId::new("acme-real-tenant").expect("tenant");
 
     let (factory, captured) = super::audit::test_capture::with_capture(|| {
         build_hook_dispatcher_builder_factory_for_tenant(

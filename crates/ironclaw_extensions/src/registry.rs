@@ -4,7 +4,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, ExtensionId};
+use ironclaw_host_api::{
+    capability::CapabilityDescriptor,
+    ids::{CapabilityId, ExtensionId},
+};
 use parking_lot::RwLock;
 
 use crate::{CapabilityVisibility, ExtensionError, ExtensionPackage};
@@ -302,7 +305,7 @@ pub(crate) fn validate_package_consistency(
 mod tests {
     use std::thread;
 
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
     use super::*;
     use crate::{ExtensionManifest, ManifestSource};

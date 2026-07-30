@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    ScopedPath, TenantId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{InvocationId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 
 use super::*;

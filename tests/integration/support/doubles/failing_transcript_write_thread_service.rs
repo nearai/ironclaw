@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,

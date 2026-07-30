@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 use crate::commands::{
-    CommandAudience, CommandResultView, declared_command_help_text, product_command_descriptors,
+    CommandAudience, CommandResultView, declared_command_help_text,
+    declared_command_help_text_with_prefix, product_command_descriptors,
     render_command_result_text,
 };
 use crate::{
@@ -205,7 +206,10 @@ impl RunDeliveryObserver {
         }
     }
 
-    pub fn with_enabled_commands<I, S>(mut self, commands: I) -> Self
+    /// `prefix` is the channel's manifest-declared
+    /// `[channel.presentation].command_prefix` (e.g. an app-scoped
+    /// dispatcher's `"/ironclaw "`); `None` renders the bare `/{name}` form.
+    pub fn with_enabled_commands<I, S>(mut self, commands: I, prefix: Option<&str>) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -224,7 +228,7 @@ impl RunDeliveryObserver {
             })
             .map(|name| name.as_ref().to_string())
             .collect();
-        self.command_help_text = declared_command_help_text(user_visible);
+        self.command_help_text = declared_command_help_text_with_prefix(user_visible, prefix);
         self
     }
 

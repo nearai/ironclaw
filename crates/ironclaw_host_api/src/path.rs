@@ -4,7 +4,7 @@
 //! [`HostPath`] is backend-internal and intentionally not serializable.
 //! [`VirtualPath`] names canonical durable roots such as `/projects` or
 //! `/system/extensions`. [`ScopedPath`] is what runtimes receive through a
-//! [`MountView`](crate::MountView), such as `/workspace/README.md`. This split is
+//! [`MountView`](crate::mount::MountView), such as `/workspace/README.md`. This split is
 //! a core containment invariant.
 
 use std::fmt;
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 /// Physical host/backend path. This type is intentionally not serializable.
 #[derive(Clone, PartialEq, Eq, Hash)]

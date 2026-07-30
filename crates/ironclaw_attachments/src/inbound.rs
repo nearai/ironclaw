@@ -12,7 +12,7 @@ use ironclaw_common::{AttachmentKind, AttachmentRef, canonical_extension, kind_f
 use ironclaw_filesystem::{
     Entry, FilesystemError, RootFilesystem, ScopedAtomicSubtreeEntry, ScopedFilesystem,
 };
-use ironclaw_host_api::{InboundAttachment, ResourceScope, ScopedPath};
+use ironclaw_host_api::{attachment::InboundAttachment, path::ScopedPath, resource::ResourceScope};
 use sha2::{Digest, Sha256};
 
 use crate::budgets::DEFAULT_ATTACHMENT_BUDGETS;
@@ -35,7 +35,7 @@ const BATCH_MANIFEST_FILENAME: &str = ".ironclaw-attachment-batch-v1";
 /// extraction finish before one atomic subtree creation publishes the complete
 /// message batch; any failure leaves the message prefix absent.
 ///
-/// [`ScopedPath`]: ironclaw_host_api::ScopedPath
+/// [`ScopedPath`]: ironclaw_host_api::path::ScopedPath
 pub async fn land_inbound_attachments<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -242,8 +242,10 @@ mod tests {
     use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        ScopedPath, TenantId, UserId, VirtualPath,
+        ids::{InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, ScopedPath, VirtualPath},
+        resource::ResourceScope,
     };
 
     // The crate no longer exports a default alias (the host composition owns

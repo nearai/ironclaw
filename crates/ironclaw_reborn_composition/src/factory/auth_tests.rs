@@ -10,8 +10,12 @@ use ironclaw_auth::{
 };
 use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
@@ -335,15 +339,15 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -380,15 +384,15 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -518,21 +522,22 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
     let egress = Arc::new(RecordingOAuthEgress::ok(
         br#"{"access_token":"vendor-access","refresh_token":"vendor-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
     ));
-    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
-        "method": "oauth2_code",
-        "display_name": "Vendor account",
-        "authorization_endpoint": "https://mcp.vendorco.example/authorize",
-        "token_endpoint": "https://mcp.vendorco.example/token",
-        "scopes": ["workspace"],
-        "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
-        "token_response": {
-            "access_token": "/access_token",
-            "refresh_token": "/refresh_token",
-            "expires_in": "/expires_in",
-            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
-        },
-    }))
-    .expect("vendor recipe parses");
+    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+        serde_json::from_value(serde_json::json!({
+            "method": "oauth2_code",
+            "display_name": "Vendor account",
+            "authorization_endpoint": "https://mcp.vendorco.example/authorize",
+            "token_endpoint": "https://mcp.vendorco.example/token",
+            "scopes": ["workspace"],
+            "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
+            "token_response": {
+                "access_token": "/access_token",
+                "refresh_token": "/refresh_token",
+                "expires_in": "/expires_in",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+        }))
+        .expect("vendor recipe parses");
 
     #[derive(Debug)]
     struct StaticTestCredentials;
@@ -542,7 +547,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError>
         {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
@@ -842,12 +847,17 @@ async fn submit_and_block_provider_auth_run(
         &scope,
         run_id,
         GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
-        vec![ironclaw_host_api::RuntimeCredentialAuthRequirement {
-            provider: ironclaw_host_api::VendorId::new(provider).unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ironclaw_host_api::ExtensionId::new(requester_extension).unwrap(),
-            provider_scopes: Vec::new(),
-        }],
+        vec![
+            ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
+                provider: ironclaw_host_api::ids::VendorId::new(provider).unwrap(),
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: Vec::new(),
+                },
+                requester_extension: ironclaw_host_api::ids::ExtensionId::new(requester_extension)
+                    .unwrap(),
+                provider_scopes: Vec::new(),
+            },
+        ],
     )
     .await;
     run_id
@@ -858,7 +868,7 @@ async fn suspend_auth_process(
     scope: &TurnScope,
     run_id: TurnRunId,
     gate_ref: GateRef,
-    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) {
     let worker_id = ProcessWorkerId::from_trusted(format!("auth-test-{run_id}"));
     let claimed = transition

@@ -15,7 +15,7 @@
 //! (a read-only mount fails closed).
 //!
 //! [`ScopedFilesystem`]: ironclaw_filesystem::ScopedFilesystem
-//! [`MountPermissions`]: ironclaw_host_api::MountPermissions
+//! [`MountPermissions`]: ironclaw_host_api::mount::MountPermissions
 
 mod budgets;
 mod inbound;

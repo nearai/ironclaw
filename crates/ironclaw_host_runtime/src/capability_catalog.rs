@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, VirtualPath,
+    capability::CapabilityDescriptor, capability_profile::CapabilityProfileSchemaRef,
+    ids::CapabilityId, path::VirtualPath,
 };
 use serde_json::Value;
 

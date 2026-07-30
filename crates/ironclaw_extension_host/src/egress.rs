@@ -15,8 +15,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    NetworkMethod, NetworkScheme, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
-    RestrictedEgressResponse, RuntimeCredentialTarget, SecretHandle,
+    action::{NetworkMethod, NetworkScheme},
+    http::RuntimeCredentialTarget,
+    ids::SecretHandle,
+    tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    },
 };
 
 use crate::lifecycle::EgressFactory;
@@ -53,7 +57,7 @@ pub struct DeclaredChannelEgress {
     /// Declared body-credential bindings: each maps a handle to the RFC 6901
     /// JSON pointer where the host inserts its resolved value. A request
     /// naming an undeclared handle is rejected before any transport activity.
-    pub body_credentials: Vec<ironclaw_host_api::ChannelBodyCredentialDescriptor>,
+    pub body_credentials: Vec<ironclaw_host_api::channel::ChannelBodyCredentialDescriptor>,
     pub paths: Vec<String>,
     pub path_prefixes: Vec<String>,
     pub request_body_limit_bytes: Option<u64>,
@@ -239,7 +243,7 @@ impl PolicyEnforcedChannelEgress {
             response_body_limit: declared
                 .response_body_limit_bytes
                 .unwrap_or(CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
-                .min(ironclaw_host_api::MAX_CHANNEL_EGRESS_TRANSFER_BYTES),
+                .min(ironclaw_host_api::channel::MAX_CHANNEL_EGRESS_TRANSFER_BYTES),
             timeout_ms: CHANNEL_EGRESS_TIMEOUT_MS,
         })
     }
@@ -286,7 +290,9 @@ impl DeclaredChannelEgress {
     }
 
     /// Lift one resolved `[[channel.egress]]` declaration into policy form.
-    pub fn from_descriptor(descriptor: &ironclaw_host_api::ChannelEgressDescriptor) -> Self {
+    pub fn from_descriptor(
+        descriptor: &ironclaw_host_api::channel::ChannelEgressDescriptor,
+    ) -> Self {
         Self {
             scheme: descriptor.scheme,
             host: descriptor.host.clone(),
@@ -327,7 +333,7 @@ impl EgressFactory for TransportBackedEgressFactory {
         &self,
         extension_id: &str,
         installation_id: &str,
-        declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+        declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(PolicyEnforcedChannelEgress::new(
             extension_id,
@@ -510,10 +516,12 @@ mod tests {
     async fn declared_body_credential_is_approved_with_its_declared_pointer() {
         let mut declared = declared_vendor();
         declared[0].request_body_limit_bytes = Some(256);
-        declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
-            handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
-            pointer: "/secret_token".to_string(),
-        }];
+        declared[0].body_credentials = vec![
+            ironclaw_host_api::channel::ChannelBodyCredentialDescriptor {
+                handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
+                pointer: "/secret_token".to_string(),
+            },
+        ];
         let (egress, transport) = egress_over(declared);
         let mut request = post("https://vendor.example/api/setWebhook");
         request.body_credentials = vec![SecretHandle::new("vendor_webhook_secret").unwrap()];
@@ -550,10 +558,12 @@ mod tests {
 
         // Declared for a DIFFERENT handle: still rejected.
         let mut declared = declared_vendor();
-        declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
-            handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
-            pointer: "/secret_token".to_string(),
-        }];
+        declared[0].body_credentials = vec![
+            ironclaw_host_api::channel::ChannelBodyCredentialDescriptor {
+                handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
+                pointer: "/secret_token".to_string(),
+            },
+        ];
         let (egress, transport) = egress_over(declared);
         let mut request = post("https://vendor.example/api/setWebhook");
         request.body_credentials = vec![SecretHandle::new("some_other_secret").unwrap()];
@@ -568,10 +578,12 @@ mod tests {
     #[tokio::test]
     async fn duplicate_body_credential_opt_in_is_rejected_before_transport() {
         let mut declared = declared_vendor();
-        declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
-            handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
-            pointer: "/secret_token".to_string(),
-        }];
+        declared[0].body_credentials = vec![
+            ironclaw_host_api::channel::ChannelBodyCredentialDescriptor {
+                handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
+                pointer: "/secret_token".to_string(),
+            },
+        ];
         let (egress, transport) = egress_over(declared);
         let mut request = post("https://vendor.example/api/setWebhook");
         request.body_credentials = vec![

@@ -4,8 +4,9 @@
 // a home below both is the only one where the vocabulary can have a single
 // definition instead of a hand-maintained copy per crate.
 use ironclaw_host_api::{
-    CapabilityRecoveryHint, DispatchInputIssueCode, FailureKind, HostRemediation,
-    SameCallRetryConstraint,
+    dispatch::DispatchInputIssueCode,
+    host_remediation::HostRemediation,
+    result_meta::{CapabilityRecoveryHint, FailureKind, SameCallRetryConstraint},
 };
 use serde::{Deserialize, Serialize};
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
@@ -17,7 +18,8 @@ pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum size of a model-visible free-text diagnostic. Larger than the
 /// summary cap because the diagnostic carries raw (secret-scrubbed) error text.
-pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES;
+pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize =
+    ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

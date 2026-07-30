@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::WorkspaceFile;
+use ironclaw_host_api::attachment::WorkspaceFile;
 use ironclaw_host_api::product_adapter::{
     ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
 };
-use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
+use ironclaw_host_api::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
 use super::*;
 
@@ -73,7 +73,8 @@ fn envelope_with_reply(
 
 fn workspace_file(filename: Option<&str>, mime_type: &str, bytes: &[u8]) -> WorkspaceFile {
     WorkspaceFile {
-        path: ironclaw_host_api::ScopedPath::new("/workspace/report.pdf").expect("workspace path"),
+        path: ironclaw_host_api::path::ScopedPath::new("/workspace/report.pdf")
+            .expect("workspace path"),
         filename: filename.map(str::to_string),
         mime_type: mime_type.to_string(),
         bytes: bytes.to_vec(),

@@ -3,14 +3,14 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use serde::{Deserialize, Serialize};
 
 use crate::CapabilityActivityId;
 use crate::run_profile::compaction::{CompactionInitiator, LoopCompactionPort};
 use crate::run_profile::system_inference::SystemInferenceTaskId;
 
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 
 use super::capability::LoopCapabilityPort;
 use super::checkpoint::{LoopCheckpointKind, LoopCheckpointPort};

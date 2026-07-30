@@ -88,7 +88,7 @@ fn source_channel(value: &'static str) -> Option<RunOriginAdapter> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::UserId;
+    use ironclaw_host_api::ids::UserId;
 
     fn owner() -> TurnOwner {
         TurnOwner::Personal {

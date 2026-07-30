@@ -33,7 +33,7 @@ use ironclaw_extension_host::{
     SnapshotConflict,
 };
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
+use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
 use ironclaw_product::{
     ChannelAdapter, ChannelAttachmentRef, ChannelError, DeliveryReport, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, ImmediateResponse, InboundBatchFragment,
@@ -224,7 +224,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         Err(ChannelError::Unsupported)
     }
@@ -1463,11 +1463,11 @@ impl ChannelAdapter for GenerationChannelAdapter {
     async fn fetch_attachment(
         &self,
         attachment: &ChannelAttachmentRef,
-        egress: &dyn ironclaw_host_api::RestrictedEgress,
-    ) -> Result<ironclaw_host_api::InboundAttachment, ChannelError> {
+        egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+    ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         egress
-            .send(ironclaw_host_api::RestrictedEgressRequest {
-                method: ironclaw_host_api::NetworkMethod::Post,
+            .send(ironclaw_host_api::tool_adapter::RestrictedEgressRequest {
+                method: ironclaw_host_api::action::NetworkMethod::Post,
                 url: format!("https://{}/files", self.vendor_host),
                 headers: Vec::new(),
                 body: None,
@@ -1479,7 +1479,7 @@ impl ChannelAdapter for GenerationChannelAdapter {
                 reason: error.to_string(),
                 retryable: true,
             })?;
-        Ok(ironclaw_host_api::InboundAttachment {
+        Ok(ironclaw_host_api::attachment::InboundAttachment {
             id: attachment.descriptor.external_file_id.clone(),
             mime_type: attachment.descriptor.mime_type.clone(),
             filename: attachment.descriptor.filename.clone(),
@@ -1490,7 +1490,7 @@ impl ChannelAdapter for GenerationChannelAdapter {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         Err(ChannelError::Unsupported)
     }
@@ -1538,13 +1538,15 @@ impl ironclaw_extension_host::egress::ChannelEgressTransport for GenerationTrans
     async fn execute(
         &self,
         approved: ironclaw_extension_host::egress::ApprovedChannelEgress,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
         self.urls
             .lock()
             .expect("transport urls lock")
             .push(approved.url);
-        Ok(ironclaw_host_api::RestrictedEgressResponse {
+        Ok(ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
             status: 200,
             body: Vec::new(),
         })

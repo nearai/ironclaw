@@ -12,9 +12,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest};
 use ironclaw_host_api::{
-    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
-    ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    host_port::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+    },
+    tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    },
 };
 use ironclaw_product::{
     ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
@@ -252,7 +256,7 @@ pub fn first_party_bundles_from_inventory() -> Vec<crate::FirstPartyPackageBundl
     use crate::{FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding};
     use ironclaw_first_party_extensions::is_gsuite_extension_id;
     use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     bundled_packages()
         .into_iter()
@@ -438,7 +442,7 @@ impl EgressFactory for FakeEgressFactory {
         &self,
         _extension_id: &str,
         _installation_id: &str,
-        _declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+        _declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllEgress)
     }

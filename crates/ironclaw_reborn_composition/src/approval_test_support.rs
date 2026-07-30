@@ -2,9 +2,13 @@ use ironclaw_approvals::ApprovalRequestStorePort as _;
 use ironclaw_approvals::{
     ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStorePort as _,
 };
-use ironclaw_host_api::MountView;
+use ironclaw_host_api::mount::MountView;
 use ironclaw_host_api::{
-    Action, CapabilityId, ExecutionContext, FailureKind, Principal, ResourceEstimate,
+    action::Action,
+    ids::CapabilityId,
+    resource::ResourceEstimate,
+    result_meta::FailureKind,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome};
 use std::sync::Arc;

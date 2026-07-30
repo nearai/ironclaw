@@ -155,7 +155,7 @@ pub(crate) fn terminal_warning_control_message(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -323,7 +323,7 @@ mod tests {
         let mut state = LoopExecutionState::initial_for_run(&test_run_context());
         state.stop_state.repeated_call_warning = Some(RepeatedCallWarningState::pending_render(
             CapabilityCallSignature::from_call(
-                ironclaw_host_api::CapabilityId::new("demo.echo").expect("valid"),
+                ironclaw_host_api::ids::CapabilityId::new("demo.echo").expect("valid"),
                 &serde_json::json!({"x": 1}),
             )
             .expect("valid signature"),
@@ -346,7 +346,7 @@ mod tests {
         let mut state = LoopExecutionState::initial_for_run(&test_run_context());
         state.stop_state.repeated_call_warning = Some(RepeatedCallWarningState::rendered(
             CapabilityCallSignature::from_call(
-                ironclaw_host_api::CapabilityId::new("demo.echo").expect("valid"),
+                ironclaw_host_api::ids::CapabilityId::new("demo.echo").expect("valid"),
                 &serde_json::json!({"x": 1}),
             )
             .expect("valid signature"),

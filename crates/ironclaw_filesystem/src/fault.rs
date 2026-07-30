@@ -40,7 +40,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
@@ -498,7 +498,7 @@ where
 mod tests {
     use super::*;
     use crate::{DiskFilesystem, InMemoryBackend};
-    use ironclaw_host_api::HostPath;
+    use ironclaw_host_api::path::HostPath;
 
     fn path(p: &str) -> VirtualPath {
         VirtualPath::new(p).unwrap()

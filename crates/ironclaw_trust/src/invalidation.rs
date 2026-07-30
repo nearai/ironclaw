@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
-use ironclaw_host_api::{CapabilityId, PackageIdentity, Timestamp};
+use ironclaw_host_api::{Timestamp, ids::CapabilityId, trust::PackageIdentity};
 
 use crate::decision::{AuthorityCeiling, EffectiveTrustClass, TrustDecision};
 

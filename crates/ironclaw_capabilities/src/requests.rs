@@ -1,12 +1,12 @@
-use ironclaw_host_api::CapabilityDispatchResult;
+use ironclaw_host_api::dispatch::CapabilityDispatchResult;
 use ironclaw_processes::ProcessRecord;
 
 /// Caller-facing capability spawn request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilitySpawnRequest {
-    pub context: ironclaw_host_api::ExecutionContext,
-    pub capability_id: ironclaw_host_api::CapabilityId,
-    pub estimate: ironclaw_host_api::ResourceEstimate,
+    pub context: ironclaw_host_api::scope::ExecutionContext,
+    pub capability_id: ironclaw_host_api::ids::CapabilityId,
+    pub estimate: ironclaw_host_api::resource::ResourceEstimate,
     pub input: serde_json::Value,
 }
 

@@ -15,8 +15,8 @@ pub mod redaction;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use crate::ProtocolAuthFailure;
-pub use crate::ProtocolHttpEgressError;
+pub use crate::product_adapter_error::ProtocolAuthFailure;
+pub use crate::product_adapter_error::ProtocolHttpEgressError;
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{

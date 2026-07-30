@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProductSurfaceError;
+use ironclaw_host_api::product_surface::ProductSurfaceError;
 
 use crate::binding::route_kind_for_trigger;
 use crate::command_dispatch::{
@@ -85,6 +85,11 @@ impl ProductCommandAdmissionService for DirectConversationCommandAdmission {
             return Ok(ProductCommandAdmission::Rejected(
                 ProductRejection::permanent(
                     ProductRejectionKind::InvalidRequest,
+                    // Internal-only `ProductRejection.reason`: the observer never
+                    // echoes it (it renders its own role-filtered, prefix-aware
+                    // `command_help_text` instead), so this stays the bare
+                    // `/{name}` form rather than threading the channel's display
+                    // prefix through admission.
                     declared_command_help_text(&self.allowed_commands),
                 ),
             ));

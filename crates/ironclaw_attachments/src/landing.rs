@@ -2,7 +2,7 @@
 //! the filesystem authority.
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
+use ironclaw_host_api::{error::HostApiError, path::ScopedPath, resource::ResourceScope};
 
 /// Subdirectory, under the project mount, where landed attachments live.
 pub const ATTACHMENTS_DIR: &str = "attachments";
@@ -157,7 +157,7 @@ pub fn attachment_scoped_path(
 /// enforce the same bound on a streaming reader *before* buffering the full
 /// `Vec<u8>`, so an oversized upload is rejected without full materialization.
 ///
-/// [`MountPermissions`]: ironclaw_host_api::MountPermissions
+/// [`MountPermissions`]: ironclaw_host_api::mount::MountPermissions
 pub async fn land_attachment<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -188,8 +188,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, TenantId,
-        UserId, VirtualPath,
+        ids::{InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
 
     const PROJECT_TARGET: &str = "/projects/workspace";

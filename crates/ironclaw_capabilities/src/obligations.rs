@@ -1,7 +1,11 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDispatchResult, CapabilityId, ExecutionContext, MountView, Obligation,
-    ResourceEstimate, ResourceReservation, RuntimeCredentialAuthRequirement,
+    decision::{Obligation, RuntimeCredentialAuthRequirement},
+    dispatch::CapabilityDispatchResult,
+    ids::CapabilityId,
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceReservation},
+    scope::ExecutionContext,
 };
 use thiserror::Error;
 

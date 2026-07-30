@@ -1,7 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, FailureKind, RuntimeKind};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId},
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{

@@ -1,6 +1,9 @@
 use std::time::SystemTime;
 
-use ironclaw_host_api::{MountGrant, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    mount::MountGrant,
+    path::{ScopedPath, VirtualPath},
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedPath {

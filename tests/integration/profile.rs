@@ -36,12 +36,13 @@ async fn read_back_run_context(tenant_id: &str, user_id: &str) -> LoopRunContext
         .await
         .expect("resolve interactive run profile");
     let scope = TurnScope::new(
-        ironclaw_host_api::TenantId::new(tenant_id).expect("valid tenant id"),
+        ironclaw_host_api::ids::TenantId::new(tenant_id).expect("valid tenant id"),
         None,
         None,
-        ironclaw_host_api::ThreadId::new("thread-profile-itest").expect("valid thread id"),
+        ironclaw_host_api::ids::ThreadId::new("thread-profile-itest").expect("valid thread id"),
     );
-    let actor = TurnActor::new(ironclaw_host_api::UserId::new(user_id).expect("valid user id"));
+    let actor =
+        TurnActor::new(ironclaw_host_api::ids::UserId::new(user_id).expect("valid user id"));
     LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
         .with_actor(actor)
 }
