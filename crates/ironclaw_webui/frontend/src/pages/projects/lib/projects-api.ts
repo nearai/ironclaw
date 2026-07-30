@@ -17,9 +17,7 @@ import {
 } from "../../../lib/api";
 
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
-// expect. Mission/spend/gate metrics default to 0 in the components (`|| 0`),
-// so they render cleanly before those endpoints exist. `goals` is read from the
-// extensible `metadata` bag.
+// expect. `goals` is read from the extensible `metadata` bag.
 function toPageProject(project) {
   if (!project) return null;
   // The server constrains `metadata` to a JSON object or null
@@ -43,7 +41,6 @@ function toPageProject(project) {
     metadata,
     created_at: project.created_at,
     updated_at: project.updated_at,
-    health: project.state === "archived" ? "muted" : "green",
   };
 }
 
@@ -61,7 +58,7 @@ function toPageThread(thread) {
 export async function fetchProjectsOverview() {
   const response = await apiListProjects({ limit: 200 });
   const projects = (response?.projects || []).map(toPageProject);
-  return { attention: [], projects };
+  return { projects };
 }
 
 export async function fetchProjectDetail(projectId) {

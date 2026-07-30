@@ -403,13 +403,27 @@ test("zh-CN localizes Reborn settings copy and compact automation filters", () =
   assert.equal(pack["automations.filter.paused"], "已暂停");
 });
 
-test("zh-CN localizes Reborn Projects summary copy", () => {
+test("locale packs include project access roles", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of [
+      "projects.projectRole.owner",
+      "projects.projectRole.editor",
+      "projects.projectRole.viewer",
+    ]) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("zh-CN localizes API-backed Projects overview copy", () => {
   const pack = loadLocalePack("zh-CN");
 
   assert.equal(pack["projects.summary.projects"], "项目");
-  assert.equal(pack["projects.summary.attentionQueue"], "关注队列");
-  assert.equal(pack["projects.summary.spendToday"], "今日花费");
-  assert.equal(pack["projects.card.pendingGates"], "待处理门禁：{count}");
+  assert.equal(pack["projects.status.active"], "活跃");
+  assert.equal(pack["projects.health.muted"], "已归档");
+  assert.equal(pack["projects.projectRole.owner"], "所有者");
   assert.equal(pack["projects.files.label"], "文件");
 });
 
