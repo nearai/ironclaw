@@ -227,6 +227,14 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
+      - name: Validate product-surface evidence contracts
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_product_surface_coverage.py
+          tests/e2e/scenarios/test_provider_capability_inventory.py
+          tests/e2e/scenarios/test_journey_coverage.py
+          -q
+
       - id: product_surface_coverage
         name: Generate product-surface coverage matrix
         run: |

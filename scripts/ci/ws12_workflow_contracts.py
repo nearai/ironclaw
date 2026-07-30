@@ -17,6 +17,8 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/reborn-e2e.yml": (
         "merge_group:",
         "push:",
+        "Validate product-surface evidence contracts",
+        "tests/e2e/scenarios/test_product_surface_coverage.py",
         "tests/e2e/scenarios/test_journey_coverage.py",
         "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
         "tests/e2e/scenarios/test_provider_fault_proxy.py",

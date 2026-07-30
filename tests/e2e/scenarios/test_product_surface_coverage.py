@@ -134,15 +134,24 @@ def test_owned_gaps_and_live_only_rows_are_prominent_in_markdown():
 def test_reborn_e2e_generates_and_uploads_the_product_surface_artifact():
     workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(encoding="utf-8")
 
+    evidence_contract_step = workflow.index(
+        "Validate product-surface evidence contracts"
+    )
+    generation_step = workflow.index("Generate product-surface coverage matrix")
+    assert evidence_contract_step < generation_step
+    for test_path in (
+        "tests/e2e/scenarios/test_product_surface_coverage.py",
+        "tests/e2e/scenarios/test_provider_capability_inventory.py",
+        "tests/e2e/scenarios/test_journey_coverage.py",
+    ):
+        assert test_path in workflow[evidence_contract_step:generation_step]
     assert "product_surface_coverage.py" in workflow
     assert "product-surface-coverage-${{" in workflow
     assert "artifacts/product-surface-coverage/" in workflow
     assert "$GITHUB_STEP_SUMMARY" in workflow
     assert 'source_commit="$(git rev-parse HEAD)"' in workflow
-    assert workflow.index("Generate product-surface coverage matrix") < workflow.index(
-        "Run Reborn WebUI v2 smoke"
-    )
-    assert workflow.index("Generate product-surface coverage matrix") < workflow.index(
+    assert generation_step < workflow.index("Run Reborn WebUI v2 smoke")
+    assert generation_step < workflow.index(
         "Run harvested QA replay and provider contracts with Emulate"
     )
     upload_step = workflow[workflow.index("Upload product-surface coverage matrix") :]
