@@ -56,7 +56,9 @@ pub use ids::{
     TriggerOriginRef,
 };
 pub use outbound_state_store::OutboundStateStore;
-pub use reply_attachment_intents::{ReplyAttachmentIntent, ReplyAttachmentIntentPort};
+pub use reply_attachment_intents::{
+    ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
 };

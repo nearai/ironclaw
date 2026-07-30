@@ -8,11 +8,41 @@ use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_host_api::{ResourceScope, RunId, ScopedPath};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::OutboundError;
 
 const MAX_REPLY_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_REPLY_ATTACHMENT_MIME_TYPE_BYTES: usize = 127;
+
+/// Opaque model-visible identity for one registered reply attachment.
+///
+/// The handle is deterministic for a `(run, scoped path)` pair so capability
+/// retries and transcript finalization independently derive the same value
+/// without persisting a second identifier or exposing the workspace path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ReplyAttachmentHandle(String);
+
+impl ReplyAttachmentHandle {
+    pub fn for_run_path(run_id: &RunId, path: &ScopedPath) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(run_id.as_uuid().as_bytes());
+        digest.update([0]);
+        digest.update(path.as_str().as_bytes());
+        Self(format!("att_{}", hex::encode(digest.finalize())))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ReplyAttachmentHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,4 +162,28 @@ fn is_mime_token_character(character: char) -> bool {
             character,
             '!' | '#' | '$' | '&' | '^' | '_' | '.' | '+' | '-'
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_attachment_handle_is_deterministic_opaque_and_path_distinct() {
+        let run_id = RunId::new();
+        let report = ScopedPath::new("/workspace/report.csv").unwrap();
+        let chart = ScopedPath::new("/workspace/chart.png").unwrap();
+
+        let first = ReplyAttachmentHandle::for_run_path(&run_id, &report);
+        let retry = ReplyAttachmentHandle::for_run_path(&run_id, &report);
+        let other = ReplyAttachmentHandle::for_run_path(&run_id, &chart);
+        let other_run = ReplyAttachmentHandle::for_run_path(&RunId::new(), &report);
+
+        assert_eq!(first, retry);
+        assert_ne!(first, other);
+        assert_ne!(first, other_run);
+        assert!(first.as_str().starts_with("att_"));
+        assert!(!first.as_str().contains("workspace"));
+        assert!(!first.as_str().contains("report"));
+    }
 }
