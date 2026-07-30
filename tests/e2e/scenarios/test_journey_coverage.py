@@ -676,6 +676,8 @@ def test_every_journey_has_complete_typed_executable_evidence():
             _assert_python_evidence(case, case.evidence)
         else:
             _assert_rust_evidence(case, case.evidence)
+        if isinstance(case, ProductJourneyCase) and case.browser_evidence is not None:
+            _assert_python_evidence(case, case.browser_evidence)
 
 
 def test_every_supported_ingress_and_delivery_target_has_journey_evidence():

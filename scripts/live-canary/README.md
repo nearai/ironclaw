@@ -117,6 +117,15 @@ Run the full QA-sheet-backed Reborn suite:
 LANE=reborn-webui-v2-live-qa CASES=all scripts/live-canary/run.sh
 ```
 
+The Reborn WebUI v2 runner preserves every case attempt in `results.json`. A
+case that fails and then succeeds is reported with `retry_outcome: "flake"` and
+remains counted separately in `green-run-explanation.json`; it is not presented
+as an ordinary first-pass success. Cases that create routines, trigger or
+verify external deliveries, assert exactly-once behavior, or guard
+security-sensitive output declare `retry_policy: "never"` in
+`case-manifest.json`, so a retry cannot duplicate a side effect or mask a
+deterministic failure.
+
 Use CI-style browser installation for auth browser lanes:
 
 ```bash

@@ -15,6 +15,7 @@ from journey_types import (
     JourneyDeliveryTarget,
     JourneyExecution,
     JourneyIngress,
+    LiveEvidence,
     ObservableAssertion,
     ProductJourneyCase,
     ProviderJourneyCase,
@@ -111,6 +112,8 @@ def unreset_mutating_tools() -> frozenset[str]:
             if tool_name not in _MUTATING_PROVIDER_TOOLS:
                 unreset.add(tool_name)
     return frozenset(unreset)
+
+
 _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_10f_slack_mention_encoding",
@@ -183,6 +186,12 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                 ),
                 evidence=_PYTEST_PROVIDER_EVIDENCE,
                 repeat_after_reset=case_id in _REPEAT_AFTER_RESET,
+                live_evidence=LiveEvidence(
+                    workflow=".github/workflows/live-canary.yml",
+                    job="reborn-webui-v2-live-qa",
+                    case_id=case_id,
+                    artifact="results.json",
+                ),
             )
         )
     return tuple(cases)
@@ -281,6 +290,10 @@ PRODUCT_JOURNEY_CASES = (
         evidence=PytestEvidence(
             source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
             test="test_reborn_v2_text_turn_persists",
+        ),
+        browser_evidence=PytestEvidence(
+            source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+            test="test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages",
         ),
     ),
     ProductJourneyCase(

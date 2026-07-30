@@ -117,14 +117,15 @@ use ironclaw_product::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
-    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
+    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -2332,14 +2333,33 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
+    let operation_id = TRACE_HOLD_AUTHORIZE_COMMAND
+        .capability_id()
+        .expect("trace hold capability id");
+
+    let response = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_host_api::ProductSurfaceInvokeRequest {
+            operation_id: operation_id.clone(),
+            input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
+                submission_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .expect("trace hold input"),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("unknown valid submission id is a no-op");
+    let decoded: RebornTraceHoldAuthorizeResponse =
+        serde_json::from_value(response.output).expect("trace hold response");
+    assert!(!decoded.authorized);
 
     let error = ProductSurface::invoke(
         &services,
         caller(),
         ironclaw_host_api::ProductSurfaceInvokeRequest {
-            operation_id: TRACE_HOLD_AUTHORIZE_COMMAND
-                .capability_id()
-                .expect("trace hold capability id"),
+            operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
             })
