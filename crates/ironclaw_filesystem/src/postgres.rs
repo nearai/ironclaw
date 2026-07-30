@@ -2384,6 +2384,8 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V32__root_filesystem_sequences.sql"),
     "\n",
     include_str!("../../../migrations/V33__root_filesystem_ordered_index_rows.sql"),
+    "\n",
+    include_str!("../../../migrations/V34__root_filesystem_ordered_index_path_collation.sql"),
 );
 
 #[cfg(test)]

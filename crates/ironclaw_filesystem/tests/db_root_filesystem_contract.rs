@@ -2592,10 +2592,7 @@ mod postgres_tests {
         let rows = fs
             .query_ordered(
                 &tenant_prefix,
-                &Filter::Eq {
-                    key: status.clone(),
-                    value: IndexValue::Text("queued".into()),
-                },
+                &Filter::All,
                 &ironclaw_filesystem::OrderedPage::new(
                     index_name,
                     status,
