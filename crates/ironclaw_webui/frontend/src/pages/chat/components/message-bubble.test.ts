@@ -482,7 +482,7 @@ test("intermediate assistant phases do not reserve a hidden meta row", async () 
 
   assert.doesNotMatch(
     html,
-    /<time|Copy message/,
+    /<time|chat\.copyMessage/,
     "intermediate utterances should not add invisible controls between tool runs",
   );
 });

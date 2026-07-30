@@ -550,6 +550,7 @@ const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+const PRODUCT_STREAM_FIRST_EVENT_WAIT: Duration = Duration::from_secs(1);
 const PRODUCT_STREAM_ACCESS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(1);
 
 fn command_result_field(label: &str, value: impl Into<String>) -> CommandResultField {
@@ -4368,22 +4369,8 @@ where
         caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-        let actor = caller.actor();
-        // Ownership probe: use the cheap read_thread probe rather than loading
-        // the full transcript. Without it a caller sharing (tenant, agent,
-        // project) could read another user's projection feed by guessing
-        // thread_id.
-        // The automation fallback allows the owner of an automation to stream
-        // events for a trigger-fired thread (which is stored under the trigger
-        // creator). The returned scope may contain an explicit owner for
-        // trigger threads.
-        //
-        // Authorization is revalidated on every poll — no caching — so a
-        // caller that loses automation visibility between polls cannot keep
-        // draining the trigger-owned stream.
-        let access = self
-            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+        let (_, subscription_request) = self
+            .resolve_projection_subscription_request(caller, request)
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(ProductSurfaceError::from_status_kind(
@@ -4392,20 +4379,6 @@ where
                 503,
                 false,
             ));
-        };
-        // Projection identity must be the thread owner, not necessarily the
-        // caller. Turn events and the runtime event stream are keyed under the
-        // identity of the actor that submitted the run (the trigger creator for
-        // trigger threads; the session user for normal threads). The caller
-        // already proved visibility via automation ownership above; using the
-        // caller's id here would filter to the wrong stream/events.
-        //
-        // For normal session threads `explicit_owner_user_id()` is `None` and
-        // we fall back to the caller's id — behaviour is unchanged.
-        let subscription_request = ProjectionSubscriptionRequest {
-            actor: access.run_actor,
-            scope: access.scope,
-            after_cursor: request.after_cursor,
         };
         let events = event_stream
             .drain(subscription_request)
@@ -4864,13 +4837,15 @@ where
         {
             let subscription =
                 open_product_surface_event_subscription(self, caller, request).await?;
-            return match subscription.next().await {
-                Some(Ok(mut response)) => {
+            return match tokio::time::timeout(PRODUCT_STREAM_FIRST_EVENT_WAIT, subscription.next())
+                .await
+            {
+                Ok(Some(Ok(mut response))) => {
                     response.subscription = Some(subscription);
                     Ok(response)
                 }
-                Some(Err(error)) => Err(error),
-                None => Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+                Ok(Some(Err(error))) => Err(error),
+                Ok(None) | Err(_) => Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
                     events: Vec::new(),
                     next_cursor: None,
                     subscription: None,
@@ -4891,15 +4866,11 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
-    let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-    let actor = caller.actor();
-    let access = services
-        .resolve_thread_access_for_caller(
-            caller.clone(),
-            caller.turn_scope(thread_id.clone()),
-            &actor,
-        )
+    let (access, subscription_request) = services
+        .resolve_projection_subscription_request(caller.clone(), request)
         .await?;
+    let thread_id = subscription_request.scope.thread_id.clone();
+    let actor = caller.actor();
     let Some(event_stream) = &services.event_stream else {
         return Err(ProductSurfaceError::from_status_kind(
             ProductSurfaceErrorCode::Unavailable,
@@ -4915,11 +4886,7 @@ where
     let subscribed_actor = access.run_actor.clone();
     let subscribed_scope = access.scope.clone();
     let mut subscription = event_stream
-        .subscribe(ProjectionSubscriptionRequest {
-            actor: access.run_actor,
-            scope: access.scope,
-            after_cursor: request.after_cursor,
-        })
+        .subscribe(subscription_request)
         .await
         .map_err(map_projection_error)?;
     // A single-slot handoff applies backpressure without creating another
@@ -5873,6 +5840,30 @@ where
             }
             Err(err) => Err(map_ownership_probe_error(err)),
         }
+    }
+
+    async fn resolve_projection_subscription_request(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<(ResolvedThreadAccess, ProjectionSubscriptionRequest), ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        // Use the cheap ownership probe rather than loading the full
+        // transcript. The automation fallback returns the trigger creator's
+        // scope and actor when the caller owns that automation.
+        let access = self
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+            .await?;
+        // Projection identity is the actor that submitted the run, not
+        // necessarily the browser caller. The authorization probe above is
+        // the authority boundary for both one-shot drains and subscriptions.
+        let subscription_request = ProjectionSubscriptionRequest {
+            actor: access.run_actor.clone(),
+            scope: access.scope.clone(),
+            after_cursor: request.after_cursor,
+        };
+        Ok((access, subscription_request))
     }
 
     fn require_project_filesystem(

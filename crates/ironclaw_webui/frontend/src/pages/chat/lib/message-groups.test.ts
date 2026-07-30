@@ -225,6 +225,24 @@ test("groupMessages: empty intermediate assistant phases do not create blank row
   assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "b"]);
 });
 
+test("groupMessages: empty intermediate error phases remain visible", () => {
+  const grouped = groupMessages([
+    {
+      id: "failed-phase",
+      role: "assistant",
+      content: "",
+      status: "error",
+      isFinalReply: false,
+      isStreaming: false,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].type, "message");
+  assert.equal(grouped[0].message.id, "failed-phase");
+});
+
 test("groupMessages: intermediate assistant attachments remain visible", () => {
   const grouped = groupMessages([
     {

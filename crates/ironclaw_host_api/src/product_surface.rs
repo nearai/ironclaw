@@ -172,7 +172,7 @@ pub struct ProductSurfaceStreamRequest {
 }
 
 /// Generic product event stream response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProductSurfaceStreamResponse {
     pub events: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,7 +190,6 @@ pub struct ProductSurfaceStreamResponse {
 /// HTTP transports keep this receiver alive for the lifetime of the client
 /// connection. This avoids the event-loss window created by repeatedly
 /// tearing down and recreating one-event subscriptions.
-#[derive(Clone)]
 pub struct ProductSurfaceEventSubscription {
     receiver:
         Arc<AsyncMutex<mpsc::Receiver<Result<ProductSurfaceStreamResponse, ProductSurfaceError>>>>,
@@ -619,6 +618,12 @@ mod tests {
 
     use super::*;
     use crate::{AgentId, ProjectId, TenantId, UserId};
+
+    #[test]
+    fn product_stream_continuation_is_single_consumer() {
+        static_assertions::assert_not_impl_any!(ProductSurfaceEventSubscription: Clone);
+        static_assertions::assert_not_impl_any!(ProductSurfaceStreamResponse: Clone);
+    }
 
     fn caller() -> ProductSurfaceCaller {
         ProductSurfaceCaller::new(

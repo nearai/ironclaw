@@ -3810,6 +3810,46 @@ async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn product_surface_subscription_bounds_a_silent_first_event() {
+    let web_caller = caller();
+    let (event_stream, _sender) = ControlledSubscribingProjectionStream::new();
+    let services = Arc::new(
+        RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_event_stream(Arc::new(event_stream)),
+    );
+    create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
+
+    let task = tokio::spawn(async move {
+        ProductSurface::stream_events(
+            services.as_ref(),
+            web_caller,
+            ProductSurfaceStreamRequest {
+                stream_id: Some("thread-alpha".to_string()),
+                after_cursor: None,
+            },
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        task.is_finished(),
+        "a silent subscription must not suspend one-shot callers indefinitely"
+    );
+    let response = task
+        .await
+        .expect("stream task joins")
+        .expect("silent subscription returns an empty response");
+    assert!(response.events.is_empty());
+    assert!(response.subscription.is_none());
+}
+
+#[tokio::test(start_paused = true)]
 async fn product_surface_subscription_revalidates_visibility_without_blocking_events() {
     let caller = caller();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -3852,9 +3892,9 @@ async fn product_surface_subscription_revalidates_visibility_without_blocking_ev
     automation_service.revoke();
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
-    let error = subscription
-        .next()
+    let error = tokio::time::timeout(Duration::from_secs(5), subscription.next())
         .await
+        .expect("revalidation must terminate the subscription")
         .expect("revocation is surfaced")
         .expect_err("revoked visibility must stop the subscription");
 

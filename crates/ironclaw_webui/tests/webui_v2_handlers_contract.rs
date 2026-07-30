@@ -468,6 +468,7 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     event_subscription_enabled: AtomicBool,
+    hold_event_subscription_open: AtomicBool,
     cancel_run_calls: Mutex<Vec<ProductCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<ProductResolveGateRequest>>,
     retry_run_calls: Mutex<Vec<ProductRetryRunRequest>>,
@@ -570,6 +571,11 @@ impl StubServices {
 
     fn enable_event_subscription(&self) {
         self.event_subscription_enabled
+            .store(true, Ordering::Release);
+    }
+
+    fn hold_event_subscription_open(&self) {
+        self.hold_event_subscription_open
             .store(true, Ordering::Release);
     }
 
@@ -1770,6 +1776,7 @@ impl ProductSurface for StubServices {
                 .expect("lock")
                 .drain(..)
                 .collect::<Vec<_>>();
+            let hold_open = self.hold_event_subscription_open.load(Ordering::Acquire);
             let (sender, receiver) = mpsc::channel(1);
             tokio::spawn(async move {
                 for response in responses {
@@ -1789,6 +1796,9 @@ impl ProductSurface for StubServices {
                     if sender.send(response).await.is_err() {
                         return;
                     }
+                }
+                if hold_open {
+                    std::future::pending::<()>().await;
                 }
             });
             Some(ProductSurfaceEventSubscription::new(receiver))
@@ -6749,6 +6759,40 @@ async fn stream_events_forwards_one_continuous_subscription_without_poll_gaps() 
         1,
         "the SSE connection must enter the product stream method only once"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_events_emits_application_keep_alive_while_subscription_is_idle() {
+    let services = Arc::new(StubServices::default());
+    services.enable_event_subscription();
+    services.hold_event_subscription_open();
+
+    let response = router_with(services)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let mut body = response.into_body();
+    let body_task = tokio::spawn(async move {
+        collect_sse_until(&mut body, Duration::from_secs(30), |buffer| {
+            String::from_utf8_lossy(buffer).contains("event: keep_alive")
+        })
+        .await
+    });
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(15)).await;
+    tokio::task::yield_now().await;
+
+    let bytes = body_task.await.expect("SSE body task");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("event: keep_alive"), "{text}");
+    assert!(text.contains(r#"data: {"type":"keep_alive"}"#), "{text}");
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being

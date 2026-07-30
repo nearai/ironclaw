@@ -159,7 +159,8 @@ function isEmptyIntermediateAssistantPhase(msg) {
     !hasToolCalls(msg) &&
     !hasContent &&
     !hasAttachments &&
-    !msg.error
+    !msg.error &&
+    msg.status !== "error"
   );
 }
 

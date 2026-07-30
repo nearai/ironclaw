@@ -79,8 +79,11 @@ function createHarness({
         status,
         headers: new Headers({ "content-type": contentType }),
       };
-      if (response.ok && contentType.includes("text/event-stream")) {
+      if (response.ok) {
         this.hooks.onResponse?.({ response });
+        if (!contentType.includes("text/event-stream")) {
+          this.hooks.onResponseError?.({ response });
+        }
       } else {
         this.hooks.onResponseError?.({ response });
       }
@@ -211,6 +214,7 @@ test("useSSE delegates framing, credentials, and retries to EventSourcePlus", ()
     "http://localhost/events/thread-1?connection_id=browser-tab-connection",
   );
   assert.deepEqual(stream.options.headers(), { Authorization: "Bearer token-1" });
+  assert.equal(new URL(stream.url).searchParams.has("token"), false);
   assert.equal(stream.options.credentials, "same-origin");
   assert.equal(stream.options.retryStrategy, "always");
   assert.equal(stream.options.maxRetryInterval, 30_000);
@@ -268,6 +272,23 @@ test("useSSE reconnects an active run when an open stream stops delivering", () 
   watchdog.handler();
   assert.equal(stream.controller.reconnectCalls, 1);
   assert.equal(typeof stream.requestOptions.query.connection_generation, "number");
+});
+
+test("useSSE arms the watchdog when an already-active stream opens", () => {
+  const { streams, timers } = createHarness({ activityExpected: true });
+  streams[0].respond();
+
+  assert.ok(
+    timers.some((timer) => timer.delay === 30_000 && !timer.cleared),
+    "an active run must be watched even when no activity transition occurs after connect",
+  );
+});
+
+test("useSSE rejects a successful response that is not an event stream", () => {
+  const { statuses, streams } = createHarness();
+  streams[0].respond(200, "text/html");
+
+  assert.notEqual(statuses.at(-1), CONNECTION_STATUS.CONNECTED);
 });
 
 test("useSSE pauses while hidden and reconnects when visible", () => {

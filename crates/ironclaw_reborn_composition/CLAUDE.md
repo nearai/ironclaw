@@ -397,11 +397,12 @@ files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than WebUI ingress.
 
 Live cumulative assistant-text projections are published at provider cadence.
-The product-thread projection adapter uses the event-stream manager's maximum
-bounded subscriber buffer so provider-rate text does not overflow the generic
-16-item default. Reasoning, capability, and lifecycle milestones remain ordered.
-The in-memory source still records the latest projection for replay when no
-browser subscriber is active.
+The live-text publisher conflates only sub-frame microbursts within a 16 ms
+window before they reach the event-stream manager's bounded subscriber.
+Ordinary provider cadence remains incremental, while each microburst retains
+its latest cumulative snapshot. Reasoning, capability, and lifecycle milestones
+remain ordered. The in-memory source still records the latest projection for
+replay when no browser subscriber is active.
 
 The opaque WebUI projection cursor stamps its process-local live position with
 the projection-services epoch. On an epoch mismatch, resume preserves durable
@@ -441,8 +442,9 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   hidden runtime owner actor.
 - `src/projection/tests/live_progress_stream.rs::provider_rate_live_text_stays_smooth_and_precedes_tool_activity`
   — caller-level regression guard that provider-rate cumulative text remains
-  smooth without terminating the bounded WebUI subscription and that every
-  text update is published before the next capability milestone.
+  smooth without terminating the bounded WebUI subscription, provider-cadence
+  snapshots precede the next capability milestone, and a sub-frame microburst
+  retains its latest cumulative snapshot before that milestone.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,

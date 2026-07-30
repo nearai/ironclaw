@@ -113,7 +113,7 @@ use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
-use crate::webui_v2::schema::WebChatV2EventFrame;
+use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
 use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
@@ -1117,8 +1117,8 @@ const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// hosted Postgres.
 const SSE_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
 
-/// SSE keep-alive cadence. axum emits an SSE comment line every interval
-/// to keep proxies from closing the idle connection.
+/// SSE keep-alive cadence. Axum emits a comment line for proxies, and the
+/// subscription path emits a typed frame for browser application code.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// HTTP header the browser's `EventSource` sends on auto-reconnect to
@@ -1303,6 +1303,25 @@ fn sse_error_event(error: ProductSurfaceError) -> Event {
     }
 }
 
+fn sse_keep_alive_event() -> Event {
+    match Event::default()
+        .event(WebChatV2Event::KeepAlive.event_name())
+        .json_data(WebChatV2Event::KeepAlive)
+    {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::debug!(
+                target = "ironclaw_webui_v2::sse",
+                error = %error,
+                "failed to serialize SSE keep-alive payload",
+            );
+            Event::default()
+                .event("keep_alive")
+                .data(r#"{"type":"keep_alive"}"#)
+        }
+    }
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
@@ -1390,6 +1409,15 @@ fn build_sse_stream(
                                     remaining,
                                     subscription.next(),
                                 ) => result,
+                                _ = tokio::time::sleep(SSE_KEEPALIVE_INTERVAL) => {
+                                    // Axum's comment keep-alive keeps proxies
+                                    // open, but parser packages do not surface
+                                    // comments to the browser watchdog. Emit a
+                                    // typed application frame as liveness proof
+                                    // while the projection is legitimately idle.
+                                    yield Ok(sse_keep_alive_event());
+                                    continue;
+                                }
                             };
                             let response = match next {
                                 Ok(Some(Ok(response))) => response,
@@ -1397,7 +1425,14 @@ fn build_sse_stream(
                                     yield Ok(sse_error_event(error));
                                     return;
                                 }
-                                Ok(None) | Err(_) => return,
+                                Ok(None) => return,
+                                Err(_) => {
+                                    tracing::debug!(
+                                        target = "ironclaw_webui_v2::sse",
+                                        "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                                    );
+                                    return;
+                                }
                             };
                             let events = match decode_product_outbound_events(response.events) {
                                 Ok(events) => events,

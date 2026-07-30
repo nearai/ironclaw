@@ -56,6 +56,7 @@ export function useSSE({
     let disposed = false;
     let terminalErrorReceived = false;
     let connectedOnce = false;
+    let streamOpen = false;
     const request = eventStreamRequest({
       threadId,
       connectionId: SSE_CONNECTION_ID,
@@ -83,7 +84,7 @@ export function useSSE({
       if (
         disposed ||
         terminalErrorReceived ||
-        !controller ||
+        !streamOpen ||
         !activityIsExpected()
       ) {
         return;
@@ -93,7 +94,7 @@ export function useSSE({
         if (
           disposed ||
           terminalErrorReceived ||
-          !controller ||
+          !streamOpen ||
           !activityIsExpected()
         ) {
           return;
@@ -107,12 +108,12 @@ export function useSSE({
       if (disposed || terminalErrorReceived) return;
       connectedOnce = true;
       setStatus(CONNECTION_STATUS.CONNECTED);
-      scheduleActivityWatchdog();
     }
 
     function connect() {
       if (disposed || terminalErrorReceived) return;
       if (document.visibilityState === "hidden") {
+        streamOpen = false;
         setStatus(CONNECTION_STATUS.PAUSED);
         return;
       }
@@ -154,6 +155,7 @@ export function useSSE({
             return;
           }
           terminalErrorReceived = true;
+          streamOpen = false;
           clearActivityWatchdog();
           controller?.abort("non-retryable stream response");
           setStatus(CONNECTION_STATUS.DISCONNECTED);
@@ -178,6 +180,7 @@ export function useSSE({
           scheduleActivityWatchdog();
           if (type === "error" && frame.retryable === false) {
             terminalErrorReceived = true;
+            streamOpen = false;
             clearActivityWatchdog();
             controller?.abort("non-retryable stream event");
             setStatus(CONNECTION_STATUS.DISCONNECTED);
@@ -194,10 +197,18 @@ export function useSSE({
           }
         },
       });
+      if (terminalErrorReceived) {
+        streamOpen = false;
+        controller?.abort("non-retryable stream response");
+        return;
+      }
+      streamOpen = true;
+      scheduleActivityWatchdog();
     }
 
     function disconnectForHiddenTab() {
       if (disposed || terminalErrorReceived) return;
+      streamOpen = false;
       clearActivityWatchdog();
       controller?.abort("document hidden");
       setStatus(CONNECTION_STATUS.PAUSED);
@@ -210,8 +221,10 @@ export function useSSE({
       } else if (!controller) {
         connect();
       } else {
+        streamOpen = true;
         setStatus(CONNECTION_STATUS.CONNECTING);
         controller.reconnect();
+        scheduleActivityWatchdog();
       }
     }
 
@@ -227,7 +240,7 @@ export function useSSE({
     }
 
     syncActivityWatchdogRef.current = () => {
-      if (controller) {
+      if (streamOpen) {
         scheduleActivityWatchdog();
       } else {
         clearActivityWatchdog();
@@ -240,6 +253,7 @@ export function useSSE({
 
     return () => {
       disposed = true;
+      streamOpen = false;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
@@ -255,7 +269,7 @@ export function useSSE({
     // so no accepted/running frame is available to arm the watchdog. Sync it
     // when processing state changes as well as when frames arrive.
     syncActivityWatchdogRef.current();
-  }, [activityExpected]);
+  }, [activityExpected, enabled, threadId]);
 
   return { status };
 }

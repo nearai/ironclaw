@@ -205,11 +205,11 @@ async def _wait_for_automation_named(
 
 
 async def _install_fake_v2_event_stream(page) -> None:
-    await page.add_init_script(
-        """
+    script = """
         (() => {
           const nativeFetch = window.fetch.bind(window);
           const encoder = new TextEncoder();
+          const expectedAuthorization = __EXPECTED_AUTHORIZATION__;
           let activeStream = null;
           let holdNextConnection = false;
 
@@ -260,12 +260,19 @@ async def _install_fake_v2_event_stream(page) -> None:
           };
 
           window.fetch = async (input, init = {}) => {
-            const url = input instanceof Request ? input.url : String(input);
-            if (!new URL(url, window.location.href).pathname.endsWith("/events")) {
+            const request = new Request(input, init);
+            const url = new URL(request.url, window.location.href);
+            if (!url.pathname.endsWith("/events")) {
               return nativeFetch(input, init);
             }
+            if (url.searchParams.has("token")) {
+              return new Response("", { status: 400 });
+            }
+            if (request.headers.get("Authorization") !== expectedAuthorization) {
+              return new Response("", { status: 401 });
+            }
             if (!holdNextConnection) {
-              return openStreamResponse(init.signal);
+              return openStreamResponse(request.signal);
             }
             return new Promise((resolve, reject) => {
               const stream = {
@@ -275,7 +282,7 @@ async def _install_fake_v2_event_stream(page) -> None:
                 reject,
               };
               activeStream = stream;
-              init.signal?.addEventListener(
+              request.signal?.addEventListener(
                 "abort",
                 () => {
                   if (stream.closed) return;
@@ -316,6 +323,11 @@ async def _install_fake_v2_event_stream(page) -> None:
           };
         })();
         """
+    await page.add_init_script(
+        script.replace(
+            "__EXPECTED_AUTHORIZATION__",
+            json.dumps(f"Bearer {REBORN_V2_AUTH_TOKEN}"),
+        )
     )
 
 

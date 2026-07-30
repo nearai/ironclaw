@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -54,7 +54,7 @@ pub(super) struct LiveProgressMilestoneSink {
     inner: Arc<dyn LoopHostMilestoneSink>,
     publisher: Arc<LiveProjectionPublisher>,
     text_coalescer: Arc<LiveTextProjectionCoalescer>,
-    text_phase_by_run: Mutex<HashMap<TurnRunId, u64>>,
+    text_phase_by_run: RwLock<HashMap<TurnRunId, u64>>,
 }
 
 #[derive(Debug)]
@@ -111,12 +111,12 @@ impl LiveProgressMilestoneSink {
             inner,
             text_coalescer: Arc::new(LiveTextProjectionCoalescer::new(Arc::clone(&publisher))),
             publisher,
-            text_phase_by_run: Mutex::new(HashMap::new()),
+            text_phase_by_run: RwLock::new(HashMap::new()),
         }
     }
 
     fn begin_text_phase(&self, run_id: TurnRunId) {
-        let mut phases = match self.text_phase_by_run.lock() {
+        let mut phases = match self.text_phase_by_run.write() {
             Ok(phases) => phases,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -136,7 +136,7 @@ impl LiveProgressMilestoneSink {
     }
 
     fn text_id(&self, run_id: TurnRunId) -> String {
-        let phases = match self.text_phase_by_run.lock() {
+        let phases = match self.text_phase_by_run.read() {
             Ok(phases) => phases,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -147,7 +147,7 @@ impl LiveProgressMilestoneSink {
     }
 
     fn finish_run(&self, run_id: TurnRunId) {
-        let mut phases = match self.text_phase_by_run.lock() {
+        let mut phases = match self.text_phase_by_run.write() {
             Ok(phases) => phases,
             Err(poisoned) => poisoned.into_inner(),
         };

@@ -151,9 +151,10 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   navigation from stranding the replacement stream behind the cap; distinct
   tabs still consume distinct slots.
 - A successful facade subscription emits an application-level `keep_alive`
-  frame immediately after admission. Browser connection state uses that frame
-  as proof that the projection tail is ready instead of waiting for a model
-  delta or the periodic transport keep-alive.
+  frame immediately after admission and every 15 seconds while the projection
+  is idle. Browser connection state and its activity watchdog use those frames
+  as liveness proof; Axum's comment-only transport keep-alive still protects
+  proxies, but SSE parser packages do not expose comments to application code.
 - Subscription-capable product surfaces keep one projection subscription alive
   for the entire SSE connection. Do not rebuild a one-event subscription after
   each frame: model/tool milestones emitted between teardown and resubscribe
