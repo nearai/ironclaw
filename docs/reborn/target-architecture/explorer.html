@@ -46,42 +46,27 @@
   .legend .done{background:var(--kept)}.legend .wip{background:var(--accent)}.legend .planned{background:var(--ink-faint)}
 
   .explorer{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:26px;align-items:start;padding-bottom:20px}
-  .band{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 16px}
-  .band+.band,.band+.rail,.rail+.band{margin-top:10px}
-  .band-label{font-family:var(--mono);font-size:.67rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:11px;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
-  .band-label .role{text-transform:none;letter-spacing:.01em;font-size:.72rem;color:var(--ink-faint);font-weight:400}
-  .row{display:flex;flex-wrap:wrap;gap:8px}
-  .node{cursor:pointer;flex:1 1 auto;min-width:116px;text-align:center;font-family:var(--mono);font-size:.82rem;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;transition:border-color .14s,transform .08s;position:relative}
-  .node:hover{border-color:var(--accent-line);transform:translateY(-1px)}
-  .node:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .node.wide{flex:1 1 100%}
-  .node.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
-  .node small{display:block;font-size:.64rem;color:var(--ink-faint);margin-top:2px;font-weight:400}
-  .rail{display:flex;align-items:center;gap:12px;margin:10px 2px}
-  .rail .l{flex:1;height:1px;background:repeating-linear-gradient(90deg,var(--sub) 0 6px,transparent 6px 12px);opacity:.5}
-  .rail .pill{cursor:pointer;font-family:var(--mono);font-size:.76rem;color:var(--sub);border:1px solid var(--sub);background:var(--sub-soft);border-radius:100px;padding:5px 14px;white-space:nowrap;font-weight:600;position:relative}
-  .rail .pill:hover{box-shadow:0 0 0 3px color-mix(in srgb,var(--sub) 16%,transparent)}
-  .rail .pill:focus-visible{outline:2px solid var(--sub);outline-offset:2px}
-  .kernel{border:1.5px solid var(--accent-line);background:linear-gradient(180deg,color-mix(in srgb,var(--accent-soft) 55%,var(--surface)),var(--surface) 62%)}
-  .kernel>.band-label{color:var(--accent);font-weight:700}
-  .kernel>.band-label .role{color:var(--accent);opacity:.82}
-  .krow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
-  .kcell{cursor:pointer;text-align:left;background:var(--surface);border:1px solid var(--accent-line);border-radius:8px;padding:12px 13px;transition:transform .08s,box-shadow .14s;position:relative}
-  .kcell:hover{transform:translateY(-1px);box-shadow:var(--shadow)}
-  .kcell:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .kcell.active{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
-  .kcell h4{margin:0 0 4px;font-size:.8rem;font-family:var(--mono);color:var(--accent)}
-  .kcell p{margin:0;font-size:.76rem;color:var(--ink-soft);line-height:1.45}
-  .untrusted .band-label .role{color:var(--gone)}
-  .uflag{font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;color:var(--gone);border:1px solid var(--gone);border-radius:5px;padding:2px 6px}
-  .strip{cursor:pointer;margin-top:10px;display:flex;gap:12px;align-items:center;border:1px dashed var(--line-strong);border-radius:var(--radius);padding:12px 15px;background:var(--surface);transition:border-color .14s;position:relative;width:100%;text-align:left}
-  .strip:hover{border-color:var(--sub)}
-  .strip:focus-visible{outline:2px solid var(--sub);outline-offset:2px}
-  .strip .tw{font-family:var(--mono);font-size:.72rem;color:var(--sub);border:1px solid var(--sub);border-radius:6px;padding:4px 9px;white-space:nowrap;font-weight:600}
-  .strip p{margin:0;font-size:.82rem;color:var(--ink-soft)}
+  .diagram{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:4px 22px 10px}
+  .dirnote{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:.68rem;color:var(--ink-faint);padding:12px 0 10px;border-bottom:1px solid var(--line)}
+  .dirnote .dl{flex:1;height:1px;background:var(--line)}
+  .fam{display:grid;grid-template-columns:200px minmax(0,1fr);gap:20px;padding:15px 0;border-bottom:1px dashed var(--line);align-items:start}
+  .fam:last-child{border-bottom:none}
+  .fam-hd h3{margin:0;font-family:var(--mono);font-size:.92rem;font-weight:650;letter-spacing:0;color:var(--ink)}
+  .fam-hd h3 span{color:var(--ink-faint);font-weight:400}
+  .fam-hd p{margin:4px 0 0;font-size:.74rem;color:var(--ink-faint);line-height:1.5}
+  .fam-tags{display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start;padding-top:1px}
+  .tag{cursor:pointer;flex:0 0 auto;font-family:var(--mono);font-size:.78rem;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:5px 11px;position:relative;transition:border-color .12s;display:inline-flex;align-items:center;gap:7px}
+  .tag:hover{border-color:var(--accent-line)}
+  .tag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .tag.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent)}
+  .tag .nb{font-size:.58rem;letter-spacing:.08em;color:var(--sub);border:1px solid var(--sub);border-radius:4px;padding:0 4px;font-weight:700}
+  .karrow{align-self:center;color:var(--accent-line);font-family:var(--mono);font-size:.72rem;user-select:none}
+  .fam.k{margin:0 -22px;padding-left:19px;padding-right:22px;border-left:3px solid var(--accent);background:linear-gradient(90deg,color-mix(in srgb,var(--accent-soft) 45%,transparent),transparent 72%)}
+  .fam.k .fam-hd h3{color:var(--accent)}
+  .fam.k .tag{border-color:var(--accent-line);background:color-mix(in srgb,var(--accent-soft) 40%,var(--surface-2))}
+  .uflag{font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--gone);border:1px solid var(--gone);border-radius:5px;padding:1px 5px;margin-left:7px;vertical-align:2px}
 
-  .sdot{position:absolute;top:6px;right:6px;width:9px;height:9px;border-radius:50%;border:1.5px solid var(--surface)}
-  .kcell .sdot{top:8px;right:8px}
+  .sdot{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--surface);flex:none}
   .sdot.done{background:var(--kept)}.sdot.wip{background:var(--accent)}.sdot.planned{background:var(--ink-faint)}
 
   .inspector{position:sticky;top:78px;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;min-height:420px}
@@ -224,7 +209,7 @@
 <header class="hero"><div class="wrap">
   <h1 id="heroTitle"></h1>
   <p id="heroSub"></p>
-  <span class="hint"><span class="pulse"></span>Click any node, rail, or band item to inspect it — dots show disposition.</span>
+  <span class="hint"><span class="pulse"></span>Click any crate to inspect it — dots show disposition (landed · in flight · planned).</span>
   <div class="legend" id="legend"></div>
 </div></header>
 
@@ -287,7 +272,7 @@ const META = {
   brandName: "IronClaw — Target Architecture",
   brandSub: "ten families · 64 crates · proposal/target-crate-architecture",
   heroTitle: 'Ten families, one direction — a stack where <em>authority has no second door</em>.',
-  heroSub: "The proposed crate map for IronClaw Reborn. Every family may depend only on families below it; the three blue rails are the contracts crates that keep the tower upright; the kernel band is the security perimeter — one crate per stage of the mediated effect pipeline.",
+  heroSub: "The proposed crate map for IronClaw Reborn: ten families in one ladder, every dependency pointing downward. The highlighted kernel row is the security perimeter — one crate per stage of the mediated effect pipeline, in pipeline order. Click a crate for its full contract; the dependency graph below shows who leans on whom.",
   repo: "nearai/ironclaw",
   asOf: "2026-07-29 · baseline dde662d5a",
   footSrc: "docs/reborn/target-architecture/ — README · PROPOSAL · families/ · CHECKLIST · PLAN (branch proposal/target-crate-architecture)",
@@ -300,14 +285,12 @@ const LAYERS = [
       {id:"cli", label:"cli", sub:"binary `ironclaw`"},
       {id:"config", label:"config", sub:"boot contract"},
       {id:"architecture", label:"architecture", sub:"the tests"} ] },
-  { type:"strip", id:"bindings", tag:"bindings-as-data", text:"The binary hands composition its concrete binding tables (channel adapters, native factories, registrars); composition selects backends from deployment data. Nothing else in the workspace names a concrete package." },
   { type:"band", name:"product/", role:"first-party userland — asks the kernel, never decides", nodes:[
       {id:"assistant", label:"assistant", sub:"the assistant · surface impl"},
       {id:"operator", label:"operator", sub:"deployment admin"},
       {id:"openai_compat", label:"openai_compat", sub:"wire adapter"},
       {id:"webui", label:"webui", sub:"routes · auth · SPA"},
       {id:"host_ingress", label:"host_ingress", sub:"route carriers"} ] },
-  { type:"rail", id:"product_contracts", text:"ProductSurface ▸ contracts/ironclaw_product_contracts" },
   { type:"band", name:"extensions/", role:"installable packages — vendor code only under packages/", nodes:[
       {id:"extension_registry", label:"extension_registry", sub:"manifests · records"},
       {id:"extension_host", label:"extension_host", sub:"verify · bind · deliver"},
@@ -317,13 +300,11 @@ const LAYERS = [
       {id:"pkg_telegram", label:"packages/telegram", sub:"protocol only"},
       {id:"pkg_memory_native", label:"packages/memory-native", sub:"[memory] provider"},
       {id:"pkg_mem0", label:"packages/mem0", sub:"[memory] provider"} ] },
-  { type:"rail", id:"extension_contracts", text:"ChannelAdapter · ToolAdapter ▸ contracts/ironclaw_extension_contracts" },
   { type:"band", name:"loop/", role:"agent behavior & its hosting — everything privileged crosses ports", variant:"untrusted", nodes:[
       {id:"agent_loop", label:"agent_loop", sub:"sealed strategies"},
       {id:"loop_host", label:"loop_host", sub:"port adapters"},
       {id:"runner", label:"runner", sub:"drivers · turn executor"},
       {id:"hooks", label:"hooks", sub:"restrict, never grant"} ] },
-  { type:"rail", id:"loop_contracts", text:"Loop*Port ▸ contracts/ironclaw_loop_contracts" },
   { type:"band", name:"kernel/", role:"the authority perimeter — one crate per pipeline stage", variant:"kernel", nodes:[
       {id:"trust", label:"trust", sub:"requested → effective ceiling, sealed variants."},
       {id:"authorization", label:"authorization", sub:"default-deny grants; resume-only leases."},
@@ -762,23 +743,20 @@ if (hasStatus) $("legend").innerHTML =
   '<span><i class="done"></i> landed</span><span><i class="wip"></i> in flight</span><span><i class="planned"></i> planned</span>' +
   `<span style="color:var(--ink-faint)">status as of ${esc(META.asOf)}</span>`;
 
-function nodeHTML(n, kernel){
-  const sub = n.sub ? (kernel ? `<p>${esc(n.sub)}</p>` : `<small>${esc(n.sub)}</small>`) : "";
-  if (kernel) return `<button class="kcell" data-node="${n.id}"><h4>${esc(n.label)}</h4>${sub}</button>`;
-  return `<button class="node${n.wide?" wide":""}" data-node="${n.id}">${esc(n.label)}${sub}</button>`;
-}
-$("diagram").innerHTML = LAYERS.map(L => {
-  if (L.type === "rail")
-    return `<div class="rail"><span class="l"></span><button class="pill" data-node="${L.id}">${esc(L.text)}</button><span class="l"></span></div>`;
-  if (L.type === "strip")
-    return `<button class="strip" data-node="${L.id}"><span class="tw">${esc(L.tag)}</span><p>${esc(L.text)}</p></button>`;
-  const kernel = L.variant === "kernel";
-  const roleHTML = L.variant === "untrusted"
-    ? `<span class="role"><span class="uflag">untrusted</span> &nbsp;${esc(L.role||"")}</span>`
-    : `<span class="role">${esc(L.role||"")}</span>`;
-  const rows = `<div class="${kernel?"krow":"row"}">${L.nodes.map(n=>nodeHTML(n,kernel)).join("")}</div>`;
-  return `<div class="band ${L.variant||""}"><div class="band-label"><span>${esc(L.name)}</span>${roleHTML}</div>${rows}</div>`;
-}).join("");
+$("diagram").innerHTML =
+  `<div class="dirnote"><span>app sits at the top · contracts at the bottom</span><span class="dl"></span><span>a crate depends only downward ↓</span></div>` +
+  LAYERS.filter(L => L.type === "band").map(L => {
+    const kern = L.variant === "kernel";
+    const tags = L.nodes.map((n, i) => {
+      const isNew = n.sub === "NEW";
+      const tip = [!isNew && n.sub ? n.sub : "", (DATA[n.id] && DATA[n.id].role) || ""].filter(Boolean).join(" — ");
+      const btn = `<button class="tag" data-node="${n.id}" title="${esc(tip)}">${esc(n.label)}${isNew?'<span class="nb">NEW</span>':""}</button>`;
+      return (kern && i > 0 ? `<span class="karrow">→</span>` : "") + btn;
+    }).join("");
+    const flag = L.variant === "untrusted" ? `<span class="uflag">untrusted</span>` : "";
+    const name = esc(L.name).replace(/\/$/, '<span>/</span>');
+    return `<div class="fam${kern ? " k" : ""}"><div class="fam-hd"><h3>${name}${flag}</h3><p>${esc(L.role || "")}</p></div><div class="fam-tags">${tags}</div></div>`;
+  }).join("");
 
 let current = null;
 function field(k,v){ return `<div class="insp-field"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
