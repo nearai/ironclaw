@@ -182,22 +182,23 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
 }
 
 #[tokio::test]
-async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_create() {
+async fn standalone_runtime_selects_outbound_delivery_target_before_trigger_create() {
     let root = tempfile::tempdir().expect("tempdir");
     let host_home = root.path().join("host-home");
     std::fs::create_dir_all(&host_home).expect("host home");
     let gateway = Arc::new(OutboundDeliveryTriggerGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_dev_build_input_with_profile(
-            RebornCompositionProfile::LocalDevYolo,
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::StandaloneUnrestricted,
             "runtime-outbound-trigger-owner",
-            root.path().join("local-dev"),
+            root.path().join("standalone"),
         )
         .with_runtime_policy(
-            crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            crate::standalone_unrestricted_runtime_policy(true)
+                .expect("local-yolo policy resolves"),
         )
-        .with_local_dev_confirmed_host_home_root(host_home),
+        .with_local_runtime_confirmed_host_home_root(host_home),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-outbound-trigger-tenant".to_string(),

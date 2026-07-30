@@ -462,7 +462,7 @@ mod tests {
 
         assert_eq!(
             readiness.profile,
-            crate::deployment::DeploymentConfig::local_dev().profile()
+            crate::deployment::DeploymentConfig::standalone().profile()
         );
         assert_eq!(readiness.state, RebornReadinessState::DevOnly);
         assert_eq!(readiness.workers, RebornWorkerReadiness::default());

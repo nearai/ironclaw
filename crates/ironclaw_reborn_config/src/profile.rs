@@ -8,13 +8,13 @@ pub const REBORN_PROFILE_ENV: &str = "IRONCLAW_REBORN_PROFILE";
 /// Coarse boot profile for the standalone Reborn binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RebornProfile {
-    /// Explicit local/developer mode. This is the safe default for a separately
-    /// invoked binary until production composition is wired and verified.
+    /// Standalone single-user runtime. This is the safe default for a
+    /// separately invoked binary.
     #[default]
-    LocalDev,
-    /// Trusted single-user local development mode with full host shell
-    /// environment inheritance. Never selected by default.
-    LocalDevYolo,
+    Standalone,
+    /// Standalone runtime with explicitly confirmed unrestricted host access.
+    /// Never selected by default.
+    StandaloneUnrestricted,
     /// Hosted single-tenant startup. Uses the local-runtime product surface
     /// with durable PostgreSQL storage.
     HostedSingleTenant,
@@ -32,8 +32,8 @@ pub enum RebornProfile {
 
 impl RebornProfile {
     const ALL: [Self; 6] = [
-        Self::LocalDev,
-        Self::LocalDevYolo,
+        Self::Standalone,
+        Self::StandaloneUnrestricted,
         Self::HostedSingleTenant,
         Self::HostedSingleTenantVolume,
         Self::Production,
@@ -54,8 +54,8 @@ impl RebornProfile {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LocalDev => "local-dev",
-            Self::LocalDevYolo => "local-dev-yolo",
+            Self::Standalone => "local-dev",
+            Self::StandaloneUnrestricted => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
@@ -73,7 +73,7 @@ impl RebornProfile {
     pub fn uses_standalone_local_runtime_volume(self) -> bool {
         matches!(
             self,
-            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
+            Self::Standalone | Self::StandaloneUnrestricted | Self::HostedSingleTenantVolume
         )
     }
 
@@ -81,17 +81,18 @@ impl RebornProfile {
         match self {
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
-            Self::LocalDev | Self::LocalDevYolo | Self::Production | Self::MigrationDryRun => {
-                "local-dev"
-            }
+            Self::Standalone
+            | Self::StandaloneUnrestricted
+            | Self::Production
+            | Self::MigrationDryRun => "local-dev",
         }
     }
 
     pub fn supports_local_runtime_skill_management(self) -> bool {
         matches!(
             self,
-            Self::LocalDev
-                | Self::LocalDevYolo
+            Self::Standalone
+                | Self::StandaloneUnrestricted
                 | Self::HostedSingleTenant
                 | Self::HostedSingleTenantVolume
         )
@@ -103,8 +104,8 @@ impl FromStr for RebornProfile {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "local-dev" => Ok(Self::LocalDev),
-            "local-dev-yolo" => Ok(Self::LocalDevYolo),
+            "local-dev" => Ok(Self::Standalone),
+            "local-dev-yolo" => Ok(Self::StandaloneUnrestricted),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),

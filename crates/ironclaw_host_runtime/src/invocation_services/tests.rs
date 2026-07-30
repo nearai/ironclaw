@@ -168,7 +168,7 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
     let local = resolve(
         ProcessBackendKind::LocalHost,
         DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
     );
     assert_eq!(
         bundled_port_name(&local).await.as_deref(),
@@ -949,7 +949,7 @@ fn local_resolver_accepts_direct_required_network_with_egress_service() {
 }
 
 #[test]
-fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
+fn local_resolver_allows_raw_diagnostics_only_for_standalone_and_yolo() {
     let resolver = ConfiguredInvocationServicesResolver::new(
         Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
@@ -974,7 +974,7 @@ fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
         .unwrap();
     assert!(!services.unsafe_raw_diagnostics_allowed);
 
-    plan.resolved_profile = RuntimeProfile::LocalDev;
+    plan.resolved_profile = RuntimeProfile::LocalHost;
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
             plan: &plan,
@@ -1271,7 +1271,7 @@ fn plan(
     ExecutionPlan {
         capability: CapabilityId::new("test.capability".to_string()).unwrap(),
         deployment: DeploymentMode::LocalSingleUser,
-        resolved_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend,
         network_mode,

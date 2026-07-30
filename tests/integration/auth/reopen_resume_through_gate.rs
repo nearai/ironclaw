@@ -78,7 +78,7 @@ async fn gate_survives_storage_reopen_and_resumes_to_completion() {
         .approval_request_scope_for_test(&gate_ref)
         .expect("gate ref resolves to a request scope");
     let reopened_approvals =
-        ironclaw_reborn_composition::test_support::open_local_dev_approval_request_store_for_test(
+        ironclaw_reborn_composition::test_support::open_standalone_approval_request_store_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await

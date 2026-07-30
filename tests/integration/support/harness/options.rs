@@ -86,7 +86,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) recording_network_egress:
         Option<Arc<super::super::doubles::RecordingNetworkHttpEgress>>,
     /// C-SYNTH `project_create` fault-injection seam: wrap the real
-    /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
+    /// `Arc<dyn ProjectService>` (`services.standalone_project_service_for_test()`)
     /// in `FaultInjectingProjectService` before it reaches the capability-port
     /// test parts' `project_service` field, so a `create_project` call naming
     /// `FAULT_INJECT_DENIED_PROJECT_NAME` returns `ProjectServiceError::Denied`

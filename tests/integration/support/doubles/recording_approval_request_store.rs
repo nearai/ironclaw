@@ -13,8 +13,8 @@ use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
 /// `outbound_delivery_target_set`) persist approval requests directly to the
 /// store rather than through the host runtime, so [`RecordingHostRuntime`]
 /// never captures their scope — wrapping the store they write through
-/// restores the `pending_approval_scopes` bookkeeping `approve_local_dev_gate`
-/// / `deny_local_dev_gate` depend on. Delegation is total, so the inner store
+/// restores the `pending_approval_scopes` bookkeeping `approve_standalone_gate`
+/// / `deny_standalone_gate` depend on. Delegation is total, so the inner store
 /// stays the single source of truth.
 pub(crate) struct RecordingApprovalRequestStore {
     pub(crate) inner: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,

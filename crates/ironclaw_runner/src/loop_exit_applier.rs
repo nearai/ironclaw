@@ -487,7 +487,7 @@ where
         // authenticated owner (`owners/<caller>`), so evidence reads must use
         // the same owner or they will look in the wrong subtree.
         if scope.has_explicit_thread_owner() {
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+            thread_scope = ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn(
                 &thread_scope,
                 scope,
                 None,
@@ -500,7 +500,7 @@ where
                     run_id,
                 })
                 .await?;
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+            thread_scope = ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn(
                 &thread_scope,
                 scope,
                 run_state.actor.as_ref(),

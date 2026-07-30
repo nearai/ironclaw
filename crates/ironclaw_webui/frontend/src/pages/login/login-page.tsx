@@ -5,7 +5,7 @@ import { Input, FormField } from "../../design-system/input";
 import { Icon } from "../../design-system/icons";
 import { useInterfaceTheme } from "../../design-system/theme";
 import { useT } from "../../lib/i18n";
-import { isLocalDevOrigin } from "../../lib/browser-origin";
+import { isLoopbackBrowserOrigin } from "../../lib/browser-origin";
 import { cn } from "../../utils/cn";
 import { OAuthProviderButtons } from "./components/oauth-provider-buttons";
 import { useOAuthProviders } from "./hooks/useOAuthProviders";
@@ -113,8 +113,8 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
             But no-SSO alone isn't local-install: a hosted token-only
             deployment also has no OAuth providers, and a remote user
             viewing it from a non-local origin has no use for a CLI hint
-            they can't run — so this also requires `isLocalDevOrigin()`. */}
-        {oauthProviders.length === 0 && isLocalDevOrigin() &&
+            they can't run — so this also requires `isLoopbackBrowserOrigin()`. */}
+        {oauthProviders.length === 0 && isLoopbackBrowserOrigin() &&
           (<p className="mt-6 text-center text-xs text-[var(--v2-text-faint)]">
             {t("login.localDevHint")}{" "}
             <code className="rounded bg-[var(--v2-surface-soft)] px-1 py-0.5 font-mono">

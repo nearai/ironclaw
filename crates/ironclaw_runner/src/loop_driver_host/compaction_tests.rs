@@ -159,7 +159,7 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
             max_messages: 8,
             require_model_route_snapshot: false,
         },
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
     );
 
     let compaction = factory.build_compaction_ports(&run_context);

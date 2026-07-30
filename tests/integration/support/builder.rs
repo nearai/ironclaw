@@ -327,6 +327,16 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Report output truncation `failures` times, then resume scripted
+    /// playback through the real provider gateway and recovery path.
+    pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::OutputTruncated,
+            failures,
+        ));
+        self
+    }
+
     /// Park this harness's tool/capability dispatch until released
     /// (tool-path analog of `park_model`, issue #5476 lease-wedge coverage).
     /// Only the `BuiltinHttpTools` backend wires this today. See
@@ -1036,6 +1046,14 @@ impl RebornIntegrationHarness {
         ))
     }
 
+    /// Exact governor used by this thread's production-composed capability
+    /// path. Intended for invariant sabotage/read-back only.
+    pub(crate) fn capability_resource_governor_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.capability_recorder.resource_governor()
+    }
+
     /// Register a scripted model gateway for a scope OTHER than this
     /// harness thread's own (which is registered at build time): delivery
     /// proofs pre-resolve the vendor conversation's binding and register its
@@ -1164,7 +1182,7 @@ impl RebornIntegrationHarness {
                 .await
                 .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
             let mut fresh_composite = CompositeRootFilesystem::new();
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
                 &mut fresh_composite,
                 filesystem,
             )?;
@@ -1755,7 +1773,7 @@ impl RebornIntegrationHarness {
     /// gate class happens to be blocked.
     pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(gate_ref)
+            .approve_standalone_gate(gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1779,7 +1797,7 @@ impl RebornIntegrationHarness {
         stale_gate_ref: &GateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(real_gate_ref)
+            .approve_standalone_gate(real_gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1816,7 +1834,7 @@ impl RebornIntegrationHarness {
     /// `ResumeTurnPrecondition::BlockedApprovalGate`.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
-            .deny_local_dev_gate(gate_ref)
+            .deny_standalone_gate(gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1903,9 +1921,9 @@ impl RebornIntegrationHarness {
     /// dispatch-time execution-context resolution actually stamps on the run.
     ///
     /// That user is NOT the capability harness's fixed constructor user: the
-    /// production capability surface (`local_dev_visible_capability_request` /
-    /// `local_dev_resource_scope_for_run` in
-    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) resolves
+    /// production capability surface (`standalone_visible_capability_request` /
+    /// `standalone_resource_scope_for_run` in
+    /// `crates/ironclaw_reborn_composition/src/runtime/standalone.rs`) resolves
     /// the execution user per run as `thread owner → run actor → fixed
     /// fallback`, and every harness thread run carries an actor — so the fixed
     /// fallback never applies here. Seeding under the harness's fixed
@@ -2145,7 +2163,7 @@ impl RebornIntegrationHarness {
 /// (`assert_reply_persists_after_reopen`, `assert_gate_survives_reopen`) —
 /// each builds its own higher-level store (thread service, turn-state store)
 /// over the fresh composite this returns.
-async fn reopen_fresh_libsql_composite(
+pub(crate) async fn reopen_fresh_libsql_composite(
     db_path: &Path,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
     let db = Arc::new(
@@ -2164,7 +2182,7 @@ async fn reopen_fresh_libsql_composite(
         .await
         .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+    ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )?;
@@ -2185,21 +2203,22 @@ pub(crate) async fn build_storage_composite(
     let mut composite = CompositeRootFilesystem::new();
     let reopen = match mode {
         StorageMode::InMemory => {
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
             StorageReopen::None
         }
         StorageMode::LibSql => {
-            ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::build_default_database_roots_for_test(
                 dir,
                 &mut composite,
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
             StorageReopen::LibSql {
-                db_path: dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME),
+                db_path: dir
+                    .join(ironclaw_reborn_composition::test_support::STANDALONE_DB_FILENAME),
             }
         }
         StorageMode::Postgres => {
@@ -2211,7 +2230,7 @@ pub(crate) async fn build_storage_composite(
                 .run_migrations()
                 .await
                 .map_err(|error| format!("Postgres migrations failed: {error}"))?;
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 filesystem,
             )?;
@@ -2279,8 +2298,9 @@ pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgr
         .map_err(|error| format!("Postgres pool must build: {error}").into())
 }
 
-/// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
-/// `binding` inside the production composite.
+/// Build a `ScopedFilesystem` that maps `/processes` and the compatibility
+/// `/turns` alias to the row-native process path for `binding` inside the
+/// composite.
 ///
 /// Uses the production path prefix `""` (no `/engine` prefix) so turn state
 /// lands under `/tenants/...` inside the composite, where the database backend

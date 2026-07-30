@@ -32,6 +32,13 @@ eula = false
 memory-mem0 = [
     "ironclaw_reborn_composition/memory-mem0",
 ]
+# Feature bar 4 (dev-only seam): compile the loopback-only OAuth provider
+# endpoint constructor used by hermetic standalone E2E tests. Activation also
+# requires a debug build plus paired endpoint env vars; release builds fail
+# closed if the vars are present.
+test-support = [
+    "ironclaw_webui/test-support",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1" }

@@ -108,6 +108,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "model_unavailable",
     "model_internal",
     "model_invalid_output",
+    "model_output_truncated",
     "model_stale_request",
     // Capability recovery categories
     "capability_transient",
@@ -136,6 +137,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     // Pinned provider categories (failure_categories.rs)
     "model_credits_exhausted",
     "model_credentials_unavailable",
+    "model_spend_budget_exhausted",
     BUDGET_ACCOUNTING_FAILED_CATEGORY,
 ];
 

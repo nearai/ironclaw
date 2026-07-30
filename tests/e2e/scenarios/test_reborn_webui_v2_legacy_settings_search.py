@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -77,6 +77,7 @@ async def _open_mocked_settings_page(
     tab: str,
     llm_state: dict | None = None,
     llm_requests: list[dict] | None = None,
+    skill_requests: list[str] | None = None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -86,6 +87,7 @@ async def _open_mocked_settings_page(
         lambda message: browser_messages.append(f"{message.type}: {message.text}"),
     )
     page.on("pageerror", lambda error: browser_messages.append(f"pageerror: {error}"))
+    skills_state = [dict(skill) for skill in MOCK_SKILLS]
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -131,10 +133,26 @@ async def _open_mocked_settings_page(
             await fulfill_json(
                 route,
                 {
-                    "skills": MOCK_SKILLS,
-                    "count": len(MOCK_SKILLS),
+                    "skills": skills_state,
+                    "count": len(skills_state),
                     "auto_activate_learned": True,
                 },
+            )
+            return
+
+        if (
+            path.startswith("/api/webchat/v2/skills/")
+            and request.method == "DELETE"
+        ):
+            skill_name = path.removeprefix("/api/webchat/v2/skills/")
+            if skill_requests is not None:
+                skill_requests.append(skill_name)
+            skills_state[:] = [
+                skill for skill in skills_state if skill["name"] != skill_name
+            ]
+            await fulfill_json(
+                route,
+                {"success": True, "message": f'Removed skill "{skill_name}"'},
             )
             return
 
@@ -371,14 +389,17 @@ async def test_reborn_legacy_settings_tools_search_and_clear(
 async def test_reborn_legacy_settings_skills_search_empty_state(
     reborn_v2_server, reborn_v2_browser
 ):
+    skill_requests: list[str] = []
     harness = await _open_mocked_settings_page(
         reborn_v2_server,
         reborn_v2_browser,
         tab="skills",
+        skill_requests=skill_requests,
     )
     try:
         page = harness["page"]
         search = harness["search"]
+        native_dialogs = capture_native_dialogs(page)
 
         await expect(page.get_by_text("markdown-helper", exact=True)).to_be_visible(
             timeout=5000
@@ -386,6 +407,23 @@ async def test_reborn_legacy_settings_skills_search_empty_state(
         await expect(page.get_by_text("workspace-helper", exact=True)).to_be_visible(
             timeout=5000
         )
+
+        skill_card = page.locator(".ext-card").filter(has_text="markdown-helper")
+        await skill_card.get_by_role("button", name="Delete").click()
+        confirmation = page.get_by_role(
+            "dialog", name='Delete skill "markdown-helper"?'
+        )
+        await expect(confirmation).to_be_visible()
+        await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+        await expect(skill_card).to_be_visible()
+        assert skill_requests == []
+
+        await skill_card.get_by_role("button", name="Delete").click()
+        await expect(confirmation).to_be_visible()
+        await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+        await expect(skill_card).to_have_count(0)
+        assert skill_requests == ["markdown-helper"]
+        assert native_dialogs == []
 
         await search.fill("workspace")
         await expect(page.get_by_text("workspace-helper", exact=True)).to_be_visible()
@@ -539,6 +577,7 @@ async def test_reborn_legacy_settings_inference_edit_and_delete_custom_provider(
     try:
         page = harness["page"]
         legacy_card = _provider_card(page, "legacy-local")
+        native_dialogs = capture_native_dialogs(page)
         await expect(legacy_card).to_be_visible(timeout=5000)
 
         await legacy_card.get_by_test_id(SEL_V2["llm_provider_disclosure"]).click()
@@ -568,13 +607,24 @@ async def test_reborn_legacy_settings_inference_edit_and_delete_custom_provider(
         assert edit_request["payload"]["default_model"] == "legacy-v2"
         assert "api_key" not in edit_request["payload"]
 
-        page.once("dialog", lambda browser_dialog: browser_dialog.accept())
         await legacy_card.get_by_role("button", name="Delete").click()
+        confirmation = page.get_by_role(
+            "dialog", name='Delete provider "Legacy Local"?'
+        )
+        await expect(confirmation).to_be_visible()
+        await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+        await expect(legacy_card).to_be_visible()
+        assert not any(request["kind"] == "delete" for request in llm_requests)
+
+        await legacy_card.get_by_role("button", name="Delete").click()
+        await expect(confirmation).to_be_visible()
+        await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
         await expect(page.get_by_text("Provider deleted.")).to_be_visible(timeout=5000)
         await expect(_provider_card(page, "legacy-local")).to_have_count(0)
         assert {
             "kind": "delete",
             "payload": {"provider_id": "legacy-local"},
         } in llm_requests
+        assert native_dialogs == []
     finally:
         await harness["context"].close()

@@ -13,12 +13,12 @@
 //!    [`OAuthProductAuthTestBundle`], `build_oauth_product_auth_for_test`,
 //!    `build_google_oauth_product_auth_for_test` — real store / real client /
 //!    scripted HTTP egress for OAuth connect, refresh, and error-path tests.
-//! 3. [`local_dev_boot`] — `build_approval_gate_evidence_for_test`,
-//!    `build_default_local_dev_database_roots_for_test`,
-//!    `mount_local_dev_database_roots_for_test`,
+//! 3. [`standalone_boot`] — `build_approval_gate_evidence_for_test`,
+//!    `build_default_database_roots_for_test`,
+//!    `mount_database_roots_for_test`,
 //!    `build_secret_store_for_test` — mirror the production
-//!    local-dev boot sequence so the integration-test harness
-//!    (`tests/support/reborn/`) drives the real local-dev composition paths
+//!    standalone boot sequence so the integration-test harness
+//!    (`tests/support/reborn/`) drives the real standalone composition paths
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
@@ -35,10 +35,10 @@
 //! 9. [`trace_capture`] — `trace_capture_turn_event_sink_for_test`, the
 //!    production `TraceCaptureTurnEventSink` factory for the integration-test
 //!    harness (C-TRACECAP seam).
-//! 10. [`automation`] — `local_dev_automation_product_service_for_test`, the
+//! 10. [`automation`] — `standalone_automation_product_service_for_test`, the
 //!     production `RebornAutomationProductService` constructor for the
 //!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2), plus
-//!     `local_dev_trigger_active_run_lookup_for_test` (the raw
+//!     `standalone_trigger_active_run_lookup_for_test` (the raw
 //!     `TriggerActiveRunLookup`, for wiring the `builtin.trigger_list`
 //!     capability directly rather than through the service, #5886).
 //! 11. [`projection`] — `build_product_event_stream_for_test`, a deliberately
@@ -48,7 +48,7 @@
 //!     the production `create_refreshing_capability_port` factory
 //!     (all wrap layers) driven with harness-injectable parts (harness-port-seam
 //!     P1 seam).
-//! 13. [`local_dev_capability_io`] — `staged_capability_io_for_test`, the
+//! 13. [`standalone_capability_io`] — `staged_capability_io_for_test`, the
 //!     production `StagedCapabilityIo` constructor (`capability_wiring`'s
 //!     `new_with_durable_previews` call), for durable tool-result projection
 //!     coverage (issue #5838).
@@ -62,14 +62,32 @@
 //!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
 //!     issue #6105).
 
+/// Build the production runtime and return the exact resource governor wired
+/// into its capability path.
+///
+/// This mirrors [`crate::build_runtime`] while keeping the lower substrate
+/// authority out of [`crate::RebornRuntime`]'s service-shaped public surface.
+/// Integration tests use the returned governor only for post-transition
+/// reservation read-back.
+pub async fn build_runtime_with_resource_governor_for_test(
+    input: crate::RebornRuntimeInput,
+) -> Result<
+    (
+        crate::RebornRuntime,
+        std::sync::Arc<dyn ironclaw_resources::ResourceGovernor>,
+    ),
+    crate::RebornRuntimeError,
+> {
+    crate::runtime::build_runtime_with_resource_governor(input).await
+}
+
 mod automation;
 mod budget_gateway;
+mod capability_io;
 #[cfg(feature = "test-support")]
 mod channel_connection;
 mod durable;
 mod libsql_host_bindings;
-mod local_dev_boot;
-mod local_dev_capability_io;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
@@ -77,44 +95,39 @@ mod projection;
 mod refreshing_capability_port;
 mod result_read;
 mod skill_activation;
+mod standalone_boot;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
 
 #[cfg(feature = "test-support")]
 pub use automation::{
-    local_dev_automation_product_service_for_test, local_dev_trigger_active_run_lookup_for_test,
-    rebind_local_dev_trigger_source_processes_for_test,
+    rebind_standalone_trigger_source_turn_state_for_test,
+    standalone_automation_product_service_for_test, standalone_trigger_active_run_lookup_for_test,
 };
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use capability_io::{
+    staged_capability_io_for_test, staged_capability_io_with_observer_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use channel_connection::{
     ChannelConnectionTestBundle, ChannelConnectionTestConfig, build_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use durable::open_local_dev_extension_installation_store_for_test;
+pub use durable::open_standalone_extension_installation_store_for_test;
 #[cfg(feature = "test-support")]
 pub use durable::{
-    open_local_dev_approval_request_store_for_test,
-    open_local_dev_approval_settings_stores_for_test,
-    open_local_dev_outbound_preferences_store_for_test, open_local_dev_trigger_repository_for_test,
+    open_standalone_approval_request_store_for_test,
+    open_standalone_approval_settings_stores_for_test,
+    open_standalone_outbound_preferences_store_for_test,
+    open_standalone_trigger_repository_for_test,
 };
 pub use libsql_host_bindings::{
     libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,
     libsql_host_bindings_with_resolved_secret_master_key_for_test,
-};
-pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
-pub use local_dev_boot::build_secret_store_for_test;
-#[cfg(feature = "test-support")]
-pub use local_dev_boot::{
-    build_approval_gate_evidence_for_test, build_default_local_dev_database_roots_for_test,
-    mount_local_dev_database_roots_for_test,
-};
-#[cfg(feature = "test-support")]
-pub use local_dev_capability_io::{
-    staged_capability_io_for_test, staged_capability_io_with_observer_for_test,
 };
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;
@@ -142,6 +155,13 @@ pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,
+};
+pub use standalone_boot::STANDALONE_DB_FILENAME;
+pub use standalone_boot::build_secret_store_for_test;
+#[cfg(feature = "test-support")]
+pub use standalone_boot::{
+    build_approval_gate_evidence_for_test, build_default_database_roots_for_test,
+    mount_database_roots_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;

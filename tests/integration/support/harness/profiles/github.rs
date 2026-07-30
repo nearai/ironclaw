@@ -12,8 +12,8 @@ use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
-    RecordingRuntimeHttpEgress, bundled_extension_provider_trust, local_dev_all_effects,
-    local_dev_host_runtime_with_registry_and_egress, wildcard_test_policy, workspace_mounts,
+    RecordingRuntimeHttpEgress, bundled_extension_provider_trust, standalone_all_effects,
+    standalone_host_runtime_with_registry_and_egress, wildcard_test_policy, workspace_mounts,
 };
 
 /// C-JOURNEY convergence seam: surfaces the file-tool approval-gate
@@ -43,7 +43,7 @@ use super::super::{
 /// `build_local_runtime` otherwise mounts `/system/extensions` empty and WASM
 /// compilation fails at dispatch time.
 ///
-/// Runtime policy is left `None` (not `LocalDevYolo`) so file tools' real
+/// Runtime policy is left `None` (not `StandaloneUnrestricted`) so file tools' real
 /// `PermissionMode::Ask` gate is preserved.
 pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile> {
     // Hermetic guard: `new_with_options`'s `build_local_runtime` defaults to
@@ -66,7 +66,7 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
             CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
             CapabilityId::new("github.get_repo")?,
         ],
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
@@ -114,7 +114,7 @@ pub(crate) async fn github_issue_tools_auth_required() -> HarnessResult<HostRunt
 ///
 /// Credential injection runs through two mechanisms, not one: the
 /// authorizer's `InjectCredentialAccountOnce` obligation, AND
-/// `local_dev_host_runtime_with_registry_and_egress`'s independent
+/// `standalone_host_runtime_with_registry_and_egress`'s independent
 /// `SharedHostWasmRuntimeCredentials` restaging (runs unconditionally on
 /// every WASM HTTP call, not gated on the authorizer's `Decision`). So a test
 /// asserting the injected header proves the end-to-end wire outcome, not
@@ -140,7 +140,7 @@ fn github_issue_tools_with_credential_result(
     let network_egress = Arc::new(RecordingNetworkHttpEgress::with_body(
         github_fixture_response,
     ));
-    let runtime = local_dev_host_runtime_with_registry_and_egress(
+    let runtime = standalone_host_runtime_with_registry_and_egress(
         storage_root.clone(),
         github_support::extension_registry()?,
         runtime_http_egress.clone(),
@@ -151,6 +151,7 @@ fn github_issue_tools_with_credential_result(
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
+        resource_governor: None,
         approval_parts: None,
         gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,

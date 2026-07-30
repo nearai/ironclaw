@@ -14,10 +14,10 @@ use ironclaw_host_api::{
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionService, OperatorStatusService, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    ChannelConnectionService, OperatorStatusService, RebornAutomationProductService,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
 };
 
@@ -26,8 +26,8 @@ use ironclaw_triggers::TriggerRepository;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
-    RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticStatus, RebornRuntime,
+    RebornBuildError, RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus,
+    RebornRuntime,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
@@ -44,7 +44,7 @@ use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCr
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
-/// SAME runtime. Local-dev and production graphs both carry these two
+/// SAME runtime. Standalone and production graphs both carry these two
 /// separately; mixing runtimes would let active-hold projections read run
 /// state the poller of the *other* runtime writes, silently desyncing the
 /// automations panel (#5886).
@@ -329,7 +329,7 @@ struct LocalSkillsProductService {
     // flag-reading selector is wired (the production assembly) — the toggle then
     // reports unavailable instead of writing to a flag nothing reads.
     //
-    // Process-global by design: this is a single-operator local-dev switch, so it
+    // Process-global by design: this is a single-operator standalone switch, so it
     // is intentionally not scoped per caller. A future multi-user surface would
     // need a per-tenant flag.
     auto_activate_learned: Option<Arc<AtomicBool>>,

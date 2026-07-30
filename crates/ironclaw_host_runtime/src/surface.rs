@@ -1,10 +1,13 @@
 use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    CapabilityVisibility, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
-    canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, Decision, EffectKind,
+    ResourceEstimate, RuntimeKind, canonical_json_v1, runtime_policy::EffectiveRuntimePolicy,
+    sha256_digest_token,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::{Value, json};
@@ -115,6 +118,10 @@ pub enum VisibleCapabilityAccess {
 pub struct VisibleCapability {
     /// Redacted declarative capability descriptor from the extension registry.
     pub descriptor: CapabilityDescriptor,
+    /// Provenance-backed trust for the model-visible description. Unknown
+    /// sources remain untrusted; only registry-installed packages cross the
+    /// signature/digest-verifying catalog boundary.
+    pub description_trust: CapabilityDescriptionTrust,
     /// Current visibility status for this context and policy.
     pub access: VisibleCapabilityAccess,
     /// Host-selected estimate used for the visibility authorization check.
@@ -275,9 +282,23 @@ impl<'a> CapabilityCatalog<'a> {
 
         Ok(Some(VisibleCapability {
             descriptor: self.surface_descriptor(descriptor).await?,
+            description_trust: self.description_trust(descriptor),
             access,
             estimated_resources: estimate,
         }))
+    }
+
+    fn description_trust(&self, descriptor: &CapabilityDescriptor) -> CapabilityDescriptionTrust {
+        match self
+            .registry
+            .get_extension(&descriptor.provider)
+            .map(|package| package.manifest.source)
+        {
+            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
+            Some(ManifestSource::HostBundled | ManifestSource::InstalledLocal) | None => {
+                CapabilityDescriptionTrust::Untrusted
+            }
+        }
     }
 
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
@@ -416,6 +437,7 @@ fn surface_version(
                 capability_version_key(capability),
                 json!({
                     "descriptor": descriptor,
+                    "description_trust": capability.description_trust,
                     "estimated_resources": &capability.estimated_resources,
                     "access": access_token(capability.access),
                     "provider_trust": trust,

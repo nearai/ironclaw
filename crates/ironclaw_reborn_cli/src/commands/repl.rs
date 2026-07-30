@@ -6,7 +6,7 @@ use crate::runtime::RuntimeInputOptions;
 /// Start an interactive Reborn CLI session backed by the composed runtime.
 #[derive(Debug, Args)]
 pub(crate) struct ReplCommand {
-    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    /// Confirm trusted-laptop host filesystem access for the unrestricted standalone profile.
     #[arg(long = "confirm-host-access")]
     confirm_host_access: bool,
 }

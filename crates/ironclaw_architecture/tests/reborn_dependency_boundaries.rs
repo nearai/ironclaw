@@ -911,6 +911,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_loop_host/src/capability_port.rs",
         "crates/ironclaw_loop_host/src/capability_port/provider_validation.rs",
         "crates/ironclaw_loop_host/src/capability_port/surface_snapshot.rs",
+        "crates/ironclaw_loop_host/src/external_tool_capability.rs",
         "crates/ironclaw_loop_host/src/subagent_spawn_port.rs",
         // The model gateway is the LLM wire boundary. Executor helpers may
         // rebuild provider calls only from stored replay metadata.
@@ -923,10 +924,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_runner/src/tool_disclosure.rs",
         "crates/ironclaw_runner/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
-        // output or local-dev provider tools.
+        // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/external_tool_capability.rs",
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
+        "crates/ironclaw_loop_host/src/synthetic_capability.rs",
         "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
     ]);
     let violations = uses
@@ -999,25 +999,25 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
     let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
-    let composition_local_dev_runtime =
-        root.join("crates/ironclaw_reborn_composition/src/runtime/local_dev.rs");
+    let composition_capability_host =
+        root.join("crates/ironclaw_reborn_composition/src/runtime/capability_host.rs");
     assert!(
         composition_runtime.exists(),
         "expected Reborn runtime assembly at {}",
         composition_runtime.display()
     );
     assert!(
-        composition_local_dev_runtime.exists(),
-        "expected local-dev runtime assembly at {}",
-        composition_local_dev_runtime.display()
+        composition_capability_host.exists(),
+        "expected capability-host runtime assembly at {}",
+        composition_capability_host.display()
     );
     let composition_runtime_source = std::fs::read_to_string(&composition_runtime)
         .expect("composition runtime.rs must be readable");
     let composition_runtime_sources = format!(
         "{}\n{}",
         composition_runtime_source,
-        std::fs::read_to_string(&composition_local_dev_runtime)
-            .expect("composition runtime/local_dev.rs must be readable")
+        std::fs::read_to_string(&composition_capability_host)
+            .expect("composition runtime/capability_host.rs must be readable")
     );
     for required in [
         "pub async fn build_reborn_runtime",

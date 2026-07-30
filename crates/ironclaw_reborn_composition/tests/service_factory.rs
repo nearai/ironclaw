@@ -1,4 +1,4 @@
-// arch-exempt: large_file, pre-existing ~1.9K-line service test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+// arch-exempt: large_file, pre-existing ~1.9K-line service test suite; this change is a net-zero rename of build_standalone_secret_store_for_test call sites with no cases added, plan #6168
 //
 // Decomposition of this suite travels with the composition god-crate shrink
 // (#6168); do not add unrelated cases here.
@@ -163,8 +163,8 @@ fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
 fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -196,15 +196,15 @@ fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
+fn local_host_builtin_visible_request() -> VisibleCapabilityRequest {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
-            local_dev_grant(
+            local_host_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
+            local_host_grant(
                 "builtin.http",
                 vec![EffectKind::DispatchCapability, EffectKind::Network],
             ),
-            local_dev_grant(
+            local_host_grant(
                 "builtin.http.save",
                 vec![
                     EffectKind::DispatchCapability,
@@ -258,7 +258,7 @@ fn production_builtin_visible_request() -> VisibleCapabilityRequest {
 fn production_process_capability_execution_context() -> ExecutionContext {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant(
+            local_host_grant(
                 SHELL_CAPABILITY_ID,
                 vec![
                     EffectKind::DispatchCapability,
@@ -269,7 +269,7 @@ fn production_process_capability_execution_context() -> ExecutionContext {
                     EffectKind::Network,
                 ],
             ),
-            local_dev_grant(
+            local_host_grant(
                 SPAWN_SUBAGENT_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
             ),
@@ -401,7 +401,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     );
 }
 
-fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
+fn local_host_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: CapabilityId::new(capability).unwrap(),
@@ -442,15 +442,15 @@ async fn invoke_trigger_management(
 fn trigger_management_execution_context() -> ExecutionContext {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant(
+            local_host_grant(
                 ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             ),
-            local_dev_grant(
+            local_host_grant(
                 ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability],
             ),
-            local_dev_grant(
+            local_host_grant(
                 ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             ),
@@ -611,14 +611,17 @@ async fn disabled_returns_empty_services() {
 }
 
 #[tokio::test]
-async fn local_dev_builds_services_without_production_claim() {
+async fn standalone_builds_services_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(
-                ironclaw_reborn_composition::local_dev_runtime_policy()
-                    .expect("local-dev runtime policy resolves"),
-            ),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(
+            ironclaw_reborn_composition::standalone_runtime_policy()
+                .expect("standalone runtime policy resolves"),
+        ),
     )
     .await
     .unwrap();
@@ -690,14 +693,17 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
 }
 
 #[tokio::test]
-async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
+async fn standalone_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(
-                ironclaw_reborn_composition::local_dev_runtime_policy()
-                    .expect("local-dev runtime policy resolves"),
-            ),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(
+            ironclaw_reborn_composition::standalone_runtime_policy()
+                .expect("standalone runtime policy resolves"),
+        ),
     )
     .await
     .unwrap();
@@ -761,20 +767,23 @@ fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_policy_exposes_http_capability() {
+async fn standalone_runtime_policy_exposes_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(local_only_runtime_policy()),
     )
     .await
     .unwrap();
     let runtime = services
         .host_runtime_for_test()
-        .expect("local dev exposes host runtime");
+        .expect("standalone exposes host runtime");
 
     let surface = runtime
-        .visible_capabilities(local_dev_builtin_visible_request())
+        .visible_capabilities(local_host_builtin_visible_request())
         .await
         .unwrap();
     let visible_ids = surface
@@ -786,29 +795,32 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
     assert!(visible_ids.contains(&"builtin.echo"));
     assert!(
         visible_ids.contains(&"builtin.http"),
-        "local-dev service should expose host HTTP when the runtime policy allows network"
+        "standalone service should expose host HTTP when the runtime policy allows network"
     );
     assert!(
         visible_ids.contains(&"builtin.http.save"),
-        "local-dev service should expose saved-body HTTP when network and filesystem are allowed"
+        "standalone service should expose saved-body HTTP when network and filesystem are allowed"
     );
 }
 
 #[tokio::test]
-async fn local_dev_runtime_policy_hides_http_capability() {
+async fn standalone_runtime_policy_hides_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(network_denied_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(network_denied_runtime_policy()),
     )
     .await
     .unwrap();
     let runtime = services
         .host_runtime_for_test()
-        .expect("local dev exposes host runtime");
+        .expect("standalone exposes host runtime");
 
     let surface = runtime
-        .visible_capabilities(local_dev_builtin_visible_request())
+        .visible_capabilities(local_host_builtin_visible_request())
         .await
         .unwrap();
     let visible_ids = surface
@@ -820,11 +832,11 @@ async fn local_dev_runtime_policy_hides_http_capability() {
     assert!(visible_ids.contains(&"builtin.echo"));
     assert!(
         !visible_ids.contains(&"builtin.http"),
-        "local-dev service must forward the supplied runtime policy before visible-surface filtering"
+        "standalone service must forward the supplied runtime policy before visible-surface filtering"
     );
     assert!(
         !visible_ids.contains(&"builtin.http.save"),
-        "local-dev service must hide saved-body HTTP when network is denied"
+        "standalone service must hide saved-body HTTP when network is denied"
     );
 }
 
@@ -1128,7 +1140,7 @@ async fn production_rejects_local_only_runtime_policy() {
     );
     assert_eq!(
         RebornReadinessDiagnostic::from_production_wiring_report(
-            RebornCompositionProfile::LocalDev,
+            RebornCompositionProfile::Standalone,
             &report,
         )
         .len(),
@@ -1245,7 +1257,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
 }
 
 /// With no cached dotfile and no `SECRETS_MASTER_KEY` env var,
-/// `resolve_local_dev_secret_master_key` (`src/factory.rs`) tries the OS
+/// `resolve_standalone_secret_master_key` (`src/factory.rs`) tries the OS
 /// keychain before generating a fresh key.
 ///
 /// - Under `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup returns
@@ -1260,7 +1272,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
 ///   binary is a separate crate the `forbid` doesn't reach, and already uses
 ///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
 #[tokio::test]
-async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
+async fn standalone_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
     let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
     let dir = tempfile::tempdir().unwrap();
@@ -1272,12 +1284,12 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     );
 
     let mut composite = ironclaw_filesystem::CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+    ironclaw_reborn_composition::test_support::build_default_database_roots_for_test(
         root,
         &mut composite,
     )
     .await
-    .expect("build default local-dev db roots");
+    .expect("build default standalone db roots");
     let composite = std::sync::Arc::new(composite);
     let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
 
@@ -1380,22 +1392,25 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
 }
 
 #[tokio::test]
-async fn local_dev_services_dispatch_trigger_management_through_composed_runtime() {
+async fn standalone_services_dispatch_trigger_management_through_composed_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_minimal_approval_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await
-    .expect("local-dev services should build with trigger management runtime");
+    .expect("standalone services should build with trigger management runtime");
 
     // The Tools-settings global auto-approve switch is authoritative for
     // first-party tool dispatch; turn it on for the dispatch scope so
     // these trigger management calls exercise the dispatch path instead of
     // stopping at the per-tool approval gate.
     let auto_approve = services
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test");
     let auto_approve_scope = trigger_management_execution_context().resource_scope;
     auto_approve
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -1408,7 +1423,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
 
     let runtime = services
         .host_runtime_for_test()
-        .expect("local-dev build exposes host runtime");
+        .expect("standalone build exposes host runtime");
     let created = invoke_trigger_management(
         runtime.as_ref(),
         ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
@@ -1424,8 +1439,8 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         .expect("created trigger id")
         .to_string();
 
-    let local_dev_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
-    assert_eq!(libsql_trigger_record_count(&local_dev_db).await, 1);
+    let standalone_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
+    assert_eq!(libsql_trigger_record_count(&standalone_db).await, 1);
 
     let listed = invoke_trigger_management(
         runtime.as_ref(),

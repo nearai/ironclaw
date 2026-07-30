@@ -59,19 +59,22 @@ fn production_readiness_rejects_reference_driver() {
 }
 
 #[test]
-fn local_dev_allows_reference_driver_with_degraded_status() {
+fn non_production_allows_reference_driver_with_degraded_status() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "reference_echo", DriverKind::Reference);
 
     let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::LocalDevTest,
+        mode: RebornLoopReadinessMode::NonProduction,
         driver_registry: &registry,
         component_graph: RebornLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::LocalDevDegraded);
+    assert_eq!(
+        report.status,
+        RebornLoopProductionStatus::NonProductionDegraded
+    );
     assert_eq!(report.blocking_issues().count(), 0);
     assert!(report.contains(
         RebornLoopProductionComponent::LoopDriver,

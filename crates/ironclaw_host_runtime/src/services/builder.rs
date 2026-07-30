@@ -461,7 +461,7 @@ where
             self.component_types.audit_sink =
                 Some(ProductionComponentType::of::<RebornEventStores>());
         } else {
-            // Prebuilt/LocalDev/Test stores are useful for tests and lower-level
+            // Prebuilt/Standalone/Test stores are useful for tests and lower-level
             // composition, but must not silently satisfy production guardrails.
             self.component_types.event_sink =
                 Some(ProductionComponentType::of::<DurableEventSink>());

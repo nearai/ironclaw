@@ -153,6 +153,31 @@ pub fn imported_extension_package(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
 ) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+    extension_package_from_files(files, reserved_bundled_ids, ManifestSource::InstalledLocal)
+}
+
+/// Build a registry-installed extension package from already verified files.
+///
+/// Registry clients own signature, provenance, size, and digest verification.
+/// This boundary still applies every extension-host invariant: reserved-id
+/// rejection, manifest validation, declared-asset completeness, and WASI
+/// component validation.
+pub fn registry_extension_package(
+    files: Vec<(String, Vec<u8>)>,
+    reserved_bundled_ids: &[String],
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+    extension_package_from_files(
+        files,
+        reserved_bundled_ids,
+        ManifestSource::RegistryInstalled,
+    )
+}
+
+fn extension_package_from_files(
+    files: Vec<(String, Vec<u8>)>,
+    reserved_bundled_ids: &[String],
+    source: ManifestSource,
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
     let manifest_toml = files
         .iter()
         .find(|(path, _)| path == "manifest.toml")
@@ -172,13 +197,13 @@ pub fn imported_extension_package(
             reason: format!("host API contract registry rejected imported extension: {error}"),
         }
     })?;
-    // Uploads are always validated as InstalledLocal. Only binary-compiled
-    // packages may claim the HostBundled trust/runtime tier. The extension id
-    // (and so the package root) is only known once the manifest is parsed,
-    // so this first pass carries no root.
+    // Uploaded and registry packages are both untrusted host inputs. Only
+    // binary-compiled packages may claim the HostBundled trust/runtime tier.
+    // The extension id (and so the package root) is only known once the
+    // manifest is parsed, so this first pass carries no root.
     let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
-        ManifestSource::InstalledLocal,
+        source,
         &host_ports,
         None,
         &contracts,
@@ -208,7 +233,7 @@ pub fn imported_extension_package(
         ironclaw_extensions::PackageRootBinding::Materialized(root.clone());
     let record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
-        ManifestSource::InstalledLocal,
+        source,
         resolved_with_root,
         record.manifest_hash().cloned(),
     )
@@ -259,7 +284,7 @@ pub fn imported_extension_package(
         )?,
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
-        source: ManifestSource::InstalledLocal,
+        source,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,

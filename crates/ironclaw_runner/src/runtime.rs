@@ -357,7 +357,7 @@ where
     /// while still ensuring the scheduler loop consumes the exact same channel.
     ///
     /// When `None` (the default), the notifier and channel are minted internally, which is
-    /// correct for local-dev and any composition that does not need to pre-mint.
+    /// correct for standalone and any composition that does not need to pre-mint.
     pub scheduler_wake_wiring: Option<SchedulerWakeWiring>,
 }
 
@@ -549,11 +549,11 @@ where
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
 }
 
-fn local_development_noop_safety_context() -> InstructionSafetyContext {
+fn non_production_noop_safety_context() -> InstructionSafetyContext {
     tracing::debug!(
-        "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
+        "using standaloneelopment no-op instruction safety context; configure a real instruction safety scanner before product-live use"
     );
-    InstructionSafetyContext::local_development_noop()
+    InstructionSafetyContext::non_production_noop()
 }
 
 pub fn build_default_planned_runtime<G>(
@@ -744,7 +744,7 @@ where
         });
     let safety_context = parts
         .safety_context
-        .unwrap_or_else(local_development_noop_safety_context);
+        .unwrap_or_else(non_production_noop_safety_context);
     // Build the after-turn memory recorder before `parts.thread_scope` is moved
     // into the host factory below. Present only when a bound memory
     // provider was resolved; it owner-rewrites the base thread scope per run
@@ -1386,6 +1386,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             safe_name: capability_id.to_string(),
             safe_description: format!("{capability_id} description"),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         }

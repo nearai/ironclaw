@@ -1008,7 +1008,7 @@ impl SpawnObligationFixture {
             "script",
             vec![EffectKind::DispatchCapability, EffectKind::Network],
         );
-        let runtime_policy = local_dev_runtime_policy();
+        let runtime_policy = standalone_runtime_policy();
         let host = CapabilityHost::new(
             self.registry.as_ref(),
             self.dispatcher.as_ref(),
@@ -1823,11 +1823,11 @@ pub(crate) fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-pub(crate) fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+pub(crate) fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

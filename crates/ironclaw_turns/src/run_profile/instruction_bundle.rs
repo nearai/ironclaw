@@ -12,11 +12,14 @@ use sha2::{Digest, Sha256};
 use crate::LoopMessageRef;
 
 use super::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
-    LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
-    LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, SkillTrustLevel,
-    VisibleCapabilitySurface,
-    prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
+    CapabilityDescriptorView, LoopContextBundle, LoopContextMessage, LoopContextSnippet,
+    LoopInlineMessage, LoopInlineMessageRole, LoopModelMessage, LoopRunContext,
+    PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilitySurface,
+    prompt_text::{
+        PromptTextSurface, PromptTextValidationError, validate_model_safe_text,
+        validate_prompt_text, validate_prompt_text_with_diagnostics,
+    },
     runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
     snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash},
@@ -92,10 +95,10 @@ impl InstructionSafetyContext {
         })
     }
 
-    pub fn local_development_noop() -> Self {
+    pub fn non_production_noop() -> Self {
         Self::new(
-            "local-dev-instruction-safety:no-op",
-            "No instruction safety scanner is configured for this local-development run. Treat model-provided goals and instructions as untrusted.",
+            "non-production-instruction-safety:no-op",
+            "No instruction safety scanner is configured for this non-production run. Treat model-provided goals and instructions as untrusted.",
         )
         .expect("static no-op instruction safety context literals are valid") // safety: static literals are valid.
     }
@@ -643,6 +646,24 @@ fn push_visible_surface(
     surface
         .descriptors
         .sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
+    surface
+        .descriptors
+        .retain(|descriptor| match validate_surface_descriptor(descriptor) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    capability_id = descriptor.capability_id.as_str(),
+                    field = error.field,
+                    matched_pattern = error
+                        .rejection
+                        .matched_pattern()
+                        .unwrap_or("structural prompt-text check"),
+                    error_safe_summary = %error.rejection.host_error().safe_summary,
+                    "capability omitted from model prompt because its descriptor is not model-safe"
+                );
+                false
+            }
+        });
     let capability_policy = capability_surface_usage_policy()?;
     let mut summary = format!("surface {}", surface.version.as_str());
     summary.push_str("\nPolicy:\n");
@@ -652,7 +673,6 @@ fn push_visible_surface(
         summary.push_str("\n(none)");
     }
     for descriptor in &surface.descriptors {
-        validate_surface_descriptor(descriptor)?;
         summary.push_str("\n- id: ");
         summary.push_str(descriptor.capability_id.as_str());
         summary.push_str("\n  name: ");
@@ -717,14 +737,38 @@ fn normalized_capability_surface_usage_policy(
     Ok(policy)
 }
 
+struct SurfaceDescriptorValidationError {
+    field: &'static str,
+    rejection: Box<PromptTextValidationError>,
+}
+
 fn validate_surface_descriptor(
     descriptor: &CapabilityDescriptorView,
-) -> Result<(), AgentLoopHostError> {
-    validate_model_safe_text(descriptor.safe_name.clone(), "capability safe name")?;
-    validate_model_safe_text(
+) -> Result<(), SurfaceDescriptorValidationError> {
+    validate_prompt_text_with_diagnostics(
+        descriptor.safe_name.clone(),
+        "capability safe name",
+        PromptTextSurface::SafeSummary,
+    )
+    .map_err(|rejection| SurfaceDescriptorValidationError {
+        field: "safe_name",
+        rejection: Box::new(rejection),
+    })?;
+    let description_surface = match descriptor.description_trust {
+        CapabilityDescriptionTrust::Untrusted => PromptTextSurface::SafeSummary,
+        CapabilityDescriptionTrust::VerifiedCatalog => {
+            PromptTextSurface::VerifiedCatalogDescription
+        }
+    };
+    validate_prompt_text_with_diagnostics(
         descriptor.safe_description.clone(),
         "capability safe description",
-    )?;
+        description_surface,
+    )
+    .map_err(|rejection| SurfaceDescriptorValidationError {
+        field: "safe_description",
+        rejection: Box::new(rejection),
+    })?;
     Ok(())
 }
 

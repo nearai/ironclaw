@@ -104,9 +104,9 @@ pub use first_party_tools::{
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
-    ensure_memory_mount, finish_memory_tool_result, map_memory_service_error,
-    memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
-    register_memory_tool_handler, register_native_memory_tools,
+    ensure_memory_mount, finish_memory_tool_result, is_allowed_code_artifact_host,
+    map_memory_service_error, memory_invocation_for_request, memory_tool_profiles,
+    normalize_memory_tool_input, register_memory_tool_handler, register_native_memory_tools,
     register_outbound_delivery_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -549,7 +549,7 @@ pub enum RuntimeBlockedReason {
 ///
 /// Raw transport errors can contain URLs, query strings, host paths, proxy
 /// details, or credential-shaped text. Keep this disabled unless debugging a
-/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// trusted `Standalone` or `LocalYolo` run. Hosted and enterprise deployments
 /// never enable raw diagnostics from this environment variable alone.
 pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
 
@@ -568,7 +568,7 @@ pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
     matches!(deployment, DeploymentMode::LocalSingleUser)
         && matches!(
             profile,
-            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+            RuntimeProfile::LocalHost | RuntimeProfile::LocalYolo
         )
 }
 
@@ -581,10 +581,10 @@ mod raw_http_diagnostic_policy_tests {
     use super::*;
 
     #[test]
-    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+    fn raw_http_diagnostics_are_limited_to_standalone_and_yolo_profiles() {
         assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
             DeploymentMode::LocalSingleUser,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
         ));
         assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
             DeploymentMode::LocalSingleUser,

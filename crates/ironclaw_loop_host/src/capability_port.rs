@@ -62,12 +62,8 @@ const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 /// loop executes it, for trajectory capture by downstream consumers (benchmark
 /// harnesses, debuggers, UI). `call_id` is the capability input ref.
 ///
-/// **Input-only.** This layer stages completed outcomes through
-/// [`LoopCapabilityResultWriter`], not through the port, so it does not observe
-/// results: result events belong to whichever result-writer the composition
-/// installs (e.g. reborn's `StagedCapabilityIo`), keyed back to `call_id`.
-/// Keeping the substrate observer input-only avoids advertising a result
-/// callback this layer would never fire.
+/// The capability port emits input events. Result-writer implementations may
+/// emit the matching result event through [`Self::on_capability_result`].
 ///
 /// Best-effort and side-effect-free. The callback fires inline on the
 /// per-capability hot path, so an implementation **must never block** (do I/O,
@@ -87,6 +83,16 @@ pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
         capability_id: &str,
         arguments: &serde_json::Value,
     );
+
+    /// A capability completed and staged `output` for the model. The default
+    /// keeps existing input-only observers source-compatible.
+    fn on_capability_result(
+        &self,
+        _call_id: &str,
+        _capability_id: &str,
+        _output: &serde_json::Value,
+    ) {
+    }
 }
 
 #[async_trait]
@@ -1818,6 +1824,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     runtime: capability.descriptor.runtime,
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
+                    description_trust: capability.description_trust,
                     concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
                 })
@@ -9740,6 +9747,7 @@ mod tests {
                 resource_profile: None,
                 origin_gate_matrix: None,
             },
+            description_trust: Default::default(),
             access: VisibleCapabilityAccess::Available,
             estimated_resources: ResourceEstimate::default(),
         }

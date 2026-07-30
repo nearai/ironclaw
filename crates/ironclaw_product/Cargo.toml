@@ -40,10 +40,12 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
+ironclaw_projects = { path = "../ironclaw_projects", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_runner = { path = "../ironclaw_runner", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -8,9 +8,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
-};
+pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
+use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope,
@@ -26,82 +25,6 @@ use crate::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
     LifecycleProductSurfaceContext, ProductSurfaceFailure,
 };
-
-/// Product-surface boundary for completing a durable auth continuation.
-///
-/// Implementations are idempotent on `flow_id`: the auth engine provides
-/// at-least-once delivery until the durable continuation fence is stamped.
-#[async_trait]
-pub trait ProductAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-}
-
-/// Adapts the auth-owned continuation vocabulary into the product continuation
-/// boundary. Composition and in-process harnesses use this same bridge before
-/// lifecycle handling is layered on top.
-pub fn product_auth_continuation_dispatcher(
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
-) -> Arc<dyn ProductAuthContinuationDispatcher> {
-    Arc::new(ProductContinuationFromAuth { inner })
-}
-
-/// Adapts a product continuation pipeline back into the auth-owned dispatcher
-/// vocabulary expected by [`ironclaw_auth::RebornProductAuthServices`].
-pub fn auth_continuation_from_product(
-    inner: Arc<dyn ProductAuthContinuationDispatcher>,
-) -> Arc<dyn RebornAuthContinuationDispatcher> {
-    Arc::new(AuthContinuationFromProduct { inner })
-}
-
-struct ProductContinuationFromAuth {
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
-}
-
-#[async_trait]
-impl ProductAuthContinuationDispatcher for ProductContinuationFromAuth {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_auth_continuation(event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
-}
-
-struct AuthContinuationFromProduct {
-    inner: Arc<dyn ProductAuthContinuationDispatcher>,
-}
-
-#[async_trait]
-impl RebornAuthContinuationDispatcher for AuthContinuationFromProduct {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_auth_continuation(event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
-}
 
 struct LifecycleAuthContinuationDispatcher {
     lifecycle: Arc<dyn LifecycleProductService>,
@@ -307,23 +230,6 @@ impl ProductAuthTurnGateResumeDispatcher {
 
 #[async_trait]
 impl ProductAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
-    }
-}
-
-#[async_trait]
-impl ironclaw_auth::RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
     async fn dispatch_auth_continuation(
         &self,
         event: AuthContinuationEvent,

@@ -26,6 +26,7 @@ mod capability_port;
 mod capability_surface_filter;
 mod compaction_task;
 mod context_window_cache;
+mod external_tool_capability;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
@@ -34,12 +35,16 @@ mod memory_context;
 mod model_capability_view;
 mod model_visible_scrub;
 mod prompt_context_budget;
+mod result_read;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
+mod surface_disclosure;
+mod synthetic_capability;
 mod system_inference;
+mod thread_scope;
 mod token_estimator;
 pub mod user_profile_context;
 
@@ -76,6 +81,7 @@ pub use compaction_task::{
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
+pub use external_tool_capability::wrap_external_tools;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -88,6 +94,9 @@ pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
 pub use model_visible_scrub::scrub_model_visible_detail;
+pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
+#[cfg(feature = "test-support")]
+pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -112,7 +121,13 @@ pub use subagent_spawn_port::{
     SubagentSpawnDeps, SubagentSpawnLimits, SubagentThreadKind, SubagentThreadMetadata,
     build_spawn_subagent_parameters_schema,
 };
+pub use surface_disclosure::wrap_surface_disclosure;
+pub use synthetic_capability::{
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation, wrap_synthetic_capabilities,
+};
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use thread_scope::ThreadScopeResolver;
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
@@ -1267,7 +1282,7 @@ where
                     usage,
                     effective_fallback_index,
                 } = response;
-                if effective_fallback_index != request.fallback_index {
+                if effective_fallback_index != Some(request.fallback_index) {
                     Err(AgentLoopHostError::new(
                         AgentLoopHostErrorKind::Internal,
                         "model gateway returned mismatched fallback route evidence",
@@ -1810,8 +1825,8 @@ pub struct HostManagedModelResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<LoopModelUsage>,
     /// Authoritative ordered-chain index used for this successful call.
-    #[serde(default)]
-    pub effective_fallback_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_fallback_index: Option<u32>,
 }
 
 impl HostManagedModelResponse {
@@ -1825,7 +1840,7 @@ impl HostManagedModelResponse {
                 content: sanitized_content,
             }),
             usage: None,
-            effective_fallback_index: 0,
+            effective_fallback_index: Some(0),
         }
     }
 
@@ -1852,7 +1867,7 @@ impl HostManagedModelResponse {
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
-            effective_fallback_index: 0,
+            effective_fallback_index: Some(0),
         }
     }
 
@@ -1874,7 +1889,7 @@ impl HostManagedModelResponse {
     }
 
     pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
-        self.effective_fallback_index = fallback_index;
+        self.effective_fallback_index = Some(fallback_index);
         self
     }
 }
@@ -1905,7 +1920,12 @@ pub enum HostManagedModelErrorKind {
     ContentFiltered,
     PolicyDenied,
     ConfigurationError,
+    /// Generic host-side resource/capacity exhaustion. Provider model-call
+    /// outcomes use the precise variants below.
     BudgetExceeded,
+    SpendBudgetExceeded,
+    ContextOverflow,
+    OutputTruncated,
     BudgetApprovalRequired,
     /// Durable host-side resource accounting failed. This is an
     /// infrastructure failure, not a provider credit or configured-budget
@@ -1935,6 +1955,8 @@ pub struct HostManagedModelError {
     /// Deterministic evidence that the provider chain has another configured
     /// route. Recovery may advance only when this is present.
     pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    pub usage: Option<LoopModelUsage>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -1953,6 +1975,7 @@ impl HostManagedModelError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -1965,6 +1988,7 @@ impl HostManagedModelError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -2010,6 +2034,11 @@ impl HostManagedModelError {
 
     pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
         self.next_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 }
@@ -2340,6 +2369,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(next_fallback_index) = error.next_fallback_index {
         host_error = host_error.with_next_fallback_index(next_fallback_index);
     }
+    if let Some(usage) = error.usage {
+        host_error = host_error.with_usage(usage);
+    }
     // `error.detail` is already producer-scrubbed; fall back to the scrubbed
     // rejected summary only when there is no structured detail.
     if let Some(detail) = error.detail.or(rejected_summary_detail) {
@@ -2357,6 +2389,11 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+        HostManagedModelErrorKind::SpendBudgetExceeded => {
+            AgentLoopHostErrorKind::SpendBudgetExceeded
+        }
+        HostManagedModelErrorKind::ContextOverflow => AgentLoopHostErrorKind::ContextOverflow,
+        HostManagedModelErrorKind::OutputTruncated => AgentLoopHostErrorKind::OutputTruncated,
         HostManagedModelErrorKind::BudgetApprovalRequired => {
             AgentLoopHostErrorKind::BudgetApprovalRequired
         }
@@ -2382,6 +2419,15 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
+        HostManagedModelErrorKind::SpendBudgetExceeded => {
+            "model request exceeded its configured spend budget"
+        }
+        HostManagedModelErrorKind::ContextOverflow => {
+            "model request exceeded the provider context window"
+        }
+        HostManagedModelErrorKind::OutputTruncated => {
+            "model response was truncated before completion"
+        }
         HostManagedModelErrorKind::BudgetApprovalRequired => "model request needs budget approval",
         HostManagedModelErrorKind::BudgetAccountingFailed => {
             "resource accounting storage is unavailable"
@@ -2401,6 +2447,40 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    #[test]
+    fn missing_model_route_evidence_stays_explicit_after_deserialization() {
+        let response = HostManagedModelResponse::assistant_reply("ok");
+        let mut serialized = serde_json::to_value(response).expect("response serializes");
+        serialized
+            .as_object_mut()
+            .expect("response is an object")
+            .remove("effective_fallback_index");
+
+        let decoded: HostManagedModelResponse =
+            serde_json::from_value(serialized).expect("legacy response shape deserializes");
+
+        assert_eq!(decoded.effective_fallback_index, None);
+    }
+
+    #[test]
+    fn failed_model_usage_survives_host_error_mapping() {
+        let usage = LoopModelUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..Default::default()
+        };
+
+        let mapped = model_gateway_error(
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::OutputTruncated,
+                "model response was truncated before completion",
+            )
+            .with_usage(usage),
+        );
+
+        assert_eq!(mapped.usage, Some(usage));
+    }
 
     #[test]
     fn typed_provider_errors_reach_distinct_loop_recovery_classes_with_retry_payload() {
@@ -2524,6 +2604,31 @@ mod tests {
             mapped.safe_summary,
             "resource accounting storage is unavailable"
         );
+    }
+
+    #[test]
+    fn model_gateway_error_preserves_precise_budget_and_token_limit_kinds() {
+        for (gateway_kind, host_kind) in [
+            (
+                HostManagedModelErrorKind::SpendBudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
+            ),
+            (
+                HostManagedModelErrorKind::ContextOverflow,
+                AgentLoopHostErrorKind::ContextOverflow,
+            ),
+            (
+                HostManagedModelErrorKind::OutputTruncated,
+                AgentLoopHostErrorKind::OutputTruncated,
+            ),
+        ] {
+            let mapped = model_gateway_error(HostManagedModelError::safe(
+                gateway_kind,
+                "model request could not complete",
+            ));
+
+            assert_eq!(mapped.kind, host_kind);
+        }
     }
 
     #[test]

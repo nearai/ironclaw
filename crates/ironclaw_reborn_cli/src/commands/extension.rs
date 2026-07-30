@@ -14,7 +14,7 @@ use crate::runtime::{RuntimeInputCaller, RuntimeInputOptions};
 
 #[derive(Debug, Args)]
 pub(crate) struct ExtensionCommand {
-    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    /// Confirm trusted-laptop host filesystem access for the unrestricted standalone profile.
     #[arg(long = "confirm-host-access", global = true)]
     confirm_host_access: bool,
 

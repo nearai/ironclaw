@@ -5,14 +5,14 @@
 //! invisible to every integration test before this seam PR.
 //!
 //! Ground truth (verified against
-//! `crates/ironclaw_reborn_composition/src/runtime/local_dev/surface_disclosure.rs`,
+//! `crates/ironclaw_reborn_composition/src/runtime/standalone/surface_disclosure.rs`,
 //! NOT the plan doc's "must deny rather than execute" framing, which does not
 //! match the code): `wrap_surface_disclosure` never hides or denies
 //! a capability. It is a description/schema ANNOTATION layer, disabled unless
 //! the workspace mount view carries a confirmed `/host` alias
 //! (`HostSurfaceDisclosure::enabled`). When enabled, it appends a
 //! "confirmed scoped roots" note to the `description`/`parameters` of the
-//! local-dev scoped-path capabilities (`read_file`, `write_file`, `list_dir`,
+//! standalone scoped-path capabilities (`read_file`, `write_file`, `list_dir`,
 //! `glob`, `grep`, `apply_patch`) and a local-host-shell note to
 //! `builtin.shell` — so the model is told which host paths are genuinely
 //! mounted instead of guessing raw host paths. This test pins THAT behavior,
@@ -43,15 +43,16 @@ const FLAT_READ_FILE_TOOL_NAME: &str = "builtin__read_file";
 const FLAT_SHELL_TOOL_NAME: &str = "builtin__shell";
 
 /// Substring of `HostSurfaceDisclosure`'s `confirmed_host_roots_note`
-/// output stable across `local_dev_mounts.rs` mount-alias wording changes.
+/// output stable across `standalone_mounts.rs` mount-alias wording changes.
 const SCOPED_ROOTS_NOTE_NEEDLE: &str = "Available scoped roots";
 
-/// Substring of `LOCAL_DEV_LOCAL_HOST_SHELL_NOTE`, the fixed local-host-shell
+/// Substring of `STANDALONE_LOCAL_HOST_SHELL_NOTE`, the fixed local-host-shell
 /// annotation `apply_to_surface_fields` appends unconditionally to
 /// `builtin.shell`'s description once the layer is enabled at all (unlike the
 /// scoped-path capabilities, `builtin.shell` gets no `scoped_roots_note`
 /// gate of its own — its branch returns immediately after appending).
-const SHELL_LOCAL_HOST_NOTE_NEEDLE: &str = "Runs on the local host with local-dev shell";
+const SHELL_LOCAL_HOST_NOTE_NEEDLE: &str =
+    "Runs on the local host with configured host process and network access";
 
 /// A harness with a confirmed `/host` mount (Change 4's new
 /// `.with_confirmed_host_mount()` backend) must surface the scoped-roots note
@@ -99,7 +100,7 @@ async fn workspace_only_mount_excludes_scoped_roots_note() {
 
 /// `builtin.shell` takes a DIFFERENT branch in `apply_to_surface_fields`
 /// (`capability_id.as_str() == SHELL_CAPABILITY_ID`, checked before the
-/// scoped-path capability match): it appends `LOCAL_DEV_LOCAL_HOST_SHELL_NOTE`
+/// scoped-path capability match): it appends `STANDALONE_LOCAL_HOST_SHELL_NOTE`
 /// unconditionally rather than gating on `scoped_roots_note`. But the whole
 /// port is still gated on `HostSurfaceDisclosure::enabled()`
 /// (`scoped_roots_note.is_some()`, i.e. a confirmed `/host` mount) in

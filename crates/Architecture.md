@@ -38,7 +38,7 @@ Reborn should not grow:
 - ad-hoc persistence records carrying raw prompts, tool input, secrets, host
   paths, or backend diagnostics;
 - separate subagent execution machinery outside the normal runner/driver loop;
-- local-dev shortcuts that silently become hosted or production behavior.
+- standalone shortcuts that silently become hosted or production behavior.
 
 ### Relationship to the legacy v1 engine
 
@@ -477,7 +477,7 @@ profile selects runtime constraints
 ```
 
 Runtime deployment profiles are a separate outer envelope. For example,
-`LocalDev`, `HostedDev`, and `EnterpriseDev` may all run the same loop and
+Standalone, hosted, and production deployments may all run the same loop and
 capability contracts, but resolve to different filesystem, process, network,
 secret, approval, and audit backends. Deployment mode may reduce requested
 authority; it must not increase it.
@@ -923,7 +923,7 @@ Composition mode changes which backends are legal, not the architecture:
 
 | Mode | Shape | Important constraint |
 | --- | --- | --- |
-| Local dev / local single user | Local workspace, optional local host process, local-friendly approvals. | Local shortcuts must be explicit and must not leak into hosted production. |
+| Standalone / single user | Local workspace, optional host process access, operator-friendly approvals. | Standalone shortcuts must be explicit and must not leak into hosted production. |
 | Product-live | Production service graph with real host runtime handles, durable events/audit, cancellation, policy guards, budgets, and safety context. | Missing handles fail closed during readiness/build. |
 | Migration/dry-run | Reborn service and stores used to validate compatibility without silently taking over live traffic. | No hidden bridge mode without migration contract. |
 | CLI / REPL | UX shell over `RebornRuntime`. | Must not import lower-level Reborn crates directly. |

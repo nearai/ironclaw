@@ -110,6 +110,7 @@ impl ProductSurface for StubServices {
         Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
             events: Vec::new(),
             next_cursor: None,
+            subscription: None,
         })
     }
 

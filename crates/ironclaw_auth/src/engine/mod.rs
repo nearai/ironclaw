@@ -104,6 +104,12 @@ impl StaticAuthRecipeResolver {
     pub fn vendors(&self) -> Vec<String> {
         self.recipes.keys().cloned().collect()
     }
+
+    /// Synchronous deployment lookup for composition-time static client
+    /// material. Runtime callers must use the requester-bound resolver port.
+    pub fn recipe_for_vendor(&self, vendor: &str) -> Option<ResolvedVendorAuthRecipe> {
+        self.recipes.get(vendor).cloned()
+    }
 }
 
 #[async_trait]

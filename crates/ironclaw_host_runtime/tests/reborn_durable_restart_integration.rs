@@ -627,7 +627,7 @@ fn base_services(
 
 async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
     build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: event_root.to_path_buf(),
             accept_single_node_durable: false,

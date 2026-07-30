@@ -1179,7 +1179,7 @@ where
     /// owner-agnostic flows and runs without an actor (background tasks,
     /// triggers) are unaffected.
     fn effective_thread_scope(&self, run_context: &LoopRunContext) -> ThreadScope {
-        crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+        ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn(
             &self.thread_scope,
             &run_context.scope,
             run_context.actor(),
@@ -2887,8 +2887,8 @@ mod tests {
         // This drives the resolution exactly as the host does — through
         // `run_context.actor()` — so it locks the host's call pattern, not
         // just the resolver rule (which has its own tests in
-        // `crate::thread_scope`).
-        use crate::thread_scope::ThreadScopeResolver;
+        // `ironclaw_loop_host::ThreadScopeResolver`).
+        use ironclaw_loop_host::ThreadScopeResolver;
 
         // No actor → the factory's owner is kept (background / system runs).
         let ctx = test_run_context().await;

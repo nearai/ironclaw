@@ -25,9 +25,9 @@ use crate::driver_registry::{
 /// Readiness mode for the Reborn loop graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornLoopReadinessMode {
-    /// Explicit local/developer/test mode. Fake, non-durable, and no-op
+    /// Non-production validation mode. Fake, non-durable, and no-op
     /// implementations are allowed but reported as degraded warnings.
-    LocalDevTest,
+    NonProduction,
     /// Production mode. Components must be production-verified; local durable
     /// implementations are valid, but fake/non-durable/no-op/unverified seams
     /// fail closed.
@@ -37,7 +37,7 @@ pub enum RebornLoopReadinessMode {
 impl From<RebornLoopReadinessMode> for DriverReadinessMode {
     fn from(mode: RebornLoopReadinessMode) -> Self {
         match mode {
-            RebornLoopReadinessMode::LocalDevTest => Self::LocalDevTest,
+            RebornLoopReadinessMode::NonProduction => Self::NonProduction,
             RebornLoopReadinessMode::Production => Self::Production,
         }
     }
@@ -64,7 +64,7 @@ impl RebornComponentSafetyClass {
         self != Self::ProductionVerified
     }
 
-    fn degraded_in_local_dev(self) -> bool {
+    fn degraded_in_non_production(self) -> bool {
         self != Self::ProductionVerified
     }
 
@@ -185,7 +185,7 @@ impl RebornLoopProductionIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornLoopProductionStatus {
     ProductionReady,
-    LocalDevDegraded,
+    NonProductionDegraded,
     NotReady,
 }
 
@@ -335,7 +335,7 @@ impl RebornComponentReadiness {
 
     fn available_for(self, mode: RebornLoopReadinessMode) -> bool {
         match mode {
-            RebornLoopReadinessMode::LocalDevTest => self.present(),
+            RebornLoopReadinessMode::NonProduction => self.present(),
             RebornLoopReadinessMode::Production => {
                 self.safety == Some(RebornComponentSafetyClass::ProductionVerified)
             }
@@ -480,10 +480,10 @@ pub fn validate_reborn_loop_production_readiness(
 
     let status = if issues.iter().any(|issue| issue.blocks_ready) {
         RebornLoopProductionStatus::NotReady
-    } else if inputs.mode == RebornLoopReadinessMode::LocalDevTest
+    } else if inputs.mode == RebornLoopReadinessMode::NonProduction
         && issues.iter().any(|issue| !issue.blocks_ready)
     {
-        RebornLoopProductionStatus::LocalDevDegraded
+        RebornLoopProductionStatus::NonProductionDegraded
     } else {
         RebornLoopProductionStatus::ProductionReady
     };
@@ -526,8 +526,8 @@ fn push_component_issues(
                     component_subject(component),
                 ));
             }
-            (RebornLoopReadinessMode::LocalDevTest, _, Some(safety))
-                if safety.degraded_in_local_dev() =>
+            (RebornLoopReadinessMode::NonProduction, _, Some(safety))
+                if safety.degraded_in_non_production() =>
             {
                 let Some(issue_kind) = safety.issue_kind() else {
                     continue;
@@ -665,7 +665,7 @@ fn push_mapped_driver_issues(
                 RebornLoopProductionIssueKind::ActiveRunDriverUnregistered,
             ),
             DriverReadinessDiagnosticCode::ReferenceDriverNotProductionReady
-            | DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev => (
+            | DriverReadinessDiagnosticCode::ReferenceDriverAllowedForNonProduction => (
                 RebornLoopProductionComponent::LoopDriver,
                 RebornLoopProductionIssueKind::TestOnlyImplementation,
             ),

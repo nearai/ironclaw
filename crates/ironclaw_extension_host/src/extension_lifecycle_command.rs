@@ -25,7 +25,7 @@ pub enum RebornExtensionLifecycleCommand {
 
 #[derive(Debug, Error)]
 pub enum RebornExtensionLifecycleCommandError {
-    #[error("extension lifecycle is available only for local-dev Reborn services")]
+    #[error("extension lifecycle is available only for standalone Reborn services")]
     LocalRuntimeUnavailable,
     #[error("extension lifecycle command is invalid: {0}")]
     ProductCommand(#[from] ProductSurfaceFailure),
@@ -229,6 +229,8 @@ fn render_string_array(output: &mut String, items: &[String], label: &str) {
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
+        LifecycleExtensionSource::Installed => "installed",
+        LifecycleExtensionSource::Registry => "registry",
     }
 }
 

@@ -1349,7 +1349,7 @@ mod tests {
             None,
         )
         .expect("valid reborn home");
-        RebornBootConfig::new(home, RebornProfile::LocalDev)
+        RebornBootConfig::new(home, RebornProfile::Standalone)
     }
 
     fn key_store() -> LlmKeyStore {

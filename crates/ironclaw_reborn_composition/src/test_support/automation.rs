@@ -1,6 +1,6 @@
-//! Test-support constructor for [`crate::RebornAutomationProductService`]
-//! (W5-WEBUI-API-1 Enabler B.2). Constructor is `pub(crate)` in production;
-//! this same-crate wrapper builds the real service over the harness's shared
+//! Test-support constructor for
+//! [`ironclaw_product::RebornAutomationProductService`] (W5-WEBUI-API-1
+//! Enabler B.2). This wrapper builds the real service over the harness's shared
 //! repository instead of a hand-rolled double duplicating its filter/join logic.
 
 use std::sync::Arc;
@@ -20,17 +20,15 @@ use crate::factory::TurnStateTriggerSourceReplyTarget;
 /// the active-hold projection from the same journal the harness coordinator
 /// writes, mirroring production's automation-backing pair (#5886).
 #[cfg(feature = "test-support")]
-pub fn local_dev_automation_product_service_for_test(
+pub fn standalone_automation_product_service_for_test(
     trigger_repository: Arc<dyn TriggerRepository>,
     processes: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
 ) -> Arc<dyn AutomationProductService> {
     let active_run_lookup = Arc::new(ProcessActiveRunLookup::new(processes));
-    Arc::new(
-        crate::automation::service::RebornAutomationProductService::new(
-            trigger_repository,
-            active_run_lookup,
-        ),
-    )
+    Arc::new(ironclaw_product::RebornAutomationProductService::new(
+        trigger_repository,
+        active_run_lookup,
+    ))
 }
 
 /// Build the raw [`TriggerActiveRunLookup`] the production automation panel
@@ -41,18 +39,18 @@ pub fn local_dev_automation_product_service_for_test(
 /// instead of through the WebUI automations service — see
 /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test` (#5886).
 #[cfg(feature = "test-support")]
-pub fn local_dev_trigger_active_run_lookup_for_test(
+pub fn standalone_trigger_active_run_lookup_for_test(
     processes: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
 ) -> Arc<dyn TriggerActiveRunLookup> {
     Arc::new(ProcessActiveRunLookup::new(processes))
 }
 
-/// Repoint the local-dev runtime's trigger lookup at the harness process
-/// runtime. Integration groups build the capability harness before the group
-/// coordinator owns its runtime, so production's single-system wiring is
-/// late-bound for active-run listing and trigger delivery inheritance.
+/// Repoint the standalone runtime's trigger-source lookup seams at the harness
+/// process runtime. Integration groups build the capability harness before the
+/// group coordinator owns its runtime, so production's single-system wiring must
+/// be late-bound for both active-run listing and trigger delivery inheritance.
 #[cfg(feature = "test-support")]
-pub fn rebind_local_dev_trigger_source_processes_for_test(
+pub fn rebind_standalone_trigger_source_turn_state_for_test(
     runtime: &crate::RebornRuntime,
     lifecycle_source: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
     turn_state: Arc<dyn AgentTurnRuntimePort>,

@@ -13,7 +13,9 @@ use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
 };
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, InMemoryBackend, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     Action, CapabilityDescriptor, CapabilityId, CredentialStageError, Decision, ExecutionContext,
     ExtensionHostAssemblyConfig, FailureKind, MountAlias, MountGrant, MountPermissions, MountView,
@@ -46,13 +48,16 @@ use crate::{
 };
 use ironclaw_skills::ScopedSkillManagementPort;
 
-pub type TestApprovalRequestStore = ApprovalRequestStore<InMemoryBackend>;
-pub type TestCapabilityLeaseStore = CapabilityLeaseStore<InMemoryBackend>;
+pub type TestApprovalRequestStore = ApprovalRequestStore<FaultInjecting<InMemoryBackend>>;
+pub type TestCapabilityLeaseStore = CapabilityLeaseStore<FaultInjecting<InMemoryBackend>>;
 
 pub struct ExtensionLifecycleTestServices {
     pub host_runtime: Arc<dyn HostRuntime>,
     pub product_auth: Arc<RebornProductAuthServices>,
     pub extension_management: Arc<RebornLocalExtensionManagementPort>,
+    pub skill_management: Arc<ScopedSkillManagementPort>,
+    pub filesystem: Arc<dyn RootFilesystem>,
+    filesystem_faults: Arc<FaultInjecting<InMemoryBackend>>,
     pub lifecycle_service: Arc<ExtensionHostLifecycleProductService>,
     pub approval_requests: Arc<TestApprovalRequestStore>,
     pub capability_leases: Arc<TestCapabilityLeaseStore>,
@@ -68,6 +73,10 @@ pub struct ExtensionLifecycleTestServices {
 impl ExtensionLifecycleTestServices {
     pub fn secret_store(&self) -> Arc<dyn SecretStorePort> {
         Arc::clone(&self.secret_store)
+    }
+
+    pub fn add_filesystem_fault(&self, fault: Fault) {
+        self.filesystem_faults.add_fault(fault);
     }
 }
 
@@ -96,7 +105,7 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
     auth_provider_client: Arc<dyn ironclaw_auth::AuthProviderClient>,
 ) -> ExtensionLifecycleTestServices {
     let owner_user_id = ironclaw_host_api::UserId::new(owner_id).expect("valid owner id");
-    let filesystem = Arc::new(InMemoryBackend::new());
+    let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let auth_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), |scope| {
@@ -157,7 +166,7 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
     .with_runtime_credential_account_resolver(credential_resolver);
     host_services = match network_http_egress {
         Some(egress) => host_services
-            .try_with_host_http_egress(TestNetworkHttpEgress(egress))
+            .try_with_host_http_egress(egress)
             .expect("test HTTP egress wires"),
         None => host_services,
     };
@@ -301,7 +310,7 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         MountPermissions::read_write_list_delete(),
     )])
     .expect("valid approval mounts");
-    let scoped_filesystem = Arc::new(ScopedFilesystem::new(filesystem, move |_| {
+    let scoped_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), move |_| {
         Ok(approval_mounts.clone())
     }));
     let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&scoped_filesystem)));
@@ -313,28 +322,27 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         .with_capability_leases(Arc::clone(&capability_leases))
         .with_persistent_approval_policies(persistent_approval_policies);
 
-    let skill_management = Arc::new(ScopedSkillManagementPort::new(
+    let skill_management = ironclaw_skills::build_scoped_skill_management_port(
         ironclaw_host_api::UserId::new(owner_id).expect("valid owner id"),
-        Arc::clone(&extension_filesystem),
-        MountView::default(),
-    ));
-    let lifecycle_service = ExtensionHostLifecycleProductService::new(skill_management)
-        .with_extension_management(Arc::clone(&extension_management));
-    let lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
+        Arc::clone(&filesystem),
+    );
+    let mut lifecycle_service =
+        ExtensionHostLifecycleProductService::new(Arc::clone(&skill_management))
+            .with_extension_management(Arc::clone(&extension_management));
+    if let Some(runtime_http_egress) = host_services.runtime_http_egress() {
+        lifecycle_service = lifecycle_service.with_runtime_http_egress(runtime_http_egress);
+    }
+    lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
         product_auth.runtime_credential_account_selection_service(),
     );
     let lifecycle_service = Arc::new(lifecycle_service);
-    let base_product_continuation =
-        ironclaw_product::product_auth_continuation_dispatcher(terminal_continuation);
     let lifecycle_product_continuation = ironclaw_product::lifecycle_auth_continuation_dispatcher(
         Arc::clone(&lifecycle_service) as Arc<dyn LifecycleProductService>,
-        base_product_continuation,
+        terminal_continuation,
     );
     assert!(
         continuation_dispatcher
-            .bind(ironclaw_product::auth_continuation_from_product(
-                lifecycle_product_continuation,
-            ))
+            .bind(lifecycle_product_continuation)
             .is_ok(),
         "lifecycle auth continuation binds once"
     );
@@ -343,6 +351,9 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         host_runtime: Arc::new(host_services.host_runtime_for_local_testing()),
         product_auth,
         extension_management: Arc::clone(&extension_management),
+        skill_management,
+        filesystem: extension_filesystem,
+        filesystem_faults: filesystem,
         lifecycle_service,
         approval_requests,
         capability_leases,
@@ -351,20 +362,20 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
     }
 }
 
-pub async fn invoke_json_with_local_dev_approval(
+pub async fn invoke_json_with_standalone_approval(
     services: &ExtensionLifecycleTestServices,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, FailureKind> {
-    match invoke_with_local_dev_approval(services, capability_id, context, input).await {
+    match invoke_with_standalone_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
         other => panic!("unexpected runtime outcome: {other:?}"),
     }
 }
 
-pub async fn invoke_with_local_dev_approval(
+pub async fn invoke_with_standalone_approval(
     services: &ExtensionLifecycleTestServices,
     capability_id: &str,
     context: ExecutionContext,
@@ -392,7 +403,7 @@ pub async fn invoke_with_local_dev_approval(
                 .expect("approval request persisted");
             let Action::Dispatch { .. } = approval_record.request.action.as_ref() else {
                 panic!(
-                    "unexpected local-dev lifecycle approval action: {:?}",
+                    "unexpected standalone lifecycle approval action: {:?}",
                     approval_record.request.action
                 );
             };
@@ -524,18 +535,6 @@ impl RuntimeCredentialAccountResolver for TestProductAuthRuntimeCredentialResolv
             scope: account.scope.resource,
             handle,
         })
-    }
-}
-
-struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
-
-#[async_trait]
-impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
-    async fn execute(
-        &self,
-        request: ironclaw_network::NetworkHttpRequest,
-    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
-        self.0.execute(request).await
     }
 }
 

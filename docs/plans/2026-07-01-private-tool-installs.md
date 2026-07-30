@@ -64,7 +64,7 @@ unchanged. The eviction-compensation finding is moot (no eviction).
   `local_dev_visible_capability_request` mints grants via
   `extension_surface.grants(&extension_id)` filtered by
   `owner.visible_to(caller)`
-  (`runtime/local_dev/extension_surface.rs`). Grant absence =
+  (`ironclaw_extension_host/src/capability_surface.rs`). Grant absence =
   invisible in the surface AND denied at dispatch — fail closed for
   free. Membership only changes what `visible_to` checks (set
   membership instead of single-owner equality).

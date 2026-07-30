@@ -2,7 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { isLocalDevOrigin } from "../../../lib/browser-origin";
+import { isLoopbackBrowserOrigin } from "../../../lib/browser-origin";
 import {
   completeNearaiWalletLogin,
   fetchLlmProviders,
@@ -12,7 +12,7 @@ import {
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 
-// `isLocalDevOrigin` moved to `src/lib/browser-origin.ts`: the login page
+// `isLoopbackBrowserOrigin` moved to `src/lib/browser-origin.ts`: the login page
 // also needs it (to gate the local-install hint on more than just "no
 // OAuth providers configured"), so the single implementation lives in the
 // app-wide shared lib rather than this settings-only hook module.
@@ -132,7 +132,7 @@ export function useProviderLogin({ onSuccess } = {}) {
   const startNearai = React.useCallback(
     async (provider) => {
       resetLoginFeedback();
-      if (isLocalDevOrigin()) {
+      if (isLoopbackBrowserOrigin()) {
         setNearaiError(t("onboarding.nearaiLocalSso"));
         return;
       }

@@ -464,6 +464,8 @@ pub enum LifecycleExtensionCredentialSetup {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
+    Installed,
+    Registry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +506,7 @@ pub struct LifecycleSkillSummary {
 pub enum LifecycleSkillSource {
     System,
     User,
+    Installed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

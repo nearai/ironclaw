@@ -1070,7 +1070,7 @@ impl RebornBinaryE2EHarness {
         self.resume_with_gate(run_id, blocked).await
     }
 
-    pub async fn approve_and_resume_local_dev_gate(
+    pub async fn approve_and_resume_standalone_gate(
         &self,
         run_id: TurnRunId,
     ) -> HarnessResult<GateRef> {
@@ -1080,7 +1080,7 @@ impl RebornBinaryE2EHarness {
             .gate_ref
             .ok_or("blocked run missing gate ref")?;
         self.capability_recorder
-            .approve_local_dev_gate(&blocked)
+            .approve_standalone_gate(&blocked)
             .await?;
         self.resume_with_gate(run_id, blocked.clone()).await?;
         Ok(blocked)
@@ -1609,7 +1609,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelRespons
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
-        effective_fallback_index: 0,
+        effective_fallback_index: Some(0),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)

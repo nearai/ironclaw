@@ -131,6 +131,13 @@ google:
       parent_google_ids:
         - root
       data: Drive content seeded by Emulate for Reborn QA.
+    - id: drv_provider_contract_empty
+      user_email: e2e.google@example.com
+      name: Empty provider file.txt
+      mime_type: text/plain
+      parent_google_ids:
+        - root
+      data: ""
     - id: drv_pepsico_account_brief
       user_email: e2e.google@example.com
       name: PepsiCo Account Brief

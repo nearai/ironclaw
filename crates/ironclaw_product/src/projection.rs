@@ -220,7 +220,7 @@ pub fn build_reborn_projection_services(
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         live_updates.clone(),
         Arc::new(NoExposureProjectionRedactionValidator),
-        // §4.3: the local-dev projection bundle's EventStreamManager keeps its
+        // §4.3: the standalone projection bundle's EventStreamManager keeps its
         // own ephemeral, volatile outbound-delivery bookkeeping — the drop-in
         // for the deleted throwaway `InMemoryOutboundStateStore::default()`.
         // A tenant/user-scoped view over a fresh `InMemoryBackend` mounts

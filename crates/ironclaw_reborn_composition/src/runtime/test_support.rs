@@ -37,9 +37,9 @@ fn build_approval_interaction_service_with_parts(
                 parts.skill_mounts.clone(),
                 parts.memory_mounts.clone(),
                 parts.system_extensions_lifecycle_mounts.clone(),
-                local_dev::extension_surface::ExtensionCapabilitySurfaceSource::new(Some(
-                    Arc::clone(&parts.extension_management),
-                )),
+                ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource::new(
+                    Some(Arc::clone(&parts.extension_management)),
+                ),
             )),
             approval_resolver,
             turn_coordinator,
@@ -57,7 +57,7 @@ impl RebornRuntime {
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in production builds.
     #[cfg(feature = "test-support")]
-    pub fn local_dev_approval_interaction_service_for_test(
+    pub fn standalone_approval_interaction_service_for_test(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
@@ -76,7 +76,7 @@ impl RebornRuntime {
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in production builds.
     #[cfg(feature = "test-support")]
-    pub fn local_dev_auth_interaction_service_for_test(
+    pub fn standalone_auth_interaction_service_for_test(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Option<Arc<dyn AuthInteractionService>> {
@@ -87,15 +87,15 @@ impl RebornRuntime {
         ))
     }
 
-    /// Like [`local_dev_approval_interaction_service_for_test`], but lets
+    /// Like [`standalone_approval_interaction_service_for_test`], but lets
     /// harnesses substitute the process gate source that owns their runs.
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in
     /// production builds.
     ///
-    /// [`local_dev_approval_interaction_service_for_test`]: Self::local_dev_approval_interaction_service_for_test
+    /// [`standalone_approval_interaction_service_for_test`]: Self::standalone_approval_interaction_service_for_test
     #[cfg(feature = "test-support")]
-    pub fn local_dev_approval_interaction_service_with_process_gates_for_test(
+    pub fn standalone_approval_interaction_service_with_turn_state_for_test(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
         process_gates: Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = TurnError>>,
@@ -108,14 +108,15 @@ impl RebornRuntime {
     }
 
     /// Auth-side counterpart of
-    /// [`local_dev_approval_interaction_service_with_process_gates_for_test`].
+    /// [`standalone_approval_interaction_service_with_turn_state_for_test`]. See
+    /// that method's documentation for why the process-gate override exists.
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in
     /// production builds.
     ///
-    /// [`local_dev_approval_interaction_service_with_process_gates_for_test`]: Self::local_dev_approval_interaction_service_with_process_gates_for_test
+    /// [`standalone_approval_interaction_service_with_turn_state_for_test`]: Self::standalone_approval_interaction_service_with_turn_state_for_test
     #[cfg(feature = "test-support")]
-    pub fn local_dev_auth_interaction_service_with_process_gates_for_test(
+    pub fn standalone_auth_interaction_service_with_turn_state_for_test(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
         process_gates: Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = TurnError>>,

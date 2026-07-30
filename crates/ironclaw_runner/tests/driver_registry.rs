@@ -139,7 +139,7 @@ fn production_readiness_rejects_fake_driver() {
 }
 
 #[test]
-fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
+fn non_production_readiness_allows_fake_driver_with_degraded_status() {
     let mut registry = DriverRegistry::new();
     let fake_key = registry
         .register_driver(
@@ -155,7 +155,7 @@ fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
         .expect("reference driver registration should succeed");
 
     let report = registry.validate_readiness(
-        DriverReadinessMode::LocalDevTest,
+        DriverReadinessMode::NonProduction,
         DriverReadinessInputs {
             host_graph: HostGraphReadiness::all_available(),
             configured_profiles: vec![ConfiguredRunProfile::enabled("local_reference", fake_key)],
@@ -165,10 +165,10 @@ fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
 
     assert_eq!(
         report.status,
-        DriverReadinessStatus::LocalDevDegradedReference
+        DriverReadinessStatus::NonProductionDegradedReference
     );
     assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.code
-        == DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev));
+        == DriverReadinessDiagnosticCode::ReferenceDriverAllowedForNonProduction));
 }
 
 #[test]

@@ -284,7 +284,7 @@ impl RebornIntegrationHarness {
         gate_ref: &GateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(gate_ref)
+            .approve_standalone_gate(gate_ref)
             .await?;
         self.resume_run_in_scope(
             scope,
@@ -307,7 +307,7 @@ impl RebornIntegrationHarness {
         gate_ref: &GateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .deny_local_dev_gate(gate_ref)
+            .deny_standalone_gate(gate_ref)
             .await?;
         self.resume_run_in_scope(
             scope,

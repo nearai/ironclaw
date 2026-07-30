@@ -31,6 +31,7 @@ test-support = [
     "ironclaw_extension_host/test-support",
     "ironclaw_auth/test-support",
     "ironclaw_host_runtime/test-support",
+    "ironclaw_loop_host/test-support",
     "ironclaw_outbound/test-support",
     "ironclaw_product/test-support",
     "ironclaw_runner/test-support",

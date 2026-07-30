@@ -38,7 +38,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Reopen a FRESH store at the same on-disk root, independent of the live
     // `Arc`, and confirm the pending request is there.
     let reopened =
-        ironclaw_reborn_composition::test_support::open_local_dev_approval_request_store_for_test(
+        ironclaw_reborn_composition::test_support::open_standalone_approval_request_store_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await?;
