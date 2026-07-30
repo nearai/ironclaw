@@ -33,7 +33,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | Crate directory | Package | Human context |
 | --- | --- | --- |
 | `ironclaw_authorization` | `ironclaw_authorization` | Evaluates host API authority contracts before capability execution. It should not execute work, reserve resources, or prompt users. |
-| `ironclaw_approvals` | `ironclaw_approvals` | Resolves durable approval requests and issues scoped authorization leases. It does not own prompting UI or runtime execution. |
+| `ironclaw_approvals` | `ironclaw_approvals` | Owns durable approval requests, gate records, policy, resolution, and scoped authorization leases. |
 | `ironclaw_trust` | `ironclaw_trust` | Host-controlled trust-class policy engine. Use it for decisions about how much trust a runtime, extension, or input receives. |
 | `ironclaw_resources` | `ironclaw_resources` | Resource reservation governor. Owns budget/reservation mechanics, not runtime dispatch. |
 | `ironclaw_auth` | `ironclaw_auth` | Product-facing Reborn auth setup contracts: auth-flow records, secure manual-token interactions, credential accounts, provider exchange, continuations, cleanup, and fakes. |
@@ -47,7 +47,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 
 | Crate directory | Package | Human context |
 | --- | --- | --- |
-| `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, run-state transitions, and neutral runtime dispatch. |
+| `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, process transitions, and neutral runtime dispatch. |
 | `ironclaw_dispatcher` | `ironclaw_dispatcher` | Composition-only runtime dispatch contracts. Wires validated extension descriptors to runtime lanes; it does not parse manifests or grant authority. |
 | `ironclaw_processes` | `ironclaw_processes` | Host-tracked background process lifecycle. Owns lifecycle mechanics, not capability policy. |
 | `ironclaw_scripts` | `ironclaw_scripts` | Script/CLI capability runner contracts. Executes declared commands through a host-selected backend. |
@@ -66,7 +66,6 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_reborn_event_store` | `ironclaw_reborn_event_store` | Concrete Reborn event/audit store backends and backend-profile validation. Depends on `ironclaw_events`; keeps storage adapters out of event vocabulary. |
 | `ironclaw_event_projections` | `ironclaw_event_projections` | Product-facing read models over durable runtime and audit logs. Upper layers should consume these DTOs rather than parse event rows directly. |
 | `ironclaw_event_streams` | `ironclaw_event_streams` | Transport-neutral projection stream manager: admission, bounded subscription buffers, replay/live updates, lag signals, and redaction validation. |
-| `ironclaw_run_state` | `ironclaw_run_state` | Current lifecycle state for host-managed invocations. Events are history; run state answers “what is happening now?” |
 | `ironclaw_threads` | `ironclaw_threads` | Canonical session thread and transcript service contracts. Use it for durable thread/transcript ownership. |
 | `ironclaw_conversations` | `ironclaw_conversations` | Conversation binding and session-thread contracts that connect product conversation concepts to Reborn threads. |
 | `ironclaw_memory` | `ironclaw_memory` | Memory document service adapters. This is for workspace/memory document semantics, not arbitrary transcript deletion. |
@@ -112,7 +111,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into engine or gateway crates.
 - **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_extension`); keep authority in lower host crates.
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
-- **Current invocation state**: use `ironclaw_run_state`, not event logs.
+- **Current invocation state**: query the `ironclaw_processes` journal projection.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product` over parsing storage rows in UI code.
 - **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product`; concrete adapters implement the `IdempotencyLedger` port without adding backend compile features.
 - **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.

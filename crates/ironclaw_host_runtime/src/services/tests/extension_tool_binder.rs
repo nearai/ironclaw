@@ -85,12 +85,7 @@ impl crate::FirstPartyCapabilityHandler for GatingHandler {
 
 fn binder_services(
     handlers: FirstPartyCapabilityRegistry,
-) -> HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
-    ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
-> {
+) -> HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor> {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::new(DiskFilesystem::new()),

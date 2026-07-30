@@ -9,7 +9,7 @@
 //!   `resume_turn_once`'s `record.gate_ref != Some(&request.gate_resolution_ref)`
 //!   check (`TurnError::InvalidRequest { reason: "gate resolution reference
 //!   mismatch" }`), distinct from a bogus ref failing earlier inside
-//!   `approve_local_dev_gate`'s own request-id lookup.
+//!   `approve_standalone_gate`'s own request-id lookup.
 //! - `missing_gate_bare_resolve` (row 10): a syntactically well-formed but
 //!   never-issued `GateRef` is resolved on a thread that never raised any
 //!   gate — pins the harness's own request-not-found rejection.

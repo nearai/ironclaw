@@ -81,14 +81,14 @@ impl LlmCredentialProvisionOutcome {
 /// Where [`provision_llm_credentials`] gets its (already-open) encrypted
 /// secret store from. Injected — mirrors [`PromptSource`] — so a test can
 /// supply a store whose `put` fails, proving the store-before-config write
-/// ordering without touching the real local-dev libsql-backed store.
+/// ordering without touching the real standalone libsql-backed store.
 pub(crate) trait LlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
 }
 
-/// Production [`LlmKeyStoreOpener`]: opens the real local-dev encrypted
+/// Production [`LlmKeyStoreOpener`]: opens the real standalone encrypted
 /// secret store `serve` later reads from (see
-/// `ironclaw_reborn_composition::open_local_dev_secret_store`'s doc for why
+/// `ironclaw_reborn_composition::open_standalone_secret_store`'s doc for why
 /// this is the same physical storage `serve` opens).
 pub(crate) struct EncryptedLlmKeyStoreOpener;
 
@@ -96,7 +96,7 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
@@ -886,15 +886,15 @@ mod tests {
         }
     }
 
-    /// Seed a cached master-key dotfile so the real local-dev store opener's
+    /// Seed a cached master-key dotfile so the real standalone store opener's
     /// resolver never reaches the OS keychain step in a test — see
     /// `ironclaw_reborn_composition::factory`'s
-    /// `open_local_dev_secret_store_opens_a_working_store_over_the_bare_root`
+    /// `open_standalone_secret_store_opens_a_working_store_over_the_bare_root`
     /// for the same seeding pattern.
     fn seed_cached_master_key(home: &RebornHome) {
         std::fs::write(
             home.path()
-                .join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+                .join(ironclaw_reborn_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
             ironclaw_secrets::keychain::generate_master_key_hex(),
         )
         .expect("seed cached master key");
@@ -1029,11 +1029,13 @@ mod tests {
             }
         );
 
-        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
-        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().join("local-dev");
+        // Verify through the compatibility RUNTIME storage root — the same db
+        // `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home
+            .path()
+            .join(ironclaw_reborn_config::RebornProfile::Standalone.local_runtime_storage_subdir());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(store)
@@ -1115,11 +1117,13 @@ mod tests {
             }
         );
 
-        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
-        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().join("local-dev");
+        // Verify through the compatibility RUNTIME storage root — the same db
+        // `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home
+            .path()
+            .join(ironclaw_reborn_config::RebornProfile::Standalone.local_runtime_storage_subdir());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(store)
@@ -1551,11 +1555,13 @@ mod tests {
             "config.toml: {config_text}"
         );
 
-        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
-        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().join("local-dev");
+        // Verify through the compatibility RUNTIME storage root — the same db
+        // `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home
+            .path()
+            .join(ironclaw_reborn_config::RebornProfile::Standalone.local_runtime_storage_subdir());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(store)
@@ -1655,12 +1661,14 @@ mod tests {
             "config.toml: {config_text}"
         );
 
-        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the
-        // same db `serve` opens at boot; pins the onboard-write/serve-read
-        // convergence for the headless env-seed path too.
-        let home_path = home.path().join("local-dev");
+        // Verify through the compatibility RUNTIME storage root — the same db
+        // `serve` opens at boot; pins the onboard-write/serve-read convergence
+        // for the headless env-seed path too.
+        let home_path = home
+            .path()
+            .join(ironclaw_reborn_config::RebornProfile::Standalone.local_runtime_storage_subdir());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(store)
@@ -1817,11 +1825,13 @@ mod tests {
             }
         );
 
-        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
-        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().join("local-dev");
+        // Verify through the compatibility RUNTIME storage root — the same db
+        // `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home
+            .path()
+            .join(ironclaw_reborn_config::RebornProfile::Standalone.local_runtime_storage_subdir());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(store)
@@ -1946,11 +1956,13 @@ mod tests {
             }
         );
 
-        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
-        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().join("local-dev");
+        // Verify through the compatibility RUNTIME storage root — the same db
+        // `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home
+            .path()
+            .join(ironclaw_reborn_config::RebornProfile::Standalone.local_runtime_storage_subdir());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(store)

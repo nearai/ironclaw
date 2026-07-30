@@ -78,7 +78,7 @@ pub(crate) fn sso_startup_config_from_env(
 /// Resolve the externally visible WebUI base URL used for OAuth redirects.
 ///
 /// Precedence stays Reborn-scoped: explicit Reborn env first, then the bound
-/// listener address for local development.
+/// listener address for standaloneelopment.
 pub(crate) fn webui_oauth_base_url_from_env(listen_addr: SocketAddr) -> anyhow::Result<String> {
     Ok(webui_public_base_url_from_env()?.unwrap_or_else(|| format!("http://{listen_addr}")))
 }
@@ -148,7 +148,7 @@ fn require_admission_allowlist(allowed_email_domains: &[String]) -> anyhow::Resu
 
 /// Refuse cleartext OAuth on a public interface: `http://` redirect URIs
 /// leak authorization codes in transit (and Google/GitHub reject them for
-/// production apps). Loopback `http://` stays allowed for local dev.
+/// production apps). Loopback `http://` stays allowed for standalone.
 fn reject_cleartext_oauth(base_url: &str, listen_addr: SocketAddr) -> anyhow::Result<()> {
     if is_cleartext_http_scheme(base_url) && !listen_addr.ip().is_loopback() {
         anyhow::bail!(
@@ -384,7 +384,7 @@ mod tests {
         for raw in ["http://localhost:3000", "HTTP://localhost:3000"] {
             assert!(
                 reject_cleartext_oauth(raw, loopback).is_ok(),
-                "{raw} on loopback stays allowed for local dev",
+                "{raw} on loopback stays allowed for standalone",
             );
         }
     }

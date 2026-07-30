@@ -49,7 +49,6 @@ ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }

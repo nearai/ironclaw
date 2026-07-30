@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::super::super::harness_mcp::{
-    build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
-    mcp_loopback_network_policy, mock_mcp_extension_package,
+    build_loopback_mcp_runtime, mcp_loopback_network_policy, mock_mcp_extension_package,
+    standalone_host_runtime_with_registry_egress_and_mcp,
 };
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
@@ -47,7 +47,7 @@ pub(crate) async fn mock_mcp_tools(
         mcp_url,
         capability_id,
     )?)?;
-    let runtime = local_dev_host_runtime_with_registry_egress_and_mcp(
+    let runtime = standalone_host_runtime_with_registry_egress_and_mcp(
         storage_root,
         registry,
         Arc::clone(&first_party_egress),

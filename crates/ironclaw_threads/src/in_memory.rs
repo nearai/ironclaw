@@ -964,7 +964,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: ListThreadsForScopeRequest,
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
-        // In-memory enumeration for local-dev. Production backends
+        // In-memory enumeration for standalone. Production backends
         // (filesystem / postgres) override with their own pagination
         // strategy; this impl is fine because the store is bounded
         // by tenant memory in the first place.
@@ -985,7 +985,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // cloning records owned by other tenants/projects only to throw
         // them away. The store is bounded by tenant memory so a full
         // scan is still acceptable here; a scope-indexed secondary
-        // map would help with very large stores but local-dev never
+        // map would help with very large stores but standalone never
         // gets close to that scale.
         //
         // Derive a sidebar-friendly title from the first user message

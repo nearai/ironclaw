@@ -15,8 +15,7 @@ publish = false
 layer = "kernel"
 
 [features]
-# In-memory turn-state store double (`test_support::in_memory_turn_state_store`)
-# for cross-crate tests. Enabled via dev-dependencies; never in production.
+# Process-backed agent-turn fixtures for cross-crate tests.
 test-support = ["ironclaw_host_api/test-support"]
 # Enables trusted host-only helpers that mark product ingress authentication as
 # verified. Product terminals must not enable this directly.
@@ -31,6 +30,7 @@ futures-util = "0.3"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
 hex = "0.4.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -44,8 +44,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 # Self-reference so the crate's own integration tests see `test_support`.
 ironclaw_turns = { path = ".", features = ["test-support"] }
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # FaultInjecting decorator: drive store fault paths through the real
-# `TurnStateRowStore` instead of a hand-rolled whole-trait fake.
+# the production process-backed projection instead of hand-rolled trait fakes.
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", features = [
     "test-support",
 ] }

@@ -417,6 +417,11 @@ async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion(
         .assert_final_reply("Recovered after capability failure.")
         .await
         .expect("recovered reply persisted to the thread");
+    assert_eq!(
+        harness.capability_invocations().len(),
+        1,
+        "the retry must continue from the checkpoint without replaying the failed side effect"
+    );
     assert_eq!(harness.remaining_model_responses(), 0);
 
     harness.shutdown().await;

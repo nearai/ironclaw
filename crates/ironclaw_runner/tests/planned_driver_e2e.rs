@@ -190,7 +190,7 @@ async fn planned_driver_executor_error_maps_to_unavailable() {
     assert_eq!(
         error,
         AgentLoopDriverError::Unavailable {
-            reason: "Prompt: unavailable".to_string()
+            reason: "Prompt: scripted prompt failure".to_string()
         }
     );
     let debug = format!("{error:?}");

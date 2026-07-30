@@ -20,9 +20,9 @@
 //! real exposure — raw tool input no longer round-trips through the loop's
 //! serialized checkpoint.
 //!
-//! This lives in `ironclaw_capabilities` (not `ironclaw_run_state`) because the
-//! `ironclaw_run_state` charter forbids persisting raw replay input in run-state
-//! records (`CLAUDE.md` line 7), and the `ironclaw_turns` charter forbids
+//! This lives in `ironclaw_capabilities` (not `ironclaw_approvals`) because the
+//! raw replay input does not belong in process-journal lifecycle rows, and the
+//! `ironclaw_turns` charter explicitly forbids
 //! persisting raw tool input in turn state or events — whereas
 //! `ironclaw_capabilities` owns the caller-facing invoke/resume/spawn workflow
 //! this payload exists to serve, and has no such prohibition. The record embeds
@@ -30,7 +30,7 @@
 //! ([`CapabilityInputRef`], [`AuthResumeApprovalIdentity`]) rather than
 //! re-typing them, per `type-placement.md`.
 //!
-//! The durable store mirrors `ironclaw_run_state`'s `GateRecordStore`:
+//! The durable store mirrors `ironclaw_approvals`'s `GateRecordStore`:
 //! a [`ScopedFilesystem`] over any [`RootFilesystem`], the shared lock-free
 //! [`cas_update`] lane (fail-closed on non-CAS backends), a `RecordKind` tag so
 //! byte-only backends are rejected, and a private [`StoredReplayPayload`] wrapper
@@ -107,7 +107,7 @@ impl From<FilesystemError> for ReplayPayloadStoreError {
 /// This is a dependency-inversion port (`type-placement.md` §"Traits" reason 2 /
 /// 4): defined in this kernel crate, implemented by
 /// [`ReplayPayloadStore`] and wired at composition — the same single-
-/// production-impl shape as `ironclaw_run_state`'s `GateRecordStorePort` it mirrors.
+/// production-impl shape as `ironclaw_approvals`'s `GateRecordStorePort` it mirrors.
 ///
 /// Resource-owner scoped; wrong-scope lookups look unknown (`Ok(None)`). It
 /// intentionally exposes no removal method: the replay payload is consumed once
@@ -160,7 +160,7 @@ struct StoredReplayPayload {
 /// Filesystem-backed replay-payload store under the `/replay-payloads` mount
 /// alias.
 ///
-/// Mirrors `ironclaw_run_state`'s `GateRecordStore`: construct with a
+/// Mirrors `ironclaw_approvals`'s `GateRecordStore`: construct with a
 /// [`ScopedFilesystem`] over any [`RootFilesystem`]. The [`ScopedFilesystem`]
 /// resolves the `/replay-payloads` alias to a tenant/user-scoped
 /// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
@@ -258,7 +258,7 @@ where
 // `MountAlias` rewriting, so neither prefix is encoded in the path itself.
 // Within-tenant sub-scope axes (agent/project/mission/thread) stay in the
 // alias-relative path because they are within-tenant scoping not covered by the
-// per-tenant `MountAlias`. Mirrors `ironclaw_run_state`'s `/gate-records` layout.
+// per-tenant `MountAlias`. Mirrors `ironclaw_approvals`'s `/gate-records` layout.
 
 const REPLAY_PAYLOADS_PREFIX: &str = "/replay-payloads";
 
@@ -277,7 +277,7 @@ fn replay_payload_path(
 /// `MountView` the caller supplied. Sub-scope axes (agent/project/mission/
 /// thread) stay in the path so within-tenant cross-scope isolation still works
 /// for stores sharing one alias target. Mirrors the sibling helper in
-/// `ironclaw_run_state`.
+/// `ironclaw_approvals`.
 fn scope_owner_alias_string(prefix: &'static str, scope: &ResourceScope) -> String {
     let mut base = String::from(prefix);
     if let Some(agent_id) = &scope.agent_id {
@@ -335,7 +335,7 @@ where
 /// Map the shared CAS helper's [`CasUpdateError`] into a
 /// [`ReplayPayloadStoreError`], preserving the caller's own error and failing
 /// closed on a backend that cannot honor versioned CAS (mirrors
-/// `ironclaw_run_state`'s `map_cas_error`).
+/// `ironclaw_approvals`'s `map_cas_error`).
 fn map_cas_error(error: CasUpdateError<ReplayPayloadStoreError>) -> ReplayPayloadStoreError {
     match error {
         CasUpdateError::Apply(inner) => inner,

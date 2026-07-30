@@ -543,15 +543,15 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
 
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -575,15 +575,15 @@ async fn build_runtime_with_slack_delivery(
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root)
+    .with_local_runtime_confirmed_host_home_root(host_home_root)
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
@@ -704,7 +704,7 @@ async fn configure_delivery_targets(runtime: &RebornRuntime) {
     let user_id = UserId::new(USER).expect("valid user id");
     register_delivery_targets(runtime);
     runtime
-        .local_dev_outbound_preferences_for_test()
+        .standalone_outbound_preferences_for_test()
         .expect("local runtime exposes outbound preferences")
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant_id, user_id.clone()),
@@ -848,15 +848,15 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
 
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -874,12 +874,12 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
 
 /// Keep parallel runtime tests off the ambient OS keychain. The production
 /// resolver deliberately prefers this cached dotfile, so this still exercises
-/// the real local-dev secret-store construction without process-global env
+/// the real standalone secret-store construction without process-global env
 /// mutation or platform keychain serialization.
 fn seed_test_secret_master_key(root: &Path) {
-    let local_dev_root = root.join("local-dev");
-    std::fs::create_dir_all(&local_dev_root).expect("local-dev root");
-    let key_path = local_dev_root.join(".reborn-local-dev-secrets-master-key");
+    let standalone_root = root.join("standalone");
+    std::fs::create_dir_all(&standalone_root).expect("standalone root");
+    let key_path = standalone_root.join(".reborn-local-dev-secrets-master-key");
     if !key_path.exists() {
         std::fs::write(key_path, TEST_SECRET_MASTER_KEY).expect("seed test secret master key");
     }
@@ -892,8 +892,8 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
     // same tenant/user) exercise the dispatch path instead of stopping at the
     // per-tool approval gate.
     let auto_approve = runtime
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test");
     let auto_approve_scope = trigger_management_execution_context().resource_scope;
     auto_approve
         .set(ironclaw_approvals::AutoApproveSettingInput {

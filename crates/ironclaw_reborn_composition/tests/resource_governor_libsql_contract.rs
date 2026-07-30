@@ -18,7 +18,8 @@ async fn real_libsql_contention_fails_current_write_then_same_governor_recovers(
             .await
             .expect("local libSQL database"),
     );
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&database)));
+    let filesystem =
+        Arc::new(LibSqlRootFilesystem::new(Arc::clone(&database)).expect("filesystem runtime"));
     filesystem
         .run_migrations()
         .await

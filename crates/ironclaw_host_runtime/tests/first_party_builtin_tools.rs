@@ -6466,7 +6466,7 @@ async fn builtin_http_defaults_json_body_content_type() {
 
 #[tokio::test]
 async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress_is_missing() {
-    let runtime = runtime_with_policy(local_dev_policy());
+    let runtime = runtime_with_policy(local_host_policy());
     let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
@@ -7584,7 +7584,7 @@ async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("filesystem.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     filesystem
         .create_dir_all(&VirtualPath::new("/projects/p").unwrap())
@@ -8477,7 +8477,7 @@ fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
 {
-    runtime_with_filesystem_and_policy(filesystem, local_dev_policy())
+    runtime_with_filesystem_and_policy(filesystem, local_host_policy())
 }
 
 fn runtime_with_filesystem_and_policy<F>(
@@ -8497,7 +8497,7 @@ where
 fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> impl HostRuntime {
     runtime_with_filesystem_policy_and_trigger_repository(
         DiskFilesystem::new(),
-        local_dev_policy(),
+        local_host_policy(),
         repository,
     )
 }
@@ -8527,7 +8527,7 @@ fn runtime_with_trigger_repository_and_create_hook(
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -8550,7 +8550,7 @@ fn runtime_with_trigger_repository_and_clock(
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9243,7 +9243,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9265,7 +9265,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_http_egress(egress)
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9293,7 +9293,7 @@ where
     }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(audit_sink)
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9302,7 +9302,7 @@ fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeProcessPort + 'static,
 {
-    runtime_with_process_port_and_policy(process_port, local_dev_policy())
+    runtime_with_process_port_and_policy(process_port, local_host_policy())
 }
 
 fn runtime_with_process_port_and_policy<T>(
@@ -9374,11 +9374,11 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     .host_runtime_for_local_testing()
 }
 
-fn local_dev_policy() -> EffectiveRuntimePolicy {
+fn local_host_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -9391,7 +9391,7 @@ fn local_dev_policy() -> EffectiveRuntimePolicy {
 fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         process_backend: ProcessBackendKind::TenantSandbox,
-        ..local_dev_policy()
+        ..local_host_policy()
     }
 }
 

@@ -57,7 +57,7 @@ pub trait UserDirectory: Send + Sync + 'static {
     ) -> Result<UserId, UserDirectoryError>;
 }
 
-/// Local-dev / single-operator default impl: derive the
+/// Standalone/single-operator default impl: derive the
 /// [`UserId`] from the verified provider email (lowercased) or fall
 /// back to `{provider}:{provider_user_id}` when no verified email
 /// is available. Production deployments should swap this for a

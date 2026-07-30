@@ -348,6 +348,109 @@ impl Default for Page {
     }
 }
 
+/// Stable ordering for an indexed keyset query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+/// Last row returned by an indexed keyset query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedQueryCursor {
+    pub value: IndexValue,
+    pub tie_breaker: IndexValue,
+}
+
+/// Bounded keyset page over one declared indexed projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedPage {
+    pub index: IndexName,
+    pub key: IndexKey,
+    pub tie_breaker: IndexKey,
+    pub direction: SortDirection,
+    pub after: Option<OrderedQueryCursor>,
+    pub limit: u32,
+}
+
+impl OrderedPage {
+    pub fn new(
+        index: IndexName,
+        key: IndexKey,
+        tie_breaker: IndexKey,
+        direction: SortDirection,
+        limit: u32,
+    ) -> Self {
+        Self {
+            index,
+            key,
+            tie_breaker,
+            direction,
+            after: None,
+            limit: limit.clamp(1, Page::MAX_LIMIT),
+        }
+    }
+
+    pub fn after(mut self, cursor: OrderedQueryCursor) -> Self {
+        self.after = Some(cursor);
+        self
+    }
+}
+
+pub(crate) fn ordered_query_prefix_values(
+    spec: &IndexSpec,
+    filter: &Filter,
+    page: &OrderedPage,
+) -> Option<Vec<IndexValue>> {
+    if spec.name != page.index || !matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix) {
+        return None;
+    }
+    let sort_position = spec.keys.iter().position(|key| key == &page.key)?;
+    if spec.keys.get(sort_position.saturating_add(1)) != Some(&page.tie_breaker) {
+        return None;
+    }
+    let mut equality_values = std::collections::BTreeMap::new();
+    if !collect_equality_values(filter, &mut equality_values) {
+        return None;
+    }
+    let prefix = spec.keys.get(..sort_position)?;
+    let prefix_keys = prefix
+        .iter()
+        .map(IndexKey::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if equality_values
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        != prefix_keys
+    {
+        return None;
+    }
+    prefix
+        .iter()
+        .map(|key| equality_values.get(key.as_str()).cloned())
+        .collect()
+}
+
+fn collect_equality_values<'a>(
+    filter: &'a Filter,
+    values: &mut std::collections::BTreeMap<&'a str, IndexValue>,
+) -> bool {
+    match filter {
+        Filter::All => true,
+        Filter::Eq { key, value } => values.insert(key.as_str(), value.clone()).is_none(),
+        Filter::And(filters) => filters
+            .iter()
+            .all(|filter| collect_equality_values(filter, values)),
+        Filter::PrefixOn { .. }
+        | Filter::Range { .. }
+        | Filter::Fts { .. }
+        | Filter::VectorNearest { .. }
+        | Filter::Or(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

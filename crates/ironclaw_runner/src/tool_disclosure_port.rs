@@ -9,8 +9,7 @@ use ironclaw_host_api::{
     TenantId, ThreadId,
 };
 use ironclaw_loop_host::{
-    CapabilityResultWrite, DurablePersistence, LoopCapabilityPortDecorator,
-    LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
@@ -65,13 +64,14 @@ impl ToolDisclosureCapabilityDecorator {
             caps: DisclosureCaps::default(),
         }
     }
-}
 
-impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
-    fn decorate(
+    /// Wrap one run's capability port with disclosure using the exact
+    /// allow-set already resolved by the runner-private profiled factory.
+    pub(crate) fn decorate_with_allow_set(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
+        allow_set: Arc<CapabilityAllowSet>,
     ) -> Arc<dyn LoopCapabilityPort> {
         Arc::new(ToolDisclosureCapabilityPort {
             inner,
@@ -79,6 +79,7 @@ impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
             result_writer: Arc::clone(&self.result_writer),
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
+            allow_set,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -92,6 +93,11 @@ struct ToolDisclosureCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    /// #5712/#5659-w6: the caller's effective allow-set, resolved once in
+    /// `ToolDisclosureCapabilityDecorator::decorate_with_allow_set` — narrows disclosed
+    /// tool_search/tool_describe metadata *and* the tool_search bridge's own
+    /// advertised description (the always-on catalog index).
+    allow_set: Arc<CapabilityAllowSet>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -199,24 +205,24 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         let Some(state) = state.as_ref() else {
             return Ok(Vec::new());
         };
-        let catalog_total_count = state.catalog.len();
-        let catalog_total_schema_tokens = state.catalog.total_schema_tokens();
+        let (effective_catalog_count, effective_catalog_schema_tokens) =
+            state.catalog.effective_metrics(&self.allow_set);
         // Live token savings = how much of the full (authorized) tool surface we
         // avoided advertising this turn. Lets a benchmark/live run report the
         // real reduction directly from one log line (the fixture benchmark can't,
         // since its names are decoupled from the real core).
-        let reduction_pct = if catalog_total_schema_tokens > 0 {
+        let reduction_pct = if effective_catalog_schema_tokens > 0 {
             100.0
                 * (1.0
                     - (f64::from(state.active.advertised_tokens)
-                        / f64::from(catalog_total_schema_tokens)))
+                        / f64::from(effective_catalog_schema_tokens)))
         } else {
             0.0
         };
         debug!(
             target: "ironclaw::reborn::context_shadow",
-            catalog_total_count,
-            catalog_total_schema_tokens,
+            effective_catalog_count,
+            effective_catalog_schema_tokens,
             advertised_tool_count = state.active.definitions.len(),
             advertised_tool_schema_tokens = state.active.advertised_tokens,
             deferred = state.active.deferred,
@@ -595,7 +601,7 @@ impl ToolDisclosureCapabilityPort {
         if rebuild {
             let catalog = CapabilityCatalog::new(&definitions, &[]);
             let promoted = self.promoted_for_scope()?;
-            let active = select_active_set(&catalog, &promoted, self.caps);
+            let active = select_active_set(&catalog, &promoted, self.caps, &self.allow_set);
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
@@ -932,7 +938,9 @@ impl ToolDisclosureCapabilityPort {
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let names = tool_search_rank(&state.catalog, query, limit);
+            let names = tool_search_rank(&state.catalog, query, limit, |id| {
+                self.allow_set.permits(id)
+            });
             let mut results = Vec::new();
             for name in names {
                 state.disclosed_names.insert(name.clone());
@@ -975,6 +983,11 @@ impl ToolDisclosureCapabilityPort {
             let Some(result) = state.catalog.search_result(name) else {
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
             };
+            // #5712: same message as a truly unknown name — a narrowed profile
+            // must not learn that a non-allowlisted tool exists.
+            if !self.allow_set.permits(&result.capability_id) {
+                return Ok(failed_invalid_input("tool_describe target is unknown"));
+            }
             state.disclosed_names.insert(name.to_string());
             json!({
                 "name": result.name,
@@ -1095,8 +1108,12 @@ impl ToolDisclosureCapabilityPort {
         let Some(state) = guard.as_ref() else {
             return Ok(None);
         };
-        // Forgiving resolution: resolve any tool the catalog knows by name,
-        // regardless of whether it has been advertised or discovered this turn.
+        // Forgiving resolution: resolve any allowlisted tool the catalog knows
+        // by name, regardless of whether it has been advertised or discovered
+        // this turn. A catalog-known but non-allowlisted target must follow the
+        // same recoverable bridge path as a nonexistent target; otherwise this
+        // host-exempt bridge becomes an existence oracle before the outer
+        // capability-surface filter can deny the resolved capability id.
         // A *direct* call to an undisclosed tool already resolves via
         // `direct_deferred_target`, so the `tool_call` bridge must not be
         // stricter than the direct path. Requiring prior disclosure here was a
@@ -1110,6 +1127,9 @@ impl ToolDisclosureCapabilityPort {
         let Some(definition) = self.catalog_target(state, name) else {
             return Ok(None);
         };
+        if !self.allow_set.permits(&definition.capability_id) {
+            return Ok(None);
+        }
         let target_call = self.target_call(tool_call, &definition, arguments);
         Ok(Some(ResolvedToolTarget {
             definition,
@@ -3113,6 +3133,9 @@ mod tests {
                 max_tools: 5,
                 ctx_limit: None,
             },
+            // Unnarrowed — unit tests here exercise disclosure mechanics, not
+            // profile narrowing (that's the integration tier).
+            allow_set: Arc::new(CapabilityAllowSet::All),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

@@ -36,17 +36,10 @@ pub struct LoadedCheckpointPayload {
     pub payload: RedactedCheckpointPayload,
 }
 
-/// Request to stage a checkpoint payload's raw bytes before calling
-/// [`LoopCheckpointPort::checkpoint`] with the resulting state ref.
+/// Request to stage checkpoint bytes in host memory before
+/// [`LoopCheckpointPort::checkpoint`] atomically journals metadata and payload.
 ///
-/// The two-step write keeps byte-storage and metadata-write responsibilities
-/// cleanly split.
-///
-/// `kind` is required so adapters that bridge to
-/// `CheckpointStateStorePort::put_checkpoint_state` can persist the correct kind
-/// without having to guess. The subsequent `checkpoint(kind, state_ref)` call
-/// must use the same `kind`; the read-side `get_checkpoint_state` validates
-/// the staged kind against the metadata write's kind.
+/// `kind` binds the staged bytes to the subsequent checkpoint boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageCheckpointPayloadRequest {
     /// Checkpoint boundary the staged payload belongs to. Must match the
@@ -58,8 +51,7 @@ pub struct StageCheckpointPayloadRequest {
     /// read-side can authenticate the boundary on resume.
     pub schema_id: CheckpointSchemaId,
     /// Canonical payload bytes (e.g. `serde_json::to_vec(&state)`). The
-    /// implementation does not parse the bytes; it persists them and returns
-    /// an opaque ref.
+    /// implementation validates the bound and returns an opaque staging ref.
     pub payload: Vec<u8>,
 }
 
@@ -92,12 +84,12 @@ pub trait LoopCheckpointPort: Send + Sync {
 
     /// Stage a checkpoint payload's raw bytes and return an opaque
     /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
-    /// can reference. The default impl fails closed; concrete impls live in
-    /// `ironclaw_loop_host` and wrap the host's `CheckpointStateStorePort`.
+    /// can reference. The default impl fails closed; the runner's host-managed
+    /// adapter stages bytes until the process checkpoint command commits them.
     ///
     /// The executor's checkpoint helper calls this method before invoking
-    /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references
-    /// a payload that's already durably stored.
+    /// `LoopCheckpointPort::checkpoint(...)`; only that checkpoint call makes
+    /// the payload durable.
     async fn stage_checkpoint_payload(
         &self,
         _request: StageCheckpointPayloadRequest,

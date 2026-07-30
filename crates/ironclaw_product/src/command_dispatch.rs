@@ -22,7 +22,7 @@ use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
 pub struct ProductCommandContext {
     pub action_id: ProductActionId,
     pub fingerprint: ActionFingerprintKey,
-    /// Exact normalized inbound token before aliases are canonicalized.
+    /// Exact raw inbound command token, verbatim from the payload.
     pub requested_command: String,
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,

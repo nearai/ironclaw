@@ -19,6 +19,19 @@ pub trait NetworkHttpEgress: Send + Sync {
 }
 
 #[async_trait]
+impl<T> NetworkHttpEgress for std::sync::Arc<T>
+where
+    T: NetworkHttpEgress + ?Sized,
+{
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        self.as_ref().execute(request).await
+    }
+}
+
+#[async_trait]
 pub trait NetworkHttpTransport: Send + Sync {
     async fn execute(
         &self,

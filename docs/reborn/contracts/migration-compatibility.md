@@ -204,7 +204,7 @@ Cutover requirements:
 - caller-level tests across `CapabilityHost -> Dispatcher -> Adapter -> Process/Event/Memory` paths;
 - explicit migration/backfill path for reused legacy schemas;
 - RootFilesystem physical-layout migrations that replace a hot production blob
-  with rows, such as turn state `/turns/state.json` to `/turns/rows/v1`, are the
+  with a journal, such as legacy turn state to the process journal, are the
   final stack step before production exposure; the stack must not go live until
   the migration has run idempotently and row readback is verified;
 - rollback notes for any bridge that can affect production state;

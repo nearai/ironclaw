@@ -11,8 +11,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
-    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
+    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
@@ -58,8 +58,8 @@ fn provider_name(value: &str) -> ProviderToolName {
     ProviderToolName::new(value).expect("provider tool name")
 }
 
-fn local_development_safety_context() -> InstructionSafetyContext {
-    InstructionSafetyContext::local_development_noop()
+fn non_production_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::non_production_noop()
 }
 
 #[tokio::test]
@@ -2451,7 +2451,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2515,7 +2515,7 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2577,7 +2577,7 @@ async fn production_loop_model_request_includes_runtime_context() {
         context_port,
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     )
-    .with_safety_context(local_development_safety_context())
+    .with_safety_context(non_production_safety_context())
     .with_instruction_materialization_store(store_for_port)
     .with_runtime_context(LoopRuntimeContext {
         loop_started_at_utc,
@@ -2638,7 +2638,7 @@ async fn production_loop_model_gateway_keeps_instruction_stores_isolated_across_
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
 
     let request = production_loop_request(&fixture, None).await;
@@ -2745,7 +2745,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2799,7 +2799,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
             fixture.thread_scope.clone(),
             provider_gateway,
             16,
-            local_development_safety_context(),
+            non_production_safety_context(),
         ));
         let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopModelPort::new(
@@ -2840,7 +2840,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2885,7 +2885,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2904,6 +2904,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             }],
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2934,7 +2935,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2953,6 +2954,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2980,7 +2982,7 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         fixture.thread_scope.clone(),
         invalid_summary_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port =
@@ -3016,6 +3018,46 @@ async fn gateway_sanitizes_provider_errors() {
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
     assert!(!error.safe_summary.contains("RAW_PROVIDER_SECRET"));
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
+}
+
+#[tokio::test]
+async fn gateway_preserves_exhausted_fallback_as_unavailable_without_provider_call() {
+    let provider = Arc::new(RecordingLlmProvider::reply("must not be called"));
+    let failover = Arc::new(
+        FailoverProvider::new(vec![provider.clone() as Arc<dyn LlmProvider>])
+            .expect("single-provider failover chain"),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        failover,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.fallback_index = 1;
+
+    let error = gateway
+        .stream_model(request)
+        .await
+        .expect_err("fallback index one is absent");
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "configured model fallback route is unavailable"
+    );
+    assert!(
+        error
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("host-selected-model")),
+        "the typed route failure must retain its safe model identity"
+    );
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        0,
+        "fallback exhaustion must be decided before provider dispatch"
+    );
 }
 
 #[tokio::test]
@@ -3634,7 +3676,7 @@ async fn production_loop_request(
     production_loop_request_with_safety(
         fixture,
         model_preference,
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
     )
     .await
 }
@@ -3661,7 +3703,7 @@ async fn production_loop_request_with_inline_messages(
     production_loop_request_with_safety_and_inline_messages(
         fixture,
         model_preference,
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
         inline_messages,
     )
     .await
@@ -3705,6 +3747,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
         inline_messages,
         surface_version: None,
         model_preference,
+        fallback_index: 0,
         capability_view: None,
     }
 }
@@ -3828,6 +3871,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
             },
         ],
         surface_version: None,
+        fallback_index: 0,
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),

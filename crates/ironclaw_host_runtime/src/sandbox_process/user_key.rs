@@ -59,7 +59,8 @@ impl RebornSandboxUserKey {
     }
 
     pub fn container_name(&self) -> String {
-        format!("ironclaw-reborn-sandbox-user-{}", &self.digest[..24])
+        let digest_prefix = self.digest.get(..24).unwrap_or(self.digest.as_str());
+        format!("ironclaw-reborn-sandbox-user-{digest_prefix}")
     }
 }
 

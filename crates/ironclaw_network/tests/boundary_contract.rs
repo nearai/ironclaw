@@ -16,7 +16,7 @@ fn network_crate_does_not_depend_on_workflow_runtime_secret_or_observability_cra
         "ironclaw_mcp",
         "ironclaw_processes",
         "ironclaw_resources",
-        "ironclaw_run_state",
+        "ironclaw_approvals",
         "ironclaw_scripts",
         "ironclaw_secrets",
         "ironclaw_wasm",

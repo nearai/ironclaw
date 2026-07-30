@@ -202,9 +202,7 @@ impl RebornTrajectoryObserver for SafePreviewTrajectoryObserver {
 
 /// Adapts a composition-owned [`RebornTrajectoryObserver`] to the substrate
 /// [`CapabilityTrajectoryObserver`] the loop-host capability port consumes,
-/// so the service trait never appears in this crate's loop-host boundary. The
-/// substrate trait is input-only; the composition observer's result half is
-/// driven separately by `StagedCapabilityIo`.
+/// so the service trait never appears in this crate's loop-host boundary.
 #[derive(Debug)]
 struct CapabilityTrajectoryObserverAdapter {
     inner: Arc<dyn RebornTrajectoryObserver>,
@@ -220,11 +218,15 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
         self.inner
             .on_capability_input(call_id, capability_id, arguments);
     }
+
+    fn on_capability_result(&self, call_id: &str, capability_id: &str, output: &serde_json::Value) {
+        self.inner
+            .on_capability_result(call_id, capability_id, output);
+    }
 }
 
-/// Adapt a composition observer to the substrate observer the loop-host
-/// capability port (the input hook) drives. The result hook lives on
-/// `StagedCapabilityIo`, which calls the composition trait directly.
+/// Adapt a composition observer to the substrate observer shared by loop-host
+/// capability input and result adapters.
 pub(crate) fn as_capability_observer(
     observer: Arc<dyn RebornTrajectoryObserver>,
 ) -> Arc<dyn CapabilityTrajectoryObserver> {

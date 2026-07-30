@@ -24,7 +24,7 @@ pub enum RebornExtensionLifecycleCommand {
 
 #[derive(Debug, Error)]
 pub enum RebornExtensionLifecycleCommandError {
-    #[error("extension lifecycle is available only for local-dev Reborn services")]
+    #[error("extension lifecycle is available only for standalone Reborn services")]
     LocalRuntimeUnavailable,
     #[error("extension lifecycle command is invalid: {0}")]
     ProductCommand(#[from] ProductSurfaceFailure),

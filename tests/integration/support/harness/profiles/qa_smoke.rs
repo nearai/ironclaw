@@ -23,8 +23,8 @@ use ironclaw_host_runtime::{
 
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
-    host_runtime_storage_roots, http_test_policy, local_dev_host_runtime_with_http_egress,
-    memory_mounts, qa_smoke_mounts,
+    host_runtime_storage_roots, http_test_policy, memory_mounts, qa_smoke_mounts,
+    standalone_host_runtime_with_http_egress,
 };
 
 /// Real capability ids `qa_smoke_tools` registers on the built harness — a
@@ -65,7 +65,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
     let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
     std::fs::create_dir_all(storage_root.join("skills"))?;
     std::fs::create_dir_all(storage_root.join("system/skills"))?;
-    let runtime = local_dev_host_runtime_with_http_egress(
+    let runtime = standalone_host_runtime_with_http_egress(
         storage_root,
         Arc::new(RecordingRuntimeHttpEgress::with_body(
             br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),

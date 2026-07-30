@@ -219,29 +219,29 @@ where
     ))
 }
 
-pub fn build_existing_local_dev_skill_management_port(
+pub fn build_existing_standalone_skill_management_port(
     owner_id: impl Into<String>,
-    local_dev_storage_root: impl Into<PathBuf>,
+    standalone_storage_root: impl Into<PathBuf>,
 ) -> Result<Option<Arc<ScopedSkillManagementPort>>, ScopedSkillManagementBuildError> {
     let owner_id = owner_id.into();
-    let local_dev_storage_root = local_dev_storage_root.into();
-    if !local_dev_storage_root.try_exists().map_err(|error| {
+    let standalone_storage_root = standalone_storage_root.into();
+    if !standalone_storage_root.try_exists().map_err(|error| {
         ScopedSkillManagementBuildError::InvalidConfig {
-            reason: format!("local-dev skill storage root could not be inspected: {error}"),
+            reason: format!("standalone skill storage root could not be inspected: {error}"),
         }
     })? {
         return Ok(None);
     }
-    if !local_dev_storage_root.is_dir() {
+    if !standalone_storage_root.is_dir() {
         return Err(ScopedSkillManagementBuildError::InvalidConfig {
-            reason: "local-dev skill storage root is not a directory".to_string(),
+            reason: "standalone skill storage root is not a directory".to_string(),
         });
     }
 
     let mut filesystem = DiskFilesystem::new();
     filesystem.mount_local(
         VirtualPath::new("/projects")?,
-        HostPath::from_path_buf(local_dev_storage_root),
+        HostPath::from_path_buf(standalone_storage_root),
     )?;
     let owner_user_id =
         UserId::new(owner_id).map_err(|error| ScopedSkillManagementBuildError::InvalidConfig {

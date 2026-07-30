@@ -18,7 +18,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_event_streams",
     "ironclaw_extensions",
     "ironclaw_authorization",
-    "ironclaw_run_state",
+    "ironclaw_approvals",
     "ironclaw_approvals",
     "ironclaw_resources",
     "ironclaw_trust",

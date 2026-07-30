@@ -87,7 +87,7 @@ run_architecture() {
   run_test ironclaw_capabilities capability_host_contract
   run_test ironclaw_capabilities capability_host_dispatcher_integration
   run_test ironclaw_capabilities capability_host_process_integration
-  run_test ironclaw_capabilities capability_host_run_state_contract
+  run_test ironclaw_capabilities capability_host_invocation_state_contract
   run_test ironclaw_capabilities capability_host_spawn_contract
   run_test ironclaw_capabilities capability_obligation_handler_contract
   # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
@@ -113,10 +113,10 @@ run_runtimes() {
   # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
   # turn: the scrubbed, bounded MCP cause reaches the next model request.
   run_test_exact ironclaw_reborn_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
-  run_test ironclaw_processes process_dispatch_integration
   run_test ironclaw_processes process_host_contract
+  run_test ironclaw_processes process_journal_store_contract
+  run_test ironclaw_processes legacy_migration_backend_contract
   run_test ironclaw_processes process_services_contract
-  run_test ironclaw_processes process_store_contract
 }
 
 run_substrates() {
@@ -132,8 +132,7 @@ run_substrates() {
   run_test ironclaw_secrets boundary_contract
   run_test ironclaw_secrets secret_store_contract
   run_test ironclaw_resources resource_governor_contract
-  run_test ironclaw_run_state approval_resolution_contract
-  run_test ironclaw_run_state run_state_contract
+  run_test ironclaw_approvals approval_store_contract
   run_test ironclaw_approvals approval_resolution_contract
   run_test ironclaw_approvals boundary_contract
   run_test ironclaw_authorization boundary_contract

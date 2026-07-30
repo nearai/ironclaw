@@ -78,7 +78,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a searched Reborn extension into durable local-dev lifecycle state. Installation also attempts activation: when an extension does not require credentials or credentials are already available it publishes tools immediately, and when credentials are missing it raises the auth gate. If install reports the extension is already installed, report the installed state or credential gate it returns instead of calling a separate activation tool.",
+            "Install a searched Reborn extension into durable standalone lifecycle state. Installation also attempts activation: when an extension does not require credentials or credentials are already available it publishes tools immediately, and when credentials are missing it raises the auth gate. If install reports the extension is already installed, report the installed state or credential gate it returns instead of calling a separate activation tool.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -92,7 +92,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_REMOVE_CAPABILITY_ID,
-            "Remove an installed Reborn extension from durable local-dev lifecycle state. Use this when the user asks to uninstall, remove, disable, disconnect, unpair, unlink, or revoke access for an extension, integration, app, account, external channel, or the current external chat. Pass the extension's registry id as extension_id; removal also performs extension-owned cleanup such as authentication, identity, and channel bindings when supported.",
+            "Remove an installed Reborn extension from durable standalone lifecycle state. Use this when the user asks to uninstall, remove, disable, disconnect, unpair, unlink, or revoke access for an extension, integration, app, account, external channel, or the current external chat. Pass the extension's registry id as extension_id; removal also performs extension-owned cleanup such as authentication, identity, and channel bindings when supported.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -669,7 +669,9 @@ mod tests {
         CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     };
-    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use ironclaw_trust::{
+        AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustPolicy, TrustProvenance,
+    };
     use std::{
         collections::{BTreeMap, BTreeSet},
         sync::Arc,
@@ -678,7 +680,7 @@ mod tests {
     use super::*;
     use crate::lifecycle_test_support::{
         ExtensionLifecycleTestServices, build_lifecycle_test_services,
-        invoke_json_with_local_dev_approval, invoke_with_local_dev_approval,
+        invoke_json_with_standalone_approval, invoke_with_standalone_approval,
     };
     use ironclaw_host_api::InstallationState;
     use ironclaw_product::{
@@ -852,7 +854,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {
+    async fn standalone_agent_surface_exposes_extension_lifecycle_tools() {
         let services = test_services("extension-tools-surface-owner", None, false).await;
         let runtime = services.host_runtime.as_ref();
 
@@ -1058,7 +1060,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_lifecycle_tools_manage_visible_extension_surface() {
+    async fn standalone_extension_lifecycle_tools_manage_visible_extension_surface() {
         let services = test_services("extension-tools-owner", None, false).await;
         let runtime = services.host_runtime.as_ref();
         let extension_management = services.extension_management.clone();
@@ -1141,8 +1143,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_remove_revokes_exclusive_credential_so_reactivation_requires_auth()
-    {
+    async fn standalone_extension_remove_revokes_exclusive_credential_so_reactivation_requires_auth()
+     {
         // Regression (#slack model-B): before the pairing->OAuth swap, removing an
         // extension cleared its credentials, so the agent could not silently
         // re-add it. OAuth personal credentials are stored `UserReusable` and are
@@ -1191,7 +1193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_remove_preserves_shared_credential_used_by_another_extension() {
+    async fn standalone_extension_remove_preserves_shared_credential_used_by_another_extension() {
         // Exclusivity guard: removing one extension must NOT revoke a credential
         // still used by another installed extension. Gmail and Google Calendar
         // share the `google` provider; removing Gmail must leave the Google
@@ -1252,7 +1254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_activate_returns_auth_gate_for_missing_extension_credentials() {
+    async fn standalone_extension_activate_returns_auth_gate_for_missing_extension_credentials() {
         let services = test_services("extension-tools-auth-gate-owner", None, false).await;
         let extension_management = services.extension_management.clone();
 
@@ -1284,7 +1286,7 @@ mod tests {
         // install exists and leaks its credential requirement shape. Ownership
         // masks before the credential preflight, so the non-owner sees the
         // same failure a missing installation would produce.
-        let outcome = invoke_with_local_dev_approval(
+        let outcome = invoke_with_standalone_approval(
             &services,
             EXTENSION_ACTIVATE_CAPABILITY_ID,
             execution_context_for_user(
@@ -1301,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_search_distinguishes_configured_from_active() {
+    async fn standalone_extension_search_distinguishes_configured_from_active() {
         let services = test_services("extension-tools-active-search-owner", None, false).await;
 
         let available_search = invoke_json(
@@ -1439,7 +1441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
+    async fn standalone_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let services = test_services("extension-tools-scope-gate-owner", None, true).await;
         let extension_management = services.extension_management.clone();
 
@@ -1484,7 +1486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
+    async fn standalone_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
         let services = test_services("extension-tools-gmail-scope-union-owner", None, true).await;
         let extension_management = services.extension_management.clone();
 
@@ -1529,7 +1531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_activate_maps_corrupt_configured_account_to_backend() {
+    async fn standalone_extension_activate_maps_corrupt_configured_account_to_backend() {
         let services = test_services("extension-tools-corrupt-auth-owner", None, false).await;
         let extension_management = services.extension_management.clone();
 
@@ -1570,7 +1572,7 @@ mod tests {
     /// invocation scope found no policy/credential, failed transient, and
     /// fell back to the bundled manifest with zero model-visible tools.
     #[tokio::test]
-    async fn local_dev_extension_activate_hosted_mcp_stages_discovery_and_publishes_tools() {
+    async fn standalone_extension_activate_hosted_mcp_stages_discovery_and_publishes_tools() {
         let discovery_script = std::sync::Arc::new(
             crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
                 // Real hosted MCP providers may return verbose prose. The
@@ -1636,8 +1638,109 @@ mod tests {
         );
     }
 
+    /// Pins the ordering the test above assumes but never checks: activation
+    /// must run hosted-MCP discovery BEFORE `commit_activation` publishes,
+    /// because the published `AuthorityCeiling` (`extension_allowed_effects`
+    /// in `active_publication.rs`) is computed from whatever
+    /// `ExtensionPackage` publish() is handed — the DISCOVERED package if
+    /// discovery ran first, the pre-discovery SEED package if not. If
+    /// activation is ever reordered to publish before discovery (or a new
+    /// activation path publishes the seed package), an effect a live MCP
+    /// server only reveals at discovery time silently drops out of the
+    /// ceiling and every tool needing it gets denied at authorization with
+    /// no error at the publish site.
+    ///
+    /// `notion`'s bundled manifest already declares every effect
+    /// (`network`, `use_secret`, `external_write`) its discovered tools can
+    /// ever produce, so swapping seed for discovered there changes nothing
+    /// observable — it cannot discriminate this regression. `nearai` is the
+    /// only other bundled hosted-MCP package, and its static manifest
+    /// declares only `network` + `use_secret`: scripting a discovered tool
+    /// with a `destructiveHint` annotation (see
+    /// `discovered_tool_requires_external_write` in
+    /// `ironclaw_extensions::hosted_mcp_discovery`) makes the DISCOVERED
+    /// package carry `ExternalWrite` while the SEED package never does —
+    /// exactly the shape needed to fail if publish ever ran on the wrong
+    /// package.
     #[tokio::test]
-    async fn local_dev_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
+    async fn local_dev_extension_activate_hosted_mcp_authority_ceiling_reflects_discovered_effects()
+    {
+        let discovery_script = std::sync::Arc::new(
+            crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("nearai-destructive-action")
+                .with_destructive_hint(),
+        );
+        let services = test_services(
+            "extension-tools-hosted-mcp-ceiling-owner",
+            Some(discovery_script.clone()),
+            false,
+        )
+        .await;
+
+        let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account(&services, &activate_context.resource_scope, "nearai").await;
+        // Real access-token material: discovery stages it from the secret
+        // store into the one-shot injection store for the live egress call.
+        let owner_scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &activate_context.resource_scope,
+            ironclaw_auth::AuthSurface::Api,
+        );
+        services
+            .secret_store()
+            .put(
+                owner_scope.resource.clone(),
+                SecretHandle::new("nearai-test-token").expect("handle"),
+                ironclaw_secrets::SecretMaterial::from("nearai-access-token"),
+                None,
+            )
+            .await
+            .expect("seed access-token material");
+
+        let activate = invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "nearai"}),
+        )
+        .await;
+        let activate = activate.expect("install-driven hosted MCP activation succeeds");
+        assert_eq!(activate["phase"], "active");
+
+        // Read back the published trust entry through the SAME seam
+        // authorization consumes (`ironclaw_authorization::effects_are_covered`
+        // reads `AuthorityCeiling::allowed_effects`), not an internal exposed
+        // solely for this test: `ActiveExtensionPublisher::publish` writes the
+        // ceiling through `HostTrustPolicy::mutate_with` /
+        // `AdminEntry::for_local_manifest`, and `TrustPolicy::evaluate` is the
+        // policy's own public read path back to that decision.
+        let extension_id = ExtensionId::new("nearai").expect("valid extension id");
+        let published_package = services
+            .extension_management
+            .active_extensions_for_test()
+            .snapshot()
+            .get_extension(&extension_id)
+            .cloned()
+            .expect("nearai package published after activation");
+        let trust_input = crate::extension_trust_policy_input(&published_package)
+            .expect("trust policy input derives from the published package");
+        let decision = services
+            .trust_policy
+            .evaluate(&trust_input)
+            .expect("trust policy evaluates the published package identity");
+
+        assert!(
+            decision
+                .authority_ceiling
+                .allowed_effects
+                .contains(&EffectKind::ExternalWrite),
+            "published authority ceiling must include the discovery-only ExternalWrite \
+             effect (destructiveHint tool absent from nearai's static manifest); got {:?}. \
+             Missing here means publish() ran on the pre-discovery seed package instead of \
+             the live-discovered one.",
+            decision.authority_ceiling.allowed_effects
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let services = test_services("extension-tools-invalid-owner", None, false).await;
         let list_all = invoke_json(
             &services,
@@ -1649,7 +1752,7 @@ mod tests {
         assert_eq!(list_all["payload"]["kind"], "extension_search");
         assert!(
             list_all["payload"]["count"].as_u64().unwrap_or_default() > 0,
-            "list-all extension search should return the bundled local-dev packages"
+            "list-all extension search should return the bundled standalone packages"
         );
         assert_eq!(
             invoke_json(
@@ -1686,7 +1789,7 @@ mod tests {
         capability_id: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, FailureKind> {
-        invoke_json_with_local_dev_approval(
+        invoke_json_with_standalone_approval(
             services,
             capability_id,
             execution_context([capability_id]),
@@ -1700,7 +1803,7 @@ mod tests {
         capability_id: &str,
         input: serde_json::Value,
     ) -> RuntimeCapabilityOutcome {
-        invoke_with_local_dev_approval(
+        invoke_with_standalone_approval(
             services,
             capability_id,
             execution_context([capability_id]),

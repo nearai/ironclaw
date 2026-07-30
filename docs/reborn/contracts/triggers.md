@@ -449,6 +449,11 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - Local-dev builds store trigger records in the local-dev libSQL database
   (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
   by production libSQL.
+- Production libSQL composition constructs one `LibSqlRuntime` for the
+  database and passes it to both the root filesystem and trigger repository.
+  Trigger reads use the runtime's concurrent reader lane; migrations and
+  mutations hold its sole writer lease through commit or rollback. PostgreSQL
+  repository pooling remains unchanged.
 - A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
   profile, not the interactive default. That profile's capability surface
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and

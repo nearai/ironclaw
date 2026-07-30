@@ -1095,7 +1095,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
         dispatcher.clone(),
         Arc::new(GrantAuthorizer),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-        local_dev_runtime_policy(),
+        standalone_runtime_policy(),
     )
     .with_trust_policy(Arc::new(trust_policy_for([(
         "echo",
@@ -1869,11 +1869,11 @@ fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
         .collect()
 }
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -2052,7 +2052,7 @@ fn runtime_with_dispatcher(
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-        local_dev_runtime_policy(),
+        standalone_runtime_policy(),
     )
 }
 
