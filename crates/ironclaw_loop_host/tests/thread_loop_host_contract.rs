@@ -2528,6 +2528,13 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         fixture.run_context.clone(),
     );
     let result_ref = LoopResultRef::new("result:demo-tool").unwrap();
+    // Provider validation has accepted metadata above 4 KiB since #5001.
+    // This exercises the transcript caller that used to retain the stale
+    // 4 KiB bound and terminate otherwise successful reasoning-heavy runs.
+    let response_reasoning = "response reasoning ".repeat(256);
+    let call_reasoning = "call reasoning ".repeat(320);
+    assert!(response_reasoning.len() > 4096);
+    assert!(call_reasoning.len() > 4096);
 
     let first_ref = adapter
         .append_capability_result_ref(AppendCapabilityResultRef {
@@ -2542,8 +2549,8 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                     provider_tool_name: ProviderToolName::new("demo__echo")
                         .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"hello"}),
-                    response_reasoning: Some("provider reasoning".to_string()),
-                    reasoning: Some("provider reasoning".to_string()),
+                    response_reasoning: Some(response_reasoning.clone()),
+                    reasoning: Some(call_reasoning.clone()),
                     signature: Some("sig-1".to_string()),
                 },
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -2616,11 +2623,11 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     );
     assert_eq!(
         provider_call.response_reasoning.as_deref(),
-        Some("provider reasoning")
+        Some(response_reasoning.as_str())
     );
     assert_eq!(
         provider_call.reasoning.as_deref(),
-        Some("provider reasoning")
+        Some(call_reasoning.as_str())
     );
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
 }
