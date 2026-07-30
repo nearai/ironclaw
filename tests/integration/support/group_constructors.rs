@@ -110,6 +110,15 @@ impl RebornIntegrationGroup {
         Self::builder().extension_visibility_probe().await
     }
 
+    /// Group with registry-installed and local prompt-description fixtures
+    /// published together, so the real surface derives and enforces each
+    /// package's description trust independently.
+    pub async fn extension_prompt_description_trust_probe() -> HarnessResult<Self> {
+        Self::builder()
+            .extension_prompt_description_trust_probe()
+            .await
+    }
+
     /// Group whose GitHub extension's credential account resolves to
     /// `AuthRequired`, so a scripted `github.*` tool call raises a real
     /// `TurnStatus::BlockedAuth` gate (E-AUTHGATE seam). Drive with
@@ -449,6 +458,18 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a prompt-description trust probe group. See
+    /// [`RebornIntegrationGroup::extension_prompt_description_trust_probe`].
+    pub async fn extension_prompt_description_trust_probe(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::extension::
+            extension_prompt_description_trust_probe_tools()
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

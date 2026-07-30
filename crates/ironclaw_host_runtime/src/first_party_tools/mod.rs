@@ -67,6 +67,7 @@ pub use skill_management::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
 };
+pub use skill_url_install::is_allowed_code_artifact_host;
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 pub use trace_commons::{

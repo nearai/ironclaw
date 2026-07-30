@@ -1824,6 +1824,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     runtime: capability.descriptor.runtime,
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
+                    description_trust: capability.description_trust,
                     concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
                 })
@@ -9746,6 +9747,7 @@ mod tests {
                 resource_profile: None,
                 origin_gate_matrix: None,
             },
+            description_trust: Default::default(),
             access: VisibleCapabilityAccess::Available,
             estimated_resources: ResourceEstimate::default(),
         }

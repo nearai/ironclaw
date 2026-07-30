@@ -49,8 +49,9 @@ struct PromptTextPolicy {
     /// (empty/oversize content and control characters) are enforced separately
     /// on every surface and are NOT governed by this flag.
     ///
-    /// Disabled only for [`PromptTextSurface::TrustedSkillInstruction`] —
-    /// trusted skill instruction bodies. "Trusted" is exactly two provenances:
+    /// Disabled only for [`PromptTextSurface::TrustedSkillInstruction`] and
+    /// [`PromptTextSurface::VerifiedCatalogDescription`]. Trusted skill
+    /// instruction bodies have exactly two provenances:
     /// first-party skills shipped in the repo `skills/` directory (installed
     /// into the trusted system-skill root) and user-placed local skills (the
     /// user `skills/` root). Registry/marketplace/URL skills are `Installed`,
@@ -72,12 +73,13 @@ pub(super) enum PromptTextSurface {
     SafeSummary,
     GenericModelContent,
     TrustedSkillInstruction,
+    VerifiedCatalogDescription,
 }
 
 impl PromptTextSurface {
     const fn max_bytes(self) -> usize {
         match self {
-            Self::SafeSummary => MODEL_SAFE_SUMMARY_MAX_BYTES,
+            Self::SafeSummary | Self::VerifiedCatalogDescription => MODEL_SAFE_SUMMARY_MAX_BYTES,
             Self::GenericModelContent | Self::TrustedSkillInstruction => {
                 LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES
             }
@@ -86,8 +88,47 @@ impl PromptTextSurface {
 
     const fn policy(self) -> PromptTextPolicy {
         PromptTextPolicy {
-            enforce_content_checks: !matches!(self, Self::TrustedSkillInstruction),
+            enforce_content_checks: !matches!(
+                self,
+                Self::TrustedSkillInstruction | Self::VerifiedCatalogDescription
+            ),
         }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct PromptTextValidationError {
+    host_error: Box<AgentLoopHostError>,
+    matched_pattern: Option<&'static str>,
+}
+
+impl PromptTextValidationError {
+    pub(super) fn host_error(&self) -> &AgentLoopHostError {
+        &self.host_error
+    }
+
+    pub(super) fn matched_pattern(&self) -> Option<&'static str> {
+        self.matched_pattern
+    }
+
+    fn structural(host_error: AgentLoopHostError) -> Self {
+        Self {
+            host_error: Box::new(host_error),
+            matched_pattern: None,
+        }
+    }
+
+    fn content(host_error: AgentLoopHostError, matched_pattern: &'static str) -> Self {
+        Self {
+            host_error: Box::new(host_error),
+            matched_pattern: Some(matched_pattern),
+        }
+    }
+}
+
+impl From<PromptTextValidationError> for AgentLoopHostError {
+    fn from(error: PromptTextValidationError) -> Self {
+        *error.host_error
     }
 }
 
@@ -103,23 +144,35 @@ pub(super) fn validate_prompt_text(
     label: &'static str,
     surface: PromptTextSurface,
 ) -> Result<String, AgentLoopHostError> {
+    validate_prompt_text_with_diagnostics(value, label, surface).map_err(Into::into)
+}
+
+pub(super) fn validate_prompt_text_with_diagnostics(
+    value: String,
+    label: &'static str,
+    surface: PromptTextSurface,
+) -> Result<String, PromptTextValidationError> {
     // Structural and framing limits apply on every surface, even trusted skill
     // content: empty/oversize content and control characters (NUL/ESC/BEL,
     // which can corrupt prompt/log/terminal framing) are not the false-positive
     // class #5169 relaxes, so they are always rejected.
     if value.is_empty() || value.len() > surface.max_bytes() {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} is not model-safe"),
+        return Err(PromptTextValidationError::structural(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::PolicyDenied,
+                format!("{label} is not model-safe"),
+            ),
         ));
     }
     if value
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
     {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} contains control characters"),
+        return Err(PromptTextValidationError::structural(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::PolicyDenied,
+                format!("{label} contains control characters"),
+            ),
         ));
     }
     // The content denylist (host paths, security vocabulary, credential-shaped
@@ -131,7 +184,10 @@ pub(super) fn validate_prompt_text(
     Ok(value)
 }
 
-fn reject_sensitive_text(value: &str, label: &'static str) -> Result<(), AgentLoopHostError> {
+fn reject_sensitive_text(
+    value: &str,
+    label: &'static str,
+) -> Result<(), PromptTextValidationError> {
     let lower = value.to_ascii_lowercase();
     for forbidden_path in [
         "/users/",
@@ -142,24 +198,24 @@ fn reject_sensitive_text(value: &str, label: &'static str) -> Result<(), AgentLo
         "/etc/",
     ] {
         if lower.contains(forbidden_path) {
-            return non_model_safe(label);
+            return non_model_safe(label, forbidden_path);
         }
     }
     for term in SENSITIVE_TERMS {
         if term.reject_as_phrase && contains_token_phrase(&lower, term.phrase) {
-            return non_model_safe(label);
+            return non_model_safe(label, term.phrase);
         }
         if term.reject_value_after_label
             && contains_credential_value_after_label(&lower, term.phrase)
         {
-            return non_model_safe(label);
+            return non_model_safe(label, term.phrase);
         }
     }
     if lower
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
         .any(|token| token.starts_with("sk-"))
     {
-        return non_model_safe(label);
+        return non_model_safe(label, "sk-");
     }
     Ok(())
 }
@@ -281,10 +337,16 @@ fn is_secret_like_token(candidate: &str) -> bool {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
         })
 }
-fn non_model_safe<T>(label: &'static str) -> Result<T, AgentLoopHostError> {
-    Err(AgentLoopHostError::new(
-        AgentLoopHostErrorKind::PolicyDenied,
-        format!("{label} contains non-model-safe content"),
+fn non_model_safe<T>(
+    label: &'static str,
+    matched_pattern: &'static str,
+) -> Result<T, PromptTextValidationError> {
+    Err(PromptTextValidationError::content(
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::PolicyDenied,
+            format!("{label} contains non-model-safe content"),
+        ),
+        matched_pattern,
     ))
 }
 
@@ -319,6 +381,14 @@ mod tests {
         "Read /Users/alice/.config/token first.",                   // host path
         "here is my key sk-abc123def456ghi789",                     // sk- token
     ];
+
+    #[test]
+    fn prompt_text_validation_error_stays_below_large_error_threshold() {
+        assert!(
+            std::mem::size_of::<PromptTextValidationError>() <= 128,
+            "prompt validation errors are returned by value and must stay below Clippy's large-error threshold"
+        );
+    }
 
     /// #5169: trusted/certified skill instruction content bypasses content
     /// denylisting (security vocabulary, host paths, credential-shaped values).
@@ -362,35 +432,40 @@ mod tests {
     fn control_characters_are_rejected_on_all_surfaces() {
         for surface in [
             PromptTextSurface::TrustedSkillInstruction,
+            PromptTextSurface::VerifiedCatalogDescription,
             PromptTextSurface::GenericModelContent,
             PromptTextSurface::SafeSummary,
         ] {
-            let error =
-                validate_prompt_text("bell\u{0007}inside content".to_string(), "content", surface)
-                    .expect_err("control characters must be rejected on all surfaces");
-            assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+            for control in ['\0', '\u{001b}', '\u{0007}'] {
+                let error = validate_prompt_text(
+                    format!("control{control}inside content"),
+                    "content",
+                    surface,
+                )
+                .expect_err("control characters must be rejected on all surfaces");
+                assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+            }
         }
     }
 
     /// Structural limits (empty, byte budget) apply to every surface, including
-    /// trusted skill content.
+    /// trusted skill and verified catalog content.
     #[test]
-    fn structural_limits_apply_even_to_trusted_skill_instruction() {
-        let empty = validate_prompt_text(
-            String::new(),
-            "skill content",
+    fn structural_limits_apply_on_every_surface() {
+        for surface in [
             PromptTextSurface::TrustedSkillInstruction,
-        )
-        .expect_err("empty content is rejected on every surface");
-        assert_eq!(empty.kind, AgentLoopHostErrorKind::PolicyDenied);
+            PromptTextSurface::VerifiedCatalogDescription,
+            PromptTextSurface::GenericModelContent,
+            PromptTextSurface::SafeSummary,
+        ] {
+            let empty = validate_prompt_text(String::new(), "content", surface)
+                .expect_err("empty content is rejected on every surface");
+            assert_eq!(empty.kind, AgentLoopHostErrorKind::PolicyDenied);
 
-        let oversized = "x".repeat(LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES + 1);
-        let too_big = validate_prompt_text(
-            oversized,
-            "skill content",
-            PromptTextSurface::TrustedSkillInstruction,
-        )
-        .expect_err("oversized content is rejected on every surface");
-        assert_eq!(too_big.kind, AgentLoopHostErrorKind::PolicyDenied);
+            let oversized = "x".repeat(surface.max_bytes() + 1);
+            let too_big = validate_prompt_text(oversized, "content", surface)
+                .expect_err("oversized content is rejected on every surface");
+            assert_eq!(too_big.kind, AgentLoopHostErrorKind::PolicyDenied);
+        }
     }
 }
