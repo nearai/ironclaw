@@ -1903,12 +1903,10 @@ async fn sse_activity_stream_replay_and_reconnect() {
 /// wires into `DefaultProductSurface`) and the production event-stream
 /// recipe `sse_activity_stream_replay_and_reconnect` above already pins.
 ///
-/// "Refresh" is simulated the same way that precedent does: a fresh
-/// `stream_events` drain with `after_cursor: None` — the SSE handler is a
-/// polling wrapper over the same drain (W5-WEBUI-SPIKE), so this is
-/// behaviorally equivalent to a browser opening a brand new `EventSource`
-/// after a cold reload, without the fragility of reading a chunked HTTP body
-/// through `tower::ServiceExt::oneshot`.
+/// "Refresh" is simulated by opening a fresh continuous event subscription
+/// with `after_cursor: None`, then consuming that same subscription until the
+/// pending gate is replayed. This matches the SSE handler without the
+/// fragility of reading a chunked HTTP body through `tower::ServiceExt::oneshot`.
 #[tokio::test]
 async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let group = RebornIntegrationGroup::live_approvals()
@@ -1969,23 +1967,29 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let caller = webui_caller_for(&h.binding);
     let thread_id = h.binding.thread_id.as_str().to_string();
 
-    // --- simulate a cold browser refresh: first drain starts without a cursor,
-    // then follows the cursor exactly like the SSE handler's polling wrapper. ---
+    // --- simulate a cold browser refresh: open one continuous subscription
+    // without a cursor, exactly like a new browser EventSource connection. ---
     // The hot turn-state cache can expose BlockedApproval just before the
     // best-effort Blocked lifecycle event reaches the durable projection source.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut after_cursor = None;
+    let mut replayed = tokio::time::timeout_at(
+        deadline,
+        services.stream_events(
+            caller.clone(),
+            ProductSurfaceStreamRequest {
+                stream_id: Some(thread_id.clone()),
+                after_cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("post-refresh subscription opens before the deadline")
+    .expect("post-refresh subscription opens");
+    let subscription = replayed
+        .subscription
+        .take()
+        .expect("post-refresh stream carries its live continuation");
     let gate_prompt = loop {
-        let replayed = services
-            .stream_events(
-                caller.clone(),
-                ProductSurfaceStreamRequest {
-                    stream_id: Some(thread_id.clone()),
-                    after_cursor: after_cursor.clone(),
-                },
-            )
-            .await
-            .expect("post-refresh drain succeeds");
         let events = replayed
             .events
             .into_iter()
@@ -2000,19 +2004,15 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         }) {
             break prompt;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "expected the replayed cold-refresh drain to surface a GatePrompt for {gate_ref:?}: {:?}",
-                events
-            );
-        }
-        if let Some(cursor) = events
-            .last()
-            .map(|envelope| envelope.projection_cursor.clone())
-        {
-            after_cursor = Some(cursor.as_str().to_string());
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        replayed = tokio::time::timeout_at(deadline, subscription.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "expected the post-refresh subscription to surface a GatePrompt for {gate_ref:?} before the deadline; last events: {events:?}"
+                )
+            })
+            .expect("post-refresh subscription remains open")
+            .expect("post-refresh subscription event succeeds");
     };
     assert_eq!(
         gate_prompt.turn_run_id, run_id,
