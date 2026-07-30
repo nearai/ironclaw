@@ -21,6 +21,7 @@ import httpx
 import pytest
 from playwright.async_api import Error as PlaywrightError
 
+from fixtures.mock_oauth_idp import MockOidcProfile, start_mock_oauth_idp
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
 USER_ID = "reborn-v2-e2e-user"
@@ -29,6 +30,7 @@ YOLO_PROFILE = "local-dev-yolo"
 DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
+SSO_GOOGLE_CLIENT_ID = "reborn-v2-e2e-google-client"
 DEFAULT_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
 MAX_SERVER_LOG_BYTES = 16 * 1024 * 1024
 _ARTIFACT_PENDING_SENTINEL = ".pytest-outcome-pending"
@@ -440,6 +442,7 @@ async def start_reborn_webui_v2_server(
     model: str = DEFAULT_MODEL,
     log_prefix: str = "reborn-v2",
     extra_env: dict[str, str] | None = None,
+    use_listener_as_webui_base_url: bool = False,
 ) -> tuple[object, str]:
     """Start ``ironclaw serve`` and return ``(process, base_url)``."""
     configured_artifact_root = os.environ.get(
@@ -472,6 +475,7 @@ async def start_reborn_webui_v2_server(
     for attempt in range(1, 4):
         port = find_free_port()
         last_port = port
+        base_url = f"http://127.0.0.1:{port}"
         if artifact_root:
             log_dir = artifact_root / "server-logs" / home_dir.name
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -495,6 +499,8 @@ async def start_reborn_webui_v2_server(
         }
         if extra_env:
             env.update(extra_env)
+        if use_listener_as_webui_base_url:
+            env["IRONCLAW_REBORN_WEBUI_BASE_URL"] = base_url
         forward_coverage_env(env)
 
         args = [
@@ -550,8 +556,6 @@ async def start_reborn_webui_v2_server(
                     env=env,
                     cwd=workspace_dir,
                 )
-        base_url = f"http://127.0.0.1:{port}"
-
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
             return proc, base_url
@@ -616,6 +620,52 @@ async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_fac
         yield base_url
     finally:
         await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_sso_server(
+    ironclaw_reborn_sso_binary, mock_llm_server, tmp_path_factory
+):
+    """Start ``ironclaw serve`` with Google SSO backed by a local mock IDP."""
+    profiles = (
+        MockOidcProfile(
+            subject="alice-subject",
+            email="alice@example.com",
+            display_name="Alice E2E",
+        ),
+        MockOidcProfile(
+            subject="bob-subject",
+            email="bob@example.com",
+            display_name="Bob E2E",
+        ),
+    )
+    async for provider in start_mock_oauth_idp(oidc_profiles=profiles):
+        home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-sso-home")
+        proc, base_url = await start_reborn_webui_v2_server(
+            ironclaw_reborn_binary=ironclaw_reborn_sso_binary,
+            mock_llm_server=mock_llm_server,
+            home_dir=home_dir,
+            profile=DEFAULT_PROFILE,
+            log_prefix="reborn-v2-sso",
+            use_listener_as_webui_base_url=True,
+            extra_env={
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID": SSO_GOOGLE_CLIENT_ID,
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET": "mock-google-secret",
+                "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS": "example.com",
+                # Defeat ambient repo/user .env values so this fixture never
+                # advertises or contacts a provider it did not start itself.
+                "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID": "",
+                "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET": "",
+                "IRONCLAW_REBORN_TEST_WEBUI_GOOGLE_AUTH_ENDPOINT": (
+                    provider.authorize_url
+                ),
+                "IRONCLAW_REBORN_TEST_WEBUI_GOOGLE_TOKEN_ENDPOINT": provider.token_url,
+            },
+        )
+        try:
+            yield {"base_url": base_url, "provider": provider}
+        finally:
+            await close_reborn_server(proc)
 
 
 @pytest.fixture(scope="module")
