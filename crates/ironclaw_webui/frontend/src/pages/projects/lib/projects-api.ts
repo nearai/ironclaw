@@ -16,6 +16,10 @@ import {
   listThreads as apiListThreads,
 } from "../../../lib/api";
 
+// Match the server's hard list cap so lifecycle summaries cover the complete
+// supported response page until the API exposes authoritative totals.
+const PROJECTS_OVERVIEW_LIMIT = 500;
+
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
 // expect. `goals` is read from the extensible `metadata` bag.
 function toPageProject(project) {
@@ -56,7 +60,7 @@ function toPageThread(thread) {
 }
 
 export async function fetchProjectsOverview() {
-  const response = await apiListProjects({ limit: 200 });
+  const response = await apiListProjects({ limit: PROJECTS_OVERVIEW_LIMIT });
   const projects = (response?.projects || []).map(toPageProject);
   return { projects };
 }

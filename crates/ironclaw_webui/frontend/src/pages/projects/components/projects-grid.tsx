@@ -57,9 +57,13 @@ function ProjectCard({ project, onOpen, t }) {
       <div className="mt-5 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-iron-300">
           <StatusPill tone="muted" label={formatProjectRole(project.role, t)} />
-          <span className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
+          <time
+            data-testid="project-updated-at"
+            dateTime={project.updated_at || undefined}
+            className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
+          >
             {t("projects.snapshot.updated", { date: formatProjectDate(project.updated_at, t) })}
-          </span>
+          </time>
         </div>
         <Button
           data-testid="project-open-workspace"
@@ -109,9 +113,13 @@ function GeneralProjectCard({ project, onOpen, t }) {
             label={formatProjectState(project.state, t)}
           />
           <StatusPill tone="muted" label={formatProjectRole(project.role, t)} />
-          <div className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
+          <time
+            data-testid="project-updated-at"
+            dateTime={project.updated_at || undefined}
+            className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
+          >
             {t("projects.snapshot.updated", { date: formatProjectDate(project.updated_at, t) })}
-          </div>
+          </time>
           <Button
             data-testid="project-open-workspace"
             variant="secondary"

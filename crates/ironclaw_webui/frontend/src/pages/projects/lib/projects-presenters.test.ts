@@ -22,7 +22,6 @@ import {
 const t = (key, params = {}) => {
   const translations = {
     "projects.count.steps": "Steps: {count}",
-    "projects.health.muted": "Localized archived project",
     "projects.metric.notSet": "Localized not set",
     "projects.missions.manual": "Localized manual",
     "projects.relative.hoursAgo": "{count} localized hours ago",
@@ -31,7 +30,9 @@ const t = (key, params = {}) => {
     "projects.date.notAvailable": "Localized date unavailable",
     "projects.role.assistant": "Localized assistant",
     "projects.projectRole.owner": "Localized owner",
+    "projects.projectRole.unknown": "Localized unknown project role",
     "projects.status.active": "Localized active",
+    "projects.status.archived": "Localized archived project",
     "projects.thread.type.missionRun": "Localized mission run",
     "projects.threadState.done": "Localized done",
   };
@@ -66,6 +67,7 @@ test("project enum formatters localize API-backed state and role values", () => 
   assert.equal(formatProjectState("archived", t), "Localized archived project");
   assert.equal(formatProjectState("unexpected", t), "unexpected");
   assert.equal(formatProjectRole("owner", t), "Localized owner");
+  assert.equal(formatProjectRole(null, t), "Localized unknown project role");
   assert.equal(formatProjectRole("unexpected", t), "unexpected");
   assert.equal(projectStateTone("active"), "success");
   assert.equal(projectStateTone("archived"), "muted");

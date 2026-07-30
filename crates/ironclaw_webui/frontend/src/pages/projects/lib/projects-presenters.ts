@@ -153,7 +153,6 @@ export function formatProjectState(state, t) {
   return formatEnumLabel(state, t, {
     labels: PROJECT_STATE_LABELS,
     keyPrefix: "projects.status",
-    translationKeys: { archived: "projects.health.muted" },
   });
 }
 
@@ -161,7 +160,6 @@ export function formatProjectRole(role, t) {
   return formatEnumLabel(role, t, {
     labels: PROJECT_ROLE_LABELS,
     keyPrefix: "projects.projectRole",
-    translationKeys: { unknown: "projects.status.unknown" },
   });
 }
 

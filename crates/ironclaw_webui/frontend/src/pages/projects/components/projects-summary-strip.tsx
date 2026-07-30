@@ -45,7 +45,12 @@ export function ProjectsSummaryStrip({ overview }) {
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{card.label}</div>
               <StatusPill tone={metricTone[card.key]} label={card.badgeLabel} />
             </div>
-            <div className="mt-4 text-3xl font-semibold tracking-tight text-white">{card.value}</div>
+            <div
+              data-testid="projects-summary-value"
+              className="mt-4 text-3xl font-semibold tracking-tight text-white"
+            >
+              {card.value}
+            </div>
           </div>
         ))}
       </div>
