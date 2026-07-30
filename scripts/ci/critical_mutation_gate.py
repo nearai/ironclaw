@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import json
 import os
 import pathlib
 import re
@@ -106,14 +107,13 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> list[dict[str,
     return validated
 
 
-def exact_function_pattern(functions: list[str]) -> str:
-    alternatives = "|".join(re.escape(function) for function in functions)
-    return rf"(^|[^A-Za-z0-9_])({alternatives})([^A-Za-z0-9_]|$)"
-
-
-def mutation_description(line: str) -> str:
-    parts = line.split(":", 3)
-    return parts[3] if len(parts) == 4 else line
+def exact_mutant_pattern(mutants: list[str]) -> str:
+    # Python's re.escape also escapes spaces, which is not portable to every
+    # regex engine accepted by cargo-mutants. Escape only regex metacharacters.
+    alternatives = "|".join(
+        re.sub(r"([\\.^$|?*+()\[\]{}])", r"\\\1", mutant) for mutant in mutants
+    )
+    return rf"^({alternatives})$"
 
 
 def changed_files(
@@ -197,38 +197,70 @@ def main() -> int:
             grouped[(entry["package"], entry["path"], test_args)].append(entry)
 
         for (package, path, test_args), group in sorted(grouped.items()):
-            for entry in group:
-                function_pattern = exact_function_pattern([entry["function"]])
-                listed = run(
-                    [
-                        "cargo",
-                        "mutants",
-                        "-p",
-                        package,
-                        "-f",
-                        path,
-                        "--re",
-                        function_pattern,
-                        "--list",
-                    ],
-                    repo_root,
+            listed = run(
+                [
+                    "cargo",
+                    "mutants",
+                    "-p",
+                    package,
+                    "-f",
+                    path,
+                    "--list",
+                    "--json",
+                ],
+                repo_root,
+            )
+            if listed.returncode != 0:
+                raise GateError(
+                    f"could not enumerate critical functions in {path}: "
+                    f"{listed.stderr.strip()}"
                 )
-                if listed.returncode != 0:
+            try:
+                listed_entries = json.loads(listed.stdout)
+            except json.JSONDecodeError as error:
+                raise GateError(
+                    f"cargo-mutants returned malformed JSON for {path}: {error}"
+                ) from error
+            if not isinstance(listed_entries, list):
+                raise GateError(f"cargo-mutants JSON must be a list for {path}")
+            listed_mutants: list[tuple[str, str]] = []
+            for index, listed_entry in enumerate(listed_entries):
+                if not isinstance(listed_entry, dict):
                     raise GateError(
-                        f"could not enumerate {entry['domain']}::{entry['function']}: "
-                        f"{listed.stderr.strip()}"
+                        f"cargo-mutants JSON entry #{index + 1} must be an object for {path}"
                     )
-                exact_name = re.compile(function_pattern)
-                if not any(
-                    exact_name.search(mutation_description(line))
-                    for line in listed.stdout.splitlines()
-                ):
+                name = listed_entry.get("name")
+                function = listed_entry.get("function")
+                if not isinstance(name, str) or not name.strip():
+                    raise GateError(
+                        f"cargo-mutants JSON entry #{index + 1} lacks name for {path}"
+                    )
+                if function is None:
+                    continue
+                function_name = (
+                    function.get("function_name") if isinstance(function, dict) else None
+                )
+                if not isinstance(function_name, str) or not function_name.strip():
+                    raise GateError(
+                        f"cargo-mutants JSON entry #{index + 1} lacks "
+                        f"function.function_name for {path}"
+                    )
+                listed_mutants.append((name, function_name.rsplit("::", 1)[-1]))
+            selected_mutants: list[str] = []
+            for entry in group:
+                function_mutants = [
+                    name
+                    for name, function_name in listed_mutants
+                    if function_name == entry["function"]
+                ]
+                if not function_mutants:
                     raise GateError(
                         f"named critical function produced zero mutants: "
                         f"{path}::{entry['function']}"
                     )
+                selected_mutants.extend(function_mutants)
 
-            pattern = exact_function_pattern([entry["function"] for entry in group])
+            pattern = exact_mutant_pattern(selected_mutants)
             print(
                 f"Critical mutation gate: {package} {path} "
                 f"({', '.join(entry['domain'] for entry in group)})",
@@ -274,6 +306,13 @@ def main() -> int:
                 total = len(missed) + len(caught) + len(unviable) + len(timed_out)
                 if total == 0:
                     raise GateError(f"critical mutation run produced zero mutants for {path}")
+                reported_mutants = missed + caught + unviable + timed_out
+                if set(reported_mutants) != set(selected_mutants) or len(
+                    reported_mutants
+                ) != len(selected_mutants):
+                    raise GateError(
+                        "cargo-mutants results did not match the exact named-mutant allowlist"
+                    )
                 if timed_out:
                     raise GateError(
                         "critical mutants timed out (no passing verdict):\n  "

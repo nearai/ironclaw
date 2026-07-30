@@ -37,13 +37,22 @@ fi
 shift
 if printf '%s\n' "$@" | grep -qx -- '--list'; then
   if [ "${STUB_MODE:-caught}" = "no-list" ]; then
+    echo '[]'
+    exit 0
+  fi
+  if [ "${STUB_MODE:-caught}" = "malformed-list" ]; then
+    echo '{'
+    exit 0
+  fi
+  if [ "${STUB_MODE:-caught}" = "malformed-entry" ]; then
+    echo '[{"name":"crates/ironclaw_demo/src/lib.rs:1:1: replace Demo::authorize with ()","function":{}}]'
     exit 0
   fi
   if [ "${STUB_MODE:-caught}" = "nearby-list" ]; then
-    echo 'crates/ironclaw_demo/src/lib.rs:1:1: replace authorize_helper -> bool with false'
+    echo '[{"name":"crates/ironclaw_demo/src/lib.rs:1:1: replace authorize_helper -> bool with false","function":{"function_name":"Demo::authorize_helper"}}]'
     exit 0
   fi
-  echo 'crates/ironclaw_demo/src/lib.rs:1:1: replace authorize -> bool with false'
+  echo '[{"name":"crates/ironclaw_demo/src/lib.rs:1:1: replace * with +","function":null},{"name":"crates/ironclaw_demo/src/lib.rs:1:1: replace Demo::authorize with ()","function":{"function_name":"Demo::authorize"}},{"name":"crates/ironclaw_demo/src/lib.rs:2:1: replace Demo::authorize_helper -> bool with false","function":{"function_name":"Demo::authorize_helper"}}]'
   exit 0
 fi
 if [[ " $* " != *" --cargo-test-arg --lib --cargo-test-arg authorize_contract "* ]]; then
@@ -51,12 +60,18 @@ if [[ " $* " != *" --cargo-test-arg --lib --cargo-test-arg authorize_contract "*
   exit 8
 fi
 out=""
+pattern=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) out="$2"; shift 2 ;;
+    --re) pattern="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
+if [[ "${pattern}" == *"authorize_helper"* ]]; then
+  echo "similarly named sibling was included in the critical allowlist" >&2
+  exit 7
+fi
 if [ "${STUB_MODE:-caught}" = "wrong-dir" ]; then
   mkdir -p "${out}"
   : >"${out}/caught.txt"
@@ -67,11 +82,16 @@ mkdir -p "${out}/mutants.out"
 : >"${out}/mutants.out/missed.txt"
 : >"${out}/mutants.out/unviable.txt"
 : >"${out}/mutants.out/timeout.txt"
-mutant='crates/ironclaw_demo/src/lib.rs:1:1: replace authorize -> bool with false'
+mutant='crates/ironclaw_demo/src/lib.rs:1:1: replace Demo::authorize with ()'
 case "${STUB_MODE:-caught}" in
   caught) echo "${mutant}" >"${out}/mutants.out/caught.txt"; exit 0 ;;
   missed) echo "${mutant}" >"${out}/mutants.out/missed.txt"; exit 2 ;;
   timeout) echo "${mutant}" >"${out}/mutants.out/timeout.txt"; exit 2 ;;
+  unexpected)
+    echo 'crates/ironclaw_demo/src/lib.rs:2:1: replace Demo::authorize_helper -> bool with false' \
+      >"${out}/mutants.out/caught.txt"
+    exit 0
+    ;;
   zero) exit 0 ;;
 esac
 STUB
@@ -119,18 +139,27 @@ check_text "pass summary refuses a score" "0 survived; 0 timed out"
 echo "▶ survivor and timeout sabotage"
 capture missed
 check_rc "a surviving named mutant blocks" 1
-check_text "survivor is printed verbatim" "replace authorize -> bool with false"
+check_text "survivor is printed verbatim" "replace Demo::authorize with ()"
 capture timeout
 check_rc "a timed-out named mutant blocks" 1
 check_text "timeout is not treated as caught" "timed out"
 
 echo "▶ empty discovery and wrong result-directory sabotage"
+capture malformed-list
+check_rc "malformed cargo-mutants discovery JSON fails" 1
+check_text "malformed discovery identifies the JSON contract" "malformed JSON"
+capture malformed-entry
+check_rc "malformed cargo-mutants function metadata fails" 1
+check_text "malformed function metadata identifies the missing field" "function.function_name"
 capture no-list
 check_rc "a named function with zero discovered mutants fails" 1
 check_text "zero discovery names the stale function" "produced zero mutants"
 capture nearby-list
 check_rc "a similarly named sibling does not satisfy discovery" 1
 check_text "substring discovery failure names the exact function" "authorize"
+capture unexpected
+check_rc "a result outside the named-mutant allowlist fails" 1
+check_text "unexpected result reports an allowlist mismatch" "exact named-mutant allowlist"
 capture zero
 check_rc "an empty result is not a pass" 1
 check_text "empty result explains zero mutants" "produced zero mutants"
