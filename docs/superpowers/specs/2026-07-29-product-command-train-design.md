@@ -277,10 +277,20 @@ to bind the real translator, so the key is now actually reachable.
 
 Reuse the single signed `[channel.ingress]` `events` route — Slack lets every
 slash command point at any Request URL, and the HMAC recipe signs the raw
-body regardless of content type. No manifest-schema or host changes.
-`crates/ironclaw_slack_extension/src/{payload,channel}.rs` learn the payload
-shapes: JSON → existing event path; form-encoded with `command` → slash
-invocation; form-encoded `ssl_check=1` → immediate empty 200.
+body regardless of content type; verification happens before content-type
+branching, so a forged signature on a form body is rejected at the same
+ingress layer as a forged JSON body. No manifest-schema or host changes.
+`crates/ironclaw_slack_extension/src/payload.rs` gains `normalize_slack_inbound`,
+a sibling entry point that branches on the (host-forwarded) Content-Type
+header: `application/x-www-form-urlencoded` → the new slash-command form
+parser; anything else, including an absent header, → delegates verbatim to
+the existing `normalize_slack_event`, so the two entry points share exactly
+one JSON parsing implementation. Inside the form branch, a minimal
+all-`Option` probe for `ssl_check` is parsed BEFORE the full slash-command
+form: Slack's `ssl_check` endpoint-verification POST carries only
+`ssl_check` + `token`, never the mandatory `channel_id`/`user_id`/`command`/
+`trigger_id` fields a real invocation requires, so the probe must run first
+or the handshake would always fail mandatory-field validation.
 
 ### Normalization (dispatcher mapping)
 
@@ -296,6 +306,12 @@ message events produce:
   unknown-command rejection path, which delivers the role-filtered
   "Available commands" help. (If a real `help` command ever joins the
   registry, this mapping upgrades gracefully into executing it.)
+- A registered command **other than** `/ironclaw` pointed at this same
+  Request URL (an app-config mistake — a second Slack slash command
+  aimed at the identical signed endpoint) is passed through raw as
+  `"{command} {text}"` rather than mapped — the adapter does not guess
+  intent; the generic classifier/admission layer rejects the unrecognized
+  text as an undeclared command, with role-filtered help.
 - Actor from `user_id`, conversation from `channel_id`; event id
   `slack-{installation}-slash-{trigger_id}` (namespaced beside the
   event_callback id space; unique per invocation — Slack does not redeliver
@@ -319,18 +335,30 @@ risk. The visible result is the bot's DM message.
 ### Help rendering: per-channel invocation prefix
 
 Neutral help renders `/model`, but typing `/model` bare in Slack fails
-(client-intercepted). `ChannelDescriptor` presentation gains an optional
-command display prefix; Slack's manifest sets `/ironclaw ` so help and
-rejection notices render `/ironclaw model` there. Other channels keep the
-plain `/name` rendering. The space-typed ` /model` path keeps working as an
-undocumented fallback.
+(client-intercepted). `ChannelPresentation`
+(`crates/ironclaw_host_api/src/channel.rs`) gains an optional
+`command_prefix: Option<String>` field, declared under the manifest's
+`[channel.presentation]` section beside `supports_markdown` /
+`max_message_chars`; Slack's manifest sets `command_prefix = "/ironclaw "` so
+help and rejection notices render `/ironclaw model` there. Other channels
+leave it `None` and keep the plain `/name` rendering.
+`ChannelDescriptor::validate` rejects a declared prefix that is empty, does
+not start with `/`, contains a control character, or exceeds 32 bytes
+(`ChannelDescriptorError::InvalidCommandPrefix`). The space-typed ` /model`
+path keeps working as an undocumented fallback.
 
 ### Behavioral edges
 
 - Slash invoked outside the bot DM: flows through the same pipeline; the
-  direct-conversation admission rejects; if the bot cannot post into that
-  conversation the user sees nothing — accepted MVP limitation, noted in the
-  PR. `response_url` support is the future fix.
+  direct-conversation admission rejects, and the observer's command-feedback
+  path posts the denial notice straight to the invoking channel
+  (`envelope.external_conversation_ref()`) — independent of any
+  shared-conversation binding or `slack_allowed_channels` allowlist
+  resolution, so it is delivered even to a channel never configured there.
+  The user sees nothing only if Slack itself refuses the post (the bot is
+  not a member of that specific channel) — accepted MVP limitation, noted in
+  the PR. `response_url` delivery would remove even that dependency and is
+  the future fix.
 - Unpaired user: existing connect-nudge path.
 - Natively registered but manifest-undeclared command: rejects with
   role-filtered help. Declaration is the single source of truth; Slack
