@@ -144,6 +144,9 @@ function isStreamingAssistantText(msg) {
 }
 
 function isEmptyIntermediateAssistantPhase(msg) {
+  // Intermediate phases are live run presentation, not transcript messages.
+  // A phase with no visible payload should not split adjacent activity into
+  // separate runs or reserve a blank row between tool groups.
   const hasContent =
     typeof msg?.content === "string" && msg.content.trim().length > 0;
   const hasAttachments =
