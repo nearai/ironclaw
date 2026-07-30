@@ -100,7 +100,7 @@ registerPack("de", {
   "chat.attachmentDropHint": "Dateien zum Anhängen ablegen",
   "chat.commandMenu": "Befehle",
   "chat.commandFailed": "Dieser Befehl konnte nicht ausgeführt werden.",
-  "chat.commandMenuHintRun": "Ausfuehrung",
+  "chat.commandMenuHintRun": "Ausführen",
   "chat.commandMenuHintComplete": "Vervollständigen",
   "chat.commandListTitle": "Verfügbare Befehle",
   "chat.attachmentTooMany": "Sie können höchstens {max} Dateien pro Nachricht anhängen.",

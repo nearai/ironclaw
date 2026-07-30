@@ -278,6 +278,33 @@ test("locale packs include composer command menu and command failure copy", () =
   }
 });
 
+test("commandMenuHintRun is an imperative verb, not a bare noun or transliteration", () => {
+  // Regression: several locales translated the paired "Run"/"Complete"
+  // composer hints inconsistently — an action-noun (or, for de, an ASCII
+  // transliteration dropping the umlaut entirely) for Run alongside a proper
+  // imperative/infinitive verb for Complete. Every locale below already uses
+  // an imperative verb for every other action label in the same file (see
+  // e.g. common.cancel/common.save); commandMenuHintRun must match that
+  // convention instead of standing out as the one noun-shaped label.
+  // ar/en/ja/ko/zh-CN are deliberately absent: their existing values already
+  // follow their language's own idiomatic convention for action labels
+  // (Arabic masdar, CJK action-noun compounds, English base-form) and are
+  // correct as-is.
+  const expected = {
+    de: "Ausführen",
+    es: "Ejecutar",
+    fr: "Exécuter",
+    "pt-BR": "Executar",
+    uk: "Запустити",
+    hi: "रन करें",
+  };
+
+  for (const [locale, value] of Object.entries(expected)) {
+    const pack = loadLocalePack(locale);
+    assert.equal(pack["chat.commandMenuHintRun"], value, `${locale} chat.commandMenuHintRun`);
+  }
+});
+
 test("locale packs include the command-result presentation's list heading", () => {
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);

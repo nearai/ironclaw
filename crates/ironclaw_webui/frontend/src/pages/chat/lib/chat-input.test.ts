@@ -1235,6 +1235,49 @@ test("ChatInput command-menu rows are non-focusable listbox options, not tab sto
   assert.equal(typeof modelRow.props.onMouseDown, "function", "focus-steal prevention must still be wired");
 });
 
+test("ChatInput textarea advertises combobox semantics only while the command menu is open", () => {
+  // Regression (a11y): the textarea already wired aria-expanded/aria-controls/
+  // aria-activedescendant, but without role="combobox" and
+  // aria-autocomplete="list" a screen reader has no reason to announce those
+  // as combobox state rather than stray attributes on a plain textbox. Both
+  // new attributes must follow the exact same `menuVisible` guard as
+  // aria-controls: present — and pointing at a listbox that actually renders
+  // — only while the menu is in play, absent (not a dangling reference)
+  // otherwise. See the WAI-ARIA "Editable Combobox With List Autocomplete"
+  // pattern.
+  const open = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/mo",
+    commands: MENU_COMMANDS,
+  });
+  const openProps = templateProps(findTextarea(open.tree));
+  assert.equal(openProps.role, "combobox");
+  assert.equal(openProps["aria-autocomplete"], "list");
+  assert.equal(openProps["aria-expanded"], true);
+  assert.equal(openProps["aria-controls"], "chat-command-menu-listbox");
+  assert.equal(openProps["aria-activedescendant"], "chat-command-option-model");
+  assert.ok(
+    findNode(open.tree, (node) => node.props?.id === "chat-command-menu-listbox"),
+    "the listbox aria-controls names must actually be rendered, not a dangling reference",
+  );
+
+  const closed = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "plain text, no menu here",
+    commands: MENU_COMMANDS,
+  });
+  const closedProps = templateProps(findTextarea(closed.tree));
+  assert.equal(closedProps.role, undefined);
+  assert.equal(closedProps["aria-autocomplete"], undefined);
+  assert.equal(closedProps["aria-expanded"], false);
+  assert.equal(closedProps["aria-controls"], undefined);
+  assert.equal(closedProps["aria-activedescendant"], undefined);
+});
+
 test("ChatInput Shift+Enter and Shift+Tab fall through the open command menu", async () => {
   const setCalls = [];
   let sendCalls = 0;

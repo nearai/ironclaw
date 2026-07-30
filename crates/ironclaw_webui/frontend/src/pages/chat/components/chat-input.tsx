@@ -802,6 +802,14 @@ export function ChatInput({
           placeholder={placeholder}
           rows={1}
           disabled={disabled}
+          // Combobox semantics (role + aria-autocomplete) are guarded on
+          // `menuVisible` exactly like `aria-controls`/`aria-activedescendant`
+          // below: the plain textarea must not announce itself as a combobox
+          // (and dangle a reference to a listbox that doesn't exist in the
+          // DOM) except while the command menu is actually in play. See the
+          // WAI-ARIA "Editable Combobox With List Autocomplete" pattern.
+          role={menuVisible ? "combobox" : undefined}
+          aria-autocomplete={menuVisible ? "list" : undefined}
           aria-expanded={menuVisible}
           aria-controls={menuVisible ? "chat-command-menu-listbox" : undefined}
           aria-activedescendant={

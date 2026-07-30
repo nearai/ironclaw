@@ -100,7 +100,7 @@ registerPack("uk", {
   "chat.attachmentDropHint": "Перетягніть файли, щоб додати",
   "chat.commandMenu": "Команди",
   "chat.commandFailed": "Не вдалося виконати цю команду.",
-  "chat.commandMenuHintRun": "Запуск",
+  "chat.commandMenuHintRun": "Запустити",
   "chat.commandMenuHintComplete": "Завершити",
   "chat.commandListTitle": "Доступні команди",
   "chat.attachmentTooMany": "Можна додати щонайбільше {max} файлів на повідомлення.",

@@ -100,7 +100,7 @@ registerPack("fr", {
   "chat.attachmentDropHint": "Déposez des fichiers pour les joindre",
   "chat.commandMenu": "Commandes",
   "chat.commandFailed": "Impossible d'exécuter cette commande.",
-  "chat.commandMenuHintRun": "Exécution",
+  "chat.commandMenuHintRun": "Exécuter",
   "chat.commandMenuHintComplete": "Compléter",
   "chat.commandListTitle": "Commandes disponibles",
   "chat.attachmentTooMany": "Vous pouvez joindre au maximum {max} fichiers par message.",

@@ -100,7 +100,7 @@ registerPack("pt-BR", {
   "chat.attachmentDropHint": "Solte os arquivos para anexar",
   "chat.commandMenu": "Comandos",
   "chat.commandFailed": "Não foi possível executar esse comando.",
-  "chat.commandMenuHintRun": "Execução",
+  "chat.commandMenuHintRun": "Executar",
   "chat.commandMenuHintComplete": "Completar",
   "chat.commandListTitle": "Comandos disponíveis",
   "chat.attachmentTooMany": "Você pode anexar no máximo {max} arquivos por mensagem.",

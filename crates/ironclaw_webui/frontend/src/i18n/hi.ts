@@ -100,7 +100,7 @@ registerPack("hi", {
   "chat.attachmentDropHint": "संलग्न करने के लिए फ़ाइलें छोड़ें",
   "chat.commandMenu": "कमांड",
   "chat.commandFailed": "वह कमांड चलाई नहीं जा सकी।",
-  "chat.commandMenuHintRun": "रन",
+  "chat.commandMenuHintRun": "रन करें",
   "chat.commandMenuHintComplete": "पूर्ण करें",
   "chat.commandListTitle": "उपलब्ध कमांड",
   "chat.attachmentTooMany": "आप प्रति संदेश अधिकतम {max} फ़ाइलें संलग्न कर सकते हैं।",
