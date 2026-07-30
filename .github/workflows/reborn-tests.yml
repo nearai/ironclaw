@@ -239,6 +239,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
+
       - name: Free disk space
         run: |
           df -h /
@@ -608,6 +611,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
+
       - name: Free disk space
         run: |
           df -h /
@@ -861,6 +867,9 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
 
       - name: Install mold
         run: |

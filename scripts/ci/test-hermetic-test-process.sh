@@ -22,6 +22,7 @@ run_probe() {
     GOOGLE_APPLICATION_CREDENTIALS="/developer/credential.json" \
     LLM_BACKEND="ambient-provider" \
     REBORN_TOOL_DISCLOSURE="Bridged" \
+    COREPACK_HOME="${probe_dir}/corepack" \
     PLAYWRIGHT_BROWSERS_PATH="${probe_dir}/playwright-browsers" \
     IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
     "${runner}" -- bash -c '
@@ -64,6 +65,10 @@ run_probe() {
       [[ "${TZ}" == "UTC" ]]
       [[ "${LANG}" == "C.UTF-8" ]]
       [[ "${LC_ALL}" == "C.UTF-8" ]]
+      if [[ "${COREPACK_HOME:-}" != */corepack ]]; then
+        echo "explicit Corepack toolchain path was not preserved" >&2
+        exit 36
+      fi
       if [[ "${PLAYWRIGHT_BROWSERS_PATH:-}" != */playwright-browsers ]]; then
         echo "explicit Playwright browser toolchain path was not preserved" >&2
         exit 35
@@ -276,6 +281,16 @@ do
     exit 1
   fi
 done
+
+corepack_path_count="$(
+  grep -Fc \
+    'COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack' \
+    "${repo_root}/.github/workflows/reborn-tests.yml"
+)"
+if [[ "${corepack_path_count}" != "3" ]]; then
+  echo "expected three guarded Rust lanes to pin COREPACK_HOME, found ${corepack_path_count}" >&2
+  exit 1
+fi
 
 for stage_call in \
   "prepare_command_dependencies" \
