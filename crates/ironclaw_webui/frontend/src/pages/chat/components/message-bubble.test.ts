@@ -393,6 +393,30 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
 });
 
+test("intermediate assistant phases do not reserve a hidden meta row", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "assistant-phase",
+        role: CHAT_MESSAGE_ROLES.ASSISTANT,
+        content: "I will check that.",
+        timestamp: "2026-07-30T00:00:00.000Z",
+        turnRunId: "run-1",
+        isFinalReply: false,
+        isStreaming: false,
+      },
+      activeRunId: "run-1",
+    }),
+  );
+
+  assert.doesNotMatch(
+    html,
+    /<time|Copy message/,
+    "intermediate utterances should not add invisible controls between tool runs",
+  );
+});
+
 test("optimistic message opacity does not fade attached image previews", () => {
   assert.match(
     messageBubbleSource,

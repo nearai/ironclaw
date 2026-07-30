@@ -4,7 +4,11 @@
    final answer, including when a later user follow-up has already been
    appended. */
 export function groupMessages(messages) {
-  const orderedMessages = moveDelayedActivityBeforeAssistantBoundary(messages);
+  const renderableMessages = messages.filter(
+    (message) => !isEmptyIntermediateAssistantPhase(message),
+  );
+  const orderedMessages =
+    moveDelayedActivityBeforeAssistantBoundary(renderableMessages);
   const items = [];
 
   for (let index = 0; index < orderedMessages.length; index += 1) {
@@ -136,6 +140,23 @@ function isStreamingAssistantText(msg) {
     !hasToolCalls(msg) &&
     msg.isFinalReply === false &&
     Boolean(turnRunIdForMessage(msg))
+  );
+}
+
+function isEmptyIntermediateAssistantPhase(msg) {
+  const hasContent =
+    typeof msg?.content === "string" && msg.content.trim().length > 0;
+  const hasAttachments =
+    msg?.images?.length > 0 ||
+    msg?.attachments?.length > 0 ||
+    msg?.generatedImages?.length > 0;
+  return (
+    msg?.role === "assistant" &&
+    msg.isFinalReply === false &&
+    !hasToolCalls(msg) &&
+    !hasContent &&
+    !hasAttachments &&
+    !msg.error
   );
 }
 

@@ -196,6 +196,52 @@ test("groupMessages: middle assistant is not hoisted before final reply arrives"
   assert.deepEqual(grouped[1].activity.map((item) => item.id), ["a", "b"]);
 });
 
+test("groupMessages: empty intermediate assistant phases do not create blank rows", () => {
+  const grouped = groupMessages([
+    {
+      id: "a",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "empty-phase",
+      role: "assistant",
+      content: "",
+      isFinalReply: false,
+      isStreaming: false,
+      turnRunId: "run-1",
+    },
+    {
+      id: "b",
+      role: "tool_activity",
+      toolName: "http",
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].type, "activity-run");
+  assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "b"]);
+});
+
+test("groupMessages: intermediate assistant attachments remain visible", () => {
+  const grouped = groupMessages([
+    {
+      id: "attachment-phase",
+      role: "assistant",
+      content: "",
+      attachments: [{ id: "file-1", name: "result.txt" }],
+      isFinalReply: false,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].type, "message");
+  assert.equal(grouped[0].message.id, "attachment-phase");
+});
+
 test("groupMessages: follow-up user does not break prior final reply ordering", () => {
   const grouped = groupMessages([
     { id: "m", role: "assistant", content: "answer", isFinalReply: true },
