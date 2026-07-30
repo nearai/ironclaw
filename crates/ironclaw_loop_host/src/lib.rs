@@ -2382,7 +2382,8 @@ fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
     // Log only the closed owner-defined variant name. The error message may
     // contain raw transcript content or storage credentials and must never be
     // forwarded or formatted here.
-    tracing::debug!(error_kind = error.kind_name(), "transcript write failed");
+    let error_kind = error.kind_name();
+    tracing::debug!(error_kind, "transcript write failed");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "assistant transcript write failed",
