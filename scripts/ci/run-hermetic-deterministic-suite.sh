@@ -58,45 +58,7 @@ run_root_partitions() {
 }
 
 discover_reborn_packages() {
-  local allowlist closure
-  allowlist="$(
-    cargo metadata --no-deps --format-version 1 \
-      | jq -c '
-          [
-            .packages[]
-            | select(
-                (
-                  (.name == "ironclaw")
-                  or (.name == "ironclaw_runner")
-                  or (.name | startswith("ironclaw_reborn"))
-                  or (.name | startswith("ironclaw_product"))
-                  or (.name == "ironclaw_architecture")
-                  or (.name == "ironclaw_slack_extension")
-                  or (.name == "ironclaw_telegram_extension")
-                  or (.name == "ironclaw_telegram_v2_adapter")
-                  or (.name | startswith("ironclaw_webui"))
-                )
-                and (.name != "ironclaw_reborn_integration_tests")
-              )
-            | .name
-          ]
-          | unique
-        '
-  )"
-  closure="$(
-    comm -12 \
-      <(cargo tree -p ironclaw -e normal,build --prefix none \
-        | grep -oE 'ironclaw_[a-z0-9_]+' \
-        | LC_ALL=C sort -u) \
-      <(cargo metadata --no-deps --format-version 1 \
-        | jq -r '.packages[].name' \
-        | LC_ALL=C sort -u) \
-      | jq -R -s -c 'split("\n") | map(select(length > 0))'
-  )"
-  jq -n -r \
-    --argjson allowlist "${allowlist}" \
-    --argjson closure "${closure}" \
-    '$allowlist + $closure | unique | .[]'
+  "${repo_root}/scripts/ci/discover-reborn-package-crates.sh" | jq -r '.[]'
 }
 
 run_crate_tests() {

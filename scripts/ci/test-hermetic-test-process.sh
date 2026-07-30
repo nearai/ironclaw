@@ -265,6 +265,7 @@ fi
 
 for workflow_contract in \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh groups" \
+  ".github/workflows/reborn-tests.yml:scripts/ci/discover-reborn-package-crates.sh" \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh command" \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh prepare-command" \
   ".github/workflows/reborn-tests.yml:IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1" \
@@ -306,6 +307,7 @@ fi
 for stage_call in \
   "prepare_command_dependencies" \
   "prepare_postgres_test_image" \
+  "discover-reborn-package-crates.sh" \
   "run_crate_tests" \
   "run_root_partitions" \
   "run_integration_tier" \
