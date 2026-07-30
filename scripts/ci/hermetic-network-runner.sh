@@ -26,12 +26,23 @@ case "$(uname -s)" in
     # SIP-protected Apple executables strip DYLD_* before their descendants
     # inherit it. The process sandbox keeps the whole tree fail-closed; the
     # interposer still records actionable diagnostics for ordinary binaries.
-    guarded_command=(
-      sandbox-exec
-      -p
-      '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))'
-      "$@"
-    )
+    if [[ "${IRONCLAW_HERMETIC_SANDBOX_ACTIVE:-0}" != "1" ]]; then
+      if ! command -v sandbox-exec >/dev/null 2>&1; then
+        echo "sandbox-exec is required for fail-closed macOS hermetic networking" >&2
+        exit 2
+      fi
+      if ! sandbox-exec -p '(version 1) (allow default)' /usr/bin/true; then
+        echo "sandbox-exec is present but cannot enforce a process sandbox" >&2
+        exit 2
+      fi
+      export IRONCLAW_HERMETIC_SANDBOX_ACTIVE=1
+      guarded_command=(
+        sandbox-exec
+        -p
+        '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))'
+        "$@"
+      )
+    fi
     ;;
   *)
     echo "unsupported platform for hermetic network guard: $(uname -s)" >&2

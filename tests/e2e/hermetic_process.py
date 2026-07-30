@@ -31,7 +31,7 @@ def forward_hermetic_process_env(
         return
     if sys.platform == "darwin":
         _prepend_preload(env, "DYLD_INSERT_LIBRARIES", guard_library)
-        env.setdefault("DYLD_FORCE_FLAT_NAMESPACE", "1")
+        env["DYLD_FORCE_FLAT_NAMESPACE"] = "1"
     elif sys.platform.startswith("linux"):
         _prepend_preload(env, "LD_PRELOAD", guard_library)
 

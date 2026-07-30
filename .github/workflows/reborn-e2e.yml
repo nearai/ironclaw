@@ -253,6 +253,8 @@ jobs:
 
       - name: Validate product-surface evidence contracts
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_product_surface_coverage.py
           tests/e2e/scenarios/test_provider_capability_inventory.py

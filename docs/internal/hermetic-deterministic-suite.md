@@ -30,7 +30,16 @@ only that suite-owned Corepack cache. Every command and descendant inside the
 suite is guarded, so remote compiler wrappers are disabled rather than treated
 as a network exception.
 
-Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. That boundary:
+Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. The boundary
+uses a default-deny environment allowlist: only required compiler/tool paths and
+named deterministic test controls survive. Cargo receives a temporary home that
+links only the existing offline `registry` and `git` caches, never host Cargo
+credentials or configuration; the resolved Rust sysroot is placed directly on
+`PATH` without exporting the host Rustup home. Compiler output remains in the
+repository's explicit `target/` build directory so prebuilt E2E binaries and
+incremental CI artifacts keep their documented paths.
+
+That boundary:
 
 - removes real provider credentials and ambient provider/LLM behavior;
 - gives the process a fresh temporary home, IronClaw base/reborn homes,
@@ -43,9 +52,10 @@ Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. That boundar
   process sandbox so SIP-protected launchers remain fail-closed. On Linux,
   route-only UDP association is permitted because it sends no packet; explicit
   and connected UDP transmission through `send`, `sendto`, `sendmsg`,
-  `sendmmsg`, `write`, and `writev` remains blocked. This lets Chromium inspect
-  a route/source address without weakening the egress boundary. The coarser
-  macOS process sandbox may reject the harmless association as well.
+  `sendmmsg`, `sendfile`, `write`, and `writev` remains blocked. This lets
+  Chromium inspect a route/source address without weakening the egress
+  boundary. The coarser macOS process sandbox may reject the harmless
+  association as well.
 
 Rust wall-clock and random behavior is not overridden through process-global
 environment variables. Time-sensitive domain tests use their owning typed

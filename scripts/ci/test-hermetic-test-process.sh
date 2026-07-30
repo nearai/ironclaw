@@ -20,6 +20,14 @@ run_probe() {
     ANTHROPIC_API_KEY="must-not-leak" \
     GITHUB_TOKEN="must-not-leak" \
     GOOGLE_APPLICATION_CREDENTIALS="/developer/credential.json" \
+    PERPLEXITY_KEY="must-not-leak" \
+    DEEPSEEK_APIKEY="must-not-leak" \
+    HF_TOKEN_FILE="/developer/hf-token" \
+    SSH_AUTH_SOCK="/developer/ssh-agent.sock" \
+    GPG_AGENT_INFO="/developer/gpg-agent" \
+    BASH_ENV="/developer/shell-startup" \
+    CARGO_TARGET_DIR="/developer/target" \
+    AMBIENT_MULTILINE=$'first line\nPATH=/developer/injected' \
     LLM_BACKEND="ambient-provider" \
     REBORN_TOOL_DISCLOSURE="Bridged" \
     COREPACK_HOME="${probe_dir}/corepack" \
@@ -32,6 +40,13 @@ run_probe() {
         ANTHROPIC_API_KEY \
         GITHUB_TOKEN \
         GOOGLE_APPLICATION_CREDENTIALS \
+        PERPLEXITY_KEY \
+        DEEPSEEK_APIKEY \
+        HF_TOKEN_FILE \
+        SSH_AUTH_SOCK \
+        GPG_AGENT_INFO \
+        BASH_ENV \
+        AMBIENT_MULTILINE \
         LLM_BACKEND \
         REBORN_TOOL_DISCLOSURE
       do
@@ -40,6 +55,22 @@ run_probe() {
           exit 31
         fi
       done
+
+      case "${CARGO_HOME}" in
+        "${IRONCLAW_HERMETIC_ROOT}"/*) ;;
+        *)
+          echo "CARGO_HOME is outside the hermetic root: ${CARGO_HOME}" >&2
+          exit 38
+          ;;
+      esac
+      if [[ -n "${RUSTUP_HOME+x}" ]]; then
+        echo "ambient RUSTUP_HOME leaked into the hermetic process" >&2
+        exit 39
+      fi
+      if [[ "${CARGO_TARGET_DIR}" != */target || "${CARGO_TARGET_DIR}" == "/developer/target" ]]; then
+        echo "ambient CARGO_TARGET_DIR leaked into the hermetic process" >&2
+        exit 40
+      fi
 
       case "${HOME}" in
         "${IRONCLAW_HERMETIC_ROOT}"/*) ;;
@@ -185,7 +216,7 @@ else
     exit 1
   fi
 fi
-connected_udp_modes=(udp-connected udp-write udp-writev)
+connected_udp_modes=(udp-connected udp-sendfile udp-write udp-writev)
 if [[ "$(uname -s)" == "Linux" ]]; then
   connected_udp_modes+=(udp-sendmmsg)
 fi
@@ -232,11 +263,13 @@ source = {
     "IRONCLAW_HERMETIC_NETWORK_VIOLATIONS": "/tmp/violations",
     "LD_PRELOAD": "/tmp/existing.so",
     "DYLD_INSERT_LIBRARIES": "/tmp/existing.dylib",
+    "DYLD_FORCE_FLAT_NAMESPACE": "0",
     "ANTHROPIC_API_KEY": "must-not-forward",
 }
 child = {}
 forward_hermetic_process_env(child, source)
 assert child["IRONCLAW_HERMETIC_NETWORK_VIOLATIONS"] == "/tmp/violations"
+assert "ANTHROPIC_API_KEY" not in child
 if sys.platform == "darwin":
     assert child["DYLD_INSERT_LIBRARIES"] == "/tmp/guard.so:/tmp/existing.dylib"
     assert child["LD_PRELOAD"] == "/tmp/existing.so"
@@ -289,6 +322,16 @@ do
   fi
 done
 
+evidence_contract_step="$(
+  sed -n \
+    '/- name: Validate product-surface evidence contracts/,/- id: product_surface_coverage/p' \
+    "${repo_root}/.github/workflows/reborn-e2e.yml"
+)"
+if [[ "${evidence_contract_step}" != *"run-hermetic-deterministic-suite.sh"* ]]; then
+  echo "product-surface evidence contracts bypass the hermetic process boundary" >&2
+  exit 1
+fi
+
 corepack_path_count="$(
   grep -Fc \
     'COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack' \
@@ -320,6 +363,8 @@ for stage_call in \
   "run-reborn-group-tests.sh" \
   "check-reborn-qa-fixtures.sh" \
   "reborn-e2e-rust.sh" \
+  "test_product_surface_coverage.py" \
+  "test_reborn_webui_v2_sso.py" \
   "run_python_e2e"
 do
   if ! grep -Fq "${stage_call}" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then

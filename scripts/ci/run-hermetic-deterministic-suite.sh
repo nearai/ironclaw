@@ -89,8 +89,10 @@ run_python_e2e() {
   fi
   run pytest \
     tests/e2e/scenarios/test_reborn_webui_v2_smoke.py \
+    tests/e2e/scenarios/test_reborn_webui_v2_sso.py \
     -v --timeout=120
   run pytest \
+    tests/e2e/scenarios/test_product_surface_coverage.py \
     tests/e2e/scenarios/test_provider_capability_inventory.py \
     tests/e2e/scenarios/test_journey_coverage.py \
     tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
@@ -177,6 +179,7 @@ case "${stage}" in
     run_frontend_tests
     ;;
   python-e2e)
+    prepare_rust_dependencies
     run_python_e2e
     ;;
   prepare-command)

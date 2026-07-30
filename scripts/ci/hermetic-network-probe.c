@@ -3,12 +3,18 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
+
+#if defined(__linux__)
+#include <sys/sendfile.h>
+#endif
 
 int main(int argc, char **argv) {
     if (argc != 2 && argc != 3) {
@@ -19,7 +25,8 @@ int main(int argc, char **argv) {
     int use_udp =
         strcmp(mode, "udp") == 0
         || strcmp(mode, "udp-connected") == 0
-        || strcmp(mode, "udp-connect-only") == 0;
+        || strcmp(mode, "udp-connect-only") == 0
+        || strcmp(mode, "udp-sendfile") == 0;
 #if defined(__linux__)
     use_udp = use_udp || strcmp(mode, "udp-sendmmsg") == 0;
 #endif
@@ -76,6 +83,44 @@ int main(int argc, char **argv) {
         if (network_status == 0 && strcmp(mode, "udp-connected") == 0) {
             const char byte = 'x';
             network_status = (int)send(fd, &byte, sizeof(byte), 0);
+        } else if (network_status == 0 && strcmp(mode, "udp-sendfile") == 0) {
+            const char *temporary_root = getenv("TMPDIR");
+            if (temporary_root == NULL || temporary_root[0] == '\0') {
+                close(fd);
+                return 6;
+            }
+            char input_path[PATH_MAX];
+            int path_length = snprintf(
+                input_path,
+                sizeof(input_path),
+                "%s/ironclaw-sendfile-probe.XXXXXX",
+                temporary_root
+            );
+            if (path_length < 0 || (size_t)path_length >= sizeof(input_path)) {
+                close(fd);
+                return 6;
+            }
+            int input_fd = mkstemp(input_path);
+            if (input_fd < 0) {
+                close(fd);
+                return 7;
+            }
+            const char byte = 'x';
+            if (write(input_fd, &byte, sizeof(byte)) != (ssize_t)sizeof(byte)) {
+                close(input_fd);
+                unlink(input_path);
+                close(fd);
+                return 8;
+            }
+#if defined(__APPLE__)
+            off_t length = sizeof(byte);
+            network_status = sendfile(input_fd, fd, 0, &length, NULL, 0);
+#else
+            off_t offset = 0;
+            network_status = (int)sendfile(fd, input_fd, &offset, sizeof(byte));
+#endif
+            close(input_fd);
+            unlink(input_path);
         } else if (network_status == 0 && strcmp(mode, "udp-write") == 0) {
             const char byte = 'x';
             network_status = (int)write(fd, &byte, sizeof(byte));

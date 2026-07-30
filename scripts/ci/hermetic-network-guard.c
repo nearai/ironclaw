@@ -14,6 +14,24 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+typedef int (*sendfile_fn)(
+    int,
+    int,
+    off_t,
+    off_t *,
+    struct sf_hdtr *,
+    int
+);
+#else
+#include <sys/sendfile.h>
+typedef ssize_t (*sendfile_fn)(int, int, off_t *, size_t);
+#endif
+
+static sendfile_fn real_sendfile(void) {
+    return (sendfile_fn)dlsym(RTLD_NEXT, "sendfile");
+}
+
 #if !defined(__APPLE__)
 typedef int (*connect_fn)(int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*send_fn)(int, const void *, size_t, int);
@@ -78,6 +96,15 @@ static int socket_is_datagram(int socket_fd) {
     int status = getsockopt(socket_fd, SOL_SOCKET, SO_TYPE, &socket_type, &length);
     errno = saved_errno;
     return status == 0 && socket_type == SOCK_DGRAM;
+}
+
+static int descriptor_is_socket(int fd) {
+    int socket_type = 0;
+    socklen_t length = sizeof(socket_type);
+    int saved_errno = errno;
+    int status = getsockopt(fd, SOL_SOCKET, SO_TYPE, &socket_type, &length);
+    errno = saved_errno;
+    return status == 0;
 }
 
 static const struct sockaddr *non_loopback_destination(
@@ -294,9 +321,59 @@ static ssize_t guarded_sendto(
 #endif
 }
 
+#if defined(__APPLE__)
+static int guarded_sendfile(
+    int input_fd,
+    int socket_fd,
+    off_t offset,
+    off_t *length,
+    struct sf_hdtr *headers,
+    int flags
+) {
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked =
+        non_loopback_destination(socket_fd, NULL, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
+        errno = EPERM;
+        return -1;
+    }
+    sendfile_fn function = real_sendfile();
+    if (function == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(input_fd, socket_fd, offset, length, headers, flags);
+}
+#else
+static ssize_t guarded_sendfile(
+    int socket_fd,
+    int input_fd,
+    off_t *offset,
+    size_t count
+) {
+    struct sockaddr_storage peer;
+    const struct sockaddr *blocked =
+        non_loopback_destination(socket_fd, NULL, &peer);
+    if (blocked != NULL) {
+        record_violation(blocked);
+        errno = EPERM;
+        return -1;
+    }
+    sendfile_fn function = real_sendfile();
+    if (function == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(socket_fd, input_fd, offset, count);
+}
+#endif
+
 static ssize_t guarded_write(int fd, const void *buffer, size_t length) {
     struct sockaddr_storage peer;
-    const struct sockaddr *blocked = non_loopback_destination(fd, NULL, &peer);
+    const struct sockaddr *blocked = descriptor_is_socket(fd)
+        ? non_loopback_destination(fd, NULL, &peer)
+        : NULL;
     if (blocked != NULL) {
         record_violation(blocked);
         errno = EPERM;
@@ -320,7 +397,9 @@ static ssize_t guarded_writev(
     int iovec_count
 ) {
     struct sockaddr_storage peer;
-    const struct sockaddr *blocked = non_loopback_destination(fd, NULL, &peer);
+    const struct sockaddr *blocked = descriptor_is_socket(fd)
+        ? non_loopback_destination(fd, NULL, &peer)
+        : NULL;
     if (blocked != NULL) {
         record_violation(blocked);
         errno = EPERM;
@@ -352,6 +431,7 @@ DYLD_INTERPOSE(guarded_connect, connect);
 DYLD_INTERPOSE(guarded_send, send);
 DYLD_INTERPOSE(guarded_sendmsg, sendmsg);
 DYLD_INTERPOSE(guarded_sendto, sendto);
+DYLD_INTERPOSE(guarded_sendfile, sendfile);
 DYLD_INTERPOSE(guarded_write, write);
 DYLD_INTERPOSE(guarded_writev, writev);
 #else
@@ -385,6 +465,10 @@ ssize_t sendto(
     socklen_t address_length
 ) {
     return guarded_sendto(socket_fd, buffer, length, flags, address, address_length);
+}
+
+ssize_t sendfile(int socket_fd, int input_fd, off_t *offset, size_t count) {
+    return guarded_sendfile(socket_fd, input_fd, offset, count);
 }
 
 ssize_t write(int fd, const void *buffer, size_t length) {
