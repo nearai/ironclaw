@@ -85,6 +85,8 @@ function renderChat({
   consoleErrors = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
+  onSelectThread = () => {},
+  contextOverrides = {},
 }) {
   const components = {
     ApprovalCard() {},
@@ -140,15 +142,18 @@ function renderChat({
       removeEventListener: () => {},
     },
     useChat: () => hookState,
+    useChatCommands: () => [],
+    matchCommand: () => null,
     useInterfacePreferences: () => ({ showChatLogsShortcut }),
     useT: () => (key) => key,
+    ...contextOverrides,
   };
 
   vm.runInNewContext(chatSourceForTest(), context);
   const tree = context.globalThis.__testExports.Chat({
     threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
-    onSelectThread: () => {},
+    onSelectThread,
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
@@ -865,6 +870,48 @@ test("Chat hides the floating thread logs shortcut when the preference is off", 
   assert.equal(componentProps(messageList, components.MessageList).logsPath, null);
 });
 
+test("Chat threads the server command inventory down to MessageList so a command-result system message can render the dropdown-echoing list", () => {
+  // The "available commands" rejection (chat-commands.ts's
+  // classifyCommandResponse -> COMMAND_LIST) renders the SAME inventory the
+  // composer's dropdown uses (see command-result.tsx), not a re-hardcoded
+  // copy — MessageList (and, in turn, MessageBubble) must receive it.
+  const commands = [
+    { name: "status", title: "Status", description: "d", usage: "/status" },
+    { name: "model", title: "Model", description: "d", usage: "/model" },
+  ];
+  const { tree, components } = renderChat({
+    activeThreadId: "thread-1",
+    contextOverrides: { useChatCommands: () => commands },
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    componentProps(messageList, components.MessageList).commands,
+    commands,
+    "MessageList should receive the same command inventory the composer uses",
+  );
+});
+
 test("Chat deny gate callback routes through approve compatibility path", () => {
   const approveCalls = [];
   const pendingGate = {
@@ -902,4 +949,174 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
   assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
+});
+
+test("Chat intercepts known slash text as a command on an active thread", async () => {
+  const sends = [];
+  const commandRuns = [];
+  const { tree, components } = renderChat({
+    activeThreadId: "thread-1",
+    contextOverrides: {
+      useChatCommands: () => [{ name: "status", usage: "/status" }],
+      matchCommand: (text) => (text.startsWith("/status") ? { name: "status" } : null),
+    },
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => {
+        sends.push(content);
+        return {};
+      },
+      runCommand: async (text) => {
+        commandRuns.push(text);
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+
+  await props.onSend("/status", {});
+  assert.deepEqual(commandRuns, ["/status"], "known slash text executes as a command");
+  assert.deepEqual(sends, [], "commands never submit a turn");
+
+  await props.onSend("/status", { images: [{ id: "img-1" }] });
+  assert.deepEqual(
+    sends,
+    ["/status"],
+    "slash text with an image submits as a message so the image is not dropped"
+  );
+  assert.deepEqual(commandRuns, ["/status"], "no second command run");
+
+  await props.onSend("plain text", {});
+  assert.deepEqual(sends, ["/status", "plain text"], "ordinary text still submits");
+});
+
+test("Chat landing view renders no command menu and submits a known command as an ordinary message", async () => {
+  // Homepage commands are intentionally OFF for now (see the interception
+  // guard comment in chat.tsx's `handleSend`). A prior change let the
+  // landing composer intercept known commands and made `runCommand` create
+  // a thread on first contact, but the result notice was appended to the
+  // pre-navigation message state and then wiped when the app navigated into
+  // the newly created (and still-loading) thread — an empty conversation
+  // left behind. Rather than fix that ordering, the landing composer
+  // neither shows the command menu nor executes known commands; slash text
+  // submits as an ordinary message there, exactly like unknown slash text
+  // always has (see the "submits unknown slash text" test below).
+  const sends = [];
+  const commandRuns = [];
+  const commands = [{ name: "status", usage: "/status" }, { name: "model", usage: "/model" }];
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    contextOverrides: {
+      useChatCommands: () => commands,
+      matchCommand: (text) => (text.startsWith("/status") ? { name: "status" } : null),
+    },
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => {
+        sends.push(content);
+        return { thread_id: "thread-new" };
+      },
+      runCommand: async (text) => {
+        commandRuns.push(text);
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const landing = findComponent(tree, components.EmptyState);
+  const props = componentProps(landing, components.EmptyState);
+  // Length check rather than `assert.deepEqual(props.commands, [])`: the
+  // empty array is a literal evaluated inside the vm-sandboxed chat.tsx
+  // source (a different realm), so a direct deepEqual against an
+  // outer-realm `[]` fails on prototype identity despite equal values (the
+  // same cross-realm gotcha noted on the completion tests in
+  // chat-input.test.ts).
+  assert.equal(
+    props.commands.length,
+    0,
+    "the landing composer must not render a command menu",
+  );
+
+  await props.onSend("/status", {});
+  assert.deepEqual(commandRuns, [], "a known command must not execute without an active thread");
+  assert.deepEqual(sends, ["/status"], "the known command submits as an ordinary message instead");
+});
+
+test("Chat landing view submits unknown slash text as an ordinary message", async () => {
+  const sends = [];
+  const commandRuns = [];
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    contextOverrides: {
+      useChatCommands: () => [{ name: "status", usage: "/status" }],
+      matchCommand: (text) => (text.startsWith("/status") ? { name: "status" } : null),
+    },
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => {
+        sends.push(content);
+        return { thread_id: "thread-new" };
+      },
+      runCommand: async (text) => {
+        commandRuns.push(text);
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const landing = findComponent(tree, components.EmptyState);
+  const props = componentProps(landing, components.EmptyState);
+  await props.onSend("/unknown-text", {});
+  assert.deepEqual(commandRuns, [], "unrecognized slash text is not a command");
+  assert.deepEqual(sends, ["/unknown-text"], "unknown slash text still sends as an ordinary message");
 });

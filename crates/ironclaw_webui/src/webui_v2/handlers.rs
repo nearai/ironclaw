@@ -51,21 +51,21 @@ use ironclaw_product::{
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
     OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
     OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
-    PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
-    PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities, ProductCancelRunRequest,
-    ProductCapabilityDescriptor, ProductCreateThreadRequest, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductOutboundEnvelope, ProductRenameAutomationRequest,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProjectFsFile, ProjectionCursor,
-    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    OUTBOUND_PREFERENCES_VIEW, PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_LIST_COMMAND,
+    PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
+    PROJECT_MEMBER_REMOVE_CAPABILITY, PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW,
+    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities,
+    ProductCancelRunRequest, ProductCapabilityDescriptor, ProductCreateThreadRequest,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductOutboundEnvelope,
+    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor,
+    ProjectFsFile, ProjectionCursor, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
@@ -1594,6 +1594,46 @@ pub struct ListThreadsQuery {
     pub candidate_thread_id: Option<String>,
     #[serde(default)]
     pub needs_approval: bool,
+}
+
+/// `GET /api/webchat/v2/commands`
+pub async fn list_commands(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ironclaw_product::RebornProductCommandListResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_LIST_COMMAND,
+        EmptyProductCommandInput {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteCommandBody {
+    pub text: String,
+}
+
+/// `POST /api/webchat/v2/threads/:thread_id/commands`
+pub async fn execute_command(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ExecuteCommandBody>,
+) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_EXECUTE_COMMAND,
+        ironclaw_product::RebornExecuteProductCommandRequest {
+            thread_id,
+            text: body.text,
+        },
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/automations`

@@ -20,6 +20,8 @@ import { RecoveryNotice } from "./components/recovery-notice";
 import { SuggestionChips } from "./components/suggestion-chips";
 import { TypingIndicator } from "./components/typing-indicator";
 import { useChat } from "./hooks/useChat";
+import { useChatCommands } from "./hooks/useChatCommands";
+import { matchCommand } from "./lib/chat-commands";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
 import { channelConnectionFromGate } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
@@ -99,6 +101,7 @@ export function Chat({
     recoveryNotice,
     activeRun,
     send,
+    runCommand,
     cancelRun,
     retryMessage,
     approve,
@@ -109,6 +112,7 @@ export function Chat({
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = useChat(activeThreadId);
+  const chatCommands = useChatCommands();
 
   React.useEffect(() => {
     onConnectionStatusChange?.(sseStatus);
@@ -209,24 +213,54 @@ export function Chat({
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
+      // A newly created thread (from either path below) is not yet the
+      // selected/active one — route the browser to it, exactly as the send
+      // path already did, so the result (a system notice for a command, the
+      // first reply for a message) renders somewhere visible.
+      const selectResponseThread = (response) => {
+        const responseThreadId = response?.thread_id || activeThreadId;
+        if (!activeThreadId && responseThreadId && onSelectThread) {
+          onSelectThread(responseThreadId, { replace: true });
+        }
+      };
+      // Slash text naming an inventory command executes as a product command
+      // (no turn); anything else — including unknown slash text — submits as
+      // an ordinary message, matching channel behavior. Commands require an
+      // existing conversation (the execute route is thread-scoped): running
+      // one from the landing composer with no thread yet created one and
+      // then lost the result to the thread-load race — the new thread's
+      // history loads empty and wipes the just-appended notice, leaving an
+      // empty conversation behind. Rather than fix that ordering, homepage
+      // commands are intentionally disabled for now — do not drop the
+      // `activeThreadId` precondition below to "fix" this; the fix is to not
+      // offer commands there at all.
+      if (
+        activeThreadId &&
+        images.length === 0 &&
+        attachments.length === 0 &&
+        matchCommand(content, chatCommands)
+      ) {
+        const response = await runCommand(content);
+        selectResponseThread(response);
+        return response;
+      }
       const response = await send(content, {
         images,
         attachments,
         displayContent,
         threadId: activeThreadId,
       });
-      const responseThreadId = response?.thread_id || activeThreadId;
-      if (!activeThreadId && responseThreadId && onSelectThread) {
-        onSelectThread(responseThreadId, { replace: true });
-      }
+      selectResponseThread(response);
       return response;
     },
     [
       activeThreadId,
       activeThreadHasGate,
       approvalSubmitWarning,
+      chatCommands,
       composerSendDisabled,
       onSelectThread,
+      runCommand,
       send,
     ]
   );
@@ -338,6 +372,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
+            commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}
@@ -362,6 +397,7 @@ export function Chat({
             activeRunId={activeRunId}
             logsPath={logsPath}
             pending={activeThreadIsProcessing}
+            commands={chatCommands}
           >
             {recoveryNotice &&
             (
@@ -455,6 +491,7 @@ export function Chat({
 
           <ChatInput
             onSend={handleSend}
+            commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}

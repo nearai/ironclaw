@@ -526,15 +526,19 @@ mod tests {
         let _guard = lock_env();
         set_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV, "1");
 
+        // User-info makes the policy parser classify this as non-loopback,
+        // while the actual connection remains on a closed loopback port so
+        // the test does not violate the hermetic test boundary.
+        let host = "http://remote-test@127.0.0.1:1";
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build current-thread runtime for test")
-            .block_on(connect_override("http://203.0.113.5:2375"));
+            .block_on(connect_override(host));
 
         remove_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV);
 
-        let err = result.expect_err("203.0.113.5:2375 has nothing listening");
+        let err = result.expect_err("127.0.0.1:1 has nothing listening");
         let message = err.to_string();
         assert!(
             !message.contains(DOCKER_HOST_ALLOW_REMOTE_ENV),
