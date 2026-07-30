@@ -41,22 +41,29 @@ jobs:
           gate_root=gate
           if [[ ! -f "$gate_root/scripts/ci/regression-test-check.py" ]]; then
             if [[ "$EVENT_NAME" != "pull_request" ]]; then
-              echo "::error::Trusted base does not contain the regression gate."
-              exit 1
+              # The PR that introduces this checker can receive review events
+              # before its trusted base contains the script. Do not execute
+              # PR-controlled gate code on that event; the ordinary
+              # pull_request run remains the bootstrap enforcement result.
+              echo "GATE_AVAILABLE=false" >> "$GITHUB_ENV"
+              exit 0
             fi
             # One-time bootstrap for the PR that first adds the checker. The
-            # pull_request event has no secrets; privileged review events fail
-            # closed rather than execute PR-controlled enforcement code.
+            # pull_request event has no secrets; review events never execute
+            # PR-controlled enforcement code.
             gate_root=.
           fi
+          echo "GATE_AVAILABLE=true" >> "$GITHUB_ENV"
           echo "GATE_ROOT=$gate_root" >> "$GITHUB_ENV"
 
       - name: Fetch PR base
+        if: env.GATE_AVAILABLE == 'true'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: git fetch origin -- "$BASE_REF"
 
       - name: Collect current approving reviews
+        if: env.GATE_AVAILABLE == 'true'
         id: reviews
         env:
           GH_TOKEN: ${{ github.token }}
@@ -78,6 +85,7 @@ jobs:
           echo "approvers=$approvers" >> "$GITHUB_OUTPUT"
 
       - name: Check for a meaningful regression test or reviewed exemption
+        if: env.GATE_AVAILABLE == 'true'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -99,4 +107,5 @@ jobs:
             --approving-reviewers "$PR_APPROVERS"
 
       - name: Run regression-gate self-tests
+        if: env.GATE_AVAILABLE == 'true'
         run: bash "$GATE_ROOT/scripts/ci/test-regression-test-check.sh"
