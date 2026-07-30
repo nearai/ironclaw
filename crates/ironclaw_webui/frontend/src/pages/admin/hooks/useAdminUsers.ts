@@ -28,7 +28,17 @@ export function useAdminUsers() {
       fetchAdminUsers({ cursor: pageParam || undefined, signal }),
     initialPageParam: null,
     getNextPageParam: (lastPage) => lastPage?.nextCursor || undefined,
-    refetchInterval: 10_000,
+    // Poll the initial bounded page, but stop once the administrator loads
+    // additional pages: TanStack refetches every retained infinite-query page,
+    // so a fixed interval would multiply traffic by the number of loaded pages.
+    // Also pause the timer during any active/paused fetch so it cannot cancel a
+    // slow fetchNextPage request. Mutations still invalidate the full query.
+    refetchInterval: (currentQuery) => {
+      const pageCount = currentQuery.state.data?.pages?.length || 0;
+      return currentQuery.state.fetchStatus === "idle" && pageCount <= 1
+        ? 10_000
+        : false;
+    },
   });
 
   const users = React.useMemo(() => {

@@ -179,6 +179,27 @@ test("admin user hook consumes cursors, deduplicates pages, and collapses load-m
     "cursor-next",
   );
   assert.equal(infiniteQueryOptions.getNextPageParam({ nextCursor: null }), undefined);
+  assert.equal(
+    infiniteQueryOptions.refetchInterval({
+      state: { data: { pages: [{ users: [] }] }, fetchStatus: "idle" },
+    }),
+    10_000,
+  );
+  assert.equal(
+    infiniteQueryOptions.refetchInterval({
+      state: { data: { pages: [{ users: [] }] }, fetchStatus: "fetching" },
+    }),
+    false,
+  );
+  assert.equal(
+    infiniteQueryOptions.refetchInterval({
+      state: {
+        data: { pages: [{ users: [] }, { users: [] }] },
+        fetchStatus: "idle",
+      },
+    }),
+    false,
+  );
 
   const signal = {};
   await infiniteQueryOptions.queryFn({ pageParam: "cursor-requested", signal });
