@@ -296,14 +296,25 @@ message events produce:
   unknown-command rejection path, which delivers the role-filtered
   "Available commands" help. (If a real `help` command ever joins the
   registry, this mapping upgrades gracefully into executing it.)
-- Actor from `user_id`, conversation from `channel_id`, `DirectChat`
-  trigger, event id derived from `trigger_id` (unique per invocation; Slack
-  does not redeliver slash commands).
+- Actor from `user_id`, conversation from `channel_id`; event id
+  `slack-{installation}-slash-{trigger_id}` (namespaced beside the
+  event_callback id space; unique per invocation — Slack does not redeliver
+  slash commands, unlike the Events API; cite Slack's docs in the PR).
+- **Trigger is derived, never hardcoded**: `DirectChat` only when the slash
+  form indicates a genuine DM (`channel_name == "directmessage"` /
+  `D`-prefixed `channel_id` — the adapter's existing `is_dm_channel`
+  semantics), else `BotCommand` (maps to the Shared route, which the
+  direct-conversation admission rejects). Hardcoding `DirectChat` would
+  silently defeat both the non-DM rejection edge and the connect-nudge
+  gate, which key off the same trigger classification.
 
 Downstream — classification, pairing, PR-1 admission, dispatch, observer
-bot-DM delivery — is identical to the space-prefixed path. Ingress ACK is
-the immediate empty 200 (Slack's ≤3s rule); the visible result is the bot's
-DM message.
+bot-DM delivery — is identical to the space-prefixed path. The ingress 200
+is ack-after-durable-admission (command execution itself is synchronous
+within the ingress request; only the reply posting is async), normally well
+inside Slack's ≤3s rule — the router's 20s deadline ceiling is a
+pre-existing degraded-backend exposure worth one line in the PR, not new
+risk. The visible result is the bot's DM message.
 
 ### Help rendering: per-channel invocation prefix
 
