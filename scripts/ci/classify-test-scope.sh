@@ -84,7 +84,7 @@ is_reborn_test_path() {
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
       return 0
       ;;
-    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/reborn_changed_coverage.py|scripts/ci/test_reborn_changed_coverage.py|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/ws12-suite-shards.toml|scripts/ci/ws12_suite_shards.py|scripts/ci/test_ws12_suite_shards.py|scripts/ci/ws12_workflow_contracts.py|scripts/ci/test_ws12_workflow_contracts.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
       return 0
       ;;
     *)
