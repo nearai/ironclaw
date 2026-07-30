@@ -84,7 +84,7 @@ Two narrow tightenings define the family's authority surface at its edges: `iron
 - **Depends on:** `ironclaw_product_contracts` and `ironclaw_extension_contracts` for DTOs and shared vocabulary, plus `ironclaw_attachments` and `ironclaw_filesystem` for the ledger it keeps.
 - **Never depends on:** `ironclaw_host_runtime`, any lane crate, the extension registry or hosting crates, or `ironclaw_assistant` directly.
 - **Security & authority role:** none beyond input sanitization and its sealed error envelope; authority is entirely delegated to whatever bound product surface it is handed.
-- **Why a separate crate:** a protocol surface with its own external wire-stability promise, versioned independently of the product surface's internal shape.
+- **Why a separate crate:** the assembly layer mounts this surface without the web host — folding it into `ironclaw_webui` would drag the embedded SPA artifact and the full listener stack into every deployment of the API skin; the wire-stability promise then rides on its own contract tests.
 
 ### `ironclaw_webui`
 

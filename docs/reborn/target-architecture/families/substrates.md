@@ -127,7 +127,7 @@ Every crate in this family executes a kernel-mediated responsibility without dec
 - **Depends on:** nothing internal.
 - **Never depends on:** anything else in the workspace.
 - **Security & authority role:** none — the only crate in this family with no security-relevant surface. Its only decision is whether a trace fires, which is an observability toggle, not a privilege.
-- **Why a separate crate:** a leaf macro surface consumed across kernel, loop, and app-tier crates alike; folding it into any one consumer would force every other consumer to depend on that crate just for a timing macro.
+- **Why a separate crate:** the contracts tier's admission rule — instrumentation is not boundary vocabulary, so the macros cannot live in the shared vocabulary crate without weakening its charter; a leaf of their own is the cheapest home that keeps that rule statable.
 
 ## Family AGENTS.md requirements
 

@@ -1,7 +1,7 @@
 
 # `crates/domains/` — typed record/service domains
 
-**Layer(s):** substrates · **Crates:** 13 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint and seal trust narrowly (outbound, triggers), and one is a credential-custody domain (auth).
+**Layer(s):** substrates · **Crates:** 13 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_projects, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint trust narrowly (outbound — sealed constructors; triggers — ratchet-pinned minting), and one is a credential-custody domain (auth).
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -38,7 +38,7 @@ The family favors narrow, single-purpose crates over shared infrastructure. Most
 - **vs `product/`** (assistant, operator, openai_compat, webui, host_ingress): product orchestrates user-facing workflow, admission, and delivery across many domains at once inside a single request; a domains crate knows nothing about channels, commands, or views — it owns one record type's invariants only.
 - **vs `extensions/`** (extension_registry, extension_host, extension_manager, packages): extensions are the installable-package concept — manifests, lifecycle, hosting, vendor packages. A domains crate is a durable business-record type available to every extension, product, and kernel caller, with no notion of install, activate, or package.
 - **Two vendor-scoped charters, permitted nowhere else in the family:** `ironclaw_llm` is a closed provider cone holding model-vendor adapters and their authentication flows; `ironclaw_auth` keeps vendor differences as recipe data consumed by one generic engine, never a code branch. No other domains crate holds a vendor name.
-- **The sealed-trust-types pattern:** two crates mint and seal trust through private constructors instead of kernel authorization machinery. `ironclaw_outbound` seals its delivery-attempt and access-grant types so only its own policy service can construct them. `ironclaw_triggers` seals the trusted-submission binding that identifies its own poller as a host-trusted sender. Both keep one narrow, reviewable trust responsibility inside a domain crate instead of promoting the crate into the kernel family.
+- **The narrow-trust-mint pattern:** two crates mint trust instead of promoting it into kernel authorization machinery, each held by a different mechanism. `ironclaw_outbound` seals its delivery-attempt and access-grant types with private constructors — only its own policy service can construct them. `ironclaw_triggers` mints the trusted-submission binding that identifies its own poller as a host-trusted sender; its constructor is public, and the protection is the ownership ratchet tests that pin who may call it. Both keep one narrow, reviewable trust responsibility inside a domain crate instead of promoting the crate into the kernel family.
 
 ## What belongs here / What never belongs here
 
@@ -214,7 +214,7 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
 - **Depends on:** `ironclaw_common`.
 - **Never depends on:** anything else internal — this crate exists specifically to keep heavy document-parsing dependencies out of every consumer's build.
 - **Security & authority role:** none — a pure transform; the bomb-safety caps are hardening, not an authorization decision.
-- **Why a separate crate:** a pure leaf with heavy parsing dependencies kept out of consumers; `ironclaw_attachments` is its sole consumer.
+- **Why a separate crate:** a pure leaf with heavy document-parsing dependencies kept out of its consumers — the attachment landing routine, the kernel's tool-output mediation, and the first-party file tools all extract text without inheriting each other's surfaces or the parser cone.
 
 ### `ironclaw_projects`
 

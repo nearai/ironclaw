@@ -233,9 +233,7 @@ depends back.
   its own.
 - **Security & authority role:** the policy-math gate feeding the membrane; deterministic and
   reproducible, so an audit record can name the exact policy that gated an invocation.
-- **Why a separate crate:** it is pure, dependency-free logic consumed identically by the
-  membrane and by mediated execution; keeping it a crate lets both depend on the function
-  without depending on each other.
+- **Why a separate crate:** the only dependency-free stage — pure policy math over neutral vocabulary — and keeping it a leaf means policy resolution stays consumable and testable without the membrane's full service cone.
 
 ### `ironclaw_capabilities`
 
