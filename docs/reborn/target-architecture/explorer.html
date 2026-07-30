@@ -54,8 +54,11 @@
   .fam.straggler{opacity:.72}
   .fam.straggler .fam-hd h3{color:var(--ink-faint);font-weight:500}
   .fam-hd h3{margin:0;font-family:var(--mono);font-size:.92rem;font-weight:650;letter-spacing:0;color:var(--ink)}
-  .fh{all:unset;cursor:pointer;font:inherit;color:inherit}
-  .fh:hover{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+  .fh{cursor:pointer;font:inherit;color:inherit;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:4px 12px;display:inline-flex;align-items:center;gap:8px;transition:border-color .12s,color .12s}
+  .fh::after{content:"›";color:var(--ink-faint);font-weight:400;font-size:1.05em;line-height:1}
+  .fh:hover{border-color:var(--accent-line);color:var(--accent)}
+  .fh:hover::after{color:var(--accent)}
+  .fh:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .cl{display:flex;flex-direction:column;gap:6px}
   .cl .cr{display:flex;align-items:baseline;gap:10px;min-width:0}
   .cl .cr .mtd{color:var(--ink-soft);font-size:.8rem;min-width:0}
