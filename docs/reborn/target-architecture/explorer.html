@@ -70,6 +70,7 @@
   .sdot.done{background:var(--kept)}.sdot.wip{background:var(--accent)}.sdot.planned{background:var(--ink-faint)}
 
   .modal-ov{position:fixed;inset:0;z-index:80;background:color-mix(in srgb,var(--bg) 52%,transparent);backdrop-filter:blur(7px);display:flex;align-items:flex-start;justify-content:center;padding:5vh 20px 8vh;overflow-y:auto}
+  .modal-ov[hidden]{display:none}
   .modal{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.38);max-width:920px;width:100%;position:relative}
   .m-close{position:absolute;top:14px;right:14px;border:1px solid var(--line-strong);background:var(--surface-2);border-radius:8px;width:34px;height:34px;cursor:pointer;color:var(--ink-soft);font-size:.9rem}
   .m-close:hover{border-color:var(--accent-line);color:var(--ink)}
