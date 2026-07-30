@@ -744,7 +744,10 @@ fn map_converse_error(model_id: &str, error: &ConverseError) -> LlmError {
             provider,
             model: model_id.to_string(),
         },
-        ConverseError::ModelErrorException(error) => LlmError::InvalidResponse {
+        // This is an upstream model-service failure, not a malformed completed
+        // response. Preserve availability recovery until the SDK mapping gains
+        // a dedicated service-error type.
+        ConverseError::ModelErrorException(error) => LlmError::RequestFailed {
             provider,
             reason: format!(
                 "Model error (original status {}, resource {}): {}",
@@ -987,14 +990,14 @@ mod tests {
         );
 
         match map_converse_error(TEST_MODEL_ID, &error) {
-            LlmError::InvalidResponse { provider, reason } => {
+            LlmError::RequestFailed { provider, reason } => {
                 assert_eq!(provider, "bedrock");
                 assert_eq!(
                     reason,
                     "Model error (original status 424, resource us.anthropic.claude-test-v1): upstream model returned malformed output"
                 );
             }
-            other => panic!("expected invalid response, got {other:?}"),
+            other => panic!("expected upstream request failure, got {other:?}"),
         }
     }
 

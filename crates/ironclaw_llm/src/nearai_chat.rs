@@ -1593,7 +1593,7 @@ impl NearAiStreamingToolCallState {
 }
 
 fn incomplete_stream_error(reason: impl Into<String>) -> LlmError {
-    LlmError::InvalidResponse {
+    LlmError::StreamInterrupted {
         provider: "nearai_chat".to_string(),
         reason: reason.into(),
     }
@@ -2085,7 +2085,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(reason.contains("terminal completion marker"), "{reason}");
             }
@@ -2137,7 +2137,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(
                     reason.contains("terminal completion marker"),
@@ -2185,7 +2185,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(
                     reason.contains("terminal completion marker"),
@@ -2233,7 +2233,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(
                     reason.contains("terminal completion marker"),

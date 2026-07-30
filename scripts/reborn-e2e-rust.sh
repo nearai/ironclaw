@@ -79,6 +79,11 @@ run_architecture() {
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
   run_test ironclaw_host_runtime reborn_invoke_vertical_slice
+  # Pins docs/reborn/contracts/agent-loop-protocol.md: completed malformed,
+  # JSON-invalid, and empty provider responses use bounded invalid-output
+  # recovery, while interrupted streams retain availability semantics.
+  run_test_exact ironclaw_runner llm_gateway gateway_maps_deterministic_provider_response_errors_to_invalid_output
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery deterministic_provider_response_errors_use_bounded_invalid_output_recovery
   run_test ironclaw_host_runtime runtime_http_egress_contract
   run_test ironclaw_host_runtime builtin_obligation_handler_contract
   run_test ironclaw_host_runtime obligation_services_composition_contract

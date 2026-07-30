@@ -92,7 +92,7 @@ fn discarding_sink() -> Arc<dyn CompletionStreamSink> {
 ///
 /// A missing terminal frame is the crate's existing incomplete-stream
 /// condition (`codex_chatgpt`'s "stream ended before response.completed"),
-/// so it surfaces the same way: a retryable `LlmError::InvalidResponse`,
+/// so it surfaces the same way: a retryable `LlmError::StreamInterrupted`,
 /// raised *before* a response object is constructed, so retry and failover
 /// see a failure rather than a completed call.
 ///
@@ -123,11 +123,11 @@ async fn streaming_without_terminal_frame_is_a_retryable_incomplete_stream() {
         .expect_err("a stream that never terminated is not a completed call");
 
     match error {
-        LlmError::InvalidResponse { reason, .. } => assert!(
+        LlmError::StreamInterrupted { reason, .. } => assert!(
             reason.contains("terminal frame"),
             "reason must name the missing terminal frame, got: {reason}"
         ),
-        other => panic!("expected a retryable InvalidResponse, got {other:?}"),
+        other => panic!("expected a retryable StreamInterrupted, got {other:?}"),
     }
 }
 
@@ -149,8 +149,8 @@ async fn streaming_tool_call_without_terminal_frame_is_a_retryable_incomplete_st
         .expect_err("a half-streamed tool call is not a completed call");
 
     assert!(
-        matches!(error, LlmError::InvalidResponse { .. }),
-        "expected a retryable InvalidResponse, got {error:?}"
+        matches!(error, LlmError::StreamInterrupted { .. }),
+        "expected a retryable StreamInterrupted, got {error:?}"
     );
 }
 
