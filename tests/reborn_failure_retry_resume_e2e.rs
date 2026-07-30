@@ -95,9 +95,9 @@ async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
 #[tokio::test]
 async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        // Typed stale requests are retried twice in-loop. Three consecutive
-        // failures exhaust that budget and leave the successful response for
-        // the externally resumed run.
+        // Typed stale requests are retried twice in-loop, then receive one
+        // observation-assisted attempt. A fourth consecutive failure aborts
+        // and leaves the successful response for the externally resumed run.
         RebornModelReplayStep::ModelError {
             kind: HostManagedModelErrorKind::StaleRequest,
             message: "model provider rejected the request".to_string(),
@@ -109,6 +109,10 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         RebornModelReplayStep::ModelError {
             kind: HostManagedModelErrorKind::StaleRequest,
             message: "model provider rejected the final in-loop retry".to_string(),
+        },
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::StaleRequest,
+            message: "model provider rejected the observation-assisted retry".to_string(),
         },
         // The externally retried run resumes and succeeds with a final reply.
         RebornModelReplayStep::Response {
@@ -175,8 +179,8 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .await
         .expect("recovered reply persisted to the thread");
 
-    // All scripted steps were consumed: three in-loop failures and the
-    // recovered external retry call.
+    // All scripted steps were consumed: four in-loop failures and the recovered
+    // external retry call.
     assert_eq!(harness.remaining_model_responses(), 0);
 
     harness.shutdown().await;

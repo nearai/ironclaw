@@ -13,8 +13,8 @@ use crate::LoopGateRef;
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
-    LoopModelRequest, LoopModelResponse, LoopRunContext, LoopSafeSummary, ParentLoopOutput,
-    sanitize_model_visible_text,
+    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopRunContext, LoopSafeSummary,
+    ParentLoopOutput, sanitize_model_visible_text,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
@@ -66,7 +66,8 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
     ) -> Result<(), LoopModelGatewayError>;
 
     /// Called **before** dispatching the model request. Return `Err` with
-    /// `AgentLoopHostErrorKind::BudgetExceeded` to reject the call.
+    /// `AgentLoopHostErrorKind::SpendBudgetExceeded` to reject the call when
+    /// the configured model-spend budget is exhausted.
     async fn pre_model_call(
         &self,
         context: &LoopRunContext,
@@ -138,6 +139,9 @@ pub struct LoopModelGatewayError {
     /// provider fallback index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
     /// Secret-value-scrubbed cause text for model recovery and failure
     /// explanation. Unlike `safe_summary`, path and payload delimiters are
     /// allowed.
@@ -157,6 +161,7 @@ impl LoopModelGatewayError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         })
     }
@@ -174,6 +179,7 @@ impl LoopModelGatewayError {
             gate_ref: None,
             retry_after_ms: None,
             next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -198,6 +204,11 @@ impl LoopModelGatewayError {
         self
     }
 
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -216,6 +227,9 @@ impl LoopModelGatewayError {
         }
         if let Some(next_fallback_index) = self.next_fallback_index {
             error = error.with_next_fallback_index(next_fallback_index);
+        }
+        if let Some(usage) = self.usage {
+            error = error.with_usage(usage);
         }
         if let Some(detail) = self.detail {
             error = error.with_detail(detail);

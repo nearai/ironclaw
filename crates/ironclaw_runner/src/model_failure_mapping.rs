@@ -3,8 +3,8 @@ use ironclaw_turns::run_profile::{AgentLoopHostErrorKind, AgentLoopHostErrorReas
 use crate::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
     MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
-    MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
-    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, MODEL_STAGE_POLICY_DENIED_CATEGORY,
+    MODEL_STAGE_REQUEST_INVALID_CATEGORY, MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
 };
 
 pub(crate) fn model_stage_failure_category(
@@ -24,15 +24,15 @@ pub(crate) fn model_stage_failure_category(
         return Some(BUDGET_ACCOUNTING_FAILED_CATEGORY);
     }
 
-    if kind == AgentLoopHostErrorKind::CredentialUnavailable {
-        return Some(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY);
-    }
-
     // Permanent for an identical retry. Without these, all four fell through to
     // `host_stage_unavailable_model` — an auto-retriable transient outage — so
     // the run re-drove a call that could not succeed and named the wrong cause.
     // `executor/mapping.rs` already documented this as handled; it was not.
     match kind {
+        AgentLoopHostErrorKind::CredentialUnavailable => {
+            Some(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY)
+        }
+        AgentLoopHostErrorKind::SpendBudgetExceeded => Some(MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY),
         AgentLoopHostErrorKind::InvalidInvocation | AgentLoopHostErrorKind::Invalid => {
             Some(MODEL_STAGE_REQUEST_INVALID_CATEGORY)
         }
@@ -97,6 +97,7 @@ mod tests {
         let expected_without_reason = |kind| match kind {
             K::CredentialUnavailable => Some(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY),
             K::BudgetAccountingFailed => Some(BUDGET_ACCOUNTING_FAILED_CATEGORY),
+            K::SpendBudgetExceeded => Some(MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY),
             // Permanent for an identical retry — each names its own cause
             // instead of falling through to the auto-retriable generic
             // host-stage outage. Inverted from `None`, which pinned the bug
@@ -110,6 +111,8 @@ mod tests {
             | K::InvalidOutput
             | K::ContentFiltered
             | K::BudgetExceeded
+            | K::ContextOverflow
+            | K::OutputTruncated
             | K::BudgetApprovalRequired
             | K::RateLimited
             | K::Unavailable
@@ -130,6 +133,9 @@ mod tests {
             K::ContentFiltered,
             K::PolicyDenied,
             K::BudgetExceeded,
+            K::SpendBudgetExceeded,
+            K::ContextOverflow,
+            K::OutputTruncated,
             K::BudgetApprovalRequired,
             K::BudgetAccountingFailed,
             K::RateLimited,

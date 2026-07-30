@@ -1594,7 +1594,7 @@ fn recover_textual_tool_calls_from_tool_response(
     response: ToolCompletionResponse,
     tool_names: &[String],
 ) -> Result<ToolCompletionResponse, HostManagedModelError> {
-    if !response.tool_calls.is_empty() {
+    if !response.tool_calls.is_empty() || response.finish_reason == FinishReason::Length {
         return Ok(response);
     }
     let Some(content) = response.content.as_deref() else {
@@ -1813,9 +1813,15 @@ async fn tool_response_to_host(
             }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::BudgetExceeded,
+            HostManagedModelErrorKind::OutputTruncated,
             "model response was truncated before completion",
-        )),
+        )
+        .with_usage(LoopModelUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+        })),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
@@ -2141,9 +2147,10 @@ fn response_to_host_reply(
             .with_usage(usage))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::BudgetExceeded,
+            HostManagedModelErrorKind::OutputTruncated,
             "model response was truncated before completion",
-        )),
+        )
+        .with_usage(usage)),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
@@ -2168,6 +2175,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
             HostManagedModelErrorKind::PolicyDenied
         }
         AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
+        AgentLoopHostErrorKind::SpendBudgetExceeded => {
+            HostManagedModelErrorKind::SpendBudgetExceeded
+        }
+        AgentLoopHostErrorKind::ContextOverflow => HostManagedModelErrorKind::ContextOverflow,
+        AgentLoopHostErrorKind::OutputTruncated => HostManagedModelErrorKind::OutputTruncated,
         AgentLoopHostErrorKind::BudgetApprovalRequired => {
             HostManagedModelErrorKind::BudgetApprovalRequired
         }
@@ -2655,7 +2667,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
-            HostManagedModelErrorKind::BudgetExceeded,
+            HostManagedModelErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         ),
         LlmError::InvalidRequest { .. } => HostManagedModelError::safe(

@@ -59,8 +59,13 @@ enum ExpectedTerminal {
 
 #[derive(Debug, Clone, Copy)]
 enum ExpectedError {
-    HostUnavailable { stage: HostStage },
-    CheckpointFailed { stage: CheckpointKind },
+    HostUnavailable {
+        stage: HostStage,
+    },
+    CheckpointRejected {
+        stage: CheckpointKind,
+        safe_summary: &'static str,
+    },
 }
 
 #[derive(Debug)]
@@ -222,12 +227,12 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "CheckpointRejected <- fail_checkpoint(BeforeModel)",
         setup: FailureSetup::CheckpointRejected,
-        // matrix-divergence: CheckpointRejected enum origin is legacy
-        // text_loop_driver; planned executor maps host checkpoint rejection to
-        // AgentLoopExecutorError::CheckpointFailed rather than LoopExit::Failed.
+        // A pre-model rejection cannot produce a trustworthy LoopExit. Preserve
+        // its bounded host cause on the distinct typed executor error instead.
         expected_kind: ExpectedTerminal::Error {
-            error: ExpectedError::CheckpointFailed {
+            error: ExpectedError::CheckpointRejected {
                 stage: CheckpointKind::BeforeModel,
+                safe_summary: "scripted checkpoint failure",
             },
         },
         expects_explanation: false,
@@ -284,12 +289,12 @@ async fn run_matrix_row(row: &MatrixRow) {
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
     match setup {
         FailureSetup::ModelError => {
-            // One more error than the availability retry budget so the abort
-            // (and its category) is driven by the Unavailable class rather
-            // than the mock's script-exhausted Internal fallback.
+            // The availability retry budget plus its one observation turn and
+            // the final repeated error drive the typed Unavailable abort,
+            // rather than the mock's script-exhausted Internal fallback.
             let unavailable_error_count = crate::strategies::DefaultRecoveryStrategy::default()
                 .max_model_availability_attempts as usize
-                + 1;
+                + 2;
             let host = MockHost::new(Vec::new()).with_model_errors(
                 (0..unavailable_error_count)
                     .map(|_| {
@@ -571,10 +576,20 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                         row.label
                     );
                 }
-                ExpectedError::CheckpointFailed { .. } => {
+                ExpectedError::CheckpointRejected { .. } => {
                     assert_eq!(
                         observed.model_request_count, 0,
-                        "{}: checkpoint failure before model should not fabricate a reply",
+                        "{}: rejected pre-model state must not reach the model",
+                        row.label
+                    );
+                    assert!(
+                        observed.appended_result_refs.is_empty(),
+                        "{}: rejected pre-model state must not dispatch a capability",
+                        row.label
+                    );
+                    assert!(
+                        observed.finalized_assistant_messages.is_empty(),
+                        "{}: rejected pre-model state must not finalize assistant output",
                         row.label
                     );
                 }
@@ -667,10 +682,16 @@ fn assert_expected_error(
                 row.label
             );
         }
-        ExpectedError::CheckpointFailed { stage } => {
+        ExpectedError::CheckpointRejected {
+            stage,
+            safe_summary,
+        } => {
             assert_eq!(
                 actual,
-                &AgentLoopExecutorError::CheckpointFailed { stage },
+                &AgentLoopExecutorError::CheckpointRejected {
+                    stage,
+                    safe_summary: LoopSafeSummary::new(safe_summary).expect("safe summary"),
+                },
                 "{}: executor error",
                 row.label
             );

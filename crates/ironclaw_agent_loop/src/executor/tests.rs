@@ -1436,7 +1436,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
 async fn model_context_overflow_retries_through_canonical_compaction_stage() {
     let host = MockHost::new(vec![reply_response()])
         .with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )])
         .with_prompt_compaction_indexes(vec![
@@ -1494,7 +1494,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
 async fn model_context_overflow_exhaustion_gives_model_one_observation_assisted_attempt() {
     let overflow = || {
         AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )
     };
@@ -1642,7 +1642,7 @@ async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_r
 async fn model_shrink_context_call_scope_returns_planner_contract() {
     let host =
         MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )]);
     let executor = CanonicalAgentLoopExecutor;
@@ -3582,27 +3582,96 @@ async fn model_unrecoverable_host_error_preserves_inline_sanitized_cause() {
 }
 
 #[tokio::test]
-async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
+async fn model_budget_accounting_failure_gets_one_durable_final_model_turn() {
     let accounting_error = || {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::BudgetAccountingFailed,
             "resource accounting storage is unavailable",
         )
     };
-    let host = MockHost::new(Vec::new()).with_model_errors(vec![
-        accounting_error(),
-        accounting_error(),
-        accounting_error(),
-    ]);
+    let host = MockHost::new(vec![reply_response_with_text(
+        "completed after accounting recovery",
+    )])
+    .with_model_errors(vec![accounting_error()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("one recovered accounting failure should reach a final model turn");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["completed after accounting recovery".to_string()]
+    );
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].inline_messages.iter().any(|message| {
+            message
+                .safe_body
+                .as_str()
+                .contains("resource accounting failed")
+        }),
+        "the recovered request must explain why it is the one final model turn"
+    );
+    assert!(
+        !requests[1]
+            .capability_view
+            .as_ref()
+            .expect("warning request has a capability view")
+            .visible_capability_ids
+            .is_empty(),
+        "the warning uses the normal tool-capable model request"
+    );
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::Final,
+        ],
+        "the consumed warning budget is durable before the warned request"
+    );
+    let mut final_state = final_staged_state(&host);
+    assert!(
+        !final_state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::budget_accounting_failed())
+    );
+}
+
+#[tokio::test]
+async fn repeated_model_budget_accounting_failure_preserves_typed_terminal_diagnostics() {
+    let accounting_error = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        )
+    };
+    let host =
+        MockHost::new(Vec::new()).with_model_errors(vec![accounting_error(), accounting_error()]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let error = executor
         .execute_family(&crate::families::default(), &host, state)
         .await
-        .expect_err("accounting outages must remain typed host failures");
+        .expect_err("a repeated accounting outage must remain a typed host failure");
 
-    assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(host.model_requests().len(), 2);
+    assert!(
+        host.model_requests()[1]
+            .inline_messages
+            .iter()
+            .any(|message| message
+                .safe_body
+                .as_str()
+                .contains("resource accounting failed"))
+    );
     assert_eq!(
         error,
         AgentLoopExecutorError::HostUnavailableWithDiagnostics {
@@ -3695,7 +3764,8 @@ async fn model_stale_request_exhaustion_fails_with_stale_request_category() {
             "model request surface version does not match the host-built prompt bundle",
         )
     };
-    let host = MockHost::new(Vec::new()).with_model_errors(vec![stale(), stale(), stale()]);
+    let host =
+        MockHost::new(Vec::new()).with_model_errors(vec![stale(), stale(), stale(), stale()]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -3714,8 +3784,8 @@ async fn model_stale_request_exhaustion_fails_with_stale_request_category() {
     }
     assert_eq!(
         host.model_requests().len(),
-        3,
-        "stale-request retries are bounded by the per-class budget"
+        4,
+        "stale-request retries are bounded by the per-class budget plus one observation turn"
     );
 }
 
@@ -4046,9 +4116,10 @@ async fn retry_transition_checkpoint_failure_stops_before_second_model_call() {
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::CheckpointFailed {
-            stage: CheckpointKind::BeforeModel
-        }
+        AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::BeforeModel,
+            safe_summary,
+        } if safe_summary.as_str() == "scripted checkpoint failure"
     ));
     assert_eq!(host.model_requests().len(), 1);
 }
@@ -4236,7 +4307,7 @@ async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evi
             AgentLoopHostErrorKind::Unavailable,
             "model provider is temporarily unavailable",
         )
-        .with_next_fallback_index(1),
+        .with_next_fallback_index(2),
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -4250,8 +4321,33 @@ async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evi
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].fallback_index, 0);
-    assert_eq!(requests[1].fallback_index, 1);
-    assert_eq!(final_staged_state(&host).model_state.fallback_index, 1);
+    assert_eq!(requests[1].fallback_index, 2);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 2);
+}
+
+#[tokio::test]
+async fn model_unavailable_retry_rejects_a_non_advancing_fallback_index() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(0),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("a host-selected fallback index must advance the current route");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "fallback model route index did not advance"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -4436,7 +4532,7 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
     // before aborting; paused time fast-forwards the backoff sleeps.
     let abort_call_count = crate::strategies::DefaultRecoveryStrategy::default()
         .max_model_availability_attempts as usize
-        + 1;
+        + 2;
     let script = ScenarioScript {
         model_responses: (0..abort_call_count)
             .map(|_| ScriptedModelResponse::Error {
@@ -4476,6 +4572,85 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn exhausted_model_unavailability_gets_one_observation_and_recovers() {
+    let family = crate::families::default_with_overrides(
+        crate::families::FamilyOverrides::default().set_model_availability_attempts(1),
+    );
+    let unavailable = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+    };
+    let host = MockHost::new(vec![reply_response_with_text(
+        "continued after provider recovery",
+    )])
+    .with_model_errors(vec![unavailable(), unavailable()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("availability observation should let the recovered provider continue");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests()
+            .iter()
+            .flat_map(|request| &request.inline_messages)
+            .filter(|message| message
+                .safe_body
+                .as_str()
+                .contains("model error observation"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["continued after provider recovery"]
+    );
+}
+
+#[tokio::test]
+async fn exhausted_stale_model_request_gets_one_observation_and_recovers() {
+    let stale = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            "model request surface is stale",
+        )
+    };
+    let host = MockHost::new(vec![reply_response_with_text(
+        "continued with the refreshed surface",
+    )])
+    .with_model_errors(vec![stale(), stale(), stale()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("stale-request observation should allow one refreshed iteration");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests()
+            .iter()
+            .flat_map(|request| &request.inline_messages)
+            .filter(|message| message
+                .safe_body
+                .as_str()
+                .contains("model error observation"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["continued with the refreshed surface"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     // Regression pin: the model stage's retry guard is derived from the
     // composed recovery strategy, not a hard-coded executor constant. A
@@ -4488,12 +4663,13 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
         crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
     );
     let cause = "provider connection timed out before a response arrived";
-    // Exactly attempts+1 scripted failures: the final one is the call where
-    // the strategy's budget is exhausted and it aborts. Any extra call would
+    // Exactly attempts+2 scripted failures: exhaustion gets one observation
+    // attempt, and the final call proves the bounded strategy then aborts. Any
+    // extra call would
     // hit the mock's script-exhausted Internal fallback and change the
     // observed failure category.
     let host = MockHost::new(Vec::new()).with_model_errors(
-        (0..=attempts)
+        (0..attempts.saturating_add(2))
             .map(|_| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
                     .with_detail(cause)
@@ -4532,8 +4708,8 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     }
     assert_eq!(
         host.model_requests().len(),
-        (attempts + 1) as usize,
-        "the loop must allow exactly the configured availability budget"
+        (attempts + 2) as usize,
+        "the loop must allow the configured availability budget plus one observation turn"
     );
 }
 

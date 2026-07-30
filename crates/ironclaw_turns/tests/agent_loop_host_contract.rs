@@ -3729,7 +3729,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         self.pre_called.store(true, Ordering::SeqCst);
         if self.reject_pre.load(Ordering::SeqCst) {
             return Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
                 "model call budget exceeded",
             )
             .expect("safe summary is valid"));
@@ -3749,7 +3749,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         }
         if self.reject_post.load(Ordering::SeqCst) {
             return Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
                 "model call accounting failed",
             )
             .expect("safe summary is valid"));
@@ -4046,7 +4046,7 @@ async fn post_accounting_failure_after_success_fails_closed() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
     assert_eq!(error.safe_summary, "model call accounting failed");
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
@@ -4152,7 +4152,7 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
     assert_eq!(error.safe_summary, "model call accounting failed");
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
@@ -4172,9 +4172,9 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
     );
 }
 
-/// Budget-exceeded pre-call rejection prevents gateway call.
+/// Spend-budget pre-call rejection prevents the provider call.
 #[tokio::test]
-async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
+async fn spend_budget_exceeded_pre_call_rejects_without_calling_gateway() {
     let context = claimed_run_context().await;
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
@@ -4193,7 +4193,7 @@ async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::SpendBudgetExceeded);
     assert!(error.safe_summary.contains("budget exceeded"));
     // Gateway was never called.
     assert_eq!(gateway.requests().len(), 0);
@@ -4219,6 +4219,18 @@ async fn error_kind_mapping_through_host_managed_port() {
         (
             AgentLoopHostErrorKind::BudgetExceeded,
             "model call budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::SpendBudgetExceeded,
+            "model spend budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::ContextOverflow,
+            "model context overflow",
+        ),
+        (
+            AgentLoopHostErrorKind::OutputTruncated,
+            "model output truncated",
         ),
         (
             AgentLoopHostErrorKind::PolicyDenied,

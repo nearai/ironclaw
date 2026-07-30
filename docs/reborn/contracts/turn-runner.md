@@ -48,6 +48,20 @@ Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 - `block_run` requires the current, unexpired lease, persists a checkpoint/gate ref, clears runner ownership, keeps the active lock, and emits `Blocked`.
 - `complete_run`, runner-side `cancel_run`, and `fail_run` require the matching, unexpired lease and release the active lock exactly once at terminal state.
 - Failure and recovery/cancel reasons are stable sanitized categories only; raw prompts, tool input, host paths, backend errors, and secrets stay out of turn state and lifecycle events.
+- A pre-model `CheckpointRejected` is deterministic for the proposed state and
+  is never repaired by relabeling, blindly retried, or followed by model/tool
+  work. If private checkpoint payload staging succeeded but checkpoint metadata
+  validation failed, the payload remains non-authoritative. The runner
+  terminalizes exactly once through the synchronously durable turn-state
+  row/`Failed` event channel, persists a bounded host-authored explanation, and
+  prohibits retry of that failed run. This is the explicit host-authored
+  exception to model-final-word handling; product projection must not invoke a
+  failure-explainer model or manufacture an assistant transcript message.
+
+The canonical caller regression is
+`turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
+in `crates/ironclaw_runner/tests/loop_driver_host.rs`, also mapped into
+`scripts/reborn-e2e-rust.sh architecture`.
 
 ---
 
