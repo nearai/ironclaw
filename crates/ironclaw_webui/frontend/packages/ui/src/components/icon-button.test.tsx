@@ -1,6 +1,9 @@
+// @vitest-environment happy-dom
+
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import React from "react";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { IconButton, iconButtonClasses } from "./icon-button";
 
@@ -54,4 +57,44 @@ test("the polymorphic contract rejects props invalid for the element (type-level
   void (<IconButton as={FakeLink} />);
 
   assert.ok(true);
+});
+
+test("the polymorphic contract types refs against the rendered element (type-level)", () => {
+  const buttonRef = React.createRef<HTMLButtonElement>();
+  const anchorRef = React.createRef<HTMLAnchorElement>();
+
+  void (<IconButton ref={buttonRef} aria-label="Bell" />);
+  void (<IconButton as="a" href="/inbox" ref={anchorRef} aria-label="Inbox" />);
+
+  // @ts-expect-error — an anchor ref is not assignable to the default button
+  void (<IconButton ref={anchorRef} aria-label="Bell" />);
+  // @ts-expect-error — a button ref is not assignable when rendering an anchor
+  void (<IconButton as="a" href="/inbox" ref={buttonRef} aria-label="Inbox" />);
+
+  assert.ok(true);
+});
+
+test("refs attach to the underlying element for button and anchor renders", () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const buttonRef = React.createRef<HTMLButtonElement>();
+  const anchorRef = React.createRef<HTMLAnchorElement>();
+
+  const root = createRoot(container);
+  try {
+    act(() =>
+      root.render(
+        <>
+          <IconButton ref={buttonRef} aria-label="Bell" />
+          <IconButton as="a" href="/inbox" ref={anchorRef} aria-label="Inbox" />
+        </>
+      )
+    );
+    assert.ok(buttonRef.current instanceof HTMLButtonElement);
+    assert.equal(buttonRef.current.type, "button");
+    assert.ok(anchorRef.current instanceof HTMLAnchorElement);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
 });
