@@ -185,17 +185,49 @@ drop out. Surviving slices: descriptor metadata
 (`title`/`description`/`usage` added to main's descriptor struct beside
 PR-1's `audience`), WebUI backend, frontend palette.
 
+### Implicit-owner rule extended to both doors (PR-1 audit fix)
+
+PR-1's final review found the channel role resolver
+(`ChannelActorRoleResolver::actor_role` in
+`crates/ironclaw_extension_host/src/channel_command_roles.rs`) had no
+env-bearer-operator bypass: an operator with no admin-directory record was
+permanently denied channel admin commands, while the WebUI door
+(`RebornServices::authorize_admin`, and now `caller_is_command_admin` below)
+already treated `caller.operator_config` as an implicit admin. PR-2 closes
+that gap: when the resolved bound user equals the resolver's
+`operator_user_id` and the admin directory has no record at all (`Ok(None)`),
+the resolver now also returns `Ok(Some(AdminUserRole::Owner))`. A persisted
+directory record of any status — including Suspended — still governs whenever
+one exists; the new arm only fires on "no record."
+
+The two doors remain asymmetric in one respect: the WebUI's
+`caller.operator_config` bypass short-circuits before any directory lookup
+and has no record-governs behavior at all, so a Suspended operator record
+denies through the channel resolver but still admits through the WebUI door.
+That asymmetry is tracked, not fixed, in issue #6877.
+
 ### Backend (`reborn_services/product_commands.rs` facade + webui_v2 routes)
 
 - `GET /api/webchat/v2/commands` — inventory with metadata, filtered by the
   authenticated caller's `AdminUserRole` (direct lookup; no channel port)
   against the listing audience. Members: `model` + `status`. Admins: + the
-  lifecycle family.
+  lifecycle family. An env-bearer operator caller (`caller.operator_config`)
+  is an implicit admin here too, without a directory record.
 - `POST /api/webchat/v2/threads/{thread_id}/commands` — shared parser →
   the same `required_audience` policy function the channel admission uses
   (surfaces cannot drift) → the same typed operations. `/status` keeps the
-  thread-ownership probe (foreign-thread 404 pinned). Member `/model set`
-  gets the same permanent `PolicyDenied` shape; handlers are never reached.
+  thread-ownership probe, but a foreign thread and a never-created thread
+  both resolve to the identical constant idle `CommandResultView` — never a
+  404. (Design review ruled this indistinguishable-idle response
+  equivalent-or-better than the originally planned foreign-thread 404: a
+  404-vs-200 split would let a caller probe for other users' thread ids one
+  guess at a time.) Member `/model set` gets the same permanent
+  `AccessDenied` shape; handlers are never reached. Lifecycle commands stay
+  listing-only through this route — `execute` rejects every
+  `ProductCommand::Lifecycle` as `InvalidRequest` (the same role-filtered help
+  text `/status`/`/model`'s help paths use) even for an admin caller who has
+  already cleared the audience gate; admins manage extensions from the
+  WebUI's Extensions page, not the composer.
 
 ### Frontend (`crates/ironclaw_webui/frontend/src/pages/chat/`)
 
@@ -209,13 +241,34 @@ re-filtering as you type. Results render as the generic system-notice bubble,
 ephemeral (Decision 6). Unknown `/text` submits as an ordinary message,
 matching channels.
 
+Two fixes landed on top of the rebased `alpine-fight` slice: (1) `EmptyState`
+(the landing view's composer, mounted before any thread exists) did not
+forward its `commands` prop to the nested `ChatInput`, so the palette was
+unreachable from a brand-new thread's first composer — `chat.tsx` now passes
+`commands={activeThreadId ? chatCommands : []}` to both `EmptyState` and
+`ChatInput`, and `EmptyState` forwards it through, pinned by a dedicated
+`EmptyState` prop-forwarding test. (2) The `chat.commandFailed` locale key
+(`"Couldn't run that command."` in `en`) was added across all 11 locale files
+for `useChat.ts`'s `runCommand` client-side execute-failure path, but a
+review-caught defect initially left it dead-wired: the catch block called the
+generic `failureMessageForRequestError` helper instead of this key (and the
+test mocked that helper, so the disconnect stayed green). Fixed by rewiring
+the catch to call `t("chat.commandFailed")` directly and de-mocking the test
+to bind the real translator, so the key is now actually reachable.
+
 ### Tests
 
-- WebUI caller tier: member vs admin inventory filtering; `/status` on an
-  owned thread returns the rendered view; foreign thread 404 (kept pin);
-  member `/model set` policy rejection.
+- WebUI caller tier: member vs admin inventory filtering (including the
+  operator-implicit-admin case); `/status` on an owned thread returns the
+  rendered view, a foreign thread is indistinguishable from a never-created
+  one (both settle to the constant idle view, never a 404); member
+  `/model set` gets an `AccessDenied` rejection; an admin's lifecycle-command
+  execute attempt still gets `InvalidRequest` (listing-only holds even for
+  admins).
 - Frontend vitest: existing chat-commands suites plus keyboard navigation and
-  metadata rendering; locale key parity; `tsc` + conventions lint.
+  metadata rendering; the landing-composer forwarding fix pinned via an
+  `EmptyState` test; locale key parity (incl. `chat.commandFailed`); `tsc` +
+  conventions lint.
 - Descriptor→DTO projection contract pinned.
 
 ## PR-3 — Native Slack slash commands

@@ -233,6 +233,7 @@ jobs:
           scripts/ci/test-reborn-crate-test-buckets.sh
           python3 scripts/ci/test_ws12_suite_shards.py
           python3 scripts/ci/test_ws12_workflow_contracts.py
+          scripts/ci/test-hermetic-test-process.sh
           bash .github/scripts/test-pr-labeler.sh
 
   clippy:

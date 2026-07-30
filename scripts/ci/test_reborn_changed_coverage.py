@@ -53,6 +53,19 @@ class ChangedCoverageTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(report["missing_files"], [path])
 
+    def test_reexport_only_file_in_a_measured_crate_does_not_fail(self):
+        """A `pub use`-only lib.rs emits no counters, so llvm-cov has no record
+        for it. That is not a coverage gap — the crate WAS measured (a sibling
+        file appears below) — so it must not fail the gate the way a wholly
+        unmeasured crate does."""
+        reexport = "crates/ironclaw_example/src/lib.rs"
+        sibling = "crates/ironclaw_example/src/service.rs"
+
+        report = evaluate(_diff(reexport, 1, 1), _lcov(sibling, {7: 1}), 90.0)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["missing_files"], [])
+
     def test_non_instrumentable_changed_lines_do_not_inflate_denominator(self):
         path = "crates/ironclaw_example/src/lib.rs"
 
@@ -82,6 +95,14 @@ class ChangedCoverageTests(unittest.TestCase):
 
                 self.assertTrue(report["passed"])
                 self.assertEqual(report["changed_product_files"], [])
+
+    def test_production_module_named_test_support_remains_gated(self):
+        path = "crates/ironclaw_example/src/test_support.rs"
+
+        report = evaluate(_diff(path, 1, 1), "", 90.0)
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["missing_files"], [path])
 
     def test_owned_exemption_removes_file_from_changed_code_gate(self):
         path = "crates/ironclaw_example/src/generated.rs"

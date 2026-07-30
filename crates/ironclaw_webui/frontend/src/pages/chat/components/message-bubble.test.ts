@@ -38,6 +38,18 @@ vi.mock("./tool-activity", async () => {
   };
 });
 
+vi.mock("./command-result", async () => {
+  const { createElement } = await import("react");
+  return {
+    CommandResult: ({ response, commands }) =>
+      createElement("div", {
+        "data-testid": "command-result-mock",
+        "data-command": response?.command,
+        "data-commands-count": Array.isArray(commands) ? commands.length : -1,
+      }),
+  };
+});
+
 vi.mock("../../../design-system/icons", async () => {
   const { createElement } = await import("react");
   return {
@@ -218,6 +230,78 @@ test("untagged reasoning in an activity run renders Markdown", async () => {
   ]);
 
   assert.match(markup, /data-streaming="false"/);
+});
+
+test("a SYSTEM message carrying a structured command result renders CommandResult, not the legacy markdown notice", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const commands = [
+    { name: "status", title: "Status", description: "d", usage: "/status" },
+  ];
+  // CommandResult is a React.lazy import behind a local Suspense boundary
+  // (see message-bubble.tsx), so a synchronous renderToStaticMarkup would
+  // only ever observe the fallback. Render into a real container instead and
+  // await act() so the (mocked) dynamic import resolves before asserting —
+  // the same pattern renderExpandedActivity() below uses.
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        React.createElement(MessageBubble, {
+          message: {
+            id: "system-command-1",
+            role: CHAT_MESSAGE_ROLES.SYSTEM,
+            content: "**Status**\nState: idle",
+            commandResult: {
+              command: "status",
+              result: { title: "Status", fields: [], lines: [] },
+            },
+            timestamp: "2026-07-30T00:00:00.000Z",
+          },
+          commands,
+        }),
+      );
+    });
+    const html = container.innerHTML;
+
+    assert.match(html, /data-testid="command-result-mock"/);
+    assert.match(html, /data-command="status"/, "CommandResult should receive the raw structured response");
+    assert.match(
+      html,
+      /data-commands-count="1"/,
+      "CommandResult should receive the server command inventory threaded down from chat.tsx",
+    );
+    assert.doesNotMatch(
+      html,
+      /data-testid="markdown"/,
+      "a structured command result must not also render through the legacy markdown notice path",
+    );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
+test("a plain SYSTEM notice without a structured command result keeps rendering through the legacy markdown bubble", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "system-busy-1",
+        role: CHAT_MESSAGE_ROLES.SYSTEM,
+        content: "The assistant is still working on the previous message.",
+        timestamp: "2026-07-30T00:00:00.000Z",
+      },
+    }),
+  );
+
+  assert.match(
+    html,
+    /data-testid="markdown"/,
+    "a plain system notice (e.g. the busy/rejected notice from send()) must keep its existing rendering",
+  );
+  assert.doesNotMatch(html, /data-testid="command-result-mock"/);
 });
 
 test("incoming reasoning and tool failures do not expand an activity run", async () => {

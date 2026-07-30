@@ -5193,8 +5193,12 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
 
     assert_eq!(
         error,
-        AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Capability
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Transcript,
+            kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+            safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+            reason_kind: None,
+            detail: None,
         }
     );
     assert!(host.appended_result_refs().is_empty());

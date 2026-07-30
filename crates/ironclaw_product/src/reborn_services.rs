@@ -55,16 +55,17 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, CommandResultField, CommandResultView,
-    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
-    ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
+    AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
+    CommandResultView, LifecycleProductContext, LifecycleProductService,
+    LifecycleProductSurfaceContext, ListPendingApprovalsRequest,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCancelRunRequest, ProductCommand,
+    ProductCommandDescriptor, ProductCreateThreadRequest, ProductGateResolution,
     ProductInboundCommand, ProductLifecycleCommandInput, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput,
+    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput, ProductRejectionKind,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
     ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ProductTriggerReason, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
@@ -73,7 +74,9 @@ use crate::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
+    declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
+    parse_product_slash_command, product_command_descriptors, required_audience,
+    thread_metadata_is_automation_trigger,
 };
 
 mod admin_configuration;
@@ -93,6 +96,7 @@ mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod outbound_views;
 mod product_capability_handlers;
+mod product_commands;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -195,17 +199,18 @@ pub use types::{
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornChannelConnectAction, RebornCommandRejection, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -218,6 +223,7 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProductCommandInfo, RebornProductCommandListResponse,
     RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState,
@@ -445,6 +451,16 @@ pub const AUTOMATION_DELETE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(AUTOMATION_DELETE_COMMAND_ID);
+pub const PRODUCT_COMMAND_LIST_COMMAND_ID: &str = "product.commands.list";
+pub const PRODUCT_COMMAND_LIST_COMMAND: ProductSurfaceCommandDescriptor<
+    EmptyProductCommandInput,
+    RebornProductCommandListResponse,
+> = ProductSurfaceCommandDescriptor::new(PRODUCT_COMMAND_LIST_COMMAND_ID);
+pub const PRODUCT_COMMAND_EXECUTE_COMMAND_ID: &str = "product.commands.execute";
+pub const PRODUCT_COMMAND_EXECUTE_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse,
+> = ProductSurfaceCommandDescriptor::new(PRODUCT_COMMAND_EXECUTE_COMMAND_ID);
 pub const THREADS_VIEW: ProductView<ProductListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =

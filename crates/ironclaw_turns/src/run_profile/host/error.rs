@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::LoopGateRef;
 
-use super::model::LoopModelUsage;
+use super::{model::LoopModelUsage, refs::LoopSafeSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -209,6 +209,22 @@ impl AgentLoopHostError {
         self.usage = Some(usage);
         self
     }
+
+    /// Apply the fail-closed surface policy for transcript-write failures.
+    ///
+    /// Backend diagnostics at this boundary may contain raw assistant content
+    /// or credentials. Keep the typed kind and other structured fields, but
+    /// replace the summary with the fixed host-authored cause and drop detail.
+    /// Other host-error kinds are returned unchanged.
+    pub fn sanitize_transcript_write_failure(mut self) -> Self {
+        if self.kind == AgentLoopHostErrorKind::TranscriptWriteFailed {
+            self.safe_summary = LoopSafeSummary::assistant_transcript_write_failed()
+                .as_str()
+                .to_string();
+            self.detail = None;
+        }
+        self
+    }
 }
 
 pub(crate) fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
@@ -234,6 +250,30 @@ mod tests {
 
         let plain = AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "boom");
         assert_eq!(plain.detail, None);
+    }
+
+    #[test]
+    fn transcript_write_surface_sanitization_is_scoped_to_transcript_failures() {
+        let transcript = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::TranscriptWriteFailed,
+            "backend rejected raw assistant content",
+        )
+        .with_detail("storage credential sk-secret")
+        .sanitize_transcript_write_failure();
+        assert_eq!(
+            transcript.safe_summary,
+            LoopSafeSummary::assistant_transcript_write_failed().as_str()
+        );
+        assert_eq!(transcript.detail, None);
+
+        let scope = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "thread scope did not match",
+        )
+        .with_detail("expected tenant scope")
+        .sanitize_transcript_write_failure();
+        assert_eq!(scope.safe_summary, "thread scope did not match");
+        assert_eq!(scope.detail.as_deref(), Some("expected tenant scope"));
     }
 
     /// Regression (#6684 review): the budget/checkpoint port kinds must not
