@@ -9,8 +9,8 @@ const NEAR_GLYPH =
 
 // The comet rides the N's spine: down the left stroke, up the diagonal, up the
 // right stroke. A thick round stroke clipped to the glyph fill reads as a light
-// travelling the vector path. Verbatim from the approved design mockup.
-const NEAR_SPINE = "M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8";
+// travelling the vector path. The geometry matches the approved design mockup.
+const NEAR_SPINE = "M2.6 22.2V2.4L21.4 21.6V1.8";
 
 type NearProcessIndicatorProps = {
   state: "working" | "done";
@@ -31,14 +31,9 @@ export function NearProcessIndicator({
   const working = state === "working";
 
   return (
-    <div
-      className={[
-        "near-process flex items-center gap-[9px] px-[2px] py-[6px] text-[13px] text-[var(--v2-text)]",
-        working ? "is-busy" : "is-done",
-      ].join(" ")}
-    >
+    <div className={`near-process ${working ? "is-busy" : "is-done"}`}>
       <svg
-        className="near-process-icon h-[18px] w-[18px] flex-none"
+        className="near-process-icon"
         viewBox="0 0 24 24"
         aria-hidden="true"
       >
@@ -49,26 +44,16 @@ export function NearProcessIndicator({
             </clipPath>
           </defs>
         )}
-        <path className="near-base" d={NEAR_GLYPH} opacity={working ? 0.24 : 1} />
+        <path className="near-base" d={NEAR_GLYPH} />
         {working && (
           <g clip-path={`url(#${clipId})`}>
             <path className="near-comet" d={NEAR_SPINE} />
           </g>
         )}
       </svg>
-      <span
-        className={
-          working
-            ? "font-[560] text-[var(--v2-text-strong)]"
-            : "font-normal text-[var(--v2-text-muted)]"
-        }
-      >
-        {label}
-      </span>
+      <span className="near-process-label">{label}</span>
       {working && elapsed ? (
-        <span className="font-mono text-[11.5px] tabular-nums text-[var(--v2-text-faint)]">
-          {elapsed}
-        </span>
+        <span className="near-process-elapsed">{elapsed}</span>
       ) : null}
     </div>
   );

@@ -56,9 +56,6 @@ function findNode(value, predicate, seen = new Set()) {
 }
 
 const byClass = (name) => (node) => node.props?.className === name;
-const includesClass = (fragment) => (node) =>
-  typeof node.props?.className === "string" &&
-  node.props.className.includes(fragment);
 
 test("NearProcessIndicator working state chases the NEAR spine with elapsed time", () => {
   const NearProcessIndicator = loadNearProcessIndicator();
@@ -71,11 +68,11 @@ test("NearProcessIndicator working state chases the NEAR spine with elapsed time
   assert.match(rendered.props.className, /\bnear-process\b/);
   assert.match(rendered.props.className, /\bis-busy\b/);
 
-  // The canonical NEAR glyph is filled and dimmed while working.
+  // The canonical NEAR glyph is rendered while working; the busy-state class
+  // scopes its dimmed presentation in app.css.
   const base = findNode(rendered, byClass("near-base"));
   assert.notEqual(base, null, "base glyph should render");
   assert.ok(base.props.d.startsWith("M21.443"), "base uses the NEAR mark path");
-  assert.equal(base.props.opacity, 0.24);
 
   // The comet only exists while working, clipped to the glyph via the useId ref.
   const comet = findNode(rendered, byClass("near-comet"));
@@ -84,12 +81,13 @@ test("NearProcessIndicator working state chases the NEAR spine with elapsed time
   const clipGroup = findNode(rendered, (node) => node.props?.["clip-path"]);
   assert.equal(clipGroup.props["clip-path"], `url(#${CLIP_ID})`);
 
-  // Label is the strong text color; elapsed is shown beside it.
-  const label = findNode(rendered, includesClass("text-[var(--v2-text-strong)]"));
-  assert.notEqual(label, null, "working label uses strong text color");
+  // State-scoped CSS makes the working label strong; elapsed is shown beside it.
+  const label = findNode(rendered, byClass("near-process-label"));
+  assert.notEqual(label, null, "working label uses the shared label class");
   assert.equal(label.children[0], "Working…");
-  const elapsed = findNode(rendered, (node) => node.children?.[0] === "0:03");
+  const elapsed = findNode(rendered, byClass("near-process-elapsed"));
   assert.notEqual(elapsed, null, "elapsed should render while working");
+  assert.equal(elapsed.children[0], "0:03");
 });
 
 test("NearProcessIndicator done state is a solid, static glyph with a muted label", () => {
@@ -100,7 +98,6 @@ test("NearProcessIndicator done state is a solid, static glyph with a muted labe
 
   const base = findNode(rendered, byClass("near-base"));
   assert.ok(base.props.d.startsWith("M21.443"), "base uses the NEAR mark path");
-  assert.equal(base.props.opacity, 1, "glyph is solid when done");
 
   assert.equal(
     findNode(rendered, byClass("near-comet")),
@@ -108,7 +105,7 @@ test("NearProcessIndicator done state is a solid, static glyph with a muted labe
     "comet is hidden when done",
   );
 
-  const label = findNode(rendered, includesClass("text-[var(--v2-text-muted)]"));
-  assert.notEqual(label, null, "done label uses the muted text color");
+  const label = findNode(rendered, byClass("near-process-label"));
+  assert.notEqual(label, null, "done label uses the shared label class");
   assert.equal(label.children[0], "Done");
 });

@@ -374,24 +374,10 @@ input:focus, select:focus, textarea:focus {
   transition: none !important;
 }
 
-/* The typing indicator is the single intentional exception: the three dots
-   loop to signal the assistant is working. The class selector outranks the
-   universal `*` rule above (both !important), so the animation survives.
-   Suppressed again under prefers-reduced-motion to respect that opt-out. */
-@keyframes v2-typing-bounce {
-  0%, 80%, 100% { transform: translateY(0);    opacity: 0.45; }
-  40%           { transform: translateY(-4px); opacity: 1; }
-}
-.v2-typing-dot {
-  animation: v2-typing-bounce 1.4s ease-in-out infinite !important;
-}
-.v2-typing-dot:nth-child(2) { animation-delay: 0.15s !important; }
-.v2-typing-dot:nth-child(3) { animation-delay: 0.3s  !important; }
-
-/* Refresh / in-flight spinner. Like the typing dots, this is an intentional
-   exception to the static-motion policy above: the class selector + !important
-   outranks the universal `animation: none` rule so a loading control can spin.
-   Suppressed under prefers-reduced-motion. */
+/* Refresh / in-flight spinner. This is an intentional exception to the
+   static-motion policy above: the class selector + !important outranks the
+   universal `animation: none` rule so a loading control can spin. Suppressed
+   under prefers-reduced-motion. */
 @keyframes v2-spin {
   to { transform: rotate(360deg); }
 }
@@ -405,16 +391,41 @@ input:focus, select:focus, textarea:focus {
    heartbeat (`near-pulse`). Both use a class selector + !important so they
    outrank the universal `animation: none` rule, and both are suppressed under
    prefers-reduced-motion below. */
+.near-process {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 2px;
+  font-size: 13px;
+}
 .near-process-icon {
   color: var(--near-blue);
   overflow: visible;
   transform-box: fill-box;
   transform-origin: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
 }
-.near-process-icon .near-base { fill: currentColor; }
+.near-process-label {
+  color: var(--v2-text-muted);
+  font-weight: 400;
+}
+.near-process.is-busy .near-process-label {
+  color: var(--v2-text-strong);
+  font-weight: 560;
+}
+.near-process-elapsed {
+  color: var(--v2-text-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.near-process-icon .near-base { fill: currentcolor; }
+.near-process.is-busy .near-base { opacity: 0.24; }
 .near-process-icon .near-comet {
   fill: none;
-  stroke: currentColor;
+  stroke: currentcolor;
   stroke-width: 7;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -422,7 +433,7 @@ input:focus, select:focus, textarea:focus {
      travels the mark; the keyframe shifts one full period for a seamless loop. */
   stroke-dasharray: 10 56;
   stroke-dashoffset: 0;
-  filter: drop-shadow(0 0 1.5px currentColor);
+  filter: drop-shadow(0 0 1.5px currentcolor);
 }
 .near-process.is-busy .near-process-icon {
   animation: near-pulse 2s ease-in-out infinite !important;
@@ -445,7 +456,6 @@ input:focus, select:focus, textarea:focus {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .v2-typing-dot { animation: none !important; }
   .v2-spin { animation: none !important; }
   .near-process.is-busy .near-process-icon,
   .near-process.is-busy .near-process-icon .near-comet { animation: none !important; }
