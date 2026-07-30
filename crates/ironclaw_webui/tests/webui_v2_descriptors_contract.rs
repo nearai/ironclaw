@@ -1661,7 +1661,7 @@ fn expected_table() -> Vec<Expected> {
 }
 
 fn route_lookup() -> HashMap<String, IngressRouteDescriptor> {
-    webui_v2_routes()
+    ironclaw_webui::webui_v2::webui_v2_routes_with_regression_artifact_export(true)
         .into_iter()
         .map(|d| (d.route_id().as_str().to_string(), d))
         .collect()
@@ -1694,7 +1694,7 @@ fn automation_resource_descriptor_pattern_is_dual_method_only() {
 
 #[test]
 fn route_table_has_exactly_the_expected_routes() {
-    let routes = webui_v2_routes();
+    let routes = ironclaw_webui::webui_v2::webui_v2_routes_with_regression_artifact_export(true);
     let expected = expected_table();
     assert_eq!(
         routes.len(),
@@ -1716,6 +1716,33 @@ fn route_table_has_exactly_the_expected_routes() {
             actual_ids
         );
     }
+}
+
+#[test]
+fn regression_artifact_descriptors_follow_the_deployment_gate() {
+    let default_ids: Vec<String> = webui_v2_routes()
+        .into_iter()
+        .map(|route| route.route_id().as_str().to_string())
+        .collect();
+    assert!(!default_ids.iter().any(|id| {
+        id == WEBUI_V2_ROUTE_GET_RUN_ARTIFACT || id == WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT
+    }));
+
+    let enabled_ids: Vec<String> =
+        ironclaw_webui::webui_v2::webui_v2_routes_with_regression_artifact_export(true)
+            .into_iter()
+            .map(|route| route.route_id().as_str().to_string())
+            .collect();
+    assert!(
+        enabled_ids
+            .iter()
+            .any(|id| id == WEBUI_V2_ROUTE_GET_RUN_ARTIFACT)
+    );
+    assert!(
+        enabled_ids
+            .iter()
+            .any(|id| id == WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT)
+    );
 }
 
 #[test]

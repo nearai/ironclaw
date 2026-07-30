@@ -216,22 +216,34 @@ pub const WEBUI_V2_PATTERN_PROJECT_MEMBERS: &str = "/api/webchat/v2/projects/{pr
 pub const WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL: &str =
     "/api/webchat/v2/projects/{project_id}/members/{user_id}";
 
-/// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
-/// beta route surface.
+/// Return the default production [`IngressRouteDescriptor`] set for the
+/// WebChat v2 beta route surface.
 ///
 /// Host composition calls this once at startup, validates the descriptors
 /// against its own mount table, and refuses to bind any route whose policy
-/// the host cannot enforce.
+/// the host cannot enforce. QA-only regression artifact exports are omitted
+/// unless composition explicitly opts in through
+/// [`webui_v2_routes_with_regression_artifact_export`].
 pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
-    vec![
+    webui_v2_routes_with_regression_artifact_export(false)
+}
+
+/// Return the canonical descriptor set for the selected artifact-export
+/// deployment policy.
+///
+/// The same captured deployment flag must feed this table and
+/// [`crate::webui_v2::WebUiV2State`] so host middleware never advertises a
+/// route the inner router does not mount.
+pub fn webui_v2_routes_with_regression_artifact_export(
+    regression_artifact_export_enabled: bool,
+) -> Vec<IngressRouteDescriptor> {
+    let mut routes = vec![
         get_session_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
         send_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
-        get_run_artifact_descriptor(),
-        get_thread_artifact_descriptor(),
         logs_descriptor(),
         get_attachment_descriptor(),
         stream_events_descriptor(),
@@ -316,7 +328,12 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         admin_list_user_secrets_descriptor(),
         admin_put_user_secret_descriptor(),
         admin_delete_user_secret_descriptor(),
-    ]
+    ];
+    if regression_artifact_export_enabled {
+        routes.push(get_run_artifact_descriptor());
+        routes.push(get_thread_artifact_descriptor());
+    }
+    routes
 }
 
 /// Returns whether a route id belongs to any operator-wide WebUI config surface.

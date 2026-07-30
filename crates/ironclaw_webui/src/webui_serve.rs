@@ -540,7 +540,10 @@ pub fn webui_v2_app_with_lifecycle(
             .filter_map(|mount| mount.drain.clone())
             .collect(),
     );
-    let mut descriptors = crate::webui_v2::webui_v2_routes();
+    let regression_artifact_export_enabled = regression_artifact_export_enabled();
+    let mut descriptors = crate::webui_v2::webui_v2_routes_with_regression_artifact_export(
+        regression_artifact_export_enabled,
+    );
     let mut operator_descriptors: Vec<IngressRouteDescriptor> = descriptors
         .iter()
         .filter(|descriptor| {
@@ -590,7 +593,7 @@ pub fn webui_v2_app_with_lifecycle(
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
         .with_reborn_projects_enabled(reborn_projects_enabled())
-        .with_regression_artifact_export_enabled(regression_artifact_export_enabled());
+        .with_regression_artifact_export_enabled(regression_artifact_export_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

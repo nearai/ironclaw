@@ -94,6 +94,7 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
     WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
     is_webui_v2_operator_webui_config_route_id, webui_v2_routes,
+    webui_v2_routes_with_regression_artifact_export,
 };
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 pub use handlers::{
