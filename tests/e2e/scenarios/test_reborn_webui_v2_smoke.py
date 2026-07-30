@@ -2083,6 +2083,18 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
                     "source": "slack",
                 }
             )
+            if not pagination_loaded:
+                entries.append(
+                    {
+                        "id": "ui-log-boundary",
+                        "timestamp": "2026-06-12T10:10:42.123Z",
+                        "level": "info",
+                        "target": "ironclaw::ui::logs",
+                        "message": "latest-page boundary log",
+                        "thread_id": "thread-ui",
+                        "run_id": "run-ui",
+                    }
+                )
             next_cursor = "older-page-1"
         await route.fulfill(
             status=200,
@@ -2162,6 +2174,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
 
     await asyncio.wait_for(polled_after_pagination.wait(), timeout=10)
     await expect(reborn_v2_page.get_by_text("new log from polling refresh")).to_be_visible()
+    await expect(reborn_v2_page.get_by_text("latest-page boundary log")).to_be_visible()
     await expect(
         reborn_v2_page.get_by_text("older paginated log from browser fixture")
     ).to_be_visible()
