@@ -274,12 +274,20 @@ run_gate
 check_rc "an empty SF block for the changed file fails" 1
 check_text "empty SF block is reported as uninstrumented" "contain no DA records"
 
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- a/crates/ironclaw_demo/src/lib.rs
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -1,0 +2,1 @@
++const UNMEASURED: bool = true;
+DIFF
 cat >"${work}/coverage.lcov" <<EOF
 SF:${case_root}/${source_path}
-DA:99,1
-BRDA:99,0,0,1
-LF:1
-LH:1
+DA:1,1
+DA:3,1
+BRDA:3,0,0,1
+LF:2
+LH:2
 BRF:1
 BRH:1
 end_of_record
@@ -287,6 +295,29 @@ EOF
 run_gate
 check_rc "a changed file with no measured changed lines fails" 1
 check_text "zero per-file denominator is actionable" "contributed no instrumented lines"
+
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
+--- a/crates/ironclaw_demo/src/lib.rs
++++ b/crates/ironclaw_demo/src/lib.rs
+@@ -0,0 +1,2 @@
++/// Documents the executable item below.
++use std::fmt::Debug;
+DIFF
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${source_path}
+DA:5,1
+DA:6,1
+BRDA:6,0,0,1
+LF:2
+LH:2
+BRF:1
+BRH:1
+end_of_record
+EOF
+run_gate
+check_rc "imports and doc comments outside the executable span pass" 0
+check_text "uninstrumentable-only additions keep an explicit empty denominator" "Changed line coverage: 100.00% (0/0)"
 
 echo "▶ test-only Rust changes do not dilute the production denominator"
 test_source="crates/ironclaw_demo/src/tests.rs"

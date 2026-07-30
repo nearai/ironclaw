@@ -462,7 +462,14 @@ def main() -> int:
                 line for line in added_lines if (path, line) not in exempt_lines
             }
             measured_lines = candidate_lines & set(instrumented)
-            if candidate_lines and not measured_lines:
+            first_instrumented = min(instrumented)
+            last_instrumented = max(instrumented)
+            candidate_lines_in_instrumented_span = {
+                line
+                for line in candidate_lines
+                if first_instrumented <= line <= last_instrumented
+            }
+            if candidate_lines_in_instrumented_span and not measured_lines:
                 empty_denominator_files.append(path)
                 continue
             for line in sorted(measured_lines):
