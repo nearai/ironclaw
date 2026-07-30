@@ -1,6 +1,6 @@
 //! Bounded transcript materialization for filesystem-backed exports.
 
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation, Filter, Page, RootFilesystem};
+use ironclaw_filesystem::{Filter, Page, RootFilesystem};
 use ironclaw_host_api::ThreadId;
 
 use crate::{SessionThreadError, ThreadMessageRecord, ThreadScope};
@@ -72,10 +72,6 @@ where
                 .await
             {
                 Ok(entries) => entries,
-                Err(FilesystemError::Unsupported {
-                    operation: FilesystemOperation::Query,
-                    ..
-                }) if budget.is_some() => return Ok(MessageReadResult::LimitExceeded),
                 Err(error) => return Err(error.into()),
             };
             let entry_count = entries.len();

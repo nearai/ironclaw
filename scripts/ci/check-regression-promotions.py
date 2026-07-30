@@ -19,7 +19,13 @@ def require_text(value: Any, field: str, errors: list[str]) -> str:
     return text
 
 
-def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
+def current_date(override: dt.date | None) -> dt.date:
+    return override if override is not None else dt.date.today()
+
+
+def validate(
+    manifest_path: pathlib.Path, today: dt.date, repo_root: pathlib.Path
+) -> list[str]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     errors: list[str] = []
     metadata = manifest.get("promotion_metadata")
@@ -89,9 +95,11 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
     drift = lifecycle.get("representative_drift_cases")
     retired = lifecycle.get("retired_cases")
     retirement_evidence = lifecycle.get("retirement_evidence")
-    if not isinstance(minimum, int) or minimum < 1:
+    minimum_is_valid = type(minimum) is int and minimum >= 1
+    if not minimum_is_valid:
         errors.append("minimum_representative_drift_cases must be positive")
-    if not isinstance(drift, list) or len(set(drift)) < (minimum or 1):
+    minimum_count = minimum if minimum_is_valid else 1
+    if not isinstance(drift, list) or len(set(drift)) < minimum_count:
         errors.append("representative drift suite is below its minimum")
         drift = []
     drift_set = set(drift)
@@ -131,7 +139,6 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
             if retirement_date > today:
                 errors.append("retirement_evidence.retired_at cannot be in the future")
 
-    repo_root = manifest_path.parents[5]
     retired_set: set[str] = set()
     for index, entry in enumerate(retired):
         field = f"retired_cases[{index}]"
@@ -196,10 +203,12 @@ def validate(manifest_path: pathlib.Path, today: dt.date) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=pathlib.Path)
-    parser.add_argument("--today", type=dt.date.fromisoformat, default=dt.date.today())
+    parser.add_argument("--today", type=dt.date.fromisoformat)
     args = parser.parse_args()
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    today = current_date(args.today)
     try:
-        errors = validate(args.manifest, args.today)
+        errors = validate(args.manifest, today, repo_root)
     except (OSError, json.JSONDecodeError) as error:
         print(f"could not validate promotion manifest: {error}", file=sys.stderr)
         return 2

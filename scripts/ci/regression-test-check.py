@@ -86,6 +86,19 @@ def added_text(repo: Path, base: str, head: str, path: str) -> str:
     return "\n".join(added)
 
 
+def target_file_text(repo: Path, head: str, path: str) -> str | None:
+    if head == "WORKTREE":
+        try:
+            return (repo / path).read_text(encoding="utf-8")
+        except (FileNotFoundError, UnicodeDecodeError):
+            return None
+    revision = "" if head == "INDEX" else head
+    try:
+        return git(repo, "show", f"{revision}:{path}")
+    except RuntimeError:
+        return None
+
+
 def is_test_path(path: str) -> bool:
     name = Path(path).name
     return (
@@ -204,8 +217,6 @@ def has_meaningful_shell_assertion(text: str) -> bool:
         r"\bassert_(?:eq|ne|contains|matches|success|failure)\b",
         r"\bgrep\s+(?:-[A-Za-z]*q[A-Za-z]*\s+|--quiet\s+)",
         r"(^|[;&|]\s*)!\s+\S+",
-        r"\bif\s+!?[[(]\s*",
-        r"^\s*\[\[?\s+",
     )
     return any(re.search(pattern, text, re.MULTILINE) for pattern in meaningful_patterns)
 
@@ -250,7 +261,9 @@ def meaningful_test_changed(
         if not text.strip():
             continue
         if suffix == ".rs":
-            full_text = (repo / path).read_text(encoding="utf-8")
+            full_text = target_file_text(repo, head, path)
+            if full_text is None:
+                continue
             inline_test_file = (
                 "#[test]" in full_text
                 or "#[tokio::test]" in full_text
@@ -405,7 +418,7 @@ def main() -> int:
         print(f"Meaningful changed regression assertion found in {path}.")
         return 0
 
-    trigger = "fix"
+    trigger = "fix" if is_fix else "high-risk change"
     if high_risk_matches:
         trigger += f"; high-risk paths: {', '.join(high_risk_matches)}"
     print(

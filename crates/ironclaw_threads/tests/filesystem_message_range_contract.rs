@@ -114,7 +114,7 @@ async fn filesystem_store_bounded_read_returns_newest_redacted_row_within_cap() 
 }
 
 #[tokio::test]
-async fn filesystem_store_bounded_read_rejects_before_materializing_the_full_thread() {
+async fn filesystem_store_bounded_read_classifies_message_and_byte_budgets() {
     let fixture = RangeFixture::new("fs-bounded", "tenant-bounded").await;
     fixture.seed_messages("event", 3).await;
 
@@ -190,7 +190,7 @@ async fn filesystem_store_bounded_read_fails_closed_without_paginated_query() {
         .unwrap();
     backend.reject_queries();
 
-    let result = service
+    let error = service
         .list_thread_messages_bounded(BoundedThreadMessagesRequest {
             scope,
             thread_id,
@@ -198,9 +198,12 @@ async fn filesystem_store_bounded_read_fails_closed_without_paginated_query() {
             max_bytes: 1024 * 1024,
         })
         .await
-        .unwrap();
+        .expect_err("unsupported bounded query must remain a backend error");
 
-    assert_eq!(result, BoundedThreadMessages::LimitExceeded);
+    assert!(
+        matches!(error, SessionThreadError::Backend(ref message) if message.contains("query")),
+        "unexpected bounded query error: {error:?}",
+    );
     assert_eq!(
         backend.list_dir_calls(),
         0,

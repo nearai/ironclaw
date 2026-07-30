@@ -10,6 +10,10 @@ write_fixture() {
   local directory=$1
   local expects=$2
   mkdir -p "$directory"
+  mkdir -p "$directory/live_canary"
+  cp \
+    "$repo_root/tests/fixtures/llm_traces/reborn_qa/live_canary/case-manifest.json" \
+    "$directory/live_canary/case-manifest.json"
   printf '%s\n' \
     '{"model_name":"test","turns":[{"user_input":"hello","steps":[{"response":{"type":"text","content":"done","input_tokens":0,"output_tokens":0}}],"expects":'"$expects"'}]}' \
     > "$directory/case.json"
@@ -17,6 +21,13 @@ write_fixture() {
 
 write_fixture "$tmp_dir/valid" '{"final_response":{"contains":["done"]}}'
 "$checker" "$tmp_dir/valid" >/dev/null
+
+write_fixture "$tmp_dir/missing-manifest" '{"final_response":{"contains":["done"]}}'
+rm "$tmp_dir/missing-manifest/live_canary/case-manifest.json"
+if "$checker" "$tmp_dir/missing-manifest" >/dev/null 2>&1; then
+  echo "checker accepted fixtures without promotion metadata manifest" >&2
+  exit 1
+fi
 
 write_fixture "$tmp_dir/empty-expects" '{}'
 if "$checker" "$tmp_dir/empty-expects" >/dev/null 2>&1; then

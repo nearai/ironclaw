@@ -7,6 +7,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = pathlib.Path(__file__).with_name("check-regression-promotions.py")
 SPEC = importlib.util.spec_from_file_location("promotion_check", SCRIPT)
@@ -23,10 +24,14 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
         )
         self.manifest = json.loads(source.read_text(encoding="utf-8"))
 
-    def validate(self, manifest: dict[str, object]) -> list[str]:
+    def validate(
+        self,
+        manifest: dict[str, object],
+        today: dt.date = dt.date(2026, 7, 30),
+    ) -> list[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            path = root / "a/b/c/d/e/case-manifest.json"
+            path = root / "arbitrary/depth/case-manifest.json"
             path.parent.mkdir(parents=True)
             path.write_text(json.dumps(manifest), encoding="utf-8")
             workflow_source = (
@@ -44,10 +49,10 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
                     fixture_path = root / fixture
                     fixture_path.parent.mkdir(parents=True, exist_ok=True)
                     fixture_path.touch()
-            return MODULE.validate(path, dt.date(2026, 7, 30))
+            return MODULE.validate(path, today, root)
 
     def test_committed_metadata_is_complete_and_fresh(self) -> None:
-        self.assertEqual(self.validate(self.manifest), [])
+        self.assertEqual(self.validate(self.manifest, dt.date.today()), [])
 
     def test_missing_provenance_fails_loudly(self) -> None:
         broken = copy.deepcopy(self.manifest)
@@ -80,6 +85,38 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
             ),
             errors,
         )
+
+    def test_invalid_minimum_reports_errors_instead_of_raising(self) -> None:
+        broken = copy.deepcopy(self.manifest)
+        broken["promotion_metadata"]["live_retirement"][
+            "minimum_representative_drift_cases"
+        ] = "not-an-integer"
+
+        errors = self.validate(broken)
+
+        self.assertIn(
+            "minimum_representative_drift_cases must be positive",
+            errors,
+        )
+
+    def test_boolean_minimum_is_not_accepted_as_an_integer(self) -> None:
+        broken = copy.deepcopy(self.manifest)
+        broken["promotion_metadata"]["live_retirement"][
+            "minimum_representative_drift_cases"
+        ] = True
+
+        self.assertIn(
+            "minimum_representative_drift_cases must be positive",
+            self.validate(broken),
+        )
+
+    def test_default_date_is_evaluated_for_each_invocation(self) -> None:
+        dates = [dt.date(2026, 7, 30), dt.date(2026, 7, 31)]
+        with mock.patch.object(MODULE.dt, "date") as date_type:
+            date_type.today.side_effect = dates
+
+            self.assertEqual(MODULE.current_date(None), dates[0])
+            self.assertEqual(MODULE.current_date(None), dates[1])
 
 
 if __name__ == "__main__":

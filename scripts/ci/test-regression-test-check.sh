@@ -29,8 +29,11 @@ run_check() {
 expect_pass() {
   local name="$1"
   shift
-  if ! "$@" >"$TMP_ROOT/output" 2>&1; then
+  local status=0
+  "$@" >"$TMP_ROOT/output" 2>&1 || status=$?
+  if [[ $status -ne 0 ]]; then
     echo "FAIL: $name unexpectedly failed"
+    echo "expected exit 0, got $status"
     cat "$TMP_ROOT/output"
     exit 1
   fi
@@ -40,8 +43,12 @@ expect_fail() {
   local name="$1"
   local expected="$2"
   shift 2
-  if "$@" >"$TMP_ROOT/output" 2>&1; then
-    echo "FAIL: $name unexpectedly passed"
+  local status=0
+  "$@" >"$TMP_ROOT/output" 2>&1 || status=$?
+  if [[ $status -ne 1 ]]; then
+    echo "FAIL: $name returned the wrong status"
+    echo "expected exit 1, got $status"
+    cat "$TMP_ROOT/output"
     exit 1
   fi
   if ! grep -Fq "$expected" "$TMP_ROOT/output"; then
@@ -50,6 +57,29 @@ expect_fail() {
     exit 1
   fi
 }
+
+unrelated="$TMP_ROOT/unrelated"
+init_repo "$unrelated"
+printf 'pub fn value() -> i32 { 2 }\n' > "$unrelated/src/lib.rs"
+expect_pass "unrelated feature skips the gate" run_check "$unrelated" \
+  --title "feat: unrelated"
+
+high_risk="$TMP_ROOT/high-risk"
+init_repo "$high_risk"
+mkdir -p "$high_risk/crates/ironclaw_safety/src"
+printf 'pub fn policy() {}\n' > "$high_risk/crates/ironclaw_safety/src/policy.rs"
+expect_fail "high-risk feature triggers the gate" \
+  "Regression test required (high-risk change; high-risk paths:" \
+  run_check "$high_risk" --title "feat: unrelated"
+
+if (
+  expect_fail "infrastructure error is not a policy rejection" "unused" \
+    python3 "$CHECKER" --repo "$unrelated" --base missing-ref --head INDEX \
+    --title "fix: infrastructure"
+) >/dev/null 2>&1; then
+  echo "FAIL: expect_fail accepted infrastructure exit status 2"
+  exit 1
+fi
 
 meaningful="$TMP_ROOT/meaningful"
 init_repo "$meaningful"
@@ -135,6 +165,45 @@ EOF
 expect_fail "setup-only change cannot inherit an old assertion" \
   "no meaningful changed regression assertion" run_check "$inherited_assertion"
 
+index_target="$TMP_ROOT/index-target"
+init_repo "$index_target"
+cat > "$index_target/src/lib.rs" <<'EOF'
+pub fn value() -> i32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn staged_regression() {
+        assert_eq!(super::value(), 1);
+    }
+}
+EOF
+git -C "$index_target" add src/lib.rs
+printf 'pub fn value() -> i32 { 1 }\n' > "$index_target/src/lib.rs"
+expect_pass "INDEX detection reads the staged Rust blob" \
+  python3 "$CHECKER" --repo "$index_target" --base HEAD --head INDEX \
+  --title "fix: staged regression"
+
+revision_target="$TMP_ROOT/revision-target"
+init_repo "$revision_target"
+cat > "$revision_target/src/lib.rs" <<'EOF'
+pub fn value() -> i32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn committed_regression() {
+        assert_eq!(super::value(), 1);
+    }
+}
+EOF
+git -C "$revision_target" add src/lib.rs
+git -C "$revision_target" commit -qm "fix: committed regression"
+printf 'pub fn value() -> i32 { 1 }\n' > "$revision_target/src/lib.rs"
+expect_pass "revision detection reads the requested Rust blob" \
+  python3 "$CHECKER" --repo "$revision_target" --base HEAD^ --head HEAD \
+  --title "fix: committed regression"
+
 comment_only="$TMP_ROOT/comment-only"
 init_repo "$comment_only"
 mkdir -p "$comment_only/scripts/ci"
@@ -170,6 +239,20 @@ exit 1
 EOF
 expect_pass "meaningful shell assertion" run_check "$shell_test"
 
+shell_guard="$TMP_ROOT/shell-guard"
+init_repo "$shell_guard"
+mkdir -p "$shell_guard/scripts/ci"
+cat > "$shell_guard/scripts/ci/test-regression.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+fixture="${TMPDIR:-/tmp}/fixture"
+if [[ -d "$fixture" ]]; then
+  fixture="$fixture/existing"
+fi
+EOF
+expect_fail "shell setup guard is not an assertion" \
+  "no meaningful changed regression assertion" run_check "$shell_guard"
+
 bare_marker="$TMP_ROOT/bare-marker"
 init_repo "$bare_marker"
 printf 'pub fn value() -> i32 { 2 }\n' > "$bare_marker/src/lib.rs"
@@ -187,6 +270,16 @@ expect_pass "reviewed reasoned commit exemption" run_check "$reasoned_marker" \
   --author "author" --approving-reviewers "author,reviewer" \
   --commit-bodies \
   "[skip-regression-check: deterministic reproduction is impossible because the failure depends on provider hardware unavailable in hermetic CI]"
+
+wrapped_marker="$TMP_ROOT/wrapped-marker"
+init_repo "$wrapped_marker"
+printf 'pub fn value() -> i32 { 2 }\n' > "$wrapped_marker/src/lib.rs"
+expect_pass "reviewed marker reason may wrap across lines" \
+  run_check "$wrapped_marker" --author "author" \
+  --approving-reviewers "reviewer" \
+  --commit-bodies "$(printf '%s\n%s' \
+    '[skip-regression-check: deterministic reproduction is impossible because' \
+    'the failure depends on provider hardware unavailable in hermetic CI]')"
 
 label_no_reason="$TMP_ROOT/label-no-reason"
 init_repo "$label_no_reason"

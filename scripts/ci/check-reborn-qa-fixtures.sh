@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture_dir="${1:-tests/fixtures/llm_traces/reborn_qa}"
 
 if [ ! -d "$fixture_dir" ]; then
@@ -147,6 +148,8 @@ print(f"Reborn QA fixture scrub check passed ({len(files)} files)")
 PY
 
 promotion_manifest="$fixture_dir/live_canary/case-manifest.json"
-if [ -f "$promotion_manifest" ]; then
-  python3 scripts/ci/check-regression-promotions.py "$promotion_manifest"
+if [ ! -f "$promotion_manifest" ]; then
+  echo "Reborn QA promotion manifest not found: $promotion_manifest" >&2
+  exit 1
 fi
+python3 "$repo_root/scripts/ci/check-regression-promotions.py" "$promotion_manifest"

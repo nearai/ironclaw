@@ -122,10 +122,11 @@ use ironclaw_product::{
     RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService, THREAD_ARTIFACT_VIEW,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
-    UpsertLlmProviderRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
+    THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -1881,6 +1882,7 @@ enum ScriptedThreadBehavior {
     ThreadArtifact {
         history: Box<ThreadHistory>,
         snapshot: Box<BoundedThreadMessageSnapshot>,
+        bounded_error: bool,
     },
     ListPages,
     SubmittedReplay {
@@ -1910,6 +1912,7 @@ enum ScriptedThreadBehavior {
 struct ScriptedThreadService {
     behavior: ScriptedThreadBehavior,
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
+    bounded_requests: Mutex<Vec<BoundedThreadMessagesRequest>>,
     list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
     list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
     /// Tracks `replay_accepted_inbound_message` call count; used by
@@ -1924,6 +1927,7 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::BackendHistory,
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -1934,6 +1938,7 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::History(Box::new(history)),
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -1945,8 +1950,28 @@ impl ScriptedThreadService {
             behavior: ScriptedThreadBehavior::ThreadArtifact {
                 history: Box::new(history),
                 snapshot: Box::new(snapshot),
+                bounded_error: false,
             },
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn thread_artifact_backend_error(
+        history: ThreadHistory,
+        snapshot: BoundedThreadMessageSnapshot,
+    ) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::ThreadArtifact {
+                history: Box::new(history),
+                snapshot: Box::new(snapshot),
+                bounded_error: true,
+            },
+            history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -1957,6 +1982,7 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::ListPages,
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(responses),
             replay_call_count: Mutex::new(0),
@@ -1967,6 +1993,7 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::SubmittedReplay { turn_run_id },
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -1977,6 +2004,7 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::RejectedBusyReplay,
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -1996,6 +2024,7 @@ impl ScriptedThreadService {
                 message_id: ThreadMessageId::new(),
             },
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -2017,6 +2046,7 @@ impl ScriptedThreadService {
                 message_id: ThreadMessageId::new(),
             },
             history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
             replay_call_count: Mutex::new(0),
@@ -2029,6 +2059,10 @@ impl ScriptedThreadService {
 
     fn list_requests(&self) -> Vec<ListThreadsForScopeRequest> {
         self.list_requests.lock().expect("lock").clone()
+    }
+
+    fn bounded_requests(&self) -> Vec<BoundedThreadMessagesRequest> {
+        self.bounded_requests.lock().expect("lock").clone()
     }
 }
 
@@ -2279,12 +2313,25 @@ impl SessionThreadService for ScriptedThreadService {
 
     async fn list_thread_messages_bounded(
         &self,
-        _request: BoundedThreadMessagesRequest,
+        request: BoundedThreadMessagesRequest,
     ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        self.bounded_requests.lock().expect("lock").push(request);
         match &self.behavior {
-            ScriptedThreadBehavior::ThreadArtifact { snapshot, .. } => Ok(
-                BoundedThreadMessages::Complete(Box::new(snapshot.as_ref().clone())),
-            ),
+            ScriptedThreadBehavior::ThreadArtifact {
+                snapshot,
+                bounded_error,
+                ..
+            } => {
+                if *bounded_error {
+                    Err(SessionThreadError::Backend(
+                        "bounded query unsupported".to_string(),
+                    ))
+                } else {
+                    Ok(BoundedThreadMessages::Complete(Box::new(
+                        snapshot.as_ref().clone(),
+                    )))
+                }
+            }
             _ => scripted_stub_unreachable("list_thread_messages_bounded"),
         }
     }
@@ -8477,8 +8524,11 @@ async fn thread_artifact_projects_messages_from_the_bounded_snapshot() {
         },
     };
     let thread_service = Arc::new(ScriptedThreadService::thread_artifact(history, snapshot));
-    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
 
     let page = services
         .query(
@@ -8502,6 +8552,17 @@ async fn thread_artifact_projects_messages_from_the_bounded_snapshot() {
         artifact.messages[0].content,
         "content from bounded snapshot"
     );
+    let bounded_requests = thread_service.bounded_requests();
+    assert_eq!(bounded_requests.len(), 1);
+    assert_eq!(
+        bounded_requests[0].thread_id.as_str(),
+        "thread-bounded-artifact"
+    );
+    assert_eq!(
+        bounded_requests[0].max_messages,
+        THREAD_ARTIFACT_MAX_MESSAGES
+    );
+    assert_eq!(bounded_requests[0].max_bytes, 16 * 1024 * 1024);
 }
 
 #[tokio::test]
@@ -8521,7 +8582,7 @@ async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() 
         })
         .await
         .expect("thread");
-    for sequence in 0..=1_000 {
+    for sequence in 0..(THREAD_ARTIFACT_MAX_MESSAGES + 1) {
         seed_submitted_message(
             &thread_service,
             &thread_scope,
@@ -8552,6 +8613,48 @@ async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() 
 
     assert_eq!(error.status_code, 413);
     assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn thread_artifact_reports_bounded_backend_failure_as_unavailable() {
+    let owner = caller();
+    let history = fake_thread_history(&owner, "thread-artifact-backend-error");
+    let snapshot = BoundedThreadMessageSnapshot {
+        history: ThreadMessageRange {
+            thread: history.thread.clone(),
+            messages: Vec::new(),
+        },
+        context: ContextMessages {
+            thread_id: history.thread.thread_id.clone(),
+            messages: Vec::new(),
+        },
+    };
+    let thread_service = Arc::new(ScriptedThreadService::thread_artifact_backend_error(
+        history, snapshot,
+    ));
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: "thread-artifact-backend-error".to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("backend capability failure must not look like an oversized thread");
+
+    assert_eq!(error.status_code, 503);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::TimelineUnavailable);
+    assert!(error.retryable);
     assert!(operator_logs.requests().is_empty());
 }
 

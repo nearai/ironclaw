@@ -3,21 +3,20 @@
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode};
 use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
-use std::collections::HashMap;
 
-use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest, ThreadMessageId};
+use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest};
 use serde::{Deserialize, Serialize};
 
 use super::{
     ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, map_timeline_probe_error,
     parse_thread_id_field,
-    run_artifact::{ARTIFACT_REDACTION_PIPELINE, artifact_messages},
+    run_artifact::{ARTIFACT_REDACTION_PIPELINE, artifact_messages, context_messages_by_id},
     thread_scope_from_turn_scope,
 };
 
 pub const THREAD_ARTIFACT_SCHEMA: &str = "ironclaw.thread_artifact.v1";
-const THREAD_ARTIFACT_MAX_MESSAGES: usize = 1_000;
+pub const THREAD_ARTIFACT_MAX_MESSAGES: usize = 1_000;
 const THREAD_ARTIFACT_MAX_STORED_BYTES: usize = 16 * 1024 * 1024;
 const THREAD_ARTIFACT_MAX_SERIALIZED_BYTES: usize = 20 * 1024 * 1024;
 pub const THREAD_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -74,12 +73,7 @@ where
         };
 
         let redactor = DeterministicTraceRedactor::new(Vec::new());
-        let context_by_id: HashMap<ThreadMessageId, _> = snapshot
-            .context
-            .messages
-            .into_iter()
-            .filter_map(|message| message.message_id.map(|id| (id, message)))
-            .collect();
+        let context_by_id = context_messages_by_id(snapshot.context.messages);
         let (messages, message_redaction_applied) =
             artifact_messages(snapshot.history.messages, &context_by_id, &redactor);
         let (logs, log_redaction_applied) = self

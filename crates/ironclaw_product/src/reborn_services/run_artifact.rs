@@ -237,13 +237,18 @@ where
             })
             .await
             .map_err(map_thread_error)?;
-        let context_by_id: HashMap<ThreadMessageId, ContextMessage> = context
-            .messages
-            .into_iter()
-            .filter_map(|message| message.message_id.map(|id| (id, message)))
-            .collect();
+        let context_by_id = context_messages_by_id(context.messages);
         Ok(artifact_messages(records, &context_by_id, redactor))
     }
+}
+
+pub(super) fn context_messages_by_id(
+    messages: Vec<ContextMessage>,
+) -> HashMap<ThreadMessageId, ContextMessage> {
+    messages
+        .into_iter()
+        .filter_map(|message| message.message_id.map(|id| (id, message)))
+        .collect()
 }
 
 pub(super) fn artifact_messages(

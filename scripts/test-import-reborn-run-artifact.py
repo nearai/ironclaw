@@ -325,7 +325,13 @@ class RunArtifactImporterTest(unittest.TestCase):
         artifact = self.thread_artifact(
             {"sequence": 1, "kind": "system", "status": "finalized", "content": "prompt"},
             {"sequence": 2, "run_id": "run-1", "kind": "user", "content": "retry"},
-            {"sequence": 3, "run_id": "run-1", "kind": "assistant", "content": "done"},
+            {
+                "sequence": 3,
+                "run_id": "run-1",
+                "kind": "assistant",
+                "status": "finalized",
+                "content": "done",
+            },
         )
 
         with self.assertRaisesRegex(ValueError, "no replayable user message"):

@@ -191,7 +191,8 @@ pub use run_artifact::{
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
 };
 pub use thread_artifact::{
-    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
+    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
