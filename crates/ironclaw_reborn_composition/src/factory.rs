@@ -49,11 +49,11 @@ use crate::runtime_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, workspace_mount_view,
 };
-use crate::standalone_bootstrap_assembly::bootstrap_standalone_host;
+#[cfg(all(test, unix))]
+use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
 #[cfg(test)]
-use crate::standalone_bootstrap_assembly::{
-    LEGACY_SKILLS_BACKFILL_MARKER, backfill_legacy_user_skills,
-};
+use crate::standalone_bootstrap_assembly::backfill_legacy_user_skills;
+use crate::standalone_bootstrap_assembly::bootstrap_standalone_host;
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornHostBindings, RebornReadiness,
     RebornServiceReadiness, RebornWorkerReadiness,

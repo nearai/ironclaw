@@ -6,7 +6,7 @@ use crate::RebornBuildError;
 use crate::root::default_system_prompt::seed_default_system_prompt;
 
 const DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use ironclaw_extension_host::bundled_skills::LEGACY_SKILLS_BACKFILL_MARKER;
 const STANDALONE_LEGACY_SKILL_TENANTS: [&str; 2] = ["default", "reborn-cli"];
 
