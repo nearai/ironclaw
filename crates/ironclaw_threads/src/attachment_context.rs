@@ -26,6 +26,114 @@ pub(crate) fn augment_model_content(content: String, attachments: &[AttachmentRe
     }
 }
 
+/// Remove a host-owned model-context attachment suffix for the same
+/// authoritative attachment refs.
+///
+/// Models can see [`augment_model_content`] output in prior transcript
+/// messages and may copy that internal context serialization into a final
+/// answer. Final assistant-message projection uses this inverse operation
+/// after sealing the run's typed attachment intents.
+///
+/// This is deliberately a narrow grammar check, not general output
+/// normalization: the suffix must have the host-owned `<attachments>` shape,
+/// contain one entry per authoritative ref in the same order, and match each
+/// ref's escaped filename, MIME type, storage key, and formatted size exactly.
+/// The presentational `type` and body may differ because a model can copy an
+/// older context block and adapt it while reattaching the same file. Markdown,
+/// standalone paths, malformed envelopes, and envelopes for any other file are
+/// left untouched.
+pub fn deproject_model_attachment_context(
+    mut content: String,
+    attachments: &[AttachmentRef],
+) -> String {
+    if attachments.is_empty() {
+        return content;
+    }
+
+    let Some(block_start) = model_attachment_block_suffix_start(&content) else {
+        return content;
+    };
+    if !model_attachment_block_matches(&content[block_start..], attachments) {
+        return content;
+    }
+
+    let prose_end = if block_start == 0 {
+        0
+    } else {
+        let Some(separator_start) = block_start.checked_sub(2) else {
+            return content;
+        };
+        if content.get(separator_start..block_start) != Some("\n\n") {
+            return content;
+        }
+        separator_start
+    };
+    content.truncate(prose_end);
+    content
+}
+
+fn model_attachment_block_suffix_start(content: &str) -> Option<usize> {
+    const BLOCK_START: &str = "<attachments>";
+    const BLOCK_END: &str = "</attachments>";
+
+    if !content.ends_with(BLOCK_END) {
+        return None;
+    }
+    if content.starts_with(BLOCK_START) {
+        return Some(0);
+    }
+    content
+        .rfind("\n\n<attachments>")
+        .map(|separator_start| separator_start + 2)
+}
+
+fn model_attachment_block_matches(block: &str, attachments: &[AttachmentRef]) -> bool {
+    let mut lines = block.lines();
+    if lines.next() != Some("<attachments>") {
+        return false;
+    }
+
+    for (index, attachment) in attachments.iter().enumerate() {
+        let Some(header) = lines.next() else {
+            return false;
+        };
+        if !attachment_header_matches(header, index + 1, attachment) {
+            return false;
+        }
+
+        let mut saw_body = false;
+        loop {
+            let Some(line) = lines.next() else {
+                return false;
+            };
+            if line == "</attachment>" {
+                break;
+            }
+            if line.starts_with("<attachment ") || line == "</attachments>" {
+                return false;
+            }
+            saw_body = true;
+        }
+        if !saw_body {
+            return false;
+        }
+    }
+
+    lines.next() == Some("</attachments>") && lines.next().is_none()
+}
+
+fn attachment_header_matches(header: &str, index: usize, attachment: &AttachmentRef) -> bool {
+    [
+        AttachmentKind::Audio,
+        AttachmentKind::Image,
+        AttachmentKind::Video,
+        AttachmentKind::Document,
+        AttachmentKind::Other,
+    ]
+    .into_iter()
+    .any(|kind| render_attachment_header(index, attachment, kind) == header)
+}
+
 /// The image attachments a vision-capable model could view as multimodal parts:
 /// `kind == Image` with a landed `storage_key`. Only the reference is carried —
 /// the bytes are read later (and only for a vision model), so a text-only model
@@ -63,9 +171,24 @@ fn render_attachments_block(attachments: &[AttachmentRef]) -> Option<String> {
 }
 
 fn render_attachment(index: usize, attachment: &AttachmentRef) -> String {
+    let header = render_attachment_header(index, attachment, attachment.kind);
+    let body = body_text(attachment, attachment.storage_key.is_some());
+    let body = match attachment.storage_key.as_deref() {
+        Some(path) => format!("Saved to project file: {}\n{}", escape_xml_text(path), body),
+        None => body,
+    };
+
+    format!("{header}\n{body}\n</attachment>")
+}
+
+fn render_attachment_header(
+    index: usize,
+    attachment: &AttachmentRef,
+    kind: AttachmentKind,
+) -> String {
     let filename = escape_xml_attr(attachment.filename.as_deref().unwrap_or("unknown"));
     let mime = escape_xml_attr(&attachment.mime_type);
-    let type_label = match attachment.kind {
+    let type_label = match kind {
         AttachmentKind::Audio => "audio",
         AttachmentKind::Image => "image",
         AttachmentKind::Video => "video",
@@ -82,16 +205,8 @@ fn render_attachment(index: usize, attachment: &AttachmentRef) -> String {
         .map(|size| format!(" size=\"{}\"", format_size(size)))
         .unwrap_or_default();
 
-    let body = body_text(attachment, attachment.storage_key.is_some());
-    let body = match attachment.storage_key.as_deref() {
-        Some(path) => format!("Saved to project file: {}\n{}", escape_xml_text(path), body),
-        None => body,
-    };
-
     format!(
-        "<attachment index=\"{index}\" type=\"{type_label}\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{size_attr}>\n\
-         {body}\n\
-         </attachment>"
+        "<attachment index=\"{index}\" type=\"{type_label}\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{size_attr}>"
     )
 }
 
@@ -168,6 +283,74 @@ mod tests {
     #[test]
     fn empty_attachments_leave_content_unchanged() {
         assert_eq!(augment_model_content("hello".to_string(), &[]), "hello");
+    }
+
+    #[test]
+    fn exact_model_context_suffix_is_deprojected_from_final_text() {
+        let attachments = [doc_ref(None)];
+        let projected = augment_model_content("plain reply".to_string(), &attachments);
+
+        assert_eq!(
+            deproject_model_attachment_context(projected, &attachments),
+            "plain reply"
+        );
+    }
+
+    #[test]
+    fn deprojection_accepts_presentational_kind_drift_for_the_same_typed_ref() {
+        let image = AttachmentRef {
+            id: "att-image".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/jpeg".to_string(),
+            filename: Some("photo.jpg".to_string()),
+            size_bytes: Some(3714),
+            storage_key: Some("/workspace/attachments/photo.jpg".to_string()),
+            extracted_text: None,
+        };
+        let mut copied_as_document = image.clone();
+        copied_as_document.kind = AttachmentKind::Document;
+        let projected =
+            augment_model_content("Reattached the image.".to_string(), &[copied_as_document]);
+
+        assert_eq!(
+            deproject_model_attachment_context(projected, &[image]),
+            "Reattached the image."
+        );
+    }
+
+    #[test]
+    fn deprojection_does_not_rewrite_noncanonical_or_different_attachment_text() {
+        let attachments = [doc_ref(None)];
+        let similar = "plain reply\n\n<attachments>\nnot the canonical envelope\n</attachments>";
+        let markdown_path = "Created [the report](/workspace/report.pdf).";
+        let different_path = augment_model_content(
+            "plain reply".to_string(),
+            &[AttachmentRef {
+                storage_key: Some("/workspace/different.pdf".to_string()),
+                ..doc_ref(None)
+            }],
+        );
+
+        assert_eq!(
+            deproject_model_attachment_context(similar.to_string(), &attachments),
+            similar
+        );
+        assert_eq!(
+            deproject_model_attachment_context(markdown_path.to_string(), &attachments),
+            markdown_path
+        );
+        assert_eq!(
+            deproject_model_attachment_context(different_path.clone(), &attachments),
+            different_path
+        );
+    }
+
+    #[test]
+    fn attachment_only_context_deprojects_to_empty_prose() {
+        let attachments = [doc_ref(None)];
+        let block = render_attachments_block(&attachments).expect("attachment context");
+
+        assert_eq!(deproject_model_attachment_context(block, &attachments), "");
     }
 
     #[test]

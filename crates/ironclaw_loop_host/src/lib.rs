@@ -1016,10 +1016,10 @@ where
             .seal(&scope, &run_id)
             .await
             .map_err(reply_attachment_seal_error)?;
-        Ok(MessageContent::with_attachments(
-            reply_text,
-            reply_attachment_refs(&run_id, intents),
-        ))
+        let attachments = reply_attachment_refs(&run_id, intents);
+        let reply_text =
+            ironclaw_threads::deproject_model_attachment_context(reply_text, &attachments);
+        Ok(MessageContent::with_attachments(reply_text, attachments))
     }
 }
 

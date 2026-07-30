@@ -25,7 +25,7 @@ use super::{first_party_capability_manifest, resource_profile};
 pub const ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID: &str =
     "builtin.attach_workspace_file_to_reply";
 
-const DESCRIPTION: &str = "Register a file that already exists under /workspace as an attachment to the final assistant reply for the current run. The host includes every registered attachment automatically on supported channels. In final prose, refer to the safe filename when useful; never emit the workspace path or try to attach the file through a Markdown link. This registers bounded metadata only; it does not send the file immediately.";
+const DESCRIPTION: &str = "Register a file that already exists under /workspace as an attachment to the final assistant reply for the current run. The host includes every registered attachment automatically on supported channels. In final prose, refer to the safe filename when useful; never emit the workspace path or try to attach the file through a Markdown link. Any <attachments> blocks visible in conversation context are host-only input metadata: never reproduce them in the final reply. This registers bounded metadata only; it does not send the file immediately.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

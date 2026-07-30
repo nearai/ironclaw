@@ -1060,9 +1060,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn outbound_attachment_retries_eventually_consistent_destination_readback() {
-        let egress = ScriptedEgress::new(vec![
+        let mut responses = vec![
             ScriptedEgress::ok(
                 r#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/ticket","file_id":"FNEW"}"#,
             ),
@@ -1071,13 +1071,20 @@ mod tests {
                 body: b"OK - 5".to_vec(),
             }),
             ScriptedEgress::ok(r#"{"ok":true,"files":[{"id":"FNEW","title":"report.txt"}]}"#),
+        ];
+        // Slack accepted the batch in production but needed longer than the
+        // former six-attempt, 500 ms window to expose the DM share through
+        // files.info. Keep the provider-visible upload one-shot while
+        // tolerating that bounded propagation delay.
+        responses.extend((0..6).map(|_| {
             ScriptedEgress::ok(
                 r#"{"ok":true,"file":{"id":"FNEW","name":"report.txt","mimetype":"text/plain","size":5}}"#,
-            ),
-            ScriptedEgress::ok(
+            )
+        }));
+        responses.push(ScriptedEgress::ok(
                 r#"{"ok":true,"file":{"id":"FNEW","name":"report.txt","mimetype":"text/plain","size":5,"ims":["D123"],"shares":{"private":{"D123":[{"ts":"1710000001.000001","thread_ts":"1710000000.000100"}]}}}}"#,
-            ),
-        ]);
+        ));
+        let egress = ScriptedEgress::new(responses);
 
         let report = SlackChannelAdapter
             .deliver(
@@ -1095,8 +1102,8 @@ mod tests {
         ));
         assert_eq!(
             egress.requests().len(),
-            5,
-            "destination propagation should be retried without re-uploading"
+            10,
+            "destination propagation beyond the old retry window should be retried without re-uploading"
         );
         assert!(
             egress.requests()[3..]
@@ -1105,7 +1112,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn outbound_attachment_readback_exhaustion_is_terminal_after_completion() {
         let mut responses = vec![
             ScriptedEgress::ok(
@@ -1117,12 +1124,14 @@ mod tests {
             }),
             ScriptedEgress::ok(r#"{"ok":true,"files":[{"id":"FNEW","title":"report.txt"}]}"#),
         ];
-        responses.extend((0..6).map(|_| {
-            Ok(RestrictedEgressResponse {
-                status: 503,
-                body: Vec::new(),
-            })
-        }));
+        responses.extend(
+            (0..crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS).map(|_| {
+                Ok(RestrictedEgressResponse {
+                    status: 503,
+                    body: Vec::new(),
+                })
+            }),
+        );
         let egress = ScriptedEgress::new(responses);
 
         let report = SlackChannelAdapter
@@ -1139,7 +1148,10 @@ mod tests {
                 if reason.contains("read-back remained unavailable")
         ));
         let requests = egress.requests();
-        assert_eq!(requests.len(), 9);
+        assert_eq!(
+            requests.len(),
+            3 + crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS as usize
+        );
         assert!(
             requests[3..]
                 .iter()
@@ -1148,24 +1160,34 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn outbound_attachment_readback_edge_cases_never_replay_the_upload() {
         let mut invalid_json = successful_upload_prefix();
-        invalid_json.extend((0..6).map(|_| ScriptedEgress::ok("not-json")));
+        invalid_json.extend(
+            (0..crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS)
+                .map(|_| ScriptedEgress::ok("not-json")),
+        );
 
         let mut missing_file = successful_upload_prefix();
-        missing_file.extend((0..6).map(|_| ScriptedEgress::ok(r#"{"ok":true}"#)));
+        missing_file.extend(
+            (0..crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS)
+                .map(|_| ScriptedEgress::ok(r#"{"ok":true}"#)),
+        );
 
         let mut file_not_found = successful_upload_prefix();
-        file_not_found
-            .extend((0..6).map(|_| ScriptedEgress::ok(r#"{"ok":false,"error":"file_not_found"}"#)));
+        file_not_found.extend(
+            (0..crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS)
+                .map(|_| ScriptedEgress::ok(r#"{"ok":false,"error":"file_not_found"}"#)),
+        );
 
         let mut wrong_destination = successful_upload_prefix();
-        wrong_destination.extend((0..6).map(|_| {
-            ScriptedEgress::ok(
-                r#"{"ok":true,"file":{"id":"FNEW","name":"report.txt","size":5,"ims":["DOTHER"]}}"#,
-            )
-        }));
+        wrong_destination.extend(
+            (0..crate::attachment_transfer::SLACK_FILE_READBACK_MAX_ATTEMPTS).map(|_| {
+                ScriptedEgress::ok(
+                    r#"{"ok":true,"file":{"id":"FNEW","name":"report.txt","size":5,"ims":["DOTHER"]}}"#,
+                )
+            }),
+        );
 
         let mut policy_denied = successful_upload_prefix();
         policy_denied.push(Err(RestrictedEgressError::PolicyDenied));

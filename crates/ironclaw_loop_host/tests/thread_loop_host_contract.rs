@@ -2524,6 +2524,52 @@ async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() 
 }
 
 #[tokio::test]
+async fn finalized_assistant_deprojects_host_context_for_the_same_typed_attachment() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/attachments/photo.jpg",
+        "photo.jpg",
+        "image/jpeg",
+        3714,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+    let copied_context = "Reattached the image.\n\n<attachments>\n\
+<attachment index=\"1\" type=\"document\" filename=\"photo.jpg\" mime=\"image/jpeg\" project_path=\"/workspace/attachments/photo.jpg\" size=\"3KB\">\n\
+Saved to project file: /workspace/attachments/photo.jpg\n\
+[Document attached — text extraction unavailable]\n\
+</attachment>\n\
+</attachments>";
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: copied_context.to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("Reattached the image."));
+    assert_eq!(assistant.attachments.len(), 1);
+    assert_eq!(assistant.attachments[0].kind, AttachmentKind::Image);
+    assert_eq!(
+        assistant.attachments[0].storage_key.as_deref(),
+        Some("/workspace/attachments/photo.jpg")
+    );
+}
+
+#[tokio::test]
 async fn finalized_assistant_attachment_port_with_no_intents_stays_text_only() {
     let fixture = ThreadFixture::new().await;
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());

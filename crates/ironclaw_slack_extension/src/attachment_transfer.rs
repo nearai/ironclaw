@@ -359,8 +359,9 @@ pub(super) async fn send_files(
     outcomes
 }
 
-const SLACK_FILE_READBACK_MAX_ATTEMPTS: u8 = 6;
-const SLACK_FILE_READBACK_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+pub(crate) const SLACK_FILE_READBACK_MAX_ATTEMPTS: u8 = 8;
+const SLACK_FILE_READBACK_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+const SLACK_FILE_READBACK_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 
 // Slack can acknowledge completion before destination indexes become visible
 // through files.info. Only this read-back is retried: tickets, byte uploads,
@@ -387,7 +388,7 @@ async fn read_back_staged_upload(
                 if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS
                     && matches!(outcome, PartDeliveryOutcome::Retryable { .. })
                 {
-                    tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                    tokio::time::sleep(file_readback_backoff(attempt)).await;
                     continue;
                 }
                 return terminal_readback_outcome(outcome);
@@ -404,7 +405,7 @@ async fn read_back_staged_upload(
             if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS
                 && matches!(outcome, PartDeliveryOutcome::Retryable { .. })
             {
-                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                tokio::time::sleep(file_readback_backoff(attempt)).await;
                 continue;
             }
             return terminal_readback_outcome(outcome);
@@ -412,7 +413,7 @@ async fn read_back_staged_upload(
         let info: SlackFilesInfoResponse = match serde_json::from_slice(&info_response.body) {
             Ok(info) => info,
             Err(_) if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS => {
-                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                tokio::time::sleep(file_readback_backoff(attempt)).await;
                 continue;
             }
             Err(_) => {
@@ -426,14 +427,14 @@ async fn read_back_staged_upload(
             if info.error.as_deref() == Some("file_not_found")
                 && attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS
             {
-                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                tokio::time::sleep(file_readback_backoff(attempt)).await;
                 continue;
             }
             return outbound_api_error("files.info", info.error.as_deref());
         }
         let Some(info) = info.file else {
             if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS {
-                tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+                tokio::time::sleep(file_readback_backoff(attempt)).await;
                 continue;
             }
             return PartDeliveryOutcome::Permanent {
@@ -455,7 +456,7 @@ async fn read_back_staged_upload(
             };
         }
         if attempt < SLACK_FILE_READBACK_MAX_ATTEMPTS {
-            tokio::time::sleep(SLACK_FILE_READBACK_BACKOFF).await;
+            tokio::time::sleep(file_readback_backoff(attempt)).await;
             continue;
         }
         return PartDeliveryOutcome::Permanent {
@@ -466,6 +467,13 @@ async fn read_back_staged_upload(
     PartDeliveryOutcome::Permanent {
         reason: "slack file read-back remained unavailable after upload completion".to_string(),
     }
+}
+
+fn file_readback_backoff(attempt: u8) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(1).min(4);
+    SLACK_FILE_READBACK_BASE_BACKOFF
+        .saturating_mul(1_u32 << exponent)
+        .min(SLACK_FILE_READBACK_MAX_BACKOFF)
 }
 
 fn terminal_readback_outcome(outcome: PartDeliveryOutcome) -> PartDeliveryOutcome {
