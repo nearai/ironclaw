@@ -1,4 +1,4 @@
-"""Slack read contracts owned by the Slack provider test module."""
+"""Slack provider operation contracts owned by the Slack test module."""
 
 import json
 
@@ -16,6 +16,7 @@ REVIEWER_NAME = "qa-reviewer"
 SEARCH_MARKER = "ENTITYMSG_1784643032040"
 THREAD_ROOT_MARKER = "QA10 thread root"
 THREAD_REPLY_MARKER = "QA10 visible thread reply"
+SEND_MARKER = "REBORN_PROVIDER_CASE_SLACK_SEND"
 
 
 async def _channel_id(emulate_url: str) -> str:
@@ -153,6 +154,54 @@ async def _whoami_outcome(emulate_url: str, preview: dict) -> None:
         "user_display_name": identity["user"],
         "user_id": identity["user_id"],
     }, output
+
+
+async def _send_arguments(emulate_url: str) -> dict:
+    return {
+        "channel": await _channel_id(emulate_url),
+        "text": SEND_MARKER,
+    }
+
+
+async def _send_baseline(emulate_url: str) -> None:
+    await _baseline(emulate_url)
+    assert not [
+        message
+        for message in await _history(emulate_url)
+        if message["text"] == SEND_MARKER
+    ], "provider world already contains the send-message contract marker"
+
+
+async def _send_outcome(emulate_url: str, preview: dict) -> None:
+    matches = [
+        message
+        for message in await _history(emulate_url)
+        if message["text"] == SEND_MARKER
+    ]
+    assert len(matches) == 1, matches
+    output = _output(preview)
+    assert output == {
+        "ok": True,
+        "channel": await _channel_id(emulate_url),
+        "ts": matches[0]["ts"],
+    }, output
+
+
+async def _cleanup_send(emulate_url: str) -> None:
+    channel = await _channel_id(emulate_url)
+    matches = [
+        message
+        for message in await _history(emulate_url)
+        if message["text"] == SEND_MARKER
+    ]
+    async with httpx.AsyncClient(timeout=15) as client:
+        for message in matches:
+            await slack_post(
+                client,
+                emulate_url,
+                "chat.delete",
+                {"channel": channel, "ts": message["ts"]},
+            )
 
 
 def _setup_empty_slack_history(proxy, endpoint: str) -> None:
@@ -414,5 +463,14 @@ SLACK_PROVIDER_OPERATION_CASES = (
         setup_provider_proxy=_setup_empty_whoami,
         expect_provider_forward=False,
         expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
+        case_id="slack_send_message",
+        provider_service="slack",
+        capability_id="slack.send_message",
+        arguments=_send_arguments,
+        assert_baseline=_send_baseline,
+        assert_outcome=_send_outcome,
+        cleanup_provider=_cleanup_send,
     ),
 )

@@ -10,6 +10,7 @@ from provider_operation_types import (
 )
 
 SPREADSHEET_ID = "sheet_reborn_abc"
+CREATED_SPREADSHEET_TITLE = "Reborn Provider Operation Spreadsheet"
 ADDED_SHEET = "ProviderCase"
 RENAMED_SHEET = "RenamedByProviderCase"
 # Deliberately below the seeded rows so a write here cannot be confused with an
@@ -18,6 +19,9 @@ RENAMED_SHEET = "RenamedByProviderCase"
 WRITE_RANGE = "Sheet1!A4:C4"
 EMPTY_RANGE = "Sheet1!A50:C60"
 WRITTEN_ROW = ["REBORN_WRITE_VALUES", "isolated", "row"]
+APPENDED_ROW = ["REBORN_APPEND_VALUES", "exactly", "once"]
+APPEND_RANGE = "Sheet1!A:C"
+APPENDED_TARGET_RANGE = "Sheet1!A3:C3"
 
 
 async def _spreadsheet(emulate_url: str) -> dict:
@@ -47,6 +51,36 @@ async def _baseline(emulate_url: str) -> None:
     ] == [(0, "Sheet1"), (7, "DeleteMe")], sheets
     values = await _values(emulate_url, "Sheet1!A1:E2")
     assert values[1][-1] == "REBORN_QA_SEEDED", values
+
+
+def _output(preview: dict) -> dict:
+    assert preview["truncated"] is False, preview
+    output = json.loads(preview["output_preview"])
+    assert isinstance(output, dict), preview
+    return output
+
+
+async def _create_spreadsheet_outcome(
+    emulate_url: str, preview: dict
+) -> None:
+    output = _output(preview)
+    assert output["spreadsheet_id"], output
+    assert output["title"] == CREATED_SPREADSHEET_TITLE, output
+    assert [sheet["title"] for sheet in output["sheets"]] == [
+        "ContractData"
+    ], output
+    spreadsheet = await google_json(
+        emulate_url,
+        "GET",
+        f"/v4/spreadsheets/{output['spreadsheet_id']}",
+    )
+    assert spreadsheet["spreadsheetId"] == output["spreadsheet_id"], spreadsheet
+    assert (
+        spreadsheet["properties"]["title"] == CREATED_SPREADSHEET_TITLE
+    ), spreadsheet
+    assert [
+        sheet["properties"]["title"] for sheet in spreadsheet["sheets"]
+    ] == ["ContractData"], spreadsheet
 
 
 async def _batch_read_outcome(emulate_url: str, preview: dict) -> None:
@@ -124,6 +158,26 @@ async def _write_values_outcome(emulate_url: str, preview: dict) -> None:
     assert "REBORN_WRITE_VALUES" in json.dumps(preview), preview
 
 
+async def _append_values_baseline(emulate_url: str) -> None:
+    await _baseline(emulate_url)
+    assert not await _values(emulate_url, APPENDED_TARGET_RANGE), (
+        "provider world already contains the append-values contract row"
+    )
+
+
+async def _append_values_outcome(emulate_url: str, preview: dict) -> None:
+    assert await _values(emulate_url, APPENDED_TARGET_RANGE) == [APPENDED_ROW], (
+        await _values(emulate_url, APPENDED_TARGET_RANGE)
+    )
+    output = _output(preview)
+    assert output == {
+        "updated_range": APPEND_RANGE,
+        "updated_rows": 1,
+        "updated_columns": 3,
+        "updated_cells": 3,
+    }, output
+
+
 async def _rename_sheet_outcome(emulate_url: str, preview: dict) -> None:
     spreadsheet = await _spreadsheet(emulate_url)
     titles = {
@@ -160,6 +214,17 @@ async def _format_cells_outcome(emulate_url: str, preview: dict) -> None:
 
 
 GOOGLE_SHEETS_PROVIDER_OPERATION_CASES = (
+    ProviderOperationCase(
+        case_id="google_sheets_create_spreadsheet",
+        provider_service="google",
+        capability_id="google-sheets.create_spreadsheet",
+        arguments={
+            "title": CREATED_SPREADSHEET_TITLE,
+            "sheet_names": ["ContractData"],
+        },
+        assert_baseline=_baseline,
+        assert_outcome=_create_spreadsheet_outcome,
+    ),
     ProviderOperationCase(
         case_id="google_sheets_batch_read_values",
         provider_service="google",
@@ -252,6 +317,19 @@ GOOGLE_SHEETS_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_write_values_baseline,
         assert_outcome=_write_values_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_append_values",
+        provider_service="google",
+        capability_id="google-sheets.append_values",
+        arguments={
+            "spreadsheet_id": SPREADSHEET_ID,
+            "range": APPEND_RANGE,
+            "values": [APPENDED_ROW],
+            "value_input_option": "RAW",
+        },
+        assert_baseline=_append_values_baseline,
+        assert_outcome=_append_values_outcome,
     ),
     ProviderOperationCase(
         case_id="google_sheets_rename_sheet",

@@ -12,6 +12,7 @@ BaselineAssertion = Callable[[str], Awaitable[None]]
 OutcomeAssertion = Callable[[str, dict], Awaitable[None]]
 ArgumentsFactory = Callable[[str], Awaitable[dict]]
 ProviderProxySetup = Callable[[Any], None]
+ProviderCleanup = Callable[[str], Awaitable[None]]
 ProviderService = Literal["google", "github", "slack"]
 
 # Which provider-observable outcome this case pins. A capability covered only
@@ -38,6 +39,7 @@ class ProviderOperationCase:
     expected_proxy_profile: str | None = None
     expected_forwarded_request_count: int | None = None
     expected_profile_request_count: int | None = None
+    cleanup_provider: ProviderCleanup | None = None
 
     async def resolve_arguments(self, emulate_url: str) -> dict:
         """Resolve static arguments or provider-issued values after setup."""

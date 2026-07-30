@@ -599,25 +599,24 @@ def _covered_capability_outcomes() -> dict[str, set[str]]:
     return covered
 
 
-def test_write_capabilities_are_not_evidenced_by_a_recorded_tool_name():
-    """A recorded tool-call name proves model choice, never a provider mutation.
+def test_write_capabilities_require_typed_provider_operation_contracts():
+    """Every provider mutation requires a typed observed-request contract.
 
-    `_recorded_tool_evidence` only observes that some harvested trace emitted a
-    call with this name. For an `external_write` capability that says nothing
-    about whether the provider committed the effect, so it cannot stand in for
-    a typed case with provider-side readback.
+    Journey evidence remains valuable user-flow coverage, but it cannot assert
+    the exact provider request, credential account, response, and mutation
+    count required by the operation runner.
     """
-    covered = set(_covered_capability_outcomes())
+    typed_capabilities = {
+        case.capability_id for case in PROVIDER_OPERATION_CASES
+    }
     unproven = sorted(
         WRITE_CAPABILITY_IDS
-        - covered
-        - INTEGRATION_EVIDENCE_CAPABILITY_IDS
-        - JOURNEY_EVIDENCE_CAPABILITY_IDS
+        - typed_capabilities
         - backlogged_capabilities("write_requires_operation_case")
     )
     assert not unproven, (
-        "write capabilities whose only evidence is a recorded tool-call name; "
-        "add a ProviderOperationCase with provider readback or an owned "
+        "write capabilities without typed request and readback evidence; "
+        "add a ProviderOperationCase or an owned "
         f"coverage_backlog entry: {unproven}"
     )
 

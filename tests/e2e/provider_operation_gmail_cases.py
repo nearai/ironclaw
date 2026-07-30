@@ -12,6 +12,8 @@ from provider_operation_types import (
 )
 
 GMAIL_REPLY_MARKER = "REBORN_PROVIDER_CASE_REPLY"
+GMAIL_SEND_MARKER = "REBORN_PROVIDER_CASE_SEND"
+GMAIL_SEND_SUBJECT = "Reborn provider operation send contract"
 SEEDED_GMAIL_MESSAGE_ID = "<msg_emulate_unread@ironclaw.test>"
 SEEDED_GMAIL_SUBJECT = "Emulate seeded unread"
 SEEDED_GMAIL_THREAD_ID = "thr_emulate_unread"
@@ -170,6 +172,27 @@ async def _assert_gmail_list_messages_empty(
     assert body["resultSizeEstimate"] == 0, body
 
 
+async def _assert_gmail_send_baseline(emulate_url: str) -> None:
+    assert not await _gmail_messages(
+        emulate_url, query=f"subject:{GMAIL_SEND_SUBJECT}"
+    ), "provider world already contains the send-message contract email"
+
+
+async def _assert_gmail_send_outcome(emulate_url: str, preview: dict) -> None:
+    messages = await _gmail_messages(
+        emulate_url, query=f"subject:{GMAIL_SEND_SUBJECT}"
+    )
+    assert len(messages) == 1, messages
+    message = await _gmail_message(emulate_url, messages[0]["id"])
+    assert "SENT" in message["labelIds"], message
+    assert gmail_header(message, "To") == "contract-recipient@example.com", message
+    assert gmail_header(message, "Subject") == GMAIL_SEND_SUBJECT, message
+    assert GMAIL_SEND_MARKER in message["snippet"], message
+    body = provider_http_body(preview)
+    assert body["id"] == message["id"], (body, message)
+    assert body["threadId"] == message["threadId"], (body, message)
+
+
 GMAIL_PROVIDER_OPERATION_CASES = (
     ProviderOperationCase(
         case_id="gmail_get_message",
@@ -211,6 +234,25 @@ GMAIL_PROVIDER_OPERATION_CASES = (
         assert_baseline=_assert_gmail_reply_baseline,
         assert_outcome=_assert_gmail_list_messages_empty,
         outcome_class="empty",
+    ),
+    ProviderOperationCase(
+        case_id="gmail_send_message",
+        provider_service="google",
+        capability_id="gmail.send_message",
+        arguments={
+            "message": {
+                "raw": raw_mime(
+                    to="contract-recipient@example.com",
+                    subject=GMAIL_SEND_SUBJECT,
+                    body=(
+                        f"{GMAIL_SEND_MARKER}: sent through the typed provider "
+                        "operation contract."
+                    ),
+                )
+            }
+        },
+        assert_baseline=_assert_gmail_send_baseline,
+        assert_outcome=_assert_gmail_send_outcome,
     ),
     ProviderOperationCase(
         case_id="gmail_create_draft",
