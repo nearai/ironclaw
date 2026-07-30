@@ -2125,6 +2125,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             Some(40_000),
             "slack declares max_message_chars = 40000"
         );
+        assert_eq!(
+            presentation.command_prefix.as_deref(),
+            Some("/ironclaw "),
+            "slack declares a command_prefix so channel help renders /ironclaw-namespaced"
+        );
         let directions = summary
             .channel_directions
             .expect("unified slack summary carries channel directions");
@@ -2162,6 +2167,17 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .commands,
             ["model", "status"],
             "shipping Telegram exposes exactly the model and status commands"
+        );
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("telegram channel descriptor")
+                .presentation
+                .command_prefix,
+            None,
+            "telegram stays prefix-free; its channel help renders bare /model, /status"
         );
     }
 

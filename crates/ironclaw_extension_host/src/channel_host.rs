@@ -1031,13 +1031,18 @@ impl GenericChannelHostAssembly {
             .as_ref()
             .map(|channel| channel.commands.as_slice())
             .unwrap_or_default();
+        let command_prefix = source
+            .resolved()
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.presentation.command_prefix.as_deref());
         let observer = Arc::new(
             RunDeliveryObserver::with_settings_and_connection_notices(
                 services,
                 delivery.settings,
                 connection_notices.clone(),
             )
-            .with_enabled_commands(enabled_commands.iter().map(String::as_str)),
+            .with_enabled_commands(enabled_commands.iter().map(String::as_str), command_prefix),
         );
         Ok(Arc::new(RunDeliveryPostAdmissionObserver {
             observer,

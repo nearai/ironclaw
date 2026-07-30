@@ -4921,9 +4921,9 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
 
     let feedback =
         wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
-            payload["text"]
-                .as_str()
-                .is_some_and(|text| text == "Available commands:\n/model\n/status")
+            payload["text"].as_str().is_some_and(|text| {
+                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+            })
         })
         .await;
     let text = feedback[0]["text"].as_str().expect("feedback text");
@@ -4959,7 +4959,9 @@ async fn disabled_dm_slash_commands_are_rejected_without_execution() {
     let scoped_help = harness
         .slack_messages()
         .into_iter()
-        .filter(|payload| payload["text"] == "Available commands:\n/model\n/status")
+        .filter(|payload| {
+            payload["text"] == "Available commands:\n/ironclaw model\n/ironclaw status"
+        })
         .count();
     assert_eq!(scoped_help, 2, "one scoped rejection per disabled command");
     assert!(harness.command_executions.invokes().is_empty());
