@@ -225,11 +225,17 @@ export function Chat({
       };
       // Slash text naming an inventory command executes as a product command
       // (no turn); anything else — including unknown slash text — submits as
-      // an ordinary message, matching channel behavior. Commands no longer
-      // require a pre-existing conversation: `runCommand` creates one itself
-      // (mirroring `send`) when called from the landing composer, so the
-      // primary entry point can run a command on first contact too.
+      // an ordinary message, matching channel behavior. Commands require an
+      // existing conversation (the execute route is thread-scoped): running
+      // one from the landing composer with no thread yet created one and
+      // then lost the result to the thread-load race — the new thread's
+      // history loads empty and wipes the just-appended notice, leaving an
+      // empty conversation behind. Rather than fix that ordering, homepage
+      // commands are intentionally disabled for now — do not drop the
+      // `activeThreadId` precondition below to "fix" this; the fix is to not
+      // offer commands there at all.
       if (
+        activeThreadId &&
         images.length === 0 &&
         attachments.length === 0 &&
         matchCommand(content, chatCommands)
@@ -366,7 +372,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
-            commands={chatCommands}
+            commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}
@@ -485,7 +491,7 @@ export function Chat({
 
           <ChatInput
             onSend={handleSend}
-            commands={chatCommands}
+            commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}

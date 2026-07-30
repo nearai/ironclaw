@@ -1008,65 +1008,24 @@ test("Chat intercepts known slash text as a command on an active thread", async 
   assert.deepEqual(sends, ["/status", "plain text"], "ordinary text still submits");
 });
 
-test("Chat landing view passes the full command inventory so the menu is reachable", () => {
-  // Regression (item 1a): the palette was dead on the landing screen because
-  // both composers received `commands={activeThreadId ? chatCommands : []}` —
-  // an empty array whenever there is no active thread yet. The landing/hero
-  // composer is the primary entry point (fresh session, no thread selected)
-  // and must see the same inventory the in-thread composer does, so typing
-  // "/mo" renders a menu there too (menu-filtering itself is unit-tested in
-  // chat-input.test.ts / chat-commands.test.ts).
+test("Chat landing view renders no command menu and submits a known command as an ordinary message", async () => {
+  // Homepage commands are intentionally OFF for now (see the interception
+  // guard comment in chat.tsx's `handleSend`). A prior change let the
+  // landing composer intercept known commands and made `runCommand` create
+  // a thread on first contact, but the result notice was appended to the
+  // pre-navigation message state and then wiped when the app navigated into
+  // the newly created (and still-loading) thread — an empty conversation
+  // left behind. Rather than fix that ordering, the landing composer
+  // neither shows the command menu nor executes known commands; slash text
+  // submits as an ordinary message there, exactly like unknown slash text
+  // always has (see the "submits unknown slash text" test below).
+  const sends = [];
+  const commandRuns = [];
   const commands = [{ name: "status", usage: "/status" }, { name: "model", usage: "/model" }];
   const { tree, components } = renderChat({
     activeThreadId: null,
-    contextOverrides: { useChatCommands: () => commands },
-    hookState: {
-      messages: [],
-      isProcessing: false,
-      pendingGate: null,
-      suggestions: [],
-      sseStatus: "open",
-      historyLoading: false,
-      hasMore: false,
-      cooldownSeconds: 0,
-      recoveryNotice: null,
-      activeRun: null,
-      send: async () => ({}),
-      runCommand: async () => ({}),
-      cancelRun: async () => {},
-      retryMessage: () => {},
-      approve: () => {},
-      recoverHistory: () => {},
-      loadMore: () => {},
-      setSuggestions: () => {},
-      submitAuthToken: async () => {},
-    },
-  });
-
-  const landing = findComponent(tree, components.EmptyState);
-  const props = componentProps(landing, components.EmptyState);
-  assert.deepEqual(
-    props.commands,
-    commands,
-    "the landing composer must receive the full command inventory, not an empty array",
-  );
-});
-
-test("Chat landing view runs a known command (creating and selecting a thread) instead of sending a message", async () => {
-  // Regression (item 1b): on the landing screen `runCommand` must behave like
-  // `send` does when there is no thread yet — create one, execute against
-  // it, and hand the new thread back through `onSelectThread` so the
-  // system-notice result is visible (mirrors the existing `send`-creates-a-
-  // thread landing behavior covered by the "prior run is settling" test
-  // above).
-  const sends = [];
-  const commandRuns = [];
-  const selected = [];
-  const { tree, components } = renderChat({
-    activeThreadId: null,
-    onSelectThread: (threadId, opts) => selected.push({ threadId, opts }),
     contextOverrides: {
-      useChatCommands: () => [{ name: "status", usage: "/status" }],
+      useChatCommands: () => commands,
       matchCommand: (text) => (text.startsWith("/status") ? { name: "status" } : null),
     },
     hookState: {
@@ -1082,14 +1041,11 @@ test("Chat landing view runs a known command (creating and selecting a thread) i
       activeRun: null,
       send: async (content) => {
         sends.push(content);
-        return { thread_id: "thread-from-send" };
+        return { thread_id: "thread-new" };
       },
       runCommand: async (text) => {
         commandRuns.push(text);
-        // Mirrors useChat.ts's runCommand: it creates the thread itself and
-        // reports the new id back on the response, the same shape `send`
-        // already reports `thread_id` on.
-        return { command: "status", result: { title: "Status" }, thread_id: "thread-from-command" };
+        return {};
       },
       cancelRun: async () => {},
       retryMessage: () => {},
@@ -1103,23 +1059,21 @@ test("Chat landing view runs a known command (creating and selecting a thread) i
 
   const landing = findComponent(tree, components.EmptyState);
   const props = componentProps(landing, components.EmptyState);
+  // Length check rather than `assert.deepEqual(props.commands, [])`: the
+  // empty array is a literal evaluated inside the vm-sandboxed chat.tsx
+  // source (a different realm), so a direct deepEqual against an
+  // outer-realm `[]` fails on prototype identity despite equal values (the
+  // same cross-realm gotcha noted on the completion tests in
+  // chat-input.test.ts).
+  assert.equal(
+    props.commands.length,
+    0,
+    "the landing composer must not render a command menu",
+  );
 
   await props.onSend("/status", {});
-  assert.deepEqual(commandRuns, ["/status"], "a known command executes as a command, even with no thread yet");
-  assert.deepEqual(sends, [], "commands never submit a turn");
-  // Compare fields individually rather than the whole array via deepEqual:
-  // `opts` is an object literal constructed inside the vm-sandboxed chat.tsx
-  // source (a different realm/Object.prototype), so a direct deepEqual
-  // against an outer-realm literal fails on prototype identity despite equal
-  // values (the same cross-realm gotcha documented on the completion tests
-  // in chat-input.test.ts).
-  assert.equal(selected.length, 1);
-  assert.equal(
-    selected[0].threadId,
-    "thread-from-command",
-    "the thread runCommand created must become the active/selected thread, same as send's landing behavior",
-  );
-  assert.equal(selected[0].opts.replace, true);
+  assert.deepEqual(commandRuns, [], "a known command must not execute without an active thread");
+  assert.deepEqual(sends, ["/status"], "the known command submits as an ordinary message instead");
 });
 
 test("Chat landing view submits unknown slash text as an ordinary message", async () => {

@@ -1097,20 +1097,18 @@ export function useChat(threadId) {
   // as a local SYSTEM notice. Commands are not turns: no optimistic user
   // bubble, no run, no SSE — the response is the whole exchange.
   //
-  // Two properties mirror `send`'s own landing/thread-switch handling:
-  //  - No thread yet (the landing composer): create one first, the same
-  //    `createThreadRequest()` first-contact treatment `send` uses, and
-  //    report the new id back as `thread_id` so the caller (chat.tsx) can
-  //    select it — the response has no `thread_id` of its own (the backend
-  //    command-execute contract doesn't carry one; only the client-driven
-  //    creation knows it).
-  //  - Identity fence: a thread switch mid-flight must not paint the
-  //    destination conversation with this command's result. `threadIdRef`
-  //    reflects whichever thread is on screen *right now* (kept current by
-  //    the layout effect above), so the notice renders locally only when
-  //    we're still viewing the thread the command executed against;
-  //    otherwise it's seeded into that thread's own cache instead of being
-  //    lost, exactly like `send`'s busy-notice handling below.
+  // Commands are thread-scoped: chat.tsx only calls this when
+  // `activeThreadId` is set (the landing composer intentionally does not
+  // offer commands — see the interception guard there), so `threadId` is
+  // always a real id here and this never needs to create one.
+  //
+  // Identity fence: a thread switch mid-flight must not paint the
+  // destination conversation with this command's result. `threadIdRef`
+  // reflects whichever thread is on screen *right now* (kept current by
+  // the layout effect above), so the notice renders locally only when
+  // we're still viewing the thread the command executed against;
+  // otherwise it's seeded into that thread's own cache instead of being
+  // lost, exactly like `send`'s busy-notice handling below.
   const runCommand = React.useCallback(
     async (text) => {
       const appendNotice = (content, executedThreadId, meta) => {
@@ -1123,13 +1121,6 @@ export function useChat(threadId) {
           ...meta,
         };
         const appendToPrev = (prev) => [...prev, notice];
-        // No thread was ever created (thread creation itself failed) —
-        // there is nowhere to seed; render locally, mirroring `send`'s own
-        // unfenced create-failure path.
-        if (!executedThreadId) {
-          setMessages(appendToPrev);
-          return;
-        }
         if (
           !threadIdRef.current ||
           threadIdRef.current === executedThreadId
@@ -1139,37 +1130,24 @@ export function useChat(threadId) {
           seedThreadMessages(executedThreadId, appendToPrev);
         }
       };
-      let executeThreadId = threadId;
       try {
-        if (!executeThreadId) {
-          const created = await createThreadRequest();
-          queryClient.invalidateQueries({ queryKey: ["threads"] });
-          executeThreadId = created?.thread?.thread_id;
-          if (!executeThreadId) {
-            throw new Error("createThread returned no thread_id");
-          }
-        }
-        const response = await executeChatCommand({
-          threadId: executeThreadId,
-          text,
-        });
+        const response = await executeChatCommand({ threadId, text });
         // `commandResult` is the raw server response — the ephemeral,
         // client-only structured payload `CommandResult`
         // (components/command-result.tsx) reads to render the rich
         // title/fields/lines (or command-list/denial) presentation.
         // `content` keeps rendering the legacy markdown string, unchanged, as
         // the fallback for any consumer that only reads plain text.
-        appendNotice(renderCommandResultMarkdown(response), executeThreadId, {
+        appendNotice(renderCommandResultMarkdown(response), threadId, {
           commandResult: response,
         });
-        return { ...response, thread_id: executeThreadId };
+        return { ...response, thread_id: threadId };
       } catch {
         // A thrown error here has no server-shaped `result`/`rejection` to
-        // render (network failure, timeout, thread-creation failure, or an
-        // unexpected client-side exception) — show one generic, localized
-        // notice instead of a raw (and potentially unlocalized) error
-        // message.
-        appendNotice(t("chat.commandFailed"), executeThreadId);
+        // render (network failure, timeout, or an unexpected client-side
+        // exception) — show one generic, localized notice instead of a raw
+        // (and potentially unlocalized) error message.
+        appendNotice(t("chat.commandFailed"), threadId);
         return null;
       }
     },
