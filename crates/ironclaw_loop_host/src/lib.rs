@@ -146,7 +146,9 @@ use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_host_api::RunId;
-use ironclaw_outbound::{OutboundError, ReplyAttachmentIntent, ReplyAttachmentIntentPort};
+use ironclaw_outbound::{
+    OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
@@ -961,17 +963,19 @@ where
             .map_err(reply_attachment_seal_error)?;
         Ok(MessageContent::with_attachments(
             reply_text,
-            reply_attachment_refs(intents),
+            reply_attachment_refs(&run_id, intents),
         ))
     }
 }
 
-fn reply_attachment_refs(intents: Vec<ReplyAttachmentIntent>) -> Vec<AttachmentRef> {
+fn reply_attachment_refs(
+    run_id: &RunId,
+    intents: Vec<ReplyAttachmentIntent>,
+) -> Vec<AttachmentRef> {
     intents
         .into_iter()
-        .enumerate()
-        .map(|(index, intent)| AttachmentRef {
-            id: format!("reply-attachment-{}", index + 1),
+        .map(|intent| AttachmentRef {
+            id: ReplyAttachmentHandle::for_run_path(run_id, &intent.path).to_string(),
             kind: AttachmentKind::from_mime_type(&intent.mime_type),
             mime_type: intent.mime_type,
             filename: Some(intent.filename),

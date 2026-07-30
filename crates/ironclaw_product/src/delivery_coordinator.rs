@@ -878,8 +878,6 @@ async fn materialize_workspace_file_parts(
         })?;
         refs.push(intent);
     }
-    collapse_materialized_workspace_links(&mut parts, &refs);
-
     // Preflight every file before reading any bytes. The production delivery
     // reader is independently capped at max_file_bytes, while this metadata
     // pass avoids even bounded allocations when the declared set already
@@ -944,69 +942,6 @@ async fn materialize_workspace_file_parts(
     parts.extend(files);
     validate_final_workspace_files(&parts)?;
     Ok(parts)
-}
-
-fn collapse_materialized_workspace_links(
-    parts: &mut [OutboundPart],
-    attachments: &[ReplyAttachmentIntent],
-) {
-    for part in parts {
-        if let OutboundPart::Text(text) = part {
-            *text = collapse_attached_workspace_links(text, attachments);
-        }
-    }
-}
-
-fn collapse_attached_workspace_links(text: &str, attachments: &[ReplyAttachmentIntent]) -> String {
-    let mut rendered = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-
-    while let Some(open_offset) = text[cursor..].find('[') {
-        let open = cursor + open_offset;
-        rendered.push_str(&text[cursor..open]);
-        let label_start = open + 1;
-        let Some(label_end_offset) = text[label_start..].find(']') else {
-            rendered.push_str(&text[open..]);
-            return rendered;
-        };
-        let label_end = label_start + label_end_offset;
-        if !text[label_end..].starts_with("](") || text[label_start..label_end].contains('[') {
-            rendered.push('[');
-            cursor = label_start;
-            continue;
-        }
-        let path_start = label_end + 2;
-        let Some(path_end_offset) = text[path_start..].find(')') else {
-            rendered.push_str(&text[open..]);
-            return rendered;
-        };
-        let path_end = path_start + path_end_offset;
-        let path = &text[path_start..path_end];
-        if path.contains('[') {
-            rendered.push('[');
-            cursor = label_start;
-            continue;
-        }
-        let Some(attachment) = attachments
-            .iter()
-            .find(|attachment| attachment.path.as_str() == path)
-        else {
-            rendered.push('[');
-            cursor = label_start;
-            continue;
-        };
-        let label = &text[label_start..label_end];
-        let display = if label.trim().is_empty() || label.trim() == path {
-            attachment.filename.as_str()
-        } else {
-            label
-        };
-        rendered.push_str(display);
-        cursor = path_end + 1;
-    }
-
-    rendered.push_str(&text[cursor..]);
-    rendered
 }
 
 fn reject_caller_supplied_files(parts: &[OutboundPart]) -> Result<(), CoordinatedDeliveryError> {

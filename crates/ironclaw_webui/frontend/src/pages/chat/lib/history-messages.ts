@@ -10,58 +10,6 @@ import { attachmentKindFromMime, formatBytes } from "./attachments";
 import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel";
 import { attachmentUrl } from "../../../lib/api";
 
-function collapseAttachedWorkspaceLinks(content, refs) {
-  if (typeof content !== "string" || !Array.isArray(refs) || refs.length === 0) {
-    return content;
-  }
-  let rendered = "";
-  let cursor = 0;
-  while (cursor < content.length) {
-    const open = content.indexOf("[", cursor);
-    if (open < 0) break;
-    rendered += content.slice(cursor, open);
-    const labelStart = open + 1;
-    const labelEnd = content.indexOf("]", labelStart);
-    if (labelEnd < 0) {
-      rendered += content.slice(open);
-      return rendered;
-    }
-    if (
-      content.slice(labelEnd, labelEnd + 2) !== "](" ||
-      content.slice(labelStart, labelEnd).includes("[")
-    ) {
-      rendered += "[";
-      cursor = labelStart;
-      continue;
-    }
-    const pathStart = labelEnd + 2;
-    const pathEnd = content.indexOf(")", pathStart);
-    if (pathEnd < 0) {
-      rendered += content.slice(open);
-      return rendered;
-    }
-    const path = content.slice(pathStart, pathEnd);
-    if (path.includes("[")) {
-      rendered += "[";
-      cursor = labelStart;
-      continue;
-    }
-    const attachment = refs.find((ref) => ref?.storage_key === path);
-    if (!attachment) {
-      rendered += "[";
-      cursor = labelStart;
-      continue;
-    }
-    const label = content.slice(labelStart, labelEnd);
-    rendered +=
-      !label.trim() || label.trim() === path
-        ? attachment.filename || "attachment"
-        : label;
-    cursor = pathEnd + 1;
-  }
-  return rendered + content.slice(cursor);
-}
-
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
 // so `preview_url` is null here; a landed image instead gets a `fetch_url`
@@ -143,14 +91,10 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
       record.content === ATTACHMENTS_ONLY_CONTENT
         ? ""
         : record.content || "";
-    const content =
-      role === "assistant"
-        ? collapseAttachedWorkspaceLinks(storedContent, record.attachments)
-        : storedContent;
     messages.push({
       id,
       role,
-      content,
+      content: storedContent,
       attachments,
       timestamp: timestampForRecord(record),
       kind: record.kind,

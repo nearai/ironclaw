@@ -387,7 +387,7 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
   ]);
 });
 
-test("messagesFromTimeline: replaces attached workspace links with readable file references", () => {
+test("messagesFromTimeline: preserves assistant text and projects attachment cards", () => {
   const messages = messagesFromTimeline([
     {
       message_id: "assistant-1",
@@ -416,6 +416,20 @@ test("messagesFromTimeline: replaces attached workspace links with readable file
           size_bytes: 4,
           storage_key: "/workspace/data.csv",
         },
+        {
+          id: "video",
+          mime_type: "video/mp4",
+          filename: "clip.mp4",
+          size_bytes: 5,
+          storage_key: "/workspace/clip.mp4",
+        },
+        {
+          id: "other",
+          mime_type: "model/gltf-binary",
+          filename: "scene.glb",
+          size_bytes: 6,
+          storage_key: "/workspace/scene.glb",
+        },
       ],
     },
   ]);
@@ -423,11 +437,23 @@ test("messagesFromTimeline: replaces attached workspace links with readable file
   assert.equal(
     messages[0].content,
     "Literal [ bracket stays.\nCreated both files:\n" +
-      "1. Readable report\n" +
-      "2. data.csv\n" +
+      "1. [Readable report](/workspace/report.txt)\n" +
+      "2. [/workspace/data.csv](/workspace/data.csv)\n" +
       "3. [Not attached](/workspace/missing.txt)",
   );
-  assert.equal(messages[0].attachments.length, 2);
+  assert.deepEqual(
+    messages[0].attachments.map((attachment) => ({
+      id: attachment.id,
+      filename: attachment.filename,
+      kind: attachment.kind,
+    })),
+    [
+      { id: "report", filename: "report.txt", kind: "document" },
+      { id: "data", filename: "data.csv", kind: "document" },
+      { id: "video", filename: "clip.mp4", kind: "video" },
+      { id: "other", filename: "scene.glb", kind: "other" },
+    ],
+  );
 });
 
 // A landed image gets a `fetch_url` so the bubble can lazily resolve a

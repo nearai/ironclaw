@@ -9,7 +9,9 @@
 //! multimodal path (the model port reads the bytes back and the gateway sends
 //! them as `ContentPart::ImageUrl`; see `ContextMessage::image_attachments`);
 //! this textual block contributes a pointer to the stored file, which is the
-//! fallback a text-only model relies on.
+//! fallback a text-only model relies on. Video and other binary media are
+//! represented as typed stored-file pointers without pretending their bytes
+//! were extracted into text.
 
 use ironclaw_common::{AttachmentKind, AttachmentRef};
 

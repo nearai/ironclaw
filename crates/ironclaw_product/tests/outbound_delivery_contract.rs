@@ -1038,7 +1038,7 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
 }
 
 #[tokio::test]
-async fn coordinator_collapses_markdown_links_for_materialized_workspace_attachments() {
+async fn coordinator_preserves_text_and_materializes_only_durable_attachment_refs() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_file("/workspace/report.txt", 3);
     files.insert_file("/workspace/data.csv", 4);
@@ -1072,9 +1072,23 @@ async fn coordinator_collapses_markdown_links_for_materialized_workspace_attachm
         &adapter.envelopes()[0].parts[0],
         ironclaw_product::OutboundPart::Text(text)
             if text == "Literal [ bracket stays.\nCreated both files:\n\
-                1. Readable report\n\
-                2. data.csv\n\
+                1. [Readable report](/workspace/report.txt)\n\
+                2. [/workspace/data.csv](/workspace/data.csv)\n\
                 3. [Not attached](/workspace/missing.txt)"
+    ));
+    assert!(matches!(
+        &adapter.envelopes()[0].parts[1],
+        ironclaw_product::OutboundPart::File(file)
+            if file.path.as_str() == "/workspace/report.txt"
+                && file.filename.as_deref() == Some("report.txt")
+                && file.mime_type == "text/plain"
+    ));
+    assert!(matches!(
+        &adapter.envelopes()[0].parts[2],
+        ironclaw_product::OutboundPart::File(file)
+            if file.path.as_str() == "/workspace/data.csv"
+                && file.filename.as_deref() == Some("data.csv")
+                && file.mime_type == "text/csv"
     ));
 }
 

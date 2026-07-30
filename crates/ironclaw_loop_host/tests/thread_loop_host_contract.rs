@@ -25,7 +25,8 @@ use ironclaw_loop_host::{
     identity_message_ref,
 };
 use ironclaw_outbound::{
-    OutboundError, OutboundStateStore, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+    OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
+    ReplyAttachmentIntentPort,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -2393,10 +2394,37 @@ async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() 
     register_reply_attachment(
         store.as_ref(),
         &fixture,
-        "/workspace/chart.png",
-        "chart.png",
-        "image/png",
+        "/workspace/chart.gif",
+        "chart.gif",
+        "image/gif",
         23,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/voice.wav",
+        "voice.wav",
+        "audio/wav",
+        11,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/clip.mp4",
+        "clip.mp4",
+        "video/mp4",
+        13,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/scene.glb",
+        "scene.glb",
+        "model/gltf-binary",
+        17,
     )
     .await;
     let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store.clone();
@@ -2410,22 +2438,68 @@ async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() 
     adapter
         .finalize_assistant_message(FinalizeAssistantMessage {
             reply: AssistantReply {
-                content: "two files".to_string(),
+                content: "Created [the report](/workspace/report.csv); unrelated [link](/workspace/missing.txt).".to_string(),
             },
         })
         .await
         .unwrap();
 
     let assistant = finalized_assistant_message(&fixture).await;
-    assert_eq!(assistant.content.as_deref(), Some("two files"));
-    assert_eq!(assistant.attachments.len(), 2);
+    assert_eq!(
+        assistant.content.as_deref(),
+        Some(
+            "Created [the report](/workspace/report.csv); unrelated [link](/workspace/missing.txt)."
+        )
+    );
+    assert_eq!(assistant.attachments.len(), 5);
+    let run_id = reply_attachment_run_id(&fixture);
+    assert_eq!(
+        assistant
+            .attachments
+            .iter()
+            .map(|attachment| attachment.id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/report.csv").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/chart.gif").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/voice.wav").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/clip.mp4").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/scene.glb").unwrap(),
+            )
+            .to_string(),
+        ]
+    );
     assert_eq!(
         assistant
             .attachments
             .iter()
             .map(|attachment| attachment.storage_key.as_deref())
             .collect::<Vec<_>>(),
-        vec![Some("/workspace/report.csv"), Some("/workspace/chart.png")]
+        vec![
+            Some("/workspace/report.csv"),
+            Some("/workspace/chart.gif"),
+            Some("/workspace/voice.wav"),
+            Some("/workspace/clip.mp4"),
+            Some("/workspace/scene.glb"),
+        ]
     );
     assert_eq!(
         assistant.attachments[0].filename.as_deref(),
@@ -2435,8 +2509,9 @@ async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() 
     assert_eq!(assistant.attachments[0].size_bytes, Some(19));
     assert_eq!(assistant.attachments[0].kind, AttachmentKind::Document);
     assert_eq!(assistant.attachments[1].kind, AttachmentKind::Image);
-    assert_ne!(assistant.attachments[0].id, assistant.attachments[1].id);
-
+    assert_eq!(assistant.attachments[2].kind, AttachmentKind::Audio);
+    assert_eq!(assistant.attachments[3].kind, AttachmentKind::Video);
+    assert_eq!(assistant.attachments[4].kind, AttachmentKind::Other);
     let error = store
         .register(
             &reply_attachment_scope(&fixture),
