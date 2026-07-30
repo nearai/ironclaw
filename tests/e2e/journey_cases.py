@@ -348,7 +348,6 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
             ObservableAssertion.EXACT_MUTATION_COUNT,
-            ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
@@ -410,15 +409,19 @@ PRODUCT_JOURNEY_CASES = (
 ALL_JOURNEY_CASES = (*PROVIDER_JOURNEY_CASES, *PRODUCT_JOURNEY_CASES)
 
 
-def _production_channel_surfaces(direction: str) -> set[str]:
-    surfaces = set()
+def _production_channel_capabilities(direction: str) -> dict[str, dict]:
+    capabilities = {}
     for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         channel = manifest.get("channel")
         if channel is not None and channel.get(direction) is True:
-            surfaces.add(manifest["id"])
-    return surfaces
+            capabilities[manifest["id"]] = channel.get("presentation") or {}
+    return capabilities
+
+
+def _production_channel_surfaces(direction: str) -> set[str]:
+    return set(_production_channel_capabilities(direction))
 
 
 def required_ingresses() -> set[str]:

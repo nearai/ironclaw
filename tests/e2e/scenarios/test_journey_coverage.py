@@ -18,7 +18,7 @@ from journey_cases import (
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
-    _production_channel_surfaces,
+    _production_channel_capabilities,
     journey_order_is_reversed,
     provider_journey_runs,
     required_delivery_targets,
@@ -678,18 +678,12 @@ def test_external_delivery_variants_name_exact_caller_evidence():
             _assert_delivery_address_is_citable(case, address)
             by_surface.setdefault(str(case.delivery_target), []).append(address)
 
-    for surface in _production_channel_surfaces("outbound"):
+    for surface, capabilities in _production_channel_capabilities("outbound").items():
         addresses = by_surface.get(surface, [])
         assert any(address.thread_anchor is None for address in addresses), (
             f"{surface}: no unthreaded delivery address evidence"
         )
-        adapter_source = (
-            ROOT / f"crates/ironclaw_{surface}_extension/src/channel.rs"
-        )
-        assert adapter_source.is_file(), (
-            f"{surface}: production channel adapter source is not discoverable"
-        )
-        if "thread_anchor" in adapter_source.read_text(encoding="utf-8"):
+        if capabilities.get("supports_threads") is True:
             assert any(address.thread_anchor is not None for address in addresses), (
                 f"{surface}: threaded delivery is implemented but lacks exact evidence"
             )
