@@ -215,3 +215,80 @@ test("a response with neither result nor rejection renders nothing (defensive on
   );
   assert.equal(html, "");
 });
+
+// `isIsoTimestampValue` / `isIdentifierValue` are the field-value-shape
+// heuristics `FieldValue` (above) dispatches on. They're colocated in
+// command-result.tsx (this module is their only caller — see the comment on
+// chat-commands.ts) and unit-tested here directly rather than only through
+// rendering, since they encode several precise edge cases.
+test("isIsoTimestampValue accepts the RFC3339-with-seconds, Z-suffixed shape the backend emits", async () => {
+  const { isIsoTimestampValue } = await import("./command-result");
+  // Matches `DateTime::to_rfc3339_opts(SecondsFormat::Secs, true)` from
+  // `execute_product_status_command`.
+  assert.equal(isIsoTimestampValue("2026-07-30T13:18:49Z"), true);
+});
+
+test("isIsoTimestampValue accepts a fractional-seconds timestamp with an explicit offset", async () => {
+  const { isIsoTimestampValue } = await import("./command-result");
+  assert.equal(isIsoTimestampValue("2026-07-30T13:18:49.123+00:00"), true);
+});
+
+test("isIsoTimestampValue rejects plain words, bare numbers, and non-timestamp text", async () => {
+  const { isIsoTimestampValue } = await import("./command-result");
+  assert.equal(isIsoTimestampValue("idle"), false);
+  assert.equal(isIsoTimestampValue("12"), false);
+  assert.equal(isIsoTimestampValue("2026-07-30"), false);
+  assert.equal(isIsoTimestampValue(""), false);
+  assert.equal(isIsoTimestampValue(undefined), false);
+});
+
+test("isIdentifierValue accepts a run-id-shaped UUID", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  assert.equal(isIdentifierValue("1b9894d9-3f21-4a10-9abc-def012345678"), true);
+});
+
+test("isIdentifierValue accepts a dotted/hyphenated/slashed package id", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  assert.equal(isIdentifierValue("acme-tools/foo-bar@2.1.0"), true);
+});
+
+test("isIdentifierValue rejects short plain words even when a label might suggest an id", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  assert.equal(isIdentifierValue("idle"), false);
+  assert.equal(isIdentifierValue("yes"), false);
+  assert.equal(isIdentifierValue("no"), false);
+});
+
+test("isIdentifierValue rejects a long plain English word with no structural punctuation", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  // e.g. LifecyclePublicState::as_str() -> "uninstalled" — a state WORD, not
+  // an opaque identifier.
+  assert.equal(isIdentifierValue("uninstalled"), false);
+});
+
+test("isIdentifierValue rejects a snake_case state label even though it clears the length bar", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  // "setup_needed" — underscore is deliberately excluded from the identifier
+  // charset so backend State values never get monospaced.
+  assert.equal(isIdentifierValue("setup_needed"), false);
+});
+
+test("isIdentifierValue rejects a bare short number (e.g. a Count field)", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  assert.equal(isIdentifierValue("12"), false);
+});
+
+test("isIdentifierValue rejects prose containing whitespace", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  assert.equal(
+    isIdentifierValue("No assistant activity in this conversation yet."),
+    false,
+  );
+});
+
+test("isIdentifierValue rejects non-string values", async () => {
+  const { isIdentifierValue } = await import("./command-result");
+  assert.equal(isIdentifierValue(12), false);
+  assert.equal(isIdentifierValue(null), false);
+  assert.equal(isIdentifierValue(undefined), false);
+});

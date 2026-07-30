@@ -210,34 +210,50 @@ test("a SYSTEM message carrying a structured command result renders CommandResul
   const commands = [
     { name: "status", title: "Status", description: "d", usage: "/status" },
   ];
-  const html = renderToStaticMarkup(
-    React.createElement(MessageBubble, {
-      message: {
-        id: "system-command-1",
-        role: CHAT_MESSAGE_ROLES.SYSTEM,
-        content: "**Status**\nState: idle",
-        commandResult: {
-          command: "status",
-          result: { title: "Status", fields: [], lines: [] },
-        },
-        timestamp: "2026-07-30T00:00:00.000Z",
-      },
-      commands,
-    }),
-  );
+  // CommandResult is a React.lazy import behind a local Suspense boundary
+  // (see message-bubble.tsx), so a synchronous renderToStaticMarkup would
+  // only ever observe the fallback. Render into a real container instead and
+  // await act() so the (mocked) dynamic import resolves before asserting —
+  // the same pattern renderExpandedActivity() below uses.
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        React.createElement(MessageBubble, {
+          message: {
+            id: "system-command-1",
+            role: CHAT_MESSAGE_ROLES.SYSTEM,
+            content: "**Status**\nState: idle",
+            commandResult: {
+              command: "status",
+              result: { title: "Status", fields: [], lines: [] },
+            },
+            timestamp: "2026-07-30T00:00:00.000Z",
+          },
+          commands,
+        }),
+      );
+    });
+    const html = container.innerHTML;
 
-  assert.match(html, /data-testid="command-result-mock"/);
-  assert.match(html, /data-command="status"/, "CommandResult should receive the raw structured response");
-  assert.match(
-    html,
-    /data-commands-count="1"/,
-    "CommandResult should receive the server command inventory threaded down from chat.tsx",
-  );
-  assert.doesNotMatch(
-    html,
-    /data-testid="markdown"/,
-    "a structured command result must not also render through the legacy markdown notice path",
-  );
+    assert.match(html, /data-testid="command-result-mock"/);
+    assert.match(html, /data-command="status"/, "CommandResult should receive the raw structured response");
+    assert.match(
+      html,
+      /data-commands-count="1"/,
+      "CommandResult should receive the server command inventory threaded down from chat.tsx",
+    );
+    assert.doesNotMatch(
+      html,
+      /data-testid="markdown"/,
+      "a structured command result must not also render through the legacy markdown notice path",
+    );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
 });
 
 test("a plain SYSTEM notice without a structured command result keeps rendering through the legacy markdown bubble", async () => {

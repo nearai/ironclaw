@@ -126,45 +126,9 @@ export function classifyCommandResponse(response) {
     : COMMAND_RESULT_KIND.DENIAL;
 }
 
-// ISO 8601 timestamp shape the backend actually emits for time-valued fields
-// (e.g. `/status`'s "Since": `DateTime::to_rfc3339_opts(SecondsFormat::Secs,
-// true)` — always `Z`-suffixed UTC, never a bare offset-less string).
-const ISO_TIMESTAMP_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
-
-// Whether a field VALUE (never the label) is an ISO timestamp that should
-// render through the app's existing human-readable date formatting instead
-// of as raw text.
-export function isIsoTimestampValue(value) {
-  if (typeof value !== "string") return false;
-  const trimmed = value.trim();
-  if (!ISO_TIMESTAMP_RE.test(trimmed)) return false;
-  return Number.isFinite(Date.parse(trimmed));
-}
-
-const MIN_IDENTIFIER_LENGTH = 8;
-// Opaque-token charset: letters, digits, and the punctuation that shows up
-// in run ids (UUIDs), package ids (dotted/slashed/hyphenated names), and
-// hashes. Deliberately excludes "_" — backend `State` values are snake_case
-// WORDS (e.g. `setup_needed`, `LifecyclePublicState::as_str()`), not opaque
-// identifiers, and must keep rendering as plain prose, not monospace.
-const IDENTIFIER_CHARSET_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.:@/-]*[A-Za-z0-9])?$/;
-
-// Whether a field VALUE looks like an identifier (run id, package id, hash)
-// rather than prose — a value-shape heuristic, not a label allowlist, so it
-// stays correct for any command's fields without hardcoding that command's
-// name or field labels here. Short plain words ("idle", "yes") and
-// underscored state labels ("setup_needed") are deliberately excluded; see
-// the constants above for why. This means a short human-chosen slug (e.g. a
-// 5-letter package id) will not get the identifier treatment — an accepted
-// trade-off given a value-only heuristic cannot otherwise distinguish it from
-// an ordinary short word (see the design report).
-export function isIdentifierValue(value) {
-  if (typeof value !== "string") return false;
-  const trimmed = value.trim();
-  if (trimmed.length < MIN_IDENTIFIER_LENGTH) return false;
-  if (/\s/.test(trimmed)) return false;
-  if (!IDENTIFIER_CHARSET_RE.test(trimmed)) return false;
-  if (!/[A-Za-z]/.test(trimmed)) return false;
-  return /[0-9._:@/-]/.test(trimmed);
-}
+// `isIsoTimestampValue` / `isIdentifierValue` (field-value-shape heuristics
+// for the success card) live in components/command-result.tsx itself, not
+// here — they're used only by that lazily-loaded module, so keeping them
+// there keeps them out of the eagerly-bundled composer chunk. This module
+// stays the eager, shared classification/menu logic (`chat-input.tsx` and
+// `message-bubble.tsx` both need it on first paint).

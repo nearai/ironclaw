@@ -1,7 +1,6 @@
 import React from "react";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
-import { CommandResult } from "./command-result";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
@@ -17,6 +16,16 @@ import {
   type ChatAttachment,
   type ChatMessage,
 } from "../lib/message-types";
+
+// The rich command-result card only renders for a SYSTEM notice carrying a
+// structured `commandResult` (see the branch below) — most messages never hit
+// it — so it loads as its own chunk instead of padding every /chat page load,
+// the same pattern markdown-renderer.tsx uses for its Streamdown import.
+const CommandResult = React.lazy(() =>
+  import("./command-result").then(({ CommandResult }) => ({
+    default: CommandResult,
+  }))
+);
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system stays as a centered notice, and error renders as an inline
@@ -218,7 +227,11 @@ function MessageBubbleImpl({
     commandResult &&
     classifyCommandResponse(commandResult) !== COMMAND_RESULT_KIND.EMPTY
   ) {
-    return (<CommandResult response={commandResult} commands={commands} />);
+    return (
+      <React.Suspense fallback={null}>
+        <CommandResult response={commandResult} commands={commands} />
+      </React.Suspense>
+    );
   }
 
   if (role === CHAT_MESSAGE_ROLES.IMAGE) {

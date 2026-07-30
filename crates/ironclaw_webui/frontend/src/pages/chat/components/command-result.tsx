@@ -3,12 +3,7 @@ import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
 import { formatThreadActivityTooltip } from "../../../lib/thread-meta";
-import {
-  COMMAND_RESULT_KIND,
-  classifyCommandResponse,
-  isIdentifierValue,
-  isIsoTimestampValue,
-} from "../lib/chat-commands";
+import { COMMAND_RESULT_KIND, classifyCommandResponse } from "../lib/chat-commands";
 
 /* Command-result presentation — the sibling of the ⌘K palette and the
    composer's command menu (command-palette.tsx / chat-input.tsx's dropdown),
@@ -23,6 +18,51 @@ import {
      calm, low-alarm inline notice — never the amber blob.
    Every token here is an existing `--v2-*` CSS variable, so light/dark
    theming is automatic (see design-system/card.tsx's own comment). */
+
+// ISO 8601 timestamp shape the backend actually emits for time-valued fields
+// (e.g. `/status`'s "Since": `DateTime::to_rfc3339_opts(SecondsFormat::Secs,
+// true)` — always `Z`-suffixed UTC, never a bare offset-less string). Lives
+// here (not chat-commands.ts) because this presentation layer is its only
+// caller — see the comment on that module.
+const ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
+
+// Whether a field VALUE (never the label) is an ISO timestamp that should
+// render through the app's existing human-readable date formatting instead
+// of as raw text.
+export function isIsoTimestampValue(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!ISO_TIMESTAMP_RE.test(trimmed)) return false;
+  return Number.isFinite(Date.parse(trimmed));
+}
+
+const MIN_IDENTIFIER_LENGTH = 8;
+// Opaque-token charset: letters, digits, and the punctuation that shows up
+// in run ids (UUIDs), package ids (dotted/slashed/hyphenated names), and
+// hashes. Deliberately excludes "_" — backend `State` values are snake_case
+// WORDS (e.g. `setup_needed`, `LifecyclePublicState::as_str()`), not opaque
+// identifiers, and must keep rendering as plain prose, not monospace.
+const IDENTIFIER_CHARSET_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.:@/-]*[A-Za-z0-9])?$/;
+
+// Whether a field VALUE looks like an identifier (run id, package id, hash)
+// rather than prose — a value-shape heuristic, not a label allowlist, so it
+// stays correct for any command's fields without hardcoding that command's
+// name or field labels here. Short plain words ("idle", "yes") and
+// underscored state labels ("setup_needed") are deliberately excluded; see
+// the constants above for why. This means a short human-chosen slug (e.g. a
+// 5-letter package id) will not get the identifier treatment — an accepted
+// trade-off given a value-only heuristic cannot otherwise distinguish it from
+// an ordinary short word (see the design report).
+export function isIdentifierValue(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (trimmed.length < MIN_IDENTIFIER_LENGTH) return false;
+  if (/\s/.test(trimmed)) return false;
+  if (!IDENTIFIER_CHARSET_RE.test(trimmed)) return false;
+  if (!/[A-Za-z]/.test(trimmed)) return false;
+  return /[0-9._:@/-]/.test(trimmed);
+}
 
 function CopyValueButton({ value }) {
   const t = useT();
