@@ -51,6 +51,8 @@ test("rejects workspace suffixes inside external URLs while preserving sandbox l
     extractWorkspaceFilePaths(
       "External https://evil.example/workspace/report.csv and disguised " +
         "https://evil.example/sandbox:/workspace/hidden.csv. " +
+        "Nested https://evil.example/(sandbox:/workspace/nested.csv). " +
+        "Protocol-relative //evil.example/(/workspace/relative.csv). " +
         "Local [safe](sandbox:/workspace/safe.pdf).",
     ),
     ["/workspace/safe.pdf"],

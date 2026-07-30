@@ -5,6 +5,12 @@
 
 import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 
+// Remove absolute and protocol-relative URL tokens before scanning. Checking
+// only the character immediately before `/workspace/` is insufficient because
+// URL path punctuation can create an apparently valid local-path boundary
+// (`https://example.test/(sandbox:/workspace/hidden.csv)`).
+const EXTERNAL_URL = /(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/[^\s<>"']+/g;
+
 // Match token-bounded scoped workspace paths with a file extension. These are
 // the paths the `/files/content` endpoint serves and that the agent's file
 // tools emit. Both a bare mention (`/workspace/report.csv`) and a Markdown link
@@ -27,12 +33,17 @@ function stripCodeSpans(content) {
   return content.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ");
 }
 
+function stripExternalUrls(content) {
+  return content.replace(EXTERNAL_URL, " ");
+}
+
 // Extract de-duplicated workspace file paths, preserving first-seen order.
 export function extractWorkspaceFilePaths(content) {
   if (typeof content !== "string" || !content) return [];
   const seen = new Set();
   const paths = [];
-  for (const match of stripCodeSpans(content).matchAll(WORKSPACE_FILE_PATH)) {
+  const searchableContent = stripExternalUrls(stripCodeSpans(content));
+  for (const match of searchableContent.matchAll(WORKSPACE_FILE_PATH)) {
     // The regex ends at `\.[\p{L}\p{N}]+`, so a match always terminates on an
     // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
     // is never captured and needs no stripping here.
