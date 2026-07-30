@@ -3730,6 +3730,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
+ "ed25519-dalek",
  "fs4",
  "futures",
  "hex",
@@ -4343,6 +4344,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-test",
  "url",
  "uuid",
 ]
@@ -4997,6 +4999,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

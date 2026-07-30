@@ -552,10 +552,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_returns_error_on_network_failure() {
-        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
-        // Short timeout so the test doesn't block for the full 10s REQUEST_TIMEOUT.
+        // Use a closed loopback port so this failure-path test stays hermetic.
         let catalog =
-            SkillCatalog::with_url_and_timeout("http://192.0.2.1:9999", Duration::from_secs(1));
+            SkillCatalog::with_url_and_timeout("http://127.0.0.1:1", Duration::from_secs(1));
         let outcome = catalog.search("test").await;
         assert!(outcome.results.is_empty());
         assert!(outcome.error.is_some());

@@ -62,6 +62,25 @@
 //!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
 //!     issue #6105).
 
+/// Build the production runtime and return the exact resource governor wired
+/// into its capability path.
+///
+/// This mirrors [`crate::build_runtime`] while keeping the lower substrate
+/// authority out of [`crate::RebornRuntime`]'s service-shaped public surface.
+/// Integration tests use the returned governor only for post-transition
+/// reservation read-back.
+pub async fn build_runtime_with_resource_governor_for_test(
+    input: crate::RebornRuntimeInput,
+) -> Result<
+    (
+        crate::RebornRuntime,
+        std::sync::Arc<dyn ironclaw_resources::ResourceGovernor>,
+    ),
+    crate::RebornRuntimeError,
+> {
+    crate::runtime::build_runtime_with_resource_governor(input).await
+}
+
 mod automation;
 mod budget_gateway;
 mod capability_io;

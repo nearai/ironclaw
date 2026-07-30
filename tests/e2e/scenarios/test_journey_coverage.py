@@ -1,23 +1,26 @@
 """Completeness gate for typed whole-path journey evidence."""
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
 import re
 import subprocess
-import tomllib
 from pathlib import Path
 
 import pytest
-
+import tomllib
 from journey_cases import (
     _HISTORICAL_MUTATING_PROVIDER_TOOLS,
     _MUTATING_PROVIDER_TOOLS,
+    _PROVIDER_REPLAY_FACTS,
     _TOOL_WORLD_PREFIXES,
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
+    _production_channel_capabilities,
+    _provider_journey_cases,
     journey_order_is_reversed,
     provider_journey_runs,
     required_delivery_targets,
@@ -28,17 +31,119 @@ from journey_cases import (
 )
 from journey_types import (
     CargoEvidence,
+    DeliveryAddressEvidence,
     JourneyCase,
+    ObservableAssertion,
+    ProductJourneyCase,
     ProviderJourneyCase,
+    ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
+from provider_journey_google import require_single_google_account
+from provider_journey_slack import (
+    EMULATE_SLACK_CHANNEL_BEARER_ENV,
+    emulate_slack_channel_bearer,
+)
+from provider_journey_trace import (
+    MISSING_SLACK_CHANNEL_ID,
+    compile_provider_journey_trace,
+    load_recorded_trace,
+    recorded_provider_calls,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
 _DISABLING_PYTEST_MARKS = {"skip", "skipif", "xfail"}
+_JOURNEY_RUNNER_SOURCES = (
+    ROOT / "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
+    ROOT / "tests/e2e/scenarios/test_reborn_qa_trace_replay.py",
+    *sorted((ROOT / "tests/e2e").glob("provider_journey_*.py")),
+)
+_SEEDED_SLACK_STATE = {
+    "channel_id": "C_SEEDED",
+    "reviewer_id": "U_REVIEWER",
+    "thread_ts": "1234.5",
+    "channel_name": "reborn-alerts",
+}
+_EXPECTED_COMPILED_PROVIDER_CALLS = {
+    "qa_2d_calendar_prep_live_chat": (
+        "google-calendar__list_events",
+        "google-calendar__list_events",
+        "google-drive__list_files",
+        "google-drive__download_file",
+    ),
+    "qa_2f_calendar_prep_email_delivery": (
+        "google-calendar__list_events",
+        "gmail__send_message",
+    ),
+    "qa_4e_github_release_email_delivery": ("gmail__send_message",),
+    "qa_5d_slack_strategy_doc_answer": (
+        "google-drive__upload_file",
+        "google-drive__download_file",
+        "google-drive__download_file",
+    ),
+    "qa_6c_gmail_to_sheet_live_chat": (
+        "gmail__list_messages",
+        "google-drive__list_files",
+        "gmail__get_message",
+        "google-sheets__get_spreadsheet",
+        "google-sheets__read_values",
+    ),
+    "qa_6e_gmail_to_sheet_delivery": (
+        "gmail__list_messages",
+        "google-sheets__create_spreadsheet",
+        "gmail__get_message",
+        "google-sheets__append_values",
+    ),
+    "qa_7c_slack_bug_logger_routine": (
+        "google-sheets__get_spreadsheet",
+        "google-sheets__read_values",
+    ),
+    "qa_7e_slack_bug_sheet_delivery": (
+        "google-sheets__create_spreadsheet",
+        "google-sheets__rename_sheet",
+        "google-sheets__write_values",
+        "google-sheets__get_spreadsheet",
+        "google-sheets__read_values",
+        "google-sheets__append_values",
+    ),
+    "qa_10a_slack_self_attribution": (
+        "slack__whoami",
+        "slack__get_conversation_history",
+    ),
+    "qa_10b_slack_ooo_status": (
+        "slack__whoami",
+        "slack__get_user_info",
+    ),
+    "qa_10c_slack_thread_replies": (
+        "slack__get_conversation_info",
+        "slack__get_conversation_history",
+        "slack__get_thread_replies",
+    ),
+    "qa_10d_slack_channel_membership": ("slack__list_conversations",),
+    "qa_10e_slack_error_honesty": ("slack__get_conversation_history",),
+    "qa_10f_slack_mention_encoding": (
+        "slack__get_conversation_info",
+        "slack__send_message",
+    ),
+    "qa_10g_slack_last_message_sent": ("slack__get_conversation_history",),
+    "qa_10g_slack_last_message_sent_global": (
+        "slack__whoami",
+        "slack__search_messages",
+    ),
+    "qa_10h_slack_email_hallucination_guard": (
+        "slack__list_conversations",
+        "slack__get_user_info",
+    ),
+    "qa_10i_slack_raw_entity_hygiene": (
+        "slack__get_conversation_info",
+        "slack__search_messages",
+        "slack__get_conversation_history",
+    ),
+}
 
 
 def _manifest_provider_journeys() -> set[str]:
@@ -57,6 +162,261 @@ def _manifest_provider_journeys() -> set[str]:
         ):
             cases.add(case_id)
     return cases
+
+
+def _case_name_branches(source_path: Path) -> list[int]:
+    """Find runner control flow or dispatch keyed by journey identity."""
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    offenders = set()
+
+    def _is_case_identity_node(node: ast.AST) -> bool:
+        return (
+            (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"case_id", "stem", "trace"}
+                and isinstance(node.value, ast.Name)
+                and (node.value.id == "case" or node.value.id.endswith("_case"))
+            )
+            or (isinstance(node, ast.Name) and node.id in {"case_id", "case_name"})
+            or (
+                isinstance(node, ast.Compare)
+                and isinstance(node.left, ast.Name)
+                and node.left.id == "journey_case"
+            )
+        )
+
+    def _reads_case_identity(node: ast.AST) -> bool:
+        return any(_is_case_identity_node(child) for child in ast.walk(node))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.IfExp)):
+            selectors = (node.test,)
+        elif isinstance(node, ast.Match):
+            selectors = (
+                node.subject,
+                *(case.guard for case in node.cases if case.guard is not None),
+            )
+        else:
+            continue
+        for selector in selectors:
+            embeds_case_name = any(
+                isinstance(child, ast.Constant)
+                and isinstance(child.value, str)
+                and child.value.startswith("qa_")
+                for child in ast.walk(selector)
+            )
+            if embeds_case_name or _reads_case_identity(selector):
+                offenders.add(selector.lineno)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "parametrize"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "mark"
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "pytest"
+            ):
+                continue
+            arguments = (
+                *node.args,
+                *(keyword.value for keyword in node.keywords),
+            )
+        elif isinstance(node, ast.Subscript):
+            arguments = (node.slice,)
+        else:
+            continue
+        if any(_reads_case_identity(argument) for argument in arguments):
+            offenders.add(node.lineno)
+    return sorted(offenders)
+
+
+def test_journey_runners_do_not_branch_on_case_names():
+    """Journey-specific execution facts belong in typed declarations."""
+    offenders = {
+        str(source.relative_to(ROOT)): lines
+        for source in _JOURNEY_RUNNER_SOURCES
+        if (lines := _case_name_branches(source))
+    }
+    assert not offenders, f"journey-name branches found in runners: {offenders}"
+
+
+def test_provider_replay_facts_must_name_collected_case(monkeypatch):
+    monkeypatch.setitem(
+        _PROVIDER_REPLAY_FACTS,
+        "qa_unknown_provider_journey",
+        ProviderJourneyReplayFacts(),
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="replay facts declared for unknown provider journey cases",
+    ):
+        _provider_journey_cases()
+
+
+@pytest.mark.parametrize(
+    "bad_runner",
+    [
+        (
+            "def run(case):\n"
+            "    if case.case_id == 'qa_new_special_case':\n"
+            "        return 'special'\n"
+        ),
+        (
+            "SPECIAL = '10e_slack_error_honesty.json'\n"
+            "def run(journey_case):\n"
+            "    if journey_case.trace.endswith(SPECIAL):\n"
+            "        return 'special'\n"
+        ),
+        (
+            "TIMEOUTS = {'qa_new_special_case': 180}\n"
+            "def run(journey_case):\n"
+            "    return TIMEOUTS.get(journey_case.case_id, 120)\n"
+        ),
+        (
+            "SPECIAL = object()\n"
+            "def run(journey_case):\n"
+            "    if journey_case == SPECIAL:\n"
+            "        return 'special'\n"
+        ),
+        (
+            "SPECIAL = object()\n"
+            "def run(journey_case):\n"
+            "    match object():\n"
+            "        case _ if journey_case == SPECIAL:\n"
+            "            return 'special'\n"
+        ),
+        ("def run(case_id):\n    return timeout_for(case_id)\n"),
+        ("def run(case_id):\n    return timeout_for(case_id=case_id)\n"),
+        (
+            "SPECIAL = object()\n"
+            "def run(journey_case):\n"
+            "    return TIMEOUTS[journey_case == SPECIAL]\n"
+        ),
+    ],
+)
+def test_case_name_branch_detector_fails_loudly(tmp_path, bad_runner):
+    source = tmp_path / "bad_runner.py"
+    source.write_text(bad_runner, encoding="utf-8")
+    assert _case_name_branches(source)
+
+
+def test_google_account_seed_rejects_an_empty_account_list():
+    with pytest.raises(AssertionError, match="no selectable Google account"):
+        require_single_google_account([], "no selectable Google account")
+
+
+def test_google_account_seed_allows_an_explicit_existing_account():
+    account = require_single_google_account(
+        [],
+        "no selectable Google account",
+        allow_existing_account=True,
+    )
+
+    assert account is None
+
+
+def test_slack_channel_bearer_requires_the_harness_environment(monkeypatch):
+    monkeypatch.delenv(EMULATE_SLACK_CHANNEL_BEARER_ENV, raising=False)
+    with pytest.raises(KeyError, match=EMULATE_SLACK_CHANNEL_BEARER_ENV):
+        emulate_slack_channel_bearer()
+
+    monkeypatch.setenv(EMULATE_SLACK_CHANNEL_BEARER_ENV, "test-channel-token")
+    assert emulate_slack_channel_bearer() == "test-channel-token"
+
+
+@pytest.mark.parametrize(
+    "case",
+    PROVIDER_JOURNEY_CASES,
+    ids=lambda case: case.case_id,
+)
+def test_provider_trace_compilation_keeps_recording_immutable(case):
+    trace_path = ROOT / case.trace
+    fixture_before = trace_path.read_bytes()
+    recorded = load_recorded_trace(trace_path)
+    before = json.dumps(recorded, sort_keys=True)
+    compiled = compile_provider_journey_trace(
+        recorded,
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state=_SEEDED_SLACK_STATE,
+    )
+
+    assert json.dumps(recorded, sort_keys=True) == before
+    assert trace_path.read_bytes() == fixture_before
+    assert compiled.trace is not recorded
+
+
+def test_provider_trace_compilation_declares_expected_failure():
+    case = next(
+        case
+        for case in PROVIDER_JOURNEY_CASES
+        if case.replay.expected_capability_failure is not None
+    )
+    trace_path = ROOT / case.trace
+    compiled = compile_provider_journey_trace(
+        load_recorded_trace(trace_path),
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state=_SEEDED_SLACK_STATE,
+    )
+
+    assert MISSING_SLACK_CHANNEL_ID in json.dumps(compiled.trace)
+    assert compiled.trace["steps"][-1]["request_hint"] == {
+        "expected_failed_tool_result_contains": (
+            case.replay.expected_capability_failure
+        )
+    }
+
+
+def test_provider_trace_compilation_preserves_provider_call_inventory():
+    actual = {}
+    for case in PROVIDER_JOURNEY_CASES:
+        trace_path = ROOT / case.trace
+        compiled = compile_provider_journey_trace(
+            load_recorded_trace(trace_path),
+            source=trace_path.name,
+            facts=case.replay,
+            provider_tools=EMULATE_SUPPORTED_TOOLS,
+            slack_state=_SEEDED_SLACK_STATE,
+        )
+        actual[case.case_id] = tuple(
+            call["name"]
+            for call in recorded_provider_calls(compiled.trace, EMULATE_SUPPORTED_TOOLS)
+        )
+
+    assert actual == _EXPECTED_COMPILED_PROVIDER_CALLS
+
+
+def test_provider_trace_compilation_uses_declared_google_seed():
+    case = next(
+        case
+        for case in PROVIDER_JOURNEY_CASES
+        if case.case_id == "qa_7c_slack_bug_logger_routine"
+    )
+    trace_path = ROOT / case.trace
+    compiled = compile_provider_journey_trace(
+        load_recorded_trace(trace_path),
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state=_SEEDED_SLACK_STATE,
+    )
+    sheet_calls = [
+        call
+        for call in recorded_provider_calls(compiled.trace, EMULATE_SUPPORTED_TOOLS)
+        if call["name"].startswith("google-sheets__")
+    ]
+
+    assert sheet_calls
+    assert {
+        call["arguments"]["spreadsheet_id"]
+        for call in sheet_calls
+        if "spreadsheet_id" in call["arguments"]
+    } == {case.replay.google_spreadsheet_id}
 
 
 def _cargo_test_config(manifest_path: Path) -> tuple[dict[str, dict], bool]:
@@ -172,8 +532,12 @@ def _assert_python_evidence(case: JourneyCase, evidence: PytestEvidence) -> None
     )
 
 
-def _rust_code_without_comments_or_strings(source: str) -> str:
-    """Mask Rust comments and strings while preserving line positions."""
+def _rust_code_without_comments_or_strings(
+    source: str,
+    *,
+    preserve_strings: bool = False,
+) -> str:
+    """Mask Rust comments and optionally strings, preserving positions."""
     result = list(source)
     index = 0
     block_depth = 0
@@ -209,9 +573,10 @@ def _rust_code_without_comments_or_strings(source: str) -> str:
             delimiter = f'"{hashes}'
             end = source.find(delimiter, index + raw_match.end())
             end = len(source) if end == -1 else end + len(delimiter)
-            for position in range(index, end):
-                if source[position] != "\n":
-                    result[position] = " "
+            if not preserve_strings:
+                for position in range(index, end):
+                    if source[position] != "\n":
+                        result[position] = " "
             index = end
             continue
         if source[index] == '"':
@@ -223,9 +588,10 @@ def _rust_code_without_comments_or_strings(source: str) -> str:
                 end += 1
                 if source[end - 1] == '"':
                     break
-            for position in range(index, min(end, len(source))):
-                if source[position] != "\n":
-                    result[position] = " "
+            if not preserve_strings:
+                for position in range(index, min(end, len(source))):
+                    if source[position] != "\n":
+                        result[position] = " "
             index = end
             continue
         index += 1
@@ -313,6 +679,171 @@ def _assert_rust_evidence(case: JourneyCase, evidence: CargoEvidence) -> None:
         evidence.source,
     )
     _assert_cargo_target(case.case_id, evidence, source_path)
+
+
+def _rust_function_body(
+    source: str,
+    function_name: str,
+    *,
+    preserve_literals: bool = False,
+) -> str:
+    """Return one Rust body, optionally preserving strings and comments."""
+    masked = _rust_code_without_comments_or_strings(source)
+    declarations = list(
+        re.finditer(
+            rf"\bfn\s+{re.escape(function_name)}\s*\([^)]*\)[^{{;]*\{{",
+            masked,
+            re.MULTILINE,
+        )
+    )
+    assert len(declarations) == 1, (
+        f"expected one Rust function {function_name!r}, found {len(declarations)}"
+    )
+    body_start = masked.find("{", declarations[0].start())
+    depth = 0
+    for index in range(body_start, len(masked)):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                body_source = (
+                    _rust_code_without_comments_or_strings(
+                        source,
+                        preserve_strings=True,
+                    )
+                    if preserve_literals
+                    else masked
+                )
+                return body_source[body_start + 1 : index]
+    raise AssertionError(f"Rust function {function_name!r} has no closing brace")
+
+
+def _rust_value_pattern(value: str) -> str:
+    if value.lstrip("-").isdigit():
+        return rf"(?:{re.escape(json.dumps(value))}|{re.escape(value)})"
+    return re.escape(json.dumps(value))
+
+
+def _assert_rust_assignment(
+    case_id: str,
+    assertion: str,
+    variable: str,
+    value: str,
+    *,
+    optional: bool = False,
+) -> None:
+    value_pattern = _rust_value_pattern(value)
+    if optional:
+        value_pattern = rf"Some\s*\(\s*{value_pattern}\s*\)"
+    assert re.search(
+        rf"\blet\s+{re.escape(variable)}(?:\s*:[^=;]+)?\s*=\s*"
+        rf"{value_pattern}\s*;",
+        assertion,
+    ), (
+        f"{case_id}: declared delivery value {value!r} is not bound to "
+        f"{variable} by the cited helper"
+    )
+
+
+def _assert_delivery_address_is_citable(
+    case: ProductJourneyCase,
+    address: DeliveryAddressEvidence,
+) -> None:
+    assert isinstance(case.evidence, CargoEvidence), (
+        f"{case.case_id}: external delivery evidence must cite a Cargo caller seam"
+    )
+    assert address.conversation_id.strip(), (
+        f"{case.case_id}: delivery conversation id is blank"
+    )
+    assert address.thread_anchor is None or address.thread_anchor.strip(), (
+        f"{case.case_id}: delivery thread anchor is blank"
+    )
+    assert address.exact_count == 1, (
+        f"{case.case_id}: representative delivery must assert exactly once"
+    )
+    assert ObservableAssertion.EXACT_DESTINATION in case.assertions
+    assert ObservableAssertion.EXACT_MUTATION_COUNT in case.assertions
+
+    source = (ROOT / case.evidence.source).read_text(encoding="utf-8")
+    assertion_body = _rust_function_body(
+        source,
+        address.assertion,
+        preserve_literals=True,
+    )
+    _assert_rust_assignment(
+        case.case_id,
+        assertion_body,
+        "expected_conversation_id",
+        address.conversation_id,
+    )
+    assert re.search(r"==\s*expected_conversation_id\b", assertion_body), (
+        f"{case.case_id}: expected_conversation_id does not gate provider evidence"
+    )
+    if address.thread_anchor is None:
+        assert re.search(
+            r"\blet\s+expected_thread_anchor(?:\s*:[^=;]+)?\s*=\s*None\s*;",
+            assertion_body,
+        ), (
+            f"{case.case_id}: declared unthreaded delivery is not asserted "
+            "by the cited helper"
+        )
+    else:
+        _assert_rust_assignment(
+            case.case_id,
+            assertion_body,
+            "expected_thread_anchor",
+            address.thread_anchor,
+            optional=True,
+        )
+    assert re.search(
+        r"==\s*expected_thread_anchor\b",
+        assertion_body,
+    ), (
+        f"{case.case_id}: expected_thread_anchor does not gate provider evidence"
+    )
+    _assert_rust_assignment(
+        case.case_id,
+        assertion_body,
+        "expected_count",
+        str(address.exact_count),
+    )
+    assert re.search(
+        r"\bmatching\s*\.\s*count\s*\(\s*\)\s*,\s*expected_count\b",
+        assertion_body,
+    ), (
+        f"{case.case_id}: expected_count does not gate the provider mutation count"
+    )
+
+    test_body = _rust_function_body(source, case.evidence.test)
+    reachable_bodies = [test_body]
+    for delegate in set(re.findall(r"\b([a-z][A-Za-z0-9_]*_impl)\s*\(", test_body)):
+        if delegate == address.assertion:
+            continue
+        with contextlib.suppress(AssertionError):
+            reachable_bodies.append(_rust_function_body(source, delegate))
+    assert any(
+        re.search(rf"\b{re.escape(address.assertion)}\s*\(", body)
+        for body in reachable_bodies
+    ), (
+        f"{case.case_id}: cited assertion {address.assertion!r} is not called "
+        f"by {case.evidence.test!r} or its direct delegate"
+    )
+
+
+def test_literal_preserving_rust_extraction_masks_comments():
+    """Commented-out evidence cannot satisfy the mechanical inventory."""
+    source = """
+fn evidence() {
+    // let comment_only = "C-FAKE";
+    /* let block_comment_only = "C-ALSO-FAKE"; */
+    let executable = "C777";
+}
+"""
+    body = _rust_function_body(source, "evidence", preserve_literals=True)
+    assert "comment_only" not in body
+    assert "block_comment_only" not in body
+    assert '"C777"' in body
 
 
 def test_provider_journey_registry_matches_every_harvested_emulate_journey():
@@ -428,9 +959,7 @@ def test_alone_lane_lists_every_mutating_journey():
     spec.loader.exec_module(module)
 
     expected = [
-        case.case_id
-        for case in PROVIDER_JOURNEY_CASES
-        if case.mutable_provider_worlds
+        case.case_id for case in PROVIDER_JOURNEY_CASES if case.mutable_provider_worlds
     ]
     assert expected, "no mutating journeys: the alone lane would test nothing"
     assert module.mutating_journey_ids() == expected
@@ -459,8 +988,7 @@ def test_alone_lane_rejects_failed_or_empty_inventory(
     )
     assert step, "missing isolated journey replay workflow step"
     script = "\n".join(
-        line.removeprefix("          ")
-        for line in step.group("script").splitlines()
+        line.removeprefix("          ") for line in step.group("script").splitlines()
     )
 
     python_stub = tmp_path / "python"
@@ -500,6 +1028,8 @@ def test_every_journey_has_complete_typed_executable_evidence():
             _assert_python_evidence(case, case.evidence)
         else:
             _assert_rust_evidence(case, case.evidence)
+        if isinstance(case, ProductJourneyCase) and case.browser_evidence is not None:
+            _assert_python_evidence(case, case.browser_evidence)
 
 
 def test_every_supported_ingress_and_delivery_target_has_journey_evidence():
@@ -516,6 +1046,89 @@ def test_every_supported_ingress_and_delivery_target_has_journey_evidence():
     assert not missing_delivery, (
         f"delivery targets lack journey evidence: {missing_delivery}"
     )
+
+
+def _assert_production_delivery_variants(
+    by_surface: dict[str, list[DeliveryAddressEvidence]],
+    production_capabilities: dict[str, dict],
+) -> None:
+    for surface, capabilities in production_capabilities.items():
+        addresses = by_surface.get(surface, [])
+        assert any(address.thread_anchor is None for address in addresses), (
+            f"{surface}: no unthreaded delivery address evidence"
+        )
+        supports_threads = capabilities.get("supports_threads")
+        assert isinstance(supports_threads, bool), (
+            f"{surface}: outbound manifest must declare supports_threads as a boolean"
+        )
+        if supports_threads:
+            assert any(address.thread_anchor is not None for address in addresses), (
+                f"{surface}: threaded delivery is implemented but lacks exact evidence"
+            )
+
+
+def test_external_delivery_variants_name_exact_caller_evidence():
+    """Opaque destinations and optional anchors stay mechanically citable."""
+    product_cases = [
+        case for case in ALL_JOURNEY_CASES if isinstance(case, ProductJourneyCase)
+    ]
+    by_surface: dict[str, list[DeliveryAddressEvidence]] = {}
+    for case in product_cases:
+        for address in case.delivery_addresses:
+            _assert_delivery_address_is_citable(case, address)
+            by_surface.setdefault(str(case.delivery_target), []).append(address)
+
+    _assert_production_delivery_variants(
+        by_surface, _production_channel_capabilities("outbound")
+    )
+
+    slack_destinations = {
+        address.conversation_id for address in by_surface.get("slack", [])
+    }
+    assert {"D-TRIGGER-DEFAULT", "C-TRIGGER-OVERRIDE"} <= slack_destinations, (
+        "Slack's existing DM and shared-channel caller proofs must remain "
+        "independently citable"
+    )
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    ({}, {"supports_thread": True}, {"supports_threads": "true"}),
+)
+def test_delivery_variant_gate_requires_explicit_boolean_threading_declaration(
+    capabilities,
+):
+    """Missing, misspelled, or mistyped declarations cannot disable evidence."""
+    unthreaded = DeliveryAddressEvidence(
+        conversation_id="C-EXACT",
+        thread_anchor=None,
+        exact_count=1,
+        assertion="assert_exact_delivery",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="outbound manifest must declare supports_threads as a boolean",
+    ):
+        _assert_production_delivery_variants(
+            {"slack": [unthreaded]},
+            {"slack": capabilities},
+        )
+
+
+def test_channel_capability_inventory_requires_a_manifest_id(tmp_path: Path):
+    """Malformed production manifests fail with a path-specific diagnostic."""
+    manifest_dir = tmp_path / "missing-id"
+    manifest_dir.mkdir()
+    (manifest_dir / "manifest.toml").write_text(
+        "[channel]\noutbound = true\n\n"
+        "[channel.presentation]\nsupports_threads = false\n"
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"missing-id/manifest\.toml: channel manifest declares no non-empty id",
+    ):
+        _production_channel_capabilities("outbound", asset_root=tmp_path)
 
 
 def test_surface_gate_reports_a_new_uncovered_surface():
@@ -825,7 +1438,9 @@ def test_provider_write_derivation_still_finds_the_tools_it_replaced():
     the ones the hand-kept list carried, so they are a floor the derivation
     must always clear.
     """
-    missing = sorted(_HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS))
+    missing = sorted(
+        _HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS)
+    )
     assert not missing, (
         f"the derivation stopped recognising known provider writes: {missing}. "
         "It reads the `external_write` effect from "

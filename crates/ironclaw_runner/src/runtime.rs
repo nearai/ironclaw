@@ -1386,6 +1386,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             safe_name: capability_id.to_string(),
             safe_description: format!("{capability_id} description"),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         }

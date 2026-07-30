@@ -51,24 +51,33 @@ export function replaceAssistantReplyForRun(messages, replyMessage, runId) {
   const currentMessages = messages || [];
   if (!runId) return [...currentMessages, replyMessage];
 
-  let replaced = false;
-  let changed = false;
-  const next = [];
-  for (const message of currentMessages) {
-    if (message?.role === "assistant" && message.turnRunId === runId) {
-      if (!replaced) {
-        replaced = true;
-        changed = true;
-        next.push(finalReplyReplacement(message, replyMessage));
-      } else {
-        changed = true;
+  let replacementIndex = currentMessages.findIndex(
+    (message) =>
+      isFinalAssistantMessage(message) && message.turnRunId === runId,
+  );
+  if (replacementIndex < 0) {
+    for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
+      const message = currentMessages[index];
+      if (
+        message?.role === "assistant" &&
+        message.turnRunId === runId &&
+        message.isFinalReply === false
+      ) {
+        replacementIndex = index;
+        break;
       }
-      continue;
     }
-    next.push(message);
   }
 
-  return replaced && changed ? next : [...currentMessages, replyMessage];
+  if (replacementIndex < 0) {
+    return [...currentMessages, replyMessage];
+  }
+  const next = [...currentMessages];
+  next[replacementIndex] = finalReplyReplacement(
+    currentMessages[replacementIndex],
+    replyMessage,
+  );
+  return next;
 }
 
 function finalReplyReplacement(current, replyMessage) {

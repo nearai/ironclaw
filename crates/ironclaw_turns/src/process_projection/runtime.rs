@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use ironclaw_host_api::ProcessId;
+use ironclaw_host_api::{ProcessId, SanitizedFailure};
 use ironclaw_processes::{
     CancelProcessRequest, ClaimedProcess, GetProcessCheckpointRequest, GetProcessSnapshotRequest,
     JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointPort, ProcessCheckpointRef,
@@ -80,7 +80,9 @@ impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
             .flatten();
         let failure_reason = failure.map(|failure| failure.category().to_string());
         let failure_detail = failure.and_then(|failure| failure.detail().map(str::to_string));
-        let failure_retryable = failure.map(|_| commit.state.checkpoint_ref.is_some());
+        let failure_retryable = failure.map(|failure| {
+            !failure_prohibits_retry(failure) && commit.state.checkpoint_ref.is_some()
+        });
         let event = turn_lifecycle_event_from_process_journal_entry(ProcessJournalEntry {
             cursor: commit.state.journal_cursor,
             process_id: commit.state.process_id,
@@ -484,6 +486,11 @@ impl AgentTurnProcessRuntime {
                 run_id: request.run_id,
             });
         }
+        if state.failure.as_ref().is_some_and(failure_prohibits_retry) {
+            return Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            });
+        }
         let mut metadata = agent_turn_metadata_from_process_snapshot(&snapshot)?;
         let latest = self
             .snapshots
@@ -598,6 +605,10 @@ impl AgentTurnProcessRuntime {
             event_cursor: state.event_cursor,
         })
     }
+}
+
+fn failure_prohibits_retry(failure: &SanitizedFailure) -> bool {
+    failure.category() == crate::LoopFailureKind::CheckpointRejected.as_str()
 }
 
 #[async_trait]

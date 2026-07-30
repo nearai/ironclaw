@@ -211,7 +211,7 @@ pub fn capability_call_response(
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
-        effective_fallback_index: 0,
+        effective_fallback_index: Some(0),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
@@ -665,7 +665,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_text_deltas: Vec::new(),
             safe_reasoning_deltas: Vec::new(),
             usage: None,
-            effective_fallback_index: request.fallback_index,
+            effective_fallback_index: Some(request.fallback_index),
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,
@@ -929,6 +929,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
                 runtime: RuntimeKind::FirstParty,
                 safe_name: self.capability.capability_id.clone(),
                 safe_description: "harness capability".to_string(),
+                description_trust: Default::default(),
                 parameters_schema: serde_json::json!({ "type": "object" }),
                 concurrency_hint: ConcurrencyHint::Exclusive,
             }],

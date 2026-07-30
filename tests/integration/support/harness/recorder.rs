@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{CapabilityId, ResourceScope, RuntimeHttpEgressRequest};
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
+use ironclaw_resources::ResourceGovernor;
 use ironclaw_turns::{GateRef, run_profile::LoopRequest};
 
 use super::super::doubles::RecordingTestCapabilityPort;
@@ -161,6 +162,15 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.approval_requests_store(),
+        }
+    }
+
+    /// The exact resource governor composed into the production capability
+    /// path, when this recorder wraps that path.
+    pub(crate) fn resource_governor(&self) -> Option<Arc<dyn ResourceGovernor>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.resource_governor_for_test(),
         }
     }
 }

@@ -27,12 +27,7 @@ type ReasoningItemProps = {
 export function ActivityRun({ activity, activeRunId = null }: ActivityRunProps) {
   const t = useT();
   const summary = React.useMemo(() => summarizeActivity(activity, t), [activity, t]);
-  const shouldAutoExpand = shouldExpandActivityRun(activity);
-  const [expanded, setExpanded] = React.useState(shouldAutoExpand);
-
-  React.useEffect(() => {
-    if (shouldAutoExpand) setExpanded(true);
-  }, [shouldAutoExpand]);
+  const [expanded, setExpanded] = React.useState(false);
 
   return (
     <div className="mr-auto flex w-full min-w-0 flex-col v2-chat-readable-width" data-testid="activity-run">
@@ -116,22 +111,4 @@ function ReasoningItem({ content, streaming = false }: ReasoningItemProps) {
 
 function hasToolCalls(item) {
   return item?.toolCalls && item.toolCalls.length > 0;
-}
-
-function shouldExpandActivityRun(activity) {
-  return (activity || []).some((item) => {
-    if (item?.role === "thinking") return true;
-    if (
-      item?.toolStatus === "error" ||
-      item?.toolStatus === "declined"
-    ) {
-      return true;
-    }
-    if (!hasToolCalls(item)) return false;
-    return item.toolCalls.some(
-      (tool) =>
-        tool?.toolStatus === "error" ||
-        tool?.toolStatus === "declined",
-    );
-  });
 }

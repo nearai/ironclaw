@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @source "../";
+@source "../../node_modules/streamdown/dist/*.js";
 
 @theme {
   --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",

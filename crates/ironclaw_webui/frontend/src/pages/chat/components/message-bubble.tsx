@@ -9,12 +9,23 @@ import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
 import { fetchRunArtifact } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { COMMAND_RESULT_KIND, classifyCommandResponse } from "../lib/chat-commands";
 import {
   CHAT_MESSAGE_ROLES,
   messageBelongsToActiveRun,
   type ChatAttachment,
   type ChatMessage,
 } from "../lib/message-types";
+
+// The rich command-result card only renders for a SYSTEM notice carrying a
+// structured `commandResult` (see the branch below) — most messages never hit
+// it — so it loads as its own chunk instead of padding every /chat page load,
+// the same pattern markdown-renderer.tsx uses for its Streamdown import.
+const CommandResult = React.lazy(() =>
+  import("./command-result").then(({ CommandResult }) => ({
+    default: CommandResult,
+  }))
+);
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system stays as a centered notice, and error renders as an inline
@@ -30,11 +41,23 @@ const ROLE_STYLES = {
     "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
+type CommandDescriptor = {
+  name: string;
+  title: string;
+  description: string;
+  usage: string;
+};
+
 type MessageBubbleProps = {
   message: ChatMessage;
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
   activeRunId?: string | null;
+  // The server command inventory (`useChatCommands()`, threaded down from
+  // chat.tsx through MessageList) — only read for a SYSTEM message carrying a
+  // `commandResult` whose rejection is the "available commands" help case;
+  // see command-result.tsx.
+  commands?: CommandDescriptor[];
 };
 
 function formatTimestamp(value?: string) {
@@ -94,9 +117,10 @@ function MessageBubbleImpl({
   onRetry,
   threadId,
   activeRunId,
+  commands,
 }: MessageBubbleProps) {
   const t = useT();
-  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
+  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp, commandResult } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
   const finalReplyState =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
@@ -106,6 +130,7 @@ function MessageBubbleImpl({
   const isStreamingAssistantReply =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === false &&
+    message.isStreaming !== false &&
     messageBelongsToActiveRun(message, activeRunId);
   const isStreamingThinking =
     role === CHAT_MESSAGE_ROLES.THINKING &&
@@ -189,6 +214,26 @@ function MessageBubbleImpl({
     );
   }
 
+  // A command-execute response stashed structured data on the notice (see
+  // useChat.ts's `runCommand`) — render the rich, left-aligned presentation
+  // instead of the plain markdown notice bubble below. `commandResult` is
+  // absent on every other SYSTEM notice (e.g. the busy/rejected notice from
+  // `send()`), which keeps rendering through the legacy path unchanged; the
+  // EMPTY classification (defensive only — never hit against a real backend,
+  // see chat-commands.ts) also falls through to that legacy path rather than
+  // rendering nothing.
+  if (
+    role === CHAT_MESSAGE_ROLES.SYSTEM &&
+    commandResult &&
+    classifyCommandResponse(commandResult) !== COMMAND_RESULT_KIND.EMPTY
+  ) {
+    return (
+      <React.Suspense fallback={null}>
+        <CommandResult response={commandResult} commands={commands} />
+      </React.Suspense>
+    );
+  }
+
   if (role === CHAT_MESSAGE_ROLES.IMAGE) {
     const imgs = generatedImages || [];
     return (
@@ -209,10 +254,15 @@ function MessageBubbleImpl({
     );
   }
 
-  const timeLabel = formatTimestamp(timestamp);
+  const isIntermediateAssistantPhase =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === false;
+  const timeLabel = isIntermediateAssistantPhase ? "" : formatTimestamp(timestamp);
   const showActions =
     role === CHAT_MESSAGE_ROLES.USER ||
-    (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+    (role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+      !isOptimistic &&
+      !isIntermediateAssistantPhase);
   const showArtifactAction = Boolean(
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === true &&

@@ -828,6 +828,51 @@ async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
 }
 
 #[tokio::test]
+async fn gateway_does_not_recover_truncated_textual_tool_syntax_as_a_capability_call() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: Some(
+            "Searching now.\nto=demo__echo weirdjson\n{\"message\":\"hello\"}".to_string(),
+        ),
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Length,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: None,
+        reasoning_details: None,
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
+    assert_eq!(
+        error.usage,
+        Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        })
+    );
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "a truncated textual tool call must never reach capability registration"
+    );
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn gateway_rejects_unrecovered_textual_tool_syntax() {
     let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
         "Searching now.\nto=hidden.tool weirdjson\n{\"message\":\"hello\"}",
@@ -2309,7 +2354,15 @@ async fn gateway_rejects_truncated_provider_responses() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
+    assert_eq!(
+        error.usage,
+        Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        })
+    );
 }
 
 #[tokio::test]

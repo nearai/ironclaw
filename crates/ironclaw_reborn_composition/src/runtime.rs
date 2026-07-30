@@ -93,7 +93,7 @@ use ironclaw_turns::{
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
-use ironclaw_host_runtime::HostRuntime;
+use ironclaw_host_runtime::{HostRuntime, HostRuntimeHttpEgressPort};
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -551,6 +551,7 @@ pub struct RebornRuntime {
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
@@ -657,6 +658,26 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
     }
 
     fn extension_lifecycle_surface_context(&self) -> LifecycleProductSurfaceContext {
+        self.extension_lifecycle_surface_context.clone()
+    }
+}
+
+impl ironclaw_extension_host::ironhub::RebornIronHubRuntime for RebornRuntime {
+    fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
+        Arc::clone(&self.skill_management)
+    }
+
+    fn ironhub_extension_management(
+        &self,
+    ) -> Arc<ironclaw_extension_host::ExtensionLifecycleManager> {
+        Arc::clone(&self.extension_management)
+    }
+
+    fn ironhub_host_runtime_http_egress(&self) -> Option<HostRuntimeHttpEgressPort> {
+        self.host_runtime_http_egress.clone()
+    }
+
+    fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext {
         self.extension_lifecycle_surface_context.clone()
     }
 }
@@ -2788,6 +2809,13 @@ pub async fn build_reborn_runtime(
 }
 
 pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, RebornRuntimeError> {
+    let (runtime, _) = build_runtime_with_resource_governor(input).await?;
+    Ok(runtime)
+}
+
+pub(crate) async fn build_runtime_with_resource_governor(
+    input: RebornRuntimeInput,
+) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
     let RebornRuntimeInput {
         services: services_input,
         llm,
@@ -3986,6 +4014,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         skill_auto_activate_learned: Arc::clone(&services.skill_auto_activate_learned),
         extension_management: services.extension_management.clone(),
         runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
+        host_runtime_http_egress: services.host_runtime_http_egress.clone(),
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
         workspace_mounts: services.workspace_mounts.clone(),
@@ -4068,7 +4097,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     if let Some(channel_connection) = runtime.generic_channel_connection_facade() {
         let _ = runtime.channel_facade_slot.set(channel_connection);
     }
-    Ok(runtime)
+    Ok((runtime, resource_governor))
 }
 
 /// Thin wrapper over

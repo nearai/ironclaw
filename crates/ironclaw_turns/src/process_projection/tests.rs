@@ -162,6 +162,25 @@ async fn fail_agent_process<F>(
 ) where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
 {
+    fail_agent_process_with_category(
+        store,
+        turn_scope,
+        run_id,
+        checkpoint_ref,
+        "runtime_test_failure",
+    )
+    .await;
+}
+
+async fn fail_agent_process_with_category<F>(
+    store: &ironclaw_processes::ProcessJournalStore<F>,
+    turn_scope: &TurnScope,
+    run_id: TurnRunId,
+    checkpoint_ref: Option<ironclaw_processes::ProcessCheckpointRef>,
+    failure_category: &str,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
     use ironclaw_host_api::SanitizedFailure;
     use ironclaw_processes::{
         ClaimProcessesRequest, FailProcessRequest, ProcessKind, ProcessTransitionPort,
@@ -185,7 +204,7 @@ async fn fail_agent_process<F>(
             process_id: process_id_from_turn_run_id(run_id),
             worker_id: claim.worker_id,
             lease_token: claim.lease_token,
-            failure: SanitizedFailure::new("runtime_test_failure").expect("failure"),
+            failure: SanitizedFailure::new(failure_category).expect("failure"),
             recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
             checkpoint_ref,
             metadata: None,
@@ -586,6 +605,63 @@ async fn retry_rejects_wrong_actor_and_non_terminal_runs_without_creating_proces
             .expect("snapshots")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn retry_rejects_checkpoint_rejection_without_creating_a_process() {
+    use ironclaw_processes::{
+        ProcessRuntimePort, ProcessSnapshotSource, in_memory_backed_process_store,
+    };
+
+    let store = Arc::new(in_memory_backed_process_store());
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let actor = TurnActor::new(UserId::new("retry-checkpoint-owner").expect("retry owner"));
+    let run_id = TurnRunId::new();
+    submit_agent_process(
+        store.as_ref(),
+        &turn_scope,
+        &actor,
+        run_id,
+        TurnId::new(),
+        None,
+    )
+    .await;
+    fail_agent_process_with_category(
+        store.as_ref(),
+        &turn_scope,
+        run_id,
+        None,
+        crate::LoopFailureKind::CheckpointRejected.as_str(),
+    )
+    .await;
+
+    let result = runtime
+        .retry_turn(RetryTurnRequest {
+            scope: turn_scope.clone(),
+            actor,
+            run_id,
+            source_binding_ref: SourceBindingRef::new("retry-checkpoint-source").expect("source"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("retry-checkpoint-reply")
+                .expect("reply"),
+            idempotency_key: IdempotencyKey::new("retry-checkpoint").expect("idempotency"),
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(TurnError::RunNotRetryable { run_id: rejected }) if rejected == run_id
+    ));
+    assert_eq!(
+        store
+            .process_snapshots(&turn_scope.to_resource_scope())
+            .await
+            .expect("snapshots")
+            .len(),
+        1,
+        "a deterministic checkpoint rejection must not create a retry process"
     );
 }
 

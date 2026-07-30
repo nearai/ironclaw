@@ -1,6 +1,10 @@
+// @vitest-environment happy-dom
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import React from "react";
+import { resolve } from "node:path";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test, vi } from "vitest";
 
@@ -8,6 +12,8 @@ import {
   CHAT_MESSAGE_ROLES,
   type ErrorChatMessage,
 } from "../lib/message-types";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("./markdown-renderer", async () => {
   const { createElement } = await import("react");
@@ -29,6 +35,18 @@ vi.mock("./tool-activity", async () => {
   const { createElement } = await import("react");
   return {
     ToolActivity: () => createElement("div", { "data-testid": "tool-activity" }),
+  };
+});
+
+vi.mock("./command-result", async () => {
+  const { createElement } = await import("react");
+  return {
+    CommandResult: ({ response, commands }) =>
+      createElement("div", {
+        "data-testid": "command-result-mock",
+        "data-command": response?.command,
+        "data-commands-count": Array.isArray(commands) ? commands.length : -1,
+      }),
   };
 });
 
@@ -67,11 +85,11 @@ vi.mock("./attachment-preview", async () => {
 });
 
 const messageBubbleSource = readFileSync(
-  new URL("./message-bubble.tsx", import.meta.url),
+  resolve(process.cwd(), "src/pages/chat/components/message-bubble.tsx"),
   "utf8",
 );
 const appCssSource = readFileSync(
-  new URL("../../../styles/app.css", import.meta.url),
+  resolve(process.cwd(), "src/styles/app.css"),
   "utf8",
 );
 
@@ -103,7 +121,11 @@ test("assistant bubbles expose final reply state for live QA", () => {
 
 test("assistant bubbles keep streaming projections off the full markdown path", async () => {
   const { MessageBubble } = await import("./message-bubble");
-  const render = (isFinalReply: boolean, activeRunId: string | null) =>
+  const render = (
+    isFinalReply: boolean,
+    activeRunId: string | null,
+    isStreaming?: boolean,
+  ) =>
     renderToStaticMarkup(
       React.createElement(MessageBubble, {
         message: {
@@ -112,6 +134,7 @@ test("assistant bubbles keep streaming projections off the full markdown path", 
           content: '<img src=x onerror="alert(1)">',
           turnRunId: "run-1",
           isFinalReply,
+          isStreaming,
         },
         activeRunId,
       }),
@@ -123,6 +146,11 @@ test("assistant bubbles keep streaming projections off the full markdown path", 
     render(false, null),
     /data-streaming="false"/,
     "historical assistant drafts must render through the completed Markdown path",
+  );
+  assert.match(
+    render(false, "run-1", false),
+    /data-streaming="false"/,
+    "an earlier model phase must stop using the streaming Markdown path while the run continues",
   );
 });
 
@@ -146,42 +174,178 @@ test("thinking bubbles defer Markdown only for the active run", async () => {
 });
 
 test("active reasoning in an activity run defers Markdown", async () => {
-  const { ActivityRun } = await import("./activity-run");
-  const render = (activeRunId: string | null) =>
-    renderToStaticMarkup(
-      React.createElement(ActivityRun, {
-        activeRunId,
-        activity: [
-          {
-            id: "thinking-run-1",
-            role: CHAT_MESSAGE_ROLES.THINKING,
-            content: "Working on **this**.",
-            turnRunId: "run-1",
-          },
-        ],
-      }),
-    );
+  const activity = [
+    {
+      id: "thinking-run-1",
+      role: CHAT_MESSAGE_ROLES.THINKING,
+      content: "Working on **this**.",
+      turnRunId: "run-1",
+    },
+  ];
 
-  assert.match(render("run-1"), /data-streaming="true"/);
-  assert.match(render(null), /data-streaming="false"/);
+  assert.match(
+    await renderExpandedActivity(activity, "run-1"),
+    /data-streaming="true"/,
+  );
+  assert.match(
+    await renderExpandedActivity(activity, null),
+    /data-streaming="false"/,
+  );
 });
 
 test("untagged reasoning in an activity run renders Markdown", async () => {
-  const { ActivityRun } = await import("./activity-run");
-  const markup = renderToStaticMarkup(
-    React.createElement(ActivityRun, {
-      activity: [
-        {
-          id: "thinking-history",
-          role: CHAT_MESSAGE_ROLES.THINKING,
-          content: "Completed **reasoning**.",
-        },
-      ],
-    }),
-  );
+  const markup = await renderExpandedActivity([
+    {
+      id: "thinking-history",
+      role: CHAT_MESSAGE_ROLES.THINKING,
+      content: "Completed **reasoning**.",
+    },
+  ]);
 
   assert.match(markup, /data-streaming="false"/);
 });
+
+test("a SYSTEM message carrying a structured command result renders CommandResult, not the legacy markdown notice", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const commands = [
+    { name: "status", title: "Status", description: "d", usage: "/status" },
+  ];
+  // CommandResult is a React.lazy import behind a local Suspense boundary
+  // (see message-bubble.tsx), so a synchronous renderToStaticMarkup would
+  // only ever observe the fallback. Render into a real container instead and
+  // await act() so the (mocked) dynamic import resolves before asserting —
+  // the same pattern renderExpandedActivity() below uses.
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        React.createElement(MessageBubble, {
+          message: {
+            id: "system-command-1",
+            role: CHAT_MESSAGE_ROLES.SYSTEM,
+            content: "**Status**\nState: idle",
+            commandResult: {
+              command: "status",
+              result: { title: "Status", fields: [], lines: [] },
+            },
+            timestamp: "2026-07-30T00:00:00.000Z",
+          },
+          commands,
+        }),
+      );
+    });
+    const html = container.innerHTML;
+
+    assert.match(html, /data-testid="command-result-mock"/);
+    assert.match(html, /data-command="status"/, "CommandResult should receive the raw structured response");
+    assert.match(
+      html,
+      /data-commands-count="1"/,
+      "CommandResult should receive the server command inventory threaded down from chat.tsx",
+    );
+    assert.doesNotMatch(
+      html,
+      /data-testid="markdown"/,
+      "a structured command result must not also render through the legacy markdown notice path",
+    );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
+test("a plain SYSTEM notice without a structured command result keeps rendering through the legacy markdown bubble", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "system-busy-1",
+        role: CHAT_MESSAGE_ROLES.SYSTEM,
+        content: "The assistant is still working on the previous message.",
+        timestamp: "2026-07-30T00:00:00.000Z",
+      },
+    }),
+  );
+
+  assert.match(
+    html,
+    /data-testid="markdown"/,
+    "a plain system notice (e.g. the busy/rejected notice from send()) must keep its existing rendering",
+  );
+  assert.doesNotMatch(html, /data-testid="command-result-mock"/);
+});
+
+test("incoming reasoning and tool failures do not expand an activity run", async () => {
+  const { ActivityRun } = await import("./activity-run");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (activity) => {
+    act(() => {
+      root.render(React.createElement(ActivityRun, { activity }));
+    });
+    assert.equal(
+      container
+        .querySelector('[data-testid="activity-run-toggle"]')
+        ?.getAttribute("aria-expanded"),
+      "false",
+    );
+  };
+
+  try {
+    render([
+      {
+        id: "tool-search",
+        role: CHAT_MESSAGE_ROLES.TOOL_ACTIVITY,
+        toolName: "web-access.search",
+        toolStatus: "running",
+      },
+    ]);
+    render([
+      {
+        id: "reasoning",
+        role: CHAT_MESSAGE_ROLES.THINKING,
+        content: "Checking another source.",
+      },
+    ]);
+    render([
+      {
+        id: "tool-search",
+        role: CHAT_MESSAGE_ROLES.TOOL_ACTIVITY,
+        toolName: "web-access.search",
+        toolStatus: "error",
+      },
+    ]);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
+async function renderExpandedActivity(activity, activeRunId: string | null = null) {
+  const { ActivityRun } = await import("./activity-run");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    act(() => {
+      root.render(React.createElement(ActivityRun, { activity, activeRunId }));
+    });
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="activity-run-toggle"]',
+    );
+    assert.equal(toggle?.getAttribute("aria-expanded"), "false");
+    act(() => toggle?.click());
+    assert.equal(toggle?.getAttribute("aria-expanded"), "true");
+    return container.innerHTML;
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+}
 
 test("only final assistant replies expose the run artifact download", async () => {
   const { MessageBubble } = await import("./message-bubble");
@@ -380,6 +544,30 @@ test("message timestamp and actions share a hover-only meta row", () => {
     actionRow,
     />\s*\$\{copied \? "Copied" : "Copy"\}\s*<|>Retry</,
     "hover controls should use fixed-size icons instead of text that competes with the timestamp",
+  );
+});
+
+test("intermediate assistant phases do not reserve a hidden meta row", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "assistant-phase",
+        role: CHAT_MESSAGE_ROLES.ASSISTANT,
+        content: "I will check that.",
+        timestamp: "2026-07-30T00:00:00.000Z",
+        turnRunId: "run-1",
+        isFinalReply: false,
+        isStreaming: false,
+      },
+      activeRunId: "run-1",
+    }),
+  );
+
+  assert.doesNotMatch(
+    html,
+    /<time|chat\.copyMessage/,
+    "intermediate utterances should not add invisible controls between tool runs",
   );
 });
 

@@ -347,6 +347,20 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "WS12 generated gates and sabotage tests are reborn-scoped" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/test_reborn_changed_coverage.py
+scripts/ci/ws12-suite-shards.toml
+scripts/ci/ws12_suite_shards.py
+scripts/ci/test_ws12_suite_shards.py
+scripts/ci/ws12_workflow_contracts.py
+scripts/ci/test_ws12_workflow_contracts.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "test suite boundaries checker script" \
   "scripts/ci/check-test-suite-boundaries.sh" \
   "docs_only=false

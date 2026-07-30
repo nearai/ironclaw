@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
+from hermetic_process import forward_hermetic_process_env
 from helpers import (
     AUTH_TOKEN,
     EMULATE_GITHUB_BEARER,
@@ -316,12 +317,13 @@ def test_tool_zips() -> dict[str, Path]:
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
-    """Forward cargo-llvm-cov env vars into child processes when present."""
+    """Forward CI instrumentation and hermetic controls to child processes."""
     cov_env_prefixes = ("CARGO_LLVM_COV", "LLVM_")
     cov_env_extras = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
     for key, val in os.environ.items():
         if key.startswith(cov_env_prefixes) or key in cov_env_extras:
             env[key] = val
+    forward_hermetic_process_env(env)
 
 
 def _build_gateway_env(
@@ -488,6 +490,32 @@ def ironclaw_reborn_binary():
                 "cargo", "build",
                 "-p", "ironclaw",
                 "--bin", "ironclaw",
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
+def ironclaw_reborn_sso_binary():
+    """Build the debug-only Reborn binary variant used by the SSO mock."""
+    target_dir = _cargo_target_dir() / "e2e-sso"
+    binary = target_dir / "debug" / "ironclaw"
+    if _binary_needs_rebuild(binary):
+        print("Building Reborn ironclaw with test support (this may take a while)...")
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw",
+                "--features", "test-support",
+                "--target-dir", str(target_dir),
             ],
             cwd=ROOT,
             check=True,

@@ -1371,9 +1371,9 @@ async fn postgres_reserve_sequence_range_with_client(
         client,
         r#"
             INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
-            VALUES ($1, $2 + 1, NOW())
+            VALUES ($1, CAST($2 AS BIGINT) + 1, NOW())
             ON CONFLICT (path) DO UPDATE SET
-                next_seq = root_filesystem_sequences.next_seq + $2,
+                next_seq = root_filesystem_sequences.next_seq + CAST($2 AS BIGINT),
                 updated_at = NOW()
             RETURNING next_seq - 1 AS reserved
             "#,
