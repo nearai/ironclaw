@@ -155,7 +155,7 @@ async def _open_custom_mcp_page(
                 if setup_result == "wrong":
                     await fulfill(route, {"success": False, "message": "Token was rejected"})
                     return
-                installed[:] = [_registered_extension(auth_kind, "active")]
+                installed[:] = [_installed_extension(auth_kind, "active")]
                 await fulfill(route, {"success": True, "message": "Custom weather MCP configured"})
                 return
         await route.continue_()

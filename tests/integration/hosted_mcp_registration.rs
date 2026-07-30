@@ -653,6 +653,34 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
         )
         .await
         .expect("admin removes only their installation membership");
+    let admin_user_id = ironclaw_host_api::UserId::new("tenant-admin").expect("admin user id");
+    let member_user_id = ironclaw_host_api::UserId::new("tenant-member").expect("member user id");
+    let capabilities_after_admin_removal = services
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capability projection after admin removal");
+    let fixture_capability_after_removal = capabilities_after_admin_removal
+        .iter()
+        .find(|capability| capability.id.as_str().starts_with("mcp-fixture."))
+        .expect(
+            "member's installation keeps the fixture MCP capability published \
+             after the admin's removal",
+        );
+    let owner_members = fixture_capability_after_removal
+        .owner
+        .members()
+        .expect("hosted-MCP installations are member-scoped, not tenant-wide");
+    assert!(
+        !owner_members.contains(&admin_user_id),
+        "removal must revoke the admin's publication membership on the shared \
+         installation's capability, not just their own list view: {fixture_capability_after_removal:#?}"
+    );
+    assert!(
+        owner_members.contains(&member_user_id),
+        "the member's own membership must survive the admin's removal (per-user \
+         scoping): {fixture_capability_after_removal:#?}"
+    );
     let member_after = services
         .lifecycle_service
         .execute(
