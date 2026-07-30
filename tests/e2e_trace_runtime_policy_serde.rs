@@ -58,7 +58,7 @@ fn runtime_profile_round_trips_serde_for_every_variant() {
     let variants = [
         RuntimeProfile::SecureDefault,
         RuntimeProfile::LocalSafe,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
         RuntimeProfile::LocalYolo,
         RuntimeProfile::HostedSafe,
         RuntimeProfile::HostedDev,
@@ -216,7 +216,7 @@ fn effective_runtime_policy_round_trips_serde_for_a_representative_matrix() {
         .unwrap(),
         resolve(ResolveRequest::new(
             DeploymentMode::LocalSingleUser,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
         ))
         .unwrap(),
         resolve(ResolveRequest {
@@ -291,25 +291,25 @@ fn effective_runtime_policy_round_trips_serde_for_a_representative_matrix() {
 
 #[test]
 fn effective_runtime_policy_was_reduced_flag_round_trips_through_serde() {
-    // Build a narrowed policy: LocalYolo requested, LocalDev ceiling →
-    // resolver narrows to LocalDev. `was_reduced()` is `true`. Serialize,
+    // Build a narrowed policy: LocalYolo requested, LocalHost ceiling →
+    // resolver narrows to LocalHost. `was_reduced()` is `true`. Serialize,
     // deserialize, and assert the flag survives the round-trip.
     let narrowed = resolve(ResolveRequest {
         deployment: DeploymentMode::LocalSingleUser,
         requested_profile: RuntimeProfile::LocalYolo,
         org_policy: OrgPolicyConstraints {
-            max_profile: Some(RuntimeProfile::LocalDev),
+            max_profile: Some(RuntimeProfile::LocalHost),
             ..OrgPolicyConstraints::default()
         },
         yolo_disclosure_acknowledged: true,
     })
-    .expect("LocalYolo with LocalDev ceiling resolves");
+    .expect("LocalYolo with LocalHost ceiling resolves");
     assert!(
         narrowed.was_reduced(),
         "ceiling narrowing must set requested != resolved",
     );
     assert_eq!(narrowed.requested_profile, RuntimeProfile::LocalYolo);
-    assert_eq!(narrowed.resolved_profile, RuntimeProfile::LocalDev);
+    assert_eq!(narrowed.resolved_profile, RuntimeProfile::LocalHost);
 
     let json = serde_json::to_string(&narrowed).expect("serialize narrowed");
     let decoded: EffectiveRuntimePolicy =

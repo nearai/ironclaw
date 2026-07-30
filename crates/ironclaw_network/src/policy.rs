@@ -31,6 +31,10 @@ pub enum NetworkPolicyError {
         estimated: u64,
         limit: u64,
     },
+    #[error("invalid network host pattern {pattern:?}: {reason}")]
+    InvalidHostPattern { pattern: String, reason: String },
+    #[error("invalid network egress limit {raw:?}: {reason}")]
+    InvalidEgressLimit { raw: String, reason: String },
 }
 
 impl NetworkPolicyError {
@@ -48,6 +52,112 @@ impl NetworkPolicyError {
 
     pub fn is_egress_estimate_required(&self) -> bool {
         matches!(self, Self::EgressEstimateRequired { .. })
+    }
+
+    pub fn is_invalid_host_pattern(&self) -> bool {
+        matches!(self, Self::InvalidHostPattern { .. })
+    }
+
+    pub fn is_invalid_egress_limit(&self) -> bool {
+        matches!(self, Self::InvalidEgressLimit { .. })
+    }
+}
+
+/// Parses one operator-supplied egress byte-limit string (e.g. from an env
+/// var override) into a positive `u64`. Rejects non-numeric input and zero —
+/// `max_egress_bytes: Some(0)` would deny every request with an egress
+/// estimate and is never what an operator setting a volume cap means; if
+/// they want to disable the cap, unsetting the override (falling back to the
+/// caller's own default) is the way to do that, not `0`.
+pub fn parse_egress_limit(raw: &str) -> Result<u64, NetworkPolicyError> {
+    let trimmed = raw.trim();
+    let parsed: u64 = trimmed
+        .parse()
+        .map_err(|_| NetworkPolicyError::InvalidEgressLimit {
+            raw: raw.to_string(),
+            reason: "must be a positive integer number of bytes".to_string(),
+        })?;
+    if parsed == 0 {
+        return Err(NetworkPolicyError::InvalidEgressLimit {
+            raw: raw.to_string(),
+            reason: "must not be zero".to_string(),
+        });
+    }
+    Ok(parsed)
+}
+
+/// Parses one operator- or config-supplied hostname string into a validated
+/// [`NetworkTargetPattern`] with `scheme: None, port: None`.
+///
+/// This is the chokepoint for turning untrusted "extra allowed domain"
+/// strings into policy the enforcer will actually honor. It is stricter than
+/// [`NetworkTargetPattern::validate_declaration`] (`crates/ironclaw_host_api/
+/// src/action.rs`): that method accepts a bare `*` because some
+/// host-authored grants — e.g. `CapabilityNetworkProfile::DevWildcard`'s
+/// local-dev shell profile — legitimately mean "every host" and are reviewed
+/// as such at declaration time. A hostname typed into an env var was never
+/// reviewed — `host_matches_pattern` (this module) treats `*` as "match
+/// every host", so a typo here silently turns a package-registry allowlist
+/// into allow-all egress for the one profile whose entire purpose is holding
+/// untrusted code. Reject it instead of trusting it.
+///
+/// The two validators diverge INTENTIONALLY and this direction must not be
+/// collapsed either: `validate_declaration` must not be tightened to match
+/// this function's wildcard rejection, since that would break
+/// `DevWildcard`'s declared full-access grant. (Extension manifest
+/// credential audiences are already stricter than either of these — they
+/// reject a wildcard host outright via `ManifestV3Error::WildcardAudienceHost`
+/// — so they are not an example of a legitimate bare-`*` consumer either.)
+///
+/// Accepts: a bare hostname (`example.com`) or a single `*.`-prefixed
+/// wildcard label (`*.example.com`). Rejects: empty/whitespace-only input,
+/// the bare wildcard `*`, and anything containing characters outside
+/// `[A-Za-z0-9.-]` or with an empty/malformed label.
+pub fn parse_host_pattern(raw: &str) -> Result<NetworkTargetPattern, NetworkPolicyError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_host_pattern(raw, "must not be empty"));
+    }
+    // Mirror `validate_declaration`'s 253-byte cap (the DNS name length
+    // limit) so this validator is never laxer than the sibling it claims to
+    // be stricter than — see the doc comment above.
+    if trimmed.len() > 253 {
+        return Err(invalid_host_pattern(raw, "must be at most 253 bytes"));
+    }
+    if trimmed == "*" {
+        return Err(invalid_host_pattern(
+            raw,
+            "bare `*` would match every host; use a specific hostname or a \
+             `*.`-prefixed wildcard label",
+        ));
+    }
+
+    let label_source = trimmed.strip_prefix("*.").unwrap_or(trimmed);
+    let shape_ok = !label_source.is_empty()
+        && !label_source.starts_with('.')
+        && !label_source.ends_with('.')
+        && !label_source.contains("..")
+        && label_source
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
+    if !shape_ok {
+        return Err(invalid_host_pattern(
+            raw,
+            "must be a valid hostname or a `*.`-prefixed wildcard label",
+        ));
+    }
+
+    Ok(NetworkTargetPattern {
+        scheme: None,
+        host_pattern: trimmed.to_string(),
+        port: None,
+    })
+}
+
+fn invalid_host_pattern(raw: &str, reason: &str) -> NetworkPolicyError {
+    NetworkPolicyError::InvalidHostPattern {
+        pattern: raw.to_string(),
+        reason: reason.to_string(),
     }
 }
 

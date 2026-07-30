@@ -349,6 +349,8 @@ pub struct GenericChannelHostDeps {
     /// sink's pre-admission consume gate and identity-based actor resolution
     /// for extensions that pair without an OAuth vendor.
     pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
+    /// Admin-users directory backing channel-command role gating.
+    pub admin_users: Arc<dyn ironclaw_product::AdminUserService>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -759,10 +761,23 @@ impl GenericChannelHostAssembly {
         if let Some(delivery) = &self.deps.delivery {
             workflow = workflow.with_delivered_gate_routes(Arc::clone(&delivery.route_store));
         }
+        // Channel-command admission's admin-audience gate: the same
+        // per-extension provider identity `build_binding`'s actor resolver
+        // uses above, so the actor a command's role is resolved for is
+        // always the same actor the conversation binding resolved.
+        let (command_role_provider, command_role_lookup) = self.provider_identity_lookup(source);
+        let command_roles = Arc::new(crate::channel_command_roles::ChannelActorRoleResolver::new(
+            command_role_provider,
+            command_role_lookup,
+            Arc::clone(&self.deps.admin_users),
+            self.deps.identity.tenant_id.clone(),
+            self.deps.identity.operator_user_id.clone(),
+        ));
         workflow = workflow
             .with_product_command_admission_service(Arc::new(
                 ironclaw_product::DirectConversationCommandAdmission::new(
                     channel.commands.iter().map(String::as_str),
+                    command_roles,
                 )
                 .map_err(|error| {
                     format!(
@@ -819,6 +834,45 @@ impl GenericChannelHostAssembly {
         }))
     }
 
+    /// Provider identity + optional identity-lookup binding used to resolve a
+    /// verified inbound actor to a bound IronClaw user for this extension:
+    /// the OAuth vendor when the extension declares vendor auth, the
+    /// extension id when it pairs via `WebGeneratedCode` without a vendor, or
+    /// no lookup (the operator-actor policy) otherwise. Shared by
+    /// [`Self::build_binding`]'s conversation-binding actor resolver and
+    /// [`Self::build_generic_graph`]'s channel-command role resolver so both
+    /// read exactly the same per-extension policy instead of two copies that
+    /// can drift.
+    fn provider_identity_lookup(
+        &self,
+        source: &HostedChannelSource,
+    ) -> (
+        String,
+        Option<Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>>,
+    ) {
+        let pairing_extension = self
+            .deps
+            .channel_pairing
+            .as_ref()
+            .is_some_and(|registry| registry.get(source.extension_id()).is_some());
+        match (
+            self.deps.identity_lookup.as_ref(),
+            source.resolved().auth.first(),
+        ) {
+            (Some(lookup), Some(auth)) => {
+                (auth.vendor.as_str().to_string(), Some(Arc::clone(lookup)))
+            }
+            // Pairing-strategy channels have no OAuth vendor; verified
+            // inbound actors resolve through the bindings the pairing
+            // consume wrote, keyed by the extension id as provider. Unbound
+            // actors fail closed instead of inheriting the operator.
+            (Some(lookup), None) if pairing_extension => {
+                (source.extension_id().to_string(), Some(Arc::clone(lookup)))
+            }
+            _ => (source.extension_id().to_string(), None),
+        }
+    }
+
     /// The per-extension conversation-binding service over durable state at
     /// the extension's storage roots, bound under the deployment identity.
     async fn build_binding(
@@ -855,34 +909,16 @@ impl GenericChannelHostAssembly {
         // an auth vendor keep the operator-actor policy: the ingress
         // verification secret gates who reaches the installation and no
         // binding can exist to resolve.
-        let pairing_extension = self
-            .deps
-            .channel_pairing
-            .as_ref()
-            .is_some_and(|registry| registry.get(source.extension_id()).is_some());
-        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match (
-            self.deps.identity_lookup.as_ref(),
-            source.resolved().auth.first(),
-        ) {
-            (Some(lookup), Some(auth)) => Arc::new(
+        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match provider_lookup {
+            Some(lookup) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    auth.vendor.as_str(),
+                    provider,
                     source.extension_id(),
-                    Arc::clone(lookup),
+                    lookup,
                 ),
             ),
-            // Pairing-strategy channels have no OAuth vendor; verified
-            // inbound actors resolve through the bindings the pairing
-            // consume wrote, keyed by the extension id as provider. Unbound
-            // actors fail closed instead of inheriting the operator.
-            (Some(lookup), None) if pairing_extension => Arc::new(
-                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    source.extension_id(),
-                    source.extension_id(),
-                    Arc::clone(lookup),
-                ),
-            ),
-            _ => Arc::new(OperatorActorUserResolver {
+            None => Arc::new(OperatorActorUserResolver {
                 operator_user_id: identity.operator_user_id.clone(),
             }),
         };

@@ -14,6 +14,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
     ProjectionCursor as EventProjectionCursor, ProjectionReplay,
@@ -36,7 +37,6 @@ use ironclaw_host_api::{
     VirtualPath,
 };
 use ironclaw_outbound::OutboundStateStore;
-use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
@@ -220,7 +220,7 @@ pub fn build_reborn_projection_services(
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         live_updates.clone(),
         Arc::new(NoExposureProjectionRedactionValidator),
-        // §4.3: the local-dev projection bundle's EventStreamManager keeps its
+        // §4.3: the standalone projection bundle's EventStreamManager keeps its
         // own ephemeral, volatile outbound-delivery bookkeeping — the drop-in
         // for the deleted throwaway `InMemoryOutboundStateStore::default()`.
         // A tenant/user-scoped view over a fresh `InMemoryBackend` mounts

@@ -1,4 +1,4 @@
-// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant LocalDevRootFilesystem alias -> CompositeRootFilesystem (de-prefix, no logic change), plan #6168
+// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant local-root filesystem alias -> CompositeRootFilesystem (no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
 //! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the

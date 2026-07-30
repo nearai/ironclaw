@@ -49,11 +49,11 @@ use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::BudgetGateId;
 use ironclaw_turns::GateRef;
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -138,8 +138,8 @@ async fn build_runtime_with_pause_inducing_setup(
 ) -> (RebornRuntime, Arc<BudgetTestGateway>) {
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 5, 5));
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input(format!("{tag}-owner"), root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(format!("{tag}-owner"), root)
+            .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tag}-tenant"),

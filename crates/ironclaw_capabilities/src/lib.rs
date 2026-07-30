@@ -1,7 +1,7 @@
 //! Capability invocation host contracts for IronClaw Reborn.
 //!
 //! `ironclaw_capabilities` is the caller-facing capability invocation service.
-//! It coordinates authorization, approval resume, run-state transitions, and
+//! It coordinates authorization, approval resume, process invocation transitions, and
 //! neutral runtime dispatch without depending on concrete runtime crates.
 #![warn(unreachable_pub)]
 

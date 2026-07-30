@@ -10,7 +10,7 @@ function component(name) {
   };
 }
 
-// `isLocalDevOrigin` defaults to `true` (local origin) so existing
+// `isLoopbackBrowserOrigin` defaults to `true` (local origin) so existing
 // providers-only test cases keep exercising the local-install-hint path
 // without every call site having to opt in explicitly.
 function renderLoginPage({ providers = [], isLocalDev = true } = {}) {
@@ -27,7 +27,7 @@ function renderLoginPage({ providers = [], isLocalDev = true } = {}) {
     useOAuthProviders: () => providers,
     // Imported from `src/lib/browser-origin.ts`; the VM harness strips
     // imports, so it must be injected here like every other dependency.
-    isLocalDevOrigin: () => isLocalDev,
+    isLoopbackBrowserOrigin: () => isLocalDev,
     useForm: () => ({
       formState: { errors: {}, isSubmitting: false },
       handleSubmit: () => () => {},

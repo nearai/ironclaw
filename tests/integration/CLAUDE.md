@@ -99,7 +99,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 - `harness_mcp.rs` — the mock-MCP scaffolding extracted from the harness:
   `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
   `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
-  `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`,
+  `mock_mcp_extension_package`, `standalone_host_runtime_with_registry_egress_and_mcp`,
   and the MCP trust/network policies. `HostRuntimeCapabilityHarness::mock_mcp_tools`
   lives in `harness/profiles/mock_mcp.rs` (part of the `ToolsProfile` split below);
   it delegates the MCP wiring to the `pub(super)` factories in `harness_mcp.rs`.
@@ -386,12 +386,12 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — constructs the `StandaloneSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
 `RebornRuntime` (returned by `build_runtime`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 
-- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
-- `local_dev_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
+- `standalone_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
+- `standalone_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
 Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornRuntime` from `build_runtime` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
 

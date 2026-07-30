@@ -7,11 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, ThreadId, UserId,
-    VirtualPath,
-};
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
@@ -41,24 +37,24 @@ use ironclaw_runner::planned_driver_factory::{
     PLANNED_DEFAULT_PROFILE_ID, default_planned_run_profile_resolver,
 };
 use ironclaw_runner::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeSubagentGoalStore,
-    RuntimeTurnStateStore, build_product_live_planned_runtime,
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
+    build_product_live_planned_runtime,
 };
 use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
 };
-use ironclaw_runner::subagent::goal_store::in_memory_backed_subagent_goal_store;
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
 };
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
-    IdempotencyKey, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
-    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
+    AgentTurnProcessRuntime, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse,
+    DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
+    ProcessLoopCheckpointStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
+    TurnRunWake, TurnScope, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -67,8 +63,6 @@ use ironclaw_turns::{
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-
-use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
@@ -424,42 +418,41 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
     }
 }
 
-fn turn_state_store_dyn(
-    store: &Arc<TurnStateRowStore<InMemoryBackend>>,
-) -> Arc<dyn TurnStateStore> {
-    Arc::clone(store) as Arc<dyn TurnStateStore>
+fn agent_turn_runtime_dyn(store: &Arc<AgentTurnProcessRuntime>) -> Arc<dyn AgentTurnRuntimePort> {
+    Arc::clone(store) as Arc<dyn AgentTurnRuntimePort>
+}
+
+fn process_runtime_fixture() -> (
+    ProcessRuntimeSystem,
+    Arc<AgentTurnProcessRuntime>,
+    Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+) {
+    let process_system = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
+    let turn_store = Arc::new(process_system.agent_turn_runtime());
+    let checkpoint_store = Arc::new(ProcessLoopCheckpointStore::new(
+        process_system.checkpoints(),
+    )) as Arc<dyn ironclaw_turns::LoopCheckpointStore>;
+    (process_system, turn_store, checkpoint_store)
 }
 
 /// Test-only in-memory await-edge trio (writer/settler/evidence trait
-/// objects, plus the goal store the resolver and `subagent_goal_store`
-/// share) — these harness tests don't exercise real subagent spawn/settle
-/// flows, so in-memory `ScopedFilesystem` fixtures are enough for their
-/// purposes.
+/// objects. These harness tests don't exercise real subagent spawn/settle
+/// flows.
 #[allow(clippy::type_complexity)]
 fn test_await_edge_trio(
-    turn_store: &Arc<TurnStateRowStore<InMemoryBackend>>,
+    process_system: &ProcessRuntimeSystem,
+    turn_store: &Arc<AgentTurnProcessRuntime>,
     capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     thread_service: Arc<InMemorySessionThreadService>,
 ) -> (
     Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
     Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
     Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
-    Arc<dyn RuntimeSubagentGoalStore>,
 ) {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").unwrap(),
-        VirtualPath::new("/turns").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    let store = Arc::new(AwaitEdgeStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )));
-    let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
+    let store = Arc::new(AwaitEdgeStore::new(process_system.dependencies()));
     let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&store),
-        goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-        Arc::clone(turn_store) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        Arc::clone(turn_store) as Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
         capability_result_writer,
         thread_service,
     ));
@@ -471,7 +464,6 @@ fn test_await_edge_trio(
         driver as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
         resolver as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
         store as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
-        goal_store as Arc<dyn RuntimeSubagentGoalStore>,
     )
 }
 
@@ -559,7 +551,7 @@ fn sample_user_message_envelope_with_install_text_and_trigger(
 async fn user_message_resolves_binding_persists_message_and_submits_turn() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(in_memory_turn_state_store());
+    let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
@@ -656,7 +648,7 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
 async fn user_message_no_profile_submission_uses_planned_reborn_default() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(in_memory_turn_state_store());
+    let store = Arc::new(in_memory_agent_turn_runtime());
     let resolver =
         Arc::new(default_planned_run_profile_resolver().expect("planned default profile resolver"));
     let coordinator =
@@ -678,11 +670,9 @@ async fn user_message_no_profile_submission_uses_planned_reborn_default() {
     else {
         panic!("expected submitted outcome");
     };
+    let turn_scope = turn_scope_for_binding(&binding);
     let state = store
-        .get_run_state(GetRunStateRequest {
-            scope: turn_scope_for_binding(&binding),
-            run_id: submitted_run_id,
-        })
+        .get_run_state(&turn_scope, submitted_run_id)
         .await
         .unwrap();
     assert_eq!(
@@ -700,8 +690,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
     let thread_service = InMemorySessionThreadService::default();
-    let turn_store = Arc::new(in_memory_turn_state_store());
-    let checkpoint_store = Arc::clone(&turn_store);
+    let (process_system, turn_store, checkpoint_store) = process_runtime_fixture();
     let model_requests = Arc::new(Mutex::new(Vec::new()));
     let model_gateway = Arc::new(ReplyModelGateway {
         reply: "planned product reply".to_string(),
@@ -724,33 +713,27 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         ),
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
-    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let unused_capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
         Arc::new(UnusedCapabilityResultWriter);
-    let (
-        subagent_await_edge_writer,
-        subagent_await_edge_settler,
-        subagent_await_edge_evidence,
-        subagent_goal_store,
-    ) = test_await_edge_trio(
-        &turn_store,
-        Arc::clone(&unused_capability_result_writer),
-        Arc::new(thread_service.clone()),
-    );
+    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) =
+        test_await_edge_trio(
+            &process_system,
+            &turn_store,
+            Arc::clone(&unused_capability_result_writer),
+            Arc::new(thread_service.clone()),
+        );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         gate_record_store: None,
-        turn_state: turn_state_for_runtime,
+        process_system,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
-        checkpoint_state_store: in_memory_checkpoint_state_store(),
         loop_checkpoint_store: checkpoint_store.clone(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer: Arc::clone(&unused_capability_result_writer),
-        subagent_goal_store,
         subagent_await_edge_writer,
         subagent_await_edge_settler,
         subagent_await_edge_evidence: Arc::clone(&subagent_await_edge_evidence),
@@ -764,7 +747,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         loop_exit_evidence: Arc::new(
             ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 Arc::new(thread_service.clone()),
-                turn_state_store_dyn(&turn_store),
+                agent_turn_runtime_dyn(&turn_store),
                 checkpoint_store,
                 subagent_await_edge_evidence,
                 thread_scope.clone(),
@@ -812,10 +795,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     let state = match timeout(Duration::from_secs(3), async {
         loop {
             let state = turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: turn_scope.clone(),
-                    run_id: submitted_run_id,
-                })
+                .get_run_state(&turn_scope, submitted_run_id)
                 .await
                 .expect("run state");
             if state.status.is_terminal() {
@@ -829,10 +809,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         Ok(state) => state,
         Err(error) => {
             let state = turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: turn_scope.clone(),
-                    run_id: submitted_run_id,
-                })
+                .get_run_state(&turn_scope, submitted_run_id)
                 .await
                 .expect("run state after timeout");
             let history = thread_service
@@ -881,8 +858,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
     let thread_service = InMemorySessionThreadService::default();
-    let turn_store = Arc::new(in_memory_turn_state_store());
-    let checkpoint_store = Arc::clone(&turn_store);
+    let (process_system, turn_store, checkpoint_store) = process_runtime_fixture();
     let model_requests = Arc::new(Mutex::new(Vec::new()));
     let model_release = CancellationToken::new();
     let model_gateway = Arc::new(PausingReplyModelGateway {
@@ -907,33 +883,27 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         ),
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
-    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let unused_capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
         Arc::new(UnusedCapabilityResultWriter);
-    let (
-        subagent_await_edge_writer,
-        subagent_await_edge_settler,
-        subagent_await_edge_evidence,
-        subagent_goal_store,
-    ) = test_await_edge_trio(
-        &turn_store,
-        Arc::clone(&unused_capability_result_writer),
-        Arc::new(thread_service.clone()),
-    );
+    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) =
+        test_await_edge_trio(
+            &process_system,
+            &turn_store,
+            Arc::clone(&unused_capability_result_writer),
+            Arc::new(thread_service.clone()),
+        );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         gate_record_store: None,
-        turn_state: turn_state_for_runtime,
+        process_system,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
-        checkpoint_state_store: in_memory_checkpoint_state_store(),
         loop_checkpoint_store: checkpoint_store.clone(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer: Arc::clone(&unused_capability_result_writer),
-        subagent_goal_store,
         subagent_await_edge_writer,
         subagent_await_edge_settler,
         subagent_await_edge_evidence: Arc::clone(&subagent_await_edge_evidence),
@@ -948,7 +918,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         // runtime cancellation source even if the supplied evidence is not.
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(thread_service.clone()),
-            turn_state_store_dyn(&turn_store),
+            agent_turn_runtime_dyn(&turn_store),
             checkpoint_store,
             subagent_await_edge_evidence,
             thread_scope.clone(),
@@ -1036,10 +1006,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     let state = timeout(Duration::from_secs(3), async {
         loop {
             let state = turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: turn_scope.clone(),
-                    run_id: submitted_run_id,
-                })
+                .get_run_state(&turn_scope, submitted_run_id)
                 .await
                 .expect("run state");
             if state.status.is_terminal() {
@@ -1080,8 +1047,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
     let thread_service = InMemorySessionThreadService::default();
-    let turn_store = Arc::new(in_memory_turn_state_store());
-    let checkpoint_store = Arc::clone(&turn_store);
+    let (process_system, turn_store, checkpoint_store) = process_runtime_fixture();
     let model_gateway = Arc::new(ReplyModelGateway {
         reply: "planned product reply".to_string(),
         requests: Arc::new(Mutex::new(Vec::new())),
@@ -1103,33 +1069,27 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         ),
     );
 
-    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let unused_capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
         Arc::new(UnusedCapabilityResultWriter);
-    let (
-        subagent_await_edge_writer,
-        subagent_await_edge_settler,
-        subagent_await_edge_evidence,
-        subagent_goal_store,
-    ) = test_await_edge_trio(
-        &turn_store,
-        Arc::clone(&unused_capability_result_writer),
-        Arc::new(thread_service.clone()),
-    );
+    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) =
+        test_await_edge_trio(
+            &process_system,
+            &turn_store,
+            Arc::clone(&unused_capability_result_writer),
+            Arc::new(thread_service.clone()),
+        );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         gate_record_store: None,
-        turn_state: turn_state_for_runtime,
+        process_system,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
-        checkpoint_state_store: in_memory_checkpoint_state_store(),
         loop_checkpoint_store: checkpoint_store.clone(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer: Arc::clone(&unused_capability_result_writer),
-        subagent_goal_store,
         subagent_await_edge_writer,
         subagent_await_edge_settler,
         subagent_await_edge_evidence: Arc::clone(&subagent_await_edge_evidence),
@@ -1142,7 +1102,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(InMemorySessionThreadService::default()),
-            Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+            Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
             checkpoint_store,
             subagent_await_edge_evidence,
             thread_scope,
@@ -1176,7 +1136,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
 async fn busy_thread_persists_second_message_as_rejected_busy() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(in_memory_turn_state_store());
+    let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
@@ -1470,7 +1430,7 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
 async fn max_valid_external_ids_do_not_overflow_turn_refs() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(in_memory_turn_state_store());
+    let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
 
@@ -1520,7 +1480,7 @@ async fn binding_failure_surfaces_workflow_error() {
     });
 
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(in_memory_turn_state_store());
+    let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
 

@@ -65,6 +65,17 @@ pub enum LoopProgressEvent {
         /// lockstep with the sibling `LoopSafeSummary`-typed summary fields.
         safe_summary: Option<LoopSafeSummary>,
     },
+    /// A recovery decision was applied to a failed model or capability
+    /// operation. This is the durable numerator paired with failure
+    /// milestones. `sequence` is stable across checkpoint replay so consumers
+    /// can deduplicate an at-least-once physical append into one logical event.
+    FailureRecovered {
+        #[serde(default)]
+        sequence: u64,
+        stage: LoopRecoveryStage,
+        class: LoopRecoveryClass,
+        disposition: LoopRecoveryDisposition,
+    },
     GateBlocked {
         iteration: u32,
         gate_kind: LoopGateKind,
@@ -124,6 +135,7 @@ impl LoopProgressEvent {
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::CapabilityActivityFailed { .. } => "capability_activity_failed",
+            Self::FailureRecovered { .. } => "failure_recovered",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
             Self::CompactionStarted { .. } => "compaction_started",
@@ -134,6 +146,83 @@ impl LoopProgressEvent {
             Self::GoalRefreshCompleted { .. } => "goal_refresh_completed",
             Self::GoalRefreshFailed { .. } => "goal_refresh_failed",
             Self::GoalRefreshLeakDetected { .. } => "goal_refresh_leak_detected",
+        }
+    }
+}
+
+/// Loop stage that applied a recovery decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopRecoveryStage {
+    Model,
+    Capability,
+}
+
+impl LoopRecoveryStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Capability => "capability",
+        }
+    }
+}
+
+/// Stable recovery class used for durable recovery-rate dimensions.
+///
+/// Capability failures retain the canonical [`FailureKind`] rather than
+/// copying its vocabulary into this crate. Model variants name the executor's
+/// closed recovery buckets, which have no capability-failure equivalent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopRecoveryClass {
+    Capability(FailureKind),
+    ModelTransient,
+    ModelContextOverflow,
+    ModelContentFiltered,
+    ModelInvalidOutput,
+    ModelUnavailable,
+    ModelInternal,
+    ModelStaleRequest,
+    ModelUnauthorized,
+    ModelCheckpointRejected,
+    ModelTranscriptWriteFailed,
+}
+
+impl LoopRecoveryClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Capability(kind) => kind.as_str(),
+            Self::ModelTransient => "model_transient",
+            Self::ModelContextOverflow => "model_context_overflow",
+            Self::ModelContentFiltered => "model_content_filtered",
+            Self::ModelInvalidOutput => "model_invalid_output",
+            Self::ModelUnavailable => "model_unavailable",
+            Self::ModelInternal => "model_internal",
+            Self::ModelStaleRequest => "model_stale_request",
+            Self::ModelUnauthorized => "model_unauthorized",
+            Self::ModelCheckpointRejected => "model_checkpoint_rejected",
+            Self::ModelTranscriptWriteFailed => "model_transcript_write_failed",
+        }
+    }
+}
+
+/// How the executor recovered from the failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopRecoveryDisposition {
+    /// The failed operation will be re-issued, possibly after rebuilding the
+    /// iteration or altering its prompt.
+    Retried,
+    /// The failure was surfaced as a typed model-visible observation so the
+    /// model can choose a different action.
+    ModelVisible,
+}
+
+impl LoopRecoveryDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retried => "retried",
+            Self::ModelVisible => "model_visible",
         }
     }
 }
@@ -175,11 +264,10 @@ pub enum LoopDriverNoteKind {
 pub trait LoopProgressPort: Send + Sync {
     /// Emit observational progress for UI/status consumers.
     ///
-    /// Progress events are best-effort and must not be used as
-    /// recoverability-critical durability markers. A failed progress emission
-    /// must not invalidate already-completed durable work; callers should treat
-    /// this like host model milestone projection, where sink failures are
-    /// logged/observed without changing the provider or checkpoint outcome.
+    /// Progress events are best-effort except
+    /// [`LoopProgressEvent::FailureRecovered`], whose producer must propagate a
+    /// failed append before continuing the recovery transition. Other progress
+    /// failures must not invalidate already-completed durable work.
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError>;
 }
 

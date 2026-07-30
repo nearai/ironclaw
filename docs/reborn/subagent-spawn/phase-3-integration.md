@@ -1359,7 +1359,8 @@ store, durable tombstone store, autonomous-continuation budget, completion
 observer, and restart reconciler. They must be subject to the same safety-class
 gate as `checkpoint_state_store` and `wake_notifier`. The pending-gate
 projection sink is a P0 product-surface prerequisite checked by composition, not
-a subagent-family readiness component.
+a subagent-family readiness component. The historical
+`checkpoint_state_store` gate is now the process checkpoint port.
 
 ```rust
 // crates/ironclaw_runner/src/production_readiness.rs  (additions)

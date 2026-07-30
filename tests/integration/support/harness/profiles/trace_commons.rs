@@ -33,9 +33,7 @@ pub(crate) fn trace_commons_tools_profile() -> HarnessResult<ToolsProfile> {
         // enabled here so the scripted run isn't gated.
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         ),
         // onboard declares EffectKind::Network, so the lease needs a non-empty network
         // policy or the obligation check rejects dispatch before the consent gate runs.

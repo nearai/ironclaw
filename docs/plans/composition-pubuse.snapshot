@@ -1,18 +1,17 @@
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::ChannelHostAssemblyTestWiring;
-pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
-pub use factory::local_dev_db_path;
-pub use factory::open_local_dev_secret_store;
+pub use factory::STANDALONE_SECRETS_MASTER_KEY_PATH;
+pub use factory::open_standalone_secret_store;
 pub use factory::production_first_party_trust_policy;
-pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
+pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
+pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
@@ -66,12 +65,12 @@ pub use memory_provider_factory::{
 };
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
+    hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options, standalone_runtime_policy,
+    standalone_unrestricted_runtime_policy,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
 pub use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
@@ -96,6 +95,7 @@ pub use readiness::{
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
     RebornServiceReadiness, RebornWorkerReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,

@@ -14,7 +14,8 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
         CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRequestBatch,
+        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRecoveryClass,
+        LoopRecoveryDisposition, LoopRecoveryStage, LoopRequestBatch,
         MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
         ObservationTrust, ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
         VisibleCapabilitySurface,
@@ -39,8 +40,8 @@ use super::{
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_port_error_is_terminal, capability_summary,
     clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
-    push_completed_result, sanitized_strategy_summary_or_fallback,
+    honor_capability_retry_alteration, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -948,12 +949,18 @@ impl CapabilityStage {
         clear_matching_pending_auth_resume(&mut state, &call);
         clear_matching_pending_external_tool_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
-            match ctx
+            let outcome = ctx
                 .planner
                 .recovery()
-                .on_capability_error(&state, &summary)
-                .await
-            {
+                .on_capability_error(&state, &summary, model_observation.as_ref())
+                .await;
+            let outcome = match outcome {
+                RecoveryOutcome::Retry { recovery, .. } if is_resume_origin => {
+                    RecoveryOutcome::ToolErrorResult { recovery }
+                }
+                other => other,
+            };
+            match outcome {
                 RecoveryOutcome::ModelErrorObservation { .. } => {
                     return Err(AgentLoopExecutorError::PlannerContract {
                         detail: "ModelErrorObservation on capability error",
@@ -970,6 +977,15 @@ impl CapabilityStage {
                         capability_batch,
                     )
                     .await?;
+                    CheckpointStage
+                        .emit_recovery(
+                            ctx,
+                            &mut state,
+                            LoopRecoveryStage::Capability,
+                            LoopRecoveryClass::Capability(summary.kind),
+                            LoopRecoveryDisposition::ModelVisible,
+                        )
+                        .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -1019,31 +1035,6 @@ impl CapabilityStage {
                 RecoveryOutcome::Retry {
                     recovery, alter, ..
                 } => {
-                    state.recovery_state = recovery;
-
-                    // Part C-sub-A: a resume-origin retryable failure must not be
-                    // silently re-dispatched.  The first dispatch already contacted
-                    // the backend (side-effect risk) and a retry without the
-                    // approval/auth context would cause scope_mismatch.  Surface
-                    // the real error to the model as a clean tool error and
-                    // continue the loop so the user can re-approve / re-auth.
-                    if is_resume_origin {
-                        append_blocked_capability_error_result(
-                            ctx.host,
-                            &mut state,
-                            &call,
-                            &summary,
-                            model_observation,
-                            capability_batch,
-                        )
-                        .await?;
-                        match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                            CancelCheck::Continue(next) => state = *next,
-                            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
-                        }
-                        return Ok(BatchStep::Continue(Box::new(state)));
-                    }
-
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -1053,7 +1044,17 @@ impl CapabilityStage {
                             detail: "invalid model output repair retry is model-only",
                         });
                     }
-                    honor_retry_alteration(alter.as_ref())?;
+                    honor_capability_retry_alteration(alter.as_ref())?;
+                    state.recovery_state = recovery;
+                    CheckpointStage
+                        .emit_recovery(
+                            ctx,
+                            &mut state,
+                            LoopRecoveryStage::Capability,
+                            LoopRecoveryClass::Capability(summary.kind),
+                            LoopRecoveryDisposition::Retried,
+                        )
+                        .await?;
                     CheckpointStage
                         .emit_progress(
                             ctx,

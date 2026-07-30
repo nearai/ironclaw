@@ -215,28 +215,15 @@ impl OpenAiCodexProvider {
                 });
 
             let body_text = response.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(LlmError::AuthFailed {
-                    provider: "openai_codex".to_string(),
-                });
-            }
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(LlmError::RateLimited {
-                    provider: "openai_codex".to_string(),
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::OpenAiCodex,
+                    model: &self.model,
+                    status: status.as_u16(),
+                    body: &body_text,
                     retry_after,
-                });
-            }
-            // Context-overflow (HTTP 413, or a 400 whose body names a
-            // context-length error) must surface as ContextLengthExceeded so
-            // the loop's context-shrink recovery fires instead of a generic
-            // RequestFailed.
-            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
-                return Err(error);
-            }
-            return Err(LlmError::RequestFailed {
-                provider: "openai_codex".to_string(),
-                reason: format!("HTTP {status}: {body_text}"),
-            });
+                },
+            ));
         }
 
         // Read the full body and parse SSE events
@@ -255,6 +242,10 @@ impl OpenAiCodexProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiCodexProvider {
+    fn provider_id(&self) -> String {
+        "openai_codex".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.model
     }

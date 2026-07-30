@@ -1,6 +1,6 @@
 //! In-memory product workflow idempotency ledger.
 //!
-//! This implementation is suitable for local-dev composition and deterministic
+//! This implementation is suitable for standalone composition and deterministic
 //! integration tests. Durable production deployments should wire a database
 //! ledger with the same lease semantics.
 
@@ -55,7 +55,7 @@ impl InMemoryIdempotencyLedger {
         }
     }
 
-    /// Reclaim expired non-terminal reservations. Exposed so local-dev hosts
+    /// Reclaim expired non-terminal reservations. Exposed so standalone hosts
     /// and tests can model the same recovery contract a durable ledger needs.
     pub fn expire_in_flight_before(
         &self,

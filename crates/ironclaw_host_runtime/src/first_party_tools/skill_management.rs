@@ -32,7 +32,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             SKILL_LIST_CAPABILITY_ID,
-            "List Reborn filesystem skills visible to the current local-dev agent",
+            "List Reborn filesystem skills visible to the current standalone agent",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),

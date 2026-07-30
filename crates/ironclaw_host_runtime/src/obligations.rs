@@ -2,7 +2,10 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -26,7 +29,12 @@ use ironclaw_host_api::{
     SandboxQuota, SecretHandle, Timestamp, VendorId,
 };
 use ironclaw_network::NetworkHttpEgress;
-use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStorePort};
+use ironclaw_processes::{
+    ProcessError, ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalKind,
+    ProcessKind, ProcessRecord, ProcessRuntimePort, ProcessStart, ProcessSubmissionLifecycle,
+    capability_process_record, complete_capability_process, fail_capability_process,
+    process_record_from_snapshot, submit_capability_process,
+};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
@@ -530,7 +538,7 @@ impl BuiltinObligationServices {
         inner: Arc<S>,
     ) -> ProcessObligationLifecycleStore
     where
-        S: ProcessStorePort + 'static,
+        S: ProcessRuntimePort + 'static,
     {
         ProcessObligationLifecycleStore::new(
             inner,
@@ -542,7 +550,7 @@ impl BuiltinObligationServices {
 
     pub fn process_obligation_lifecycle_store_dyn(
         &self,
-        inner: Arc<dyn ProcessStorePort>,
+        inner: Arc<dyn ProcessRuntimePort>,
     ) -> ProcessObligationLifecycleStore {
         ProcessObligationLifecycleStore::from_dyn(
             inner,
@@ -657,18 +665,19 @@ impl SecretStorePort for SharedSecretStore {
 }
 
 /// Process-store wrapper that owns spawn-phase obligation handoffs after
-/// `ProcessStorePort::start` succeeds.
+/// process submission succeeds.
 ///
 /// `CapabilityHost` aborts prepared effects when process start fails. Once
 /// start succeeds, this wrapper becomes responsible for discarding staged
 /// network/secret handoffs and reconciling or releasing a prepared resource
 /// reservation when the process reaches a terminal state.
 pub struct ProcessObligationLifecycleStore {
-    inner: Arc<dyn ProcessStorePort>,
+    processes: Arc<dyn ProcessRuntimePort>,
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
-    resource_governor: Arc<dyn ResourceGovernor>,
+    resource_governor: Mutex<Arc<dyn ResourceGovernor>>,
     event_sink: Mutex<Option<Arc<dyn EventSink>>>,
+    observer_registered: AtomicBool,
     active_process_handoffs: Mutex<HashMap<ProcessObligationHandoffKey, ProcessId>>,
     cleaned_process_handoffs: Mutex<HashSet<ProcessObligationProcessKey>>,
 }
@@ -681,9 +690,9 @@ impl ProcessObligationLifecycleStore {
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self
     where
-        S: ProcessStorePort + 'static,
+        S: ProcessRuntimePort + 'static,
     {
-        let inner: Arc<dyn ProcessStorePort> = inner;
+        let inner: Arc<dyn ProcessRuntimePort> = inner;
         Self::from_dyn(
             inner,
             network_policies,
@@ -693,20 +702,52 @@ impl ProcessObligationLifecycleStore {
     }
 
     pub(crate) fn from_dyn(
-        inner: Arc<dyn ProcessStorePort>,
+        processes: Arc<dyn ProcessRuntimePort>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self {
         Self {
-            inner,
+            processes,
             network_policies,
             secret_injections,
-            resource_governor,
+            resource_governor: Mutex::new(resource_governor),
             event_sink: Mutex::new(None),
+            observer_registered: AtomicBool::new(false),
             active_process_handoffs: Mutex::new(HashMap::new()),
             cleaned_process_handoffs: Mutex::new(HashSet::new()),
         }
+    }
+
+    pub(crate) fn set_resource_governor(&self, resource_governor: Arc<dyn ResourceGovernor>) {
+        match self.resource_governor.lock() {
+            Ok(mut slot) => {
+                *slot = resource_governor;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "process resource governor registry unavailable");
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn register_journal_observer(
+        self: &Arc<Self>,
+        runtime: &dyn ProcessRuntimePort,
+    ) -> Result<(), String> {
+        if self
+            .observer_registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+        let observer: Arc<dyn ProcessJournalCommitObserver> = self.clone();
+        if let Err(error) = runtime.subscribe_process_observer(observer) {
+            self.observer_registered.store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Attaches a best-effort event sink for process lifecycle transitions.
@@ -750,7 +791,9 @@ impl ProcessObligationLifecycleStore {
         process_id: ProcessId,
         reconcile: bool,
     ) -> Result<(), ProcessError> {
-        if let Some(record) = self.inner.get(scope, process_id).await? {
+        if let Some(record) =
+            capability_process_record(self.processes.as_ref(), scope, process_id).await?
+        {
             self.cleanup_record_obligations(&record, reconcile)?;
             self.release_active_process_handoff(&record)?;
             self.mark_process_handoff_cleaned(&record)?;
@@ -909,15 +952,105 @@ impl ProcessObligationLifecycleStore {
                 })?;
         }
         if let Some(reservation_id) = record.resource_reservation_id {
+            let governor =
+                self.resource_governor
+                    .lock()
+                    .map_err(|_| ProcessError::InvalidStoredRecord {
+                        reason: "process resource governor registry unavailable".to_string(),
+                    })?;
             if reconcile {
                 close_reservation_once(
-                    self.resource_governor
-                        .reconcile(reservation_id, ResourceUsage::default()),
+                    governor.reconcile(reservation_id, ResourceUsage::default()),
                 )?;
             } else {
-                close_reservation_once(self.resource_governor.release(reservation_id))?;
+                close_reservation_once(governor.release(reservation_id))?;
             }
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for ProcessObligationLifecycleStore {
+    fn process_observer_id(&self) -> &'static str {
+        "process-obligation-lifecycle-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if commit.state.process_kind != ProcessKind::CapabilityInvocation {
+            return Ok(());
+        }
+        let record =
+            process_record_from_snapshot(commit.state).map_err(|error| error.to_string())?;
+        match commit.kind {
+            ProcessJournalKind::Completed => {
+                self.emit_process_event(RuntimeEvent::process_completed(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                ))
+                .await;
+                self.cleanup_terminal(&record, true)
+                    .map_err(|error| error.to_string())?;
+            }
+            ProcessJournalKind::Failed => {
+                self.emit_process_event(RuntimeEvent::process_failed(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                    record
+                        .error_kind
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ))
+                .await;
+                self.cleanup_terminal(&record, false)
+                    .map_err(|error| error.to_string())?;
+            }
+            ProcessJournalKind::Stopped
+            | ProcessJournalKind::Cancelled
+            | ProcessJournalKind::Killed
+            | ProcessJournalKind::RecoveryRequired => {
+                self.emit_process_event(RuntimeEvent::process_killed(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                ))
+                .await;
+                self.cleanup_terminal(&record, false)
+                    .map_err(|error| error.to_string())?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProcessSubmissionLifecycle for ProcessObligationLifecycleStore {
+    async fn before_submit(&self, start: &ProcessStart) -> Result<(), ProcessError> {
+        self.claim_active_process_handoff(start).map(|_| ())
+    }
+
+    async fn submit_failed(&self, start: &ProcessStart) -> Result<(), ProcessError> {
+        self.release_claimed_process_handoff(&start.scope, &start.capability_id, start.process_id)
+    }
+
+    async fn submitted(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
+        self.emit_process_event(RuntimeEvent::process_started(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
         Ok(())
     }
 }
@@ -974,14 +1107,17 @@ impl ProcessObligationProcessKey {
     }
 }
 
-#[async_trait]
-impl ProcessStorePort for ProcessObligationLifecycleStore {
-    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+impl ProcessObligationLifecycleStore {
+    pub fn process_runtime(&self) -> Arc<dyn ProcessRuntimePort> {
+        Arc::clone(&self.processes)
+    }
+
+    pub async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let claimed = self.claim_active_process_handoff(&start)?;
         let process_id = start.process_id;
         let scope = start.scope.clone();
         let capability_id = start.capability_id.clone();
-        match self.inner.start(start).await {
+        match submit_capability_process(self.processes.as_ref(), start).await {
             Ok(record) => {
                 self.emit_process_event(RuntimeEvent::process_started(
                     record.scope.clone(),
@@ -1002,78 +1138,73 @@ impl ProcessStorePort for ProcessObligationLifecycleStore {
         }
     }
 
-    async fn complete(
+    pub async fn complete(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.complete(scope, process_id).await?;
-        self.emit_process_event(RuntimeEvent::process_completed(
-            record.scope.clone(),
-            record.capability_id.clone(),
-            record.extension_id.clone(),
-            record.runtime,
-            record.process_id,
-        ))
-        .await;
+        let record =
+            complete_capability_process(self.processes.as_ref(), scope, process_id).await?;
         self.cleanup_terminal(&record, true)?;
         Ok(record)
     }
 
-    async fn fail(
+    pub async fn fail(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.fail(scope, process_id, error_kind).await?;
-        self.emit_process_event(RuntimeEvent::process_failed(
-            record.scope.clone(),
-            record.capability_id.clone(),
-            record.extension_id.clone(),
-            record.runtime,
-            record.process_id,
-            record
-                .error_kind
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-        ))
-        .await;
+        let record =
+            fail_capability_process(self.processes.as_ref(), scope, process_id, error_kind).await?;
         self.cleanup_terminal(&record, false)?;
         Ok(record)
     }
 
-    async fn kill(
+    pub async fn kill(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.kill(scope, process_id).await?;
-        self.emit_process_event(RuntimeEvent::process_killed(
-            record.scope.clone(),
-            record.capability_id.clone(),
-            record.extension_id.clone(),
-            record.runtime,
-            record.process_id,
-        ))
-        .await;
+        let result = self
+            .processes
+            .kill_process(ironclaw_processes::KillProcessRequest {
+                scope: scope.clone(),
+                process_id,
+                operation_id: None,
+                reason: None,
+            })
+            .await
+            .map_err(|error| ProcessError::InvalidStoredRecord {
+                reason: error.to_string(),
+            })?;
+        let record = process_record_from_snapshot(result.state)?;
         self.cleanup_terminal(&record, false)?;
         Ok(record)
     }
 
-    async fn get(
+    pub async fn get(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError> {
-        self.inner.get(scope, process_id).await
+        capability_process_record(self.processes.as_ref(), scope, process_id).await
     }
 
-    async fn records_for_scope(
+    pub async fn records_for_scope(
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
-        self.inner.records_for_scope(scope).await
+        self.processes
+            .process_snapshots(scope)
+            .await
+            .map_err(|error| ProcessError::InvalidStoredRecord {
+                reason: error.to_string(),
+            })?
+            .into_iter()
+            .filter(|snapshot| snapshot.process_kind == ProcessKind::CapabilityInvocation)
+            .map(process_record_from_snapshot)
+            .collect()
     }
 }
 

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{
-    CasExpectation, Entry, InMemoryBackend, RootFilesystem, ScopedFilesystem,
+    CasExpectation, Entry, InMemoryBackend, IndexKey, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath, TenantId,
@@ -21,15 +21,6 @@ async fn filesystem_store_range_read_returns_only_requested_sequences() {
     let fixture = RangeFixture::new("fs-range", "tenant-range").await;
     fixture.seed_messages("event", 4).await;
 
-    assert_eq!(
-        fixture.index_entry_names().await,
-        vec![
-            "00000000000000000001.json",
-            "00000000000000000002.json",
-            "00000000000000000003.json",
-            "00000000000000000004.json",
-        ]
-    );
     fixture
         .put_malformed_message("malformed-out-of-range")
         .await;
@@ -43,13 +34,10 @@ async fn filesystem_store_range_read_returns_only_requested_sequences() {
     );
 }
 
-/// A finalized assistant message stored only via the append log (no
-/// per-message file) must still be written into the sequence index, otherwise
-/// indexed range reads — which back `list_thread_messages_range`, summaries,
-/// and compaction — would silently omit it from threads that also have
-/// indexed messages.
+/// Finalized assistant messages use the same individual-row plus sequence
+/// projection shape as every other transcript message.
 #[tokio::test]
-async fn filesystem_store_range_read_includes_append_only_finalized_message() {
+async fn filesystem_store_range_read_includes_finalized_message_row() {
     let fixture = RangeFixture::new("fs-range-append", "tenant-range-append").await;
     // Two indexed user messages (sequences 1, 2) so the index is non-empty —
     // `list_thread_messages_range_indexed` will not fall back to a full scan.
@@ -67,27 +55,12 @@ async fn filesystem_store_range_read_includes_append_only_finalized_message() {
         .unwrap();
     assert_eq!(finalized.sequence, 3);
 
-    // The append-only branch must have actually run: the finalized message has
-    // no per-message file (it lives solely in the append log). Without this
-    // guard the test would still pass if `append_message_event` returned false
-    // and `write_new_message` created the normal per-message file instead.
     assert!(
-        !fixture.message_file_exists(&finalized.message_id).await,
-        "finalized assistant message must be append-only (no per-message file)"
+        fixture.message_file_exists(&finalized.message_id).await,
+        "finalized assistant message must be stored as an individual row"
     );
 
-    // The append-only finalize path must have written the sequence index entry.
-    assert_eq!(
-        fixture.index_entry_names().await,
-        vec![
-            "00000000000000000001.json",
-            "00000000000000000002.json",
-            "00000000000000000003.json",
-        ]
-    );
-
-    // The indexed range read includes the append-only finalized message (its id
-    // resolves through `read_message_versioned`'s append-log fallback).
+    // The indexed range read resolves the individual finalized message row.
     assert_eq!(fixture.range_sequences(0, 3).await, vec![1, 2, 3]);
     assert_eq!(
         fixture.range_contents(2, 3).await,
@@ -95,13 +68,10 @@ async fn filesystem_store_range_read_includes_append_only_finalized_message() {
     );
 }
 
-/// If a finalized assistant message was appended to the log but the process
-/// died before its sequence index was written, an idempotent retry (same
-/// `turn_run_id`) must repair the missing index rather than returning the
-/// already-finalized message with no indexed entry — otherwise a durable LLM
-/// message stays invisible to indexed range reads.
+/// The finalized message and its ordered projection are one row, while the
+/// run lookup keeps retries idempotent.
 #[tokio::test]
-async fn filesystem_append_finalized_assistant_message_retry_repairs_missing_sequence_index() {
+async fn filesystem_finalized_message_row_and_projection_are_atomic() {
     let fixture = RangeFixture::new("fs-range-repair", "tenant-range-repair").await;
 
     let first = fixture
@@ -115,18 +85,7 @@ async fn filesystem_append_finalized_assistant_message_retry_repairs_missing_seq
         .await
         .unwrap();
     assert_eq!(first.sequence, 1);
-    assert_eq!(
-        fixture.index_entry_names().await,
-        vec!["00000000000000000001.json"]
-    );
 
-    // Simulate the partial-persistence failure: the append-log event survived,
-    // but the sequence index entry is gone.
-    fixture.delete_sequence_index(1).await;
-    assert!(fixture.index_entry_names().await.is_empty());
-
-    // Idempotent retry with the same turn_run_id resolves the finalized
-    // message via the append-log fallback and must repair the index.
     let retried = fixture
         .service
         .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
@@ -139,27 +98,35 @@ async fn filesystem_append_finalized_assistant_message_retry_repairs_missing_seq
         .unwrap();
     assert_eq!(retried.message_id, first.message_id);
     assert_eq!(retried.sequence, 1);
-    assert_eq!(
-        fixture.index_entry_names().await,
-        vec!["00000000000000000001.json"],
-        "idempotent retry must repair the missing sequence index"
-    );
-
-    // The repaired index makes the message visible to indexed range reads.
     assert_eq!(fixture.range_sequences(0, 1).await, vec![1]);
 }
 
 #[tokio::test]
-async fn filesystem_store_range_read_falls_back_when_sequence_index_has_gap() {
+async fn filesystem_store_range_read_stays_available_until_a_gap_is_repaired() {
     let fixture = RangeFixture::new("fs-range-gap", "tenant-range-gap").await;
     fixture.seed_messages("gap-event", 4).await;
     fixture.delete_sequence_index(2).await;
 
-    assert_eq!(fixture.range_sequences(1, 3).await, vec![2, 3]);
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![3]);
     assert_eq!(
-        fixture.range_contents(1, 3).await,
-        vec!["message 2".to_string(), "message 3".to_string()]
+        fixture
+            .service
+            .migrate_transcript_indexes_for_scope(&fixture.scope)
+            .await
+            .unwrap(),
+        4
     );
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![2, 3]);
+}
+
+#[tokio::test]
+async fn filesystem_store_range_read_tolerates_a_leaked_sequence_without_a_message() {
+    let fixture = RangeFixture::new("fs-range-leaked-gap", "tenant-range-leaked-gap").await;
+    let message_ids = fixture.seed_messages("leaked-gap-event", 4).await;
+    fixture.delete_sequence_index(2).await;
+    fixture.delete_message(message_ids[1]).await;
+
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![3]);
 }
 
 #[tokio::test]
@@ -171,17 +138,12 @@ async fn filesystem_store_range_read_clamps_to_thread_sequence_ceiling() {
 }
 
 #[tokio::test]
-async fn filesystem_store_range_read_errors_when_indexed_message_is_missing() {
+async fn filesystem_store_range_read_tolerates_a_missing_message_row() {
     let fixture = RangeFixture::new("fs-range-missing", "tenant-range-missing").await;
     let message_ids = fixture.seed_messages("missing-event", 4).await;
     fixture.delete_message(message_ids[1]).await;
 
-    let err = fixture.range_error(1, 3).await;
-
-    assert!(matches!(
-        err,
-        SessionThreadError::UnknownMessage { message_id } if message_id == message_ids[1]
-    ));
+    assert_eq!(fixture.range_sequences(1, 3).await, vec![3]);
 }
 
 #[tokio::test]
@@ -199,15 +161,31 @@ async fn filesystem_store_summary_creation_uses_indexed_range_validation() {
 }
 
 #[tokio::test]
-async fn filesystem_store_summary_creation_falls_back_when_sequence_index_has_gap() {
+async fn filesystem_store_summary_creation_requires_complete_sequence_projection() {
     let fixture = RangeFixture::new("fs-summary-range-gap", "tenant-summary-range-gap").await;
     fixture.seed_messages("summary-gap-event", 4).await;
     fixture.delete_sequence_index(2).await;
 
-    let summary = fixture.create_compaction_summary(2, 3).await;
-
-    assert_eq!(summary.start_sequence, 2);
-    assert_eq!(summary.end_sequence, 3);
+    let error = fixture
+        .service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SessionThreadError::InvalidSummaryRange {
+            start_sequence: 2,
+            end_sequence: 3
+        }
+    ));
 }
 
 struct RangeFixture {
@@ -265,19 +243,6 @@ impl RangeFixture {
         message_ids
     }
 
-    async fn index_entry_names(&self) -> Vec<String> {
-        let mut names = self
-            .scoped
-            .list_dir(&self.scope.to_resource_scope(), &self.sequence_root())
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.name)
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        names
-    }
-
     async fn put_malformed_message(&self, name: &str) {
         self.scoped
             .put(
@@ -291,10 +256,28 @@ impl RangeFixture {
     }
 
     async fn delete_sequence_index(&self, sequence: u64) {
+        let range = self.list_range(0, sequence).await;
+        let message_id = range
+            .messages
+            .iter()
+            .find(|message| message.sequence == sequence)
+            .map(|message| message.message_id)
+            .unwrap();
+        let path = self.message_path(&message_id.to_string());
+        let versioned = self
+            .scoped
+            .get(&self.scope.to_resource_scope(), &path)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut entry = versioned.entry;
+        entry.indexed.remove(&IndexKey::new("sequence").unwrap());
         self.scoped
-            .delete(
+            .put(
                 &self.scope.to_resource_scope(),
-                &self.sequence_index_path(sequence),
+                &path,
+                entry,
+                CasExpectation::Version(versioned.version),
             )
             .await
             .unwrap();
@@ -339,18 +322,6 @@ impl RangeFixture {
             .collect()
     }
 
-    async fn range_error(&self, after_sequence: u64, through_sequence: u64) -> SessionThreadError {
-        self.service
-            .list_thread_messages_range(ThreadMessageRangeRequest {
-                scope: self.scope.clone(),
-                thread_id: self.thread_id.clone(),
-                after_sequence,
-                through_sequence,
-            })
-            .await
-            .unwrap_err()
-    }
-
     async fn create_compaction_summary(
         &self,
         start_sequence: u64,
@@ -391,18 +362,6 @@ impl RangeFixture {
             "/threads/agents/agent-{}/projects/project-{}/owners/user-{}/threads/thread-{}",
             self.label, self.label, self.label, self.label
         )
-    }
-
-    fn sequence_root(&self) -> ScopedPath {
-        ScopedPath::new(format!("{}/messages_by_sequence", self.thread_root())).unwrap()
-    }
-
-    fn sequence_index_path(&self, sequence: u64) -> ScopedPath {
-        ScopedPath::new(format!(
-            "{}/messages_by_sequence/{sequence:020}.json",
-            self.thread_root()
-        ))
-        .unwrap()
     }
 
     fn message_path(&self, name: &str) -> ScopedPath {

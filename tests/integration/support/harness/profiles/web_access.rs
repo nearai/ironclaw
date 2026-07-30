@@ -37,7 +37,7 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
     ));
     let mut registry = ExtensionRegistry::new();
     registry.insert(harness_web_access::web_access_extension_package()?)?;
-    let runtime = harness_web_access::local_dev_host_runtime_with_web_access(
+    let runtime = harness_web_access::standalone_host_runtime_with_web_access(
         storage_root,
         registry,
         Arc::clone(&http_egress),

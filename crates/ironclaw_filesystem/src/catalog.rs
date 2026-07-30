@@ -245,6 +245,18 @@ impl RootFilesystem for CompositeRootFilesystem {
             .await
     }
 
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .query_ordered(path, filter, page)
+            .await
+    }
+
     async fn ensure_index(
         &self,
         path: &VirtualPath,

@@ -45,7 +45,7 @@ Keep lower layers neutral. Product and runtime composition flows downward throug
 ```text
 common / host_api / prompt_envelope
   -> filesystem / memory / events / event_projections / event_streams / extensions / trust / resources
-  -> secrets / network / outbound / channel_host / channel_delivery / run_state / authorization / approvals / runtime_policy / hooks
+  -> secrets / network / outbound / channel_host / channel_delivery / processes / authorization / approvals / runtime_policy / hooks
   -> host_runtime / processes / dispatcher / runtime lanes (scripts, mcp, wasm, wasm_limiter)
   -> turns / threads / agent_loop / loop_host / capabilities
   -> reborn composition / product adapters / product orchestration / CLI
@@ -89,8 +89,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | --- | --- | --- | --- |
 | `ironclaw_trust` | `ironclaw_trust/AGENTS.md`, `ironclaw_trust/CLAUDE.md`, `ironclaw_trust/CONTRACT.md` | Host-controlled trust classes, policy sources, requested-vs-effective trust, invalidation. | Authorization grants, runtime dispatch, product workflow. |
 | `ironclaw_authorization` | `ironclaw_authorization/AGENTS.md`, `ironclaw_authorization/CLAUDE.md` | Grant matching, leases, dispatch/spawn authorization decisions, DB-backed auth state. | Execution, approvals, run-state persistence, prompting. |
-| `ironclaw_approvals` | `ironclaw_approvals/AGENTS.md`, `ironclaw_approvals/CLAUDE.md` | Exact-invocation approval requests, leases, resume coordination, approval events. | Reusable broad approvals or dispatch before fingerprinted lease claim. |
-| `ironclaw_run_state` | `ironclaw_run_state/AGENTS.md`, `ironclaw_run_state/CLAUDE.md` | Durable invocation state and approval request records. | Authorization policy, approval resolution, dispatch, runtime execution, process lifecycle. |
+| `ironclaw_approvals` | `ironclaw_approvals/AGENTS.md`, `ironclaw_approvals/CLAUDE.md` | Durable exact-invocation approval requests, gate records, resolution, leases, and approval policy. | Dispatch, runtime execution, process lifecycle. |
 | `ironclaw_resources` | `ironclaw_resources/AGENTS.md`, `ironclaw_resources/CLAUDE.md` | Reservation, reconciliation, release, quota accounting. | Runtime dispatch, product workflow, hidden costed work without reservation. |
 | `ironclaw_auth` | `ironclaw_auth/AGENTS.md`, `ironclaw_auth/CLAUDE.md`, `docs/reborn/contracts/auth-product.md` | Product-facing Reborn auth-flow, secure interaction, credential account, provider exchange, continuation, cleanup contracts and fakes. | V1 route handlers/pending maps, durable secret storage, raw provider HTTP, runtime injection, extension lifecycle mutation. |
 | `ironclaw_runtime_policy` | `ironclaw_runtime_policy/AGENTS.md`, `ironclaw_runtime_policy/CLAUDE.md`, `docs/reborn/contracts/runtime-profiles.md` | Runtime profile resolver and runtime selection policy. | Runtime startup, action dispatch, product strategy outside selection. |
@@ -165,7 +164,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 - Storage and persistence: owning domain crate for schemas/queries; preserve libSQL/PostgreSQL parity where applicable. Product ledger adapters live behind `ironclaw_product`'s `storage`/`libsql`/`postgres` features; event/audit store backends live in `ironclaw_reborn_event_store`.
 - Files/memory: `ironclaw_filesystem` for mount/path authority; `ironclaw_memory` for memory documents/search/chunking/indexing.
 - Events/projections/outbound: `ironclaw_events` for canonical redacted events; `ironclaw_event_projections` for projection model; `ironclaw_event_streams` for transport-neutral live/replay streams; `ironclaw_outbound` for metadata-only delivery/subscription policy; adapters for concrete delivery.
-- Trust/auth/approval: `ironclaw_trust` -> `ironclaw_authorization` -> `ironclaw_run_state`/`ironclaw_approvals` -> `ironclaw_capabilities` as needed.
+- Trust/auth/approval: `ironclaw_trust` -> `ironclaw_authorization` -> `ironclaw_approvals` -> `ironclaw_capabilities` as needed.
 - Hooks and prompt context: `ironclaw_hooks` for hook registration/dispatch/failure policy; `ironclaw_prompt_envelope` for model-visible untrusted or trust-labeled snippet wrapping.
 - Reborn runtime execution: lane crate (`scripts`, `mcp`, `wasm`) first; `dispatcher` for routing; `host_runtime` for secrets/network/resources/redaction; `processes` for background lifecycle; `ironclaw_wasm_limiter` only for shared limiter mechanics. Use `ironclaw_engine` only for existing v1 engine maintenance.
 - Reborn turns/agent loop: `ironclaw_turns` for turn coordination; `ironclaw_agent_loop` for strategy/planner/executor contracts; `ironclaw_loop_host` for host support ports. Use `ironclaw_engine` only for existing v1 CodeAct/thread runtime maintenance.

@@ -80,7 +80,7 @@ async fn production_profile_rejects_in_memory_before_returning_service_graph() {
 
 #[tokio::test]
 async fn local_and_test_profiles_allow_explicit_in_memory_stores() {
-    for profile in [RebornProfile::LocalDev, RebornProfile::Test] {
+    for profile in [RebornProfile::Standalone, RebornProfile::Test] {
         let stores = build_reborn_event_stores(profile, RebornEventStoreConfig::InMemory)
             .await
             .expect("dev/test profiles may use explicit in-memory stores");

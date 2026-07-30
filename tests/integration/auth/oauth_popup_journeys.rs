@@ -231,6 +231,7 @@ app_id = "/app_id"
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
         None,
         &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        None,
     )
     .expect("fixture manifest parses");
     let admin_descriptors = record.resolved().admin_configuration.clone();

@@ -525,7 +525,7 @@ fn large_durable_file_content() -> String {
 /// `new_with_durable_previews` over this harness's own local-dev session
 /// thread service — mirrors production's `capability_wiring`) must reach the
 /// model as a truncated `ResultReference` preview
-/// (`local_dev_result_reference_observation`), never the raw payload.
+/// (`standalone_result_reference_observation`), never the raw payload.
 ///
 /// RED evidence for this PR: against the harness's `ProductLive` default
 /// (`ProductLiveCapabilityIo::write_capability_result`, which sets no
@@ -585,7 +585,7 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
 
 /// `result_read` continuation (issue #5838): a second scripted turn on the
 /// SAME thread calls `builtin.result_read` (`RESULT_READ_CAPABILITY_ID`,
-/// `runtime/local_dev/result_read.rs`) with the durable `result_ref` and
+/// `runtime/standalone/result_read.rs`) with the durable `result_ref` and
 /// `next_offset` the first turn's `read_file` observation reported —
 /// discovered via `latest_tool_result_ref`/`latest_tool_result_next_offset`
 /// (a static script cannot know a server-minted ref ahead of time) and

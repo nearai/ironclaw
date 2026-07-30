@@ -142,9 +142,9 @@ pub enum RebornReadinessDiagnosticComponent {
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
-    ProcessStore,
+    ProcessRuntime,
     ProcessResultStore,
-    RunState,
+    InvocationState,
     ApprovalRequests,
     CapabilityLeases,
     PersistentApprovalPolicies,
@@ -175,9 +175,9 @@ impl RebornReadinessDiagnosticComponent {
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
-            Self::ProcessStore => "process_store",
+            Self::ProcessRuntime => "process_runtime",
             Self::ProcessResultStore => "process_result_store",
-            Self::RunState => "run_state",
+            Self::InvocationState => "invocation_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
             Self::PersistentApprovalPolicies => "persistent_approval_policies",
@@ -223,9 +223,9 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticComponent {
             "trust_policy" => Self::TrustPolicy,
             "filesystem" => Self::Filesystem,
             "resource_governor" => Self::ResourceGovernor,
-            "process_store" => Self::ProcessStore,
+            "process_runtime" => Self::ProcessRuntime,
             "process_result_store" => Self::ProcessResultStore,
-            "run_state" => Self::RunState,
+            "invocation_state" => Self::InvocationState,
             "approval_requests" => Self::ApprovalRequests,
             "capability_leases" => Self::CapabilityLeases,
             "persistent_approval_policies" => Self::PersistentApprovalPolicies,
@@ -340,9 +340,9 @@ impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
             ProductionWiringComponent::TrustPolicy => Self::TrustPolicy,
             ProductionWiringComponent::Filesystem => Self::Filesystem,
             ProductionWiringComponent::ResourceGovernor => Self::ResourceGovernor,
-            ProductionWiringComponent::ProcessStorePort => Self::ProcessStore,
+            ProductionWiringComponent::ProcessRuntimePort => Self::ProcessRuntime,
             ProductionWiringComponent::ProcessResultStorePort => Self::ProcessResultStore,
-            ProductionWiringComponent::RunState => Self::RunState,
+            ProductionWiringComponent::InvocationState => Self::InvocationState,
             ProductionWiringComponent::ApprovalRequests => Self::ApprovalRequests,
             ProductionWiringComponent::CapabilityLeases => Self::CapabilityLeases,
             ProductionWiringComponent::PersistentApprovalPolicies => {
@@ -462,7 +462,7 @@ mod tests {
 
         assert_eq!(
             readiness.profile,
-            crate::deployment::DeploymentConfig::local_dev().profile()
+            crate::deployment::DeploymentConfig::standalone().profile()
         );
         assert_eq!(readiness.state, RebornReadinessState::DevOnly);
         assert_eq!(readiness.workers, RebornWorkerReadiness::default());
